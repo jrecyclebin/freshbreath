@@ -1,0 +1,702 @@
+package main
+
+import (
+  "bytes"
+  "database/sql"
+  "encoding/json"
+  "io"
+  "net/http"
+  "net/http/httptest"
+  "strings"
+  "testing"
+)
+
+func newTestServer(t *testing.T) *Server {
+  t.Helper()
+  db, err := sql.Open("sqlite3", ":memory:")
+  if err != nil {
+    t.Fatalf("open db: %v", err)
+  }
+  t.Cleanup(func() { db.Close() })
+  store := &Store{db: db}
+  if err := store.Migrate(); err != nil {
+    t.Fatalf("migrate: %v", err)
+  }
+  srv := &Server{
+    config: Config{
+      PublicBaseURL: "http://localhost:9009",
+    },
+    store:      store,
+    pending:    make(map[string]*pendingAuth),
+    httpClient: &http.Client{},
+  }
+  srv.SetupRoutes()
+  return srv
+}
+
+func testRequest(t *testing.T, srv *Server, method, path string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {
+  t.Helper()
+  req := httptest.NewRequest(method, path, body)
+  for k, v := range headers {
+    req.Header.Set(k, v)
+  }
+  if body != nil {
+    req.Header.Set("Content-Type", "application/json")
+  }
+  rr := httptest.NewRecorder()
+  srv.ServeHTTP(rr, req)
+  return rr
+}
+
+// ── Static routes ──
+
+func TestHandleEnvJS(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "GET", "/env.js", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, want 200", rr.Code)
+  }
+  body := rr.Body.String()
+  if !strings.Contains(body, "__HOMESLICE_CONFIG") {
+    t.Errorf("expected __HOMESLICE_CONFIG in body, got: %s", body)
+  }
+}
+
+func TestHandleIndexRedirect(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "GET", "/", nil, nil)
+  if rr.Code != 302 {
+    t.Fatalf("status = %d, want 302", rr.Code)
+  }
+  if loc := rr.Header().Get("Location"); loc != "/control" {
+    t.Errorf("Location = %q, want /control", loc)
+  }
+}
+
+func TestHandleSetupJS(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "GET", "/setup.js", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, want 200", rr.Code)
+  }
+  if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+    t.Errorf("Content-Type = %q, want javascript", ct)
+  }
+}
+
+// ── Admin API: Apps ──
+
+func TestCreateAndListApps(t *testing.T) {
+  srv := newTestServer(t)
+
+  body := `{"name": "my-app"}`
+  rr := testRequest(t, srv, "POST", "/api/apps", strings.NewReader(body), nil)
+  if rr.Code != 200 {
+    t.Fatalf("create app: status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var created map[string]string
+  if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+    t.Fatalf("unmarshal create response: %v", err)
+  }
+  if created["nonce"] == "" {
+    t.Fatal("expected nonce in create response")
+  }
+
+  rr = testRequest(t, srv, "GET", "/api/apps", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("list apps: status = %d", rr.Code)
+  }
+
+  var list map[string]interface{}
+  if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+    t.Fatalf("unmarshal list: %v", err)
+  }
+  apps := list["apps"].([]interface{})
+  if len(apps) != 1 {
+    t.Errorf("len(apps) = %d, want 1", len(apps))
+  }
+}
+
+func TestCreateAppMissingName(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "POST", "/api/apps", strings.NewReader(`{}`), nil)
+  if rr.Code != 400 {
+    t.Errorf("status = %d, want 400", rr.Code)
+  }
+}
+
+func TestAppDetail(t *testing.T) {
+  srv := newTestServer(t)
+
+  nonce := createApp(t, srv, "detail-test")
+  rr := testRequest(t, srv, "GET", "/api/apps/"+nonce, nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var detail map[string]interface{}
+  if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+    t.Fatalf("unmarshal: %v", err)
+  }
+  if detail["nonce"] != nonce {
+    t.Errorf("nonce = %q, want %q", detail["nonce"], nonce)
+  }
+}
+
+func TestAppDetailNotFound(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "GET", "/api/apps/bogus", nil, nil)
+  if rr.Code != 404 {
+    t.Errorf("status = %d, want 404", rr.Code)
+  }
+}
+
+// ── Admin API: Services ──
+
+func TestCreateAndListServices(t *testing.T) {
+  srv := newTestServer(t)
+
+  body := `{"name": "slack", "url": "https://slack.example/mcp", "descriptor": {"type": "mcp"}}`
+  rr := testRequest(t, srv, "POST", "/api/services", strings.NewReader(body), nil)
+  if rr.Code != 200 {
+    t.Fatalf("create service: status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var created map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &created)
+  if created["id"] == nil {
+    t.Fatal("expected id in create response")
+  }
+
+  rr = testRequest(t, srv, "GET", "/api/services", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("list services: status = %d", rr.Code)
+  }
+
+  var list map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &list)
+  services := list["services"].([]interface{})
+  if len(services) != 1 {
+    t.Errorf("len(services) = %d, want 1", len(services))
+  }
+}
+
+func TestCreateServiceWithDescriptor(t *testing.T) {
+  srv := newTestServer(t)
+
+  body := `{"name": "github", "url": "https://api.github.com", "descriptor": {"type": "api", "proxied": true, "client_id": "gh-client", "oauth_url": "https://github.com/login/oauth"}}`
+  rr := testRequest(t, srv, "POST", "/api/services", strings.NewReader(body), nil)
+  if rr.Code != 200 {
+    t.Fatalf("create service: status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var created map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &created)
+  desc := created["descriptor"].(map[string]interface{})
+  if desc["type"] != "api" {
+    t.Errorf("descriptor.type = %v, want api", desc["type"])
+  }
+  if desc["proxied"] != true {
+    t.Errorf("descriptor.proxied = %v, want true", desc["proxied"])
+  }
+  if desc["client_id"] != "gh-client" {
+    t.Errorf("descriptor.client_id = %v, want gh-client", desc["client_id"])
+  }
+}
+
+func TestCreateServiceMissingURL(t *testing.T) {
+  srv := newTestServer(t)
+  body := `{"name": "slack", "descriptor": {"type": "mcp"}}`
+  rr := testRequest(t, srv, "POST", "/api/services", strings.NewReader(body), nil)
+  if rr.Code != 400 {
+    t.Errorf("status = %d, want 400", rr.Code)
+  }
+}
+
+func TestServiceDetail(t *testing.T) {
+  srv := newTestServer(t)
+  id := registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+
+  rr := testRequest(t, srv, "GET", "/api/services/"+id, nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var detail map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &detail)
+  if detail["name"] != "slack" {
+    t.Errorf("name = %q, want slack", detail["name"])
+  }
+}
+
+func TestServiceDetailNotFound(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "GET", "/api/services/9999", nil, nil)
+  if rr.Code != 404 {
+    t.Errorf("status = %d, want 404", rr.Code)
+  }
+}
+
+// ── Proxy ──
+
+func TestProxyForwardsRequest(t *testing.T) {
+  mockService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    auth := r.Header.Get("Authorization")
+    if auth != "Bearer test-token" {
+      t.Errorf("Authorization = %q, want Bearer test-token", auth)
+    }
+    body, _ := io.ReadAll(r.Body)
+    if string(body) != `{"method":"tools/list"}` {
+      t.Errorf("body = %q, want {\"method\":\"tools/list\"}", string(body))
+    }
+    w.Header().Set("X-Mock-Header", "yes")
+    w.WriteHeader(200)
+    w.Write([]byte(`{"tools":[]}`))
+  }))
+  defer mockService.Close()
+
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "proxy")
+  id := registerService(t, srv, "mock", mockService.URL, ServiceDescriptor{Type: "mcp"})
+
+  rr := testRequest(t, srv, "POST", "/service/"+id+"/tools/list",
+    strings.NewReader(`{"method":"tools/list"}`),
+    map[string]string{
+      "X-App-Nonce":   nonce,
+      "Accept":        "application/json",
+      "Authorization": "Bearer test-token",
+    })
+
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  if rr.Body.String() != `{"tools":[]}` {
+    t.Errorf("response body = %q, want {\"tools\":[]}", rr.Body.String())
+  }
+  if rr.Header().Get("X-Mock-Header") != "yes" {
+    t.Error("expected X-Mock-Header to be forwarded")
+  }
+}
+
+func TestLoginWithMetadataFallback(t *testing.T) {
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "fallback-test")
+  srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+    switch {
+    // Metadata 404 — should fall back to default endpoints
+    case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"),
+      strings.HasSuffix(req.URL.Path, "/.well-known/openid-configuration"):
+      return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
+    case req.URL.Path == "/register":
+      return jsonResp(201, map[string]string{"client_id": "fallback-client"})
+    default:
+      return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
+    }
+  })
+
+  registerService(t, srv, "github", "https://gh.example/mcp", ServiceDescriptor{Type: "mcp"})
+
+  rr := testRequest(t, srv, "GET", "/service/login?url=https://gh.example/mcp&state=x", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var body map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &body)
+  if body["type"] != "redirect" {
+    t.Fatalf("expected redirect type, got %v", body["type"])
+  }
+  loc := body["url"].(string)
+  if !strings.Contains(loc, "client_id=fallback-client") {
+    t.Errorf("redirect missing client_id: %s", loc)
+  }
+}
+
+func TestProxyMissingNonce(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "POST", "/service/1/tools/list", strings.NewReader(`{}`), nil)
+  if rr.Code != 401 {
+    t.Errorf("status = %d, want 401", rr.Code)
+  }
+}
+
+// ── Login ──
+
+func TestLoginByServiceURL(t *testing.T) {
+  srv := newTestServer(t)
+  srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+    switch {
+    case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
+      return jsonResp(200, map[string]interface{}{
+        "issuer":                           "https://slack.example",
+        "authorization_endpoint":           "https://slack.example/authorize",
+        "token_endpoint":                   "https://slack.example/token",
+        "registration_endpoint":            "https://slack.example/register",
+        "code_challenge_methods_supported": []string{"S256"},
+      })
+    case req.URL.Path == "/register":
+      return jsonResp(201, map[string]string{"client_id": "mock-client"})
+    default:
+      return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
+    }
+  })
+
+  nonce := createApp(t, srv, "login-test")
+  registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+
+  rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var body map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &body)
+  if body["type"] != "redirect" {
+    t.Fatalf("expected redirect type, got %v", body["type"])
+  }
+  loc := body["url"].(string)
+  if !strings.Contains(loc, "client_id=mock-client") {
+    t.Errorf("redirect missing client_id: %s", loc)
+  }
+}
+
+func TestLoginMissingServiceURL(t *testing.T) {
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "login-test")
+  rr := testRequest(t, srv, "GET", "/service/login?state=x", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 400 {
+    t.Errorf("status = %d, want 400", rr.Code)
+  }
+}
+
+func TestLoginUnknownServiceURL(t *testing.T) {
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "login-test")
+  rr := testRequest(t, srv, "GET", "/service/login?url=https://unknown.example/mcp&state=x", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 403 {
+    t.Errorf("status = %d, want 403", rr.Code)
+  }
+}
+
+func TestLoginViaQueryParam(t *testing.T) {
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "login-test")
+  srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+    switch {
+    case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
+      return jsonResp(200, map[string]interface{}{
+        "issuer":                           "https://slack.example",
+        "authorization_endpoint":           "https://slack.example/authorize",
+        "token_endpoint":                   "https://slack.example/token",
+        "registration_endpoint":            "https://slack.example/register",
+        "code_challenge_methods_supported": []string{"S256"},
+      })
+    case req.URL.Path == "/register":
+      return jsonResp(201, map[string]string{"client_id": "mock-client"})
+    default:
+      return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
+    }
+  })
+
+  registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+
+  // No X-App-Nonce header — nonce comes from query param
+  rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x&app_nonce="+nonce, nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var body map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &body)
+  if body["type"] != "redirect" {
+    t.Fatalf("expected redirect type, got %v", body["type"])
+  }
+  loc := body["url"].(string)
+  if !strings.Contains(loc, "client_id=mock-client") {
+    t.Errorf("redirect missing client_id: %s", loc)
+  }
+}
+
+// ── Login with pre-registered client_id (API service) ──
+
+func TestLoginWithPreRegisteredClient(t *testing.T) {
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "api-test")
+  srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+    switch {
+    case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
+      return jsonResp(200, map[string]interface{}{
+        "issuer":                           "https://github.com",
+        "authorization_endpoint":           "https://github.com/login/oauth/authorize",
+        "token_endpoint":                   "https://github.com/login/oauth/access_token",
+        "code_challenge_methods_supported": []string{"S256"},
+      })
+    // Should NOT hit /register — client_id is pre-registered
+    case req.URL.Path == "/register":
+      return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader("should not be called"))}
+    default:
+      return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
+    }
+  })
+
+  registerService(t, srv, "github", "https://api.github.com", ServiceDescriptor{
+    Type:     "api",
+    ClientID: "gh-pre-registered-client",
+    OAuthURL: "https://github.com",
+  })
+
+  rr := testRequest(t, srv, "GET", "/service/login?url=https://api.github.com&state=x", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var body map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &body)
+  if body["type"] != "redirect" {
+    t.Fatalf("expected redirect type, got %v", body["type"])
+  }
+  loc := body["url"].(string)
+  if !strings.Contains(loc, "client_id=gh-pre-registered-client") {
+    t.Errorf("redirect missing client_id: %s", loc)
+  }
+  // Should NOT have hit the registration endpoint
+  if strings.Contains(loc, "/register") {
+    t.Error("should not have attempted DCR for pre-registered client")
+  }
+}
+
+// ── Login with API key auth ──
+
+func TestLoginWithAPIKey(t *testing.T) {
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "key-test")
+  registerService(t, srv, "weather", "https://api.weather.com", ServiceDescriptor{
+    Type: "api",
+    Auth:  "key",
+  })
+
+  rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var resp map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &resp)
+  if resp["type"] != "key-auth-complete" {
+    t.Errorf("type = %v, want key-auth-complete", resp["type"])
+  }
+  if resp["auth"] != "key" {
+    t.Errorf("auth = %v, want key", resp["auth"])
+  }
+  if resp["serviceID"] == nil {
+    t.Error("expected serviceID")
+  }
+  if resp["hasKey"] != false {
+    t.Errorf("hasKey = %v, want false (no admin key set)", resp["hasKey"])
+  }
+}
+
+func TestLoginWithAPIKeyAdminSet(t *testing.T) {
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "key-admin-test")
+  registerService(t, srv, "weather", "https://api.weather.com", ServiceDescriptor{
+    Type:   "api",
+    Auth:   "key",
+    APIKey: "admin-secret-key",
+  })
+
+  rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var resp map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &resp)
+  if resp["hasKey"] != true {
+    t.Errorf("hasKey = %v, want true (admin key set)", resp["hasKey"])
+  }
+  // Admin key is available in the response (auth is coming later)
+  if resp["apiKey"] != "admin-secret-key" {
+    t.Errorf("apiKey = %v, want admin-secret-key", resp["apiKey"])
+  }
+}
+
+func TestProxyInjectsAdminAPIKey(t *testing.T) {
+  var receivedAuth string
+  mockService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    receivedAuth = r.Header.Get("Authorization")
+    w.WriteHeader(200)
+    w.Write([]byte(`{"ok":true}`))
+  }))
+  defer mockService.Close()
+
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "proxy-key-test")
+  id := registerService(t, srv, "weather", mockService.URL, ServiceDescriptor{
+    Type:   "api",
+    Auth:   "key",
+    APIKey: "admin-secret-key",
+  })
+
+  // Request WITHOUT Authorization header — proxy should inject the key
+  rr := testRequest(t, srv, "GET", "/service/"+id+"/forecast", nil,
+    map[string]string{"X-App-Nonce": nonce})
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  if receivedAuth != "Bearer admin-secret-key" {
+    t.Errorf("Authorization = %q, want Bearer admin-secret-key", receivedAuth)
+  }
+}
+
+func TestProxyDoesNotOverrideUserAPIKey(t *testing.T) {
+  var receivedAuth string
+  mockService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    receivedAuth = r.Header.Get("Authorization")
+    w.WriteHeader(200)
+    w.Write([]byte(`{"ok":true}`))
+  }))
+  defer mockService.Close()
+
+  srv := newTestServer(t)
+  nonce := createApp(t, srv, "proxy-user-key-test")
+  id := registerService(t, srv, "weather", mockService.URL, ServiceDescriptor{
+    Type:   "api",
+    Auth:   "key",
+    APIKey: "admin-secret-key",
+  })
+
+  // Request WITH Authorization header — user's key wins
+  rr := testRequest(t, srv, "GET", "/service/"+id+"/forecast", nil,
+    map[string]string{
+      "X-App-Nonce":   nonce,
+      "Authorization": "Bearer user-own-key",
+    })
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  if receivedAuth != "Bearer user-own-key" {
+    t.Errorf("Authorization = %q, want Bearer user-own-key (user key should win)", receivedAuth)
+  }
+}
+
+// ── CORS ──
+
+func TestCORSWithOrigin(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "https://example.com"})
+  if rr.Code != 200 {
+    t.Fatalf("status = %d", rr.Code)
+  }
+  acao := rr.Header().Get("Access-Control-Allow-Origin")
+  if acao != "https://example.com" {
+    t.Errorf("Access-Control-Allow-Origin = %q, want https://example.com", acao)
+  }
+  if rr.Header().Get("Access-Control-Allow-Credentials") != "true" {
+    t.Error("expected Access-Control-Allow-Credentials: true")
+  }
+}
+
+func TestCORSMissingOrigin(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "GET", "/env.js", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d", rr.Code)
+  }
+  if rr.Header().Get("Access-Control-Allow-Origin") != "" {
+    t.Error("expected no CORS headers when Origin is absent")
+  }
+}
+
+func TestCORSPreflight(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "OPTIONS", "/api/apps", nil, map[string]string{
+    "Origin":                         "https://example.com",
+    "Access-Control-Request-Method":  "POST",
+    "Access-Control-Request-Headers": "X-App-Nonce, Content-Type",
+  })
+  if rr.Code != 204 {
+    t.Fatalf("status = %d, want 204", rr.Code)
+  }
+  if rr.Header().Get("Access-Control-Allow-Origin") != "https://example.com" {
+    t.Error("expected allowed origin on preflight")
+  }
+  if !strings.Contains(rr.Header().Get("Access-Control-Allow-Headers"), "X-App-Nonce") {
+    t.Errorf("Allow-Headers = %q, expected X-App-Nonce", rr.Header().Get("Access-Control-Allow-Headers"))
+  }
+  if rr.Header().Get("Access-Control-Allow-Methods") == "" {
+    t.Error("expected Allow-Methods on preflight")
+  }
+}
+
+// ── helpers ──
+
+func createApp(t *testing.T, srv *Server, name string) string {
+  t.Helper()
+  rr := testRequest(t, srv, "POST", "/api/apps", strings.NewReader(`{"name": "`+name+`"}`), nil)
+  if rr.Code != 200 {
+    t.Fatalf("create app failed: %d %s", rr.Code, rr.Body.String())
+  }
+  var res map[string]string
+  json.Unmarshal(rr.Body.Bytes(), &res)
+  return res["nonce"]
+}
+
+func registerService(t *testing.T, srv *Server, name, serviceURL string, descriptor ServiceDescriptor) string {
+  t.Helper()
+  body, _ := json.Marshal(map[string]interface{}{
+    "name":       name,
+    "url":        serviceURL,
+    "descriptor": descriptor,
+  })
+  rr := testRequest(t, srv, "POST", "/api/services", bytes.NewReader(body), nil)
+  if rr.Code != 200 {
+    t.Fatalf("create service failed: %d %s", rr.Code, rr.Body.String())
+  }
+  var res map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &res)
+  idf := res["id"].(float64)
+  return formatInt(int64(idf))
+}
+
+func mockHTTPClient(fn func(req *http.Request) *http.Response) *http.Client {
+  return &http.Client{Transport: mockRoundTripper{fn}}
+}
+
+type mockRoundTripper struct {
+  fn func(req *http.Request) *http.Response
+}
+
+func (m mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+  return m.fn(req), nil
+}
+
+func jsonResp(code int, body interface{}) *http.Response {
+  b, _ := json.Marshal(body)
+  return &http.Response{
+    StatusCode: code,
+    Header:     http.Header{"Content-Type": []string{"application/json"}},
+    Body:       io.NopCloser(bytes.NewReader(b)),
+  }
+}
+
+func formatInt(n int64) string {
+  var buf [20]byte
+  i := 0
+  if n == 0 {
+    return "0"
+  }
+  for n > 0 {
+    buf[i] = byte('0' + n%10)
+    n /= 10
+    i++
+  }
+  for j := 0; j < i/2; j++ {
+    buf[j], buf[i-1-j] = buf[i-1-j], buf[j]
+  }
+  return string(buf[:i])
+}

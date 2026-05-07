@@ -1,0 +1,35 @@
+[tasks.build]
+description = "Build freshbreath"
+run = "go build -o freshbreath ."
+
+[tasks.test]
+description = "Run all tests"
+run = "go test ./... -v"
+
+[tasks.test-race]
+description = "Run all tests with race detector"
+run = "go test ./... -race"
+
+[tasks.lint]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.check]
+description = "Run lint and tests"
+depends = ["lint", "test"]
+
+[tasks.local]
+description = "Run the server locally"
+run = "go run ."
+
+[tasks.dev]
+description = "Run with auto-restart (requires entr or similar)"
+run = "find . -name '*.go' | entr -r go run ."
+
+[tasks.outdated]
+description = "View outdated dependencies"
+run = "go list -u -m all 2>/dev/null | grep '\\['"
+
+[tasks.update]
+description = "Updated out-of-date modules"
+run = "go get -u ./... && go mod tidy"
