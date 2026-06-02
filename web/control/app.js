@@ -262,7 +262,7 @@ function LoginScreen({ serviceName, onLogin, authError }) {
         </div>
         <div className="login-foot">
           <span>admin panel</span>
-          <span>v1.0</span>
+          <span>v{window.__HOMESLICE_CONFIG?.version || 'dev'}</span>
         </div>
       </aside>
       <main className="login-main">
@@ -361,6 +361,9 @@ function Sidebar({ active, onNav, counts, user, onLogout }) {
               <Icon name="signout" size={14}/>
             </button>
           )}
+        </div>
+        <div className="sb-version" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
+          v{window.__HOMESLICE_CONFIG?.version || 'dev'}
         </div>
       </div>
     </aside>

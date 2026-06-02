@@ -107,8 +107,8 @@ func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
     }
   }
   w.Header().Set("Content-Type", "application/javascript")
-  fmt.Fprintf(w, "window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q };\n",
-    s.config.PublicBaseURL, authRequired, authServiceName)
+  fmt.Fprintf(w, "window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, version: %q, commit: %q };\n",
+    s.config.PublicBaseURL, authRequired, authServiceName, version, commit)
 }
 
 func (s *Server) handleSetupStatic(w http.ResponseWriter, r *http.Request) {
