@@ -64,6 +64,7 @@ jobs:
           path-type: inherit
 
       - name: Build
+        shell: bash
         run: mise run ${{ matrix.mise_task }}
         env:
           CC: ${{ matrix.cc }}
