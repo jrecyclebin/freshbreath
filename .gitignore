@@ -2,3 +2,4 @@ node_modules/
 *.db
 /freshbreath
 *.db-journal
+dist/

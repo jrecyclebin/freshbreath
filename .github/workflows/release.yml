@@ -1,0 +1,90 @@
+name: Build & Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cc: gcc
+            output: freshbreath-linux-amd64
+            mise_task: build:linux
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cc: aarch64-linux-gnu-gcc
+            output: freshbreath-linux-arm64
+            mise_task: build:linux-arm64
+          - os: macos-14
+            goos: darwin
+            goarch: arm64
+            cc: cc
+            output: freshbreath-darwin-arm64
+            mise_task: build:mac
+          - os: macos-13
+            goos: darwin
+            goarch: amd64
+            cc: cc
+            output: freshbreath-darwin-amd64
+            mise_task: build:mac-amd64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            cc: gcc
+            output: freshbreath-windows-amd64.exe
+            mise_task: build:windows
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      - name: Install arm64 cross-compiler (Linux arm64 only)
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install MinGW (Windows only)
+        if: matrix.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+          path-type: inherit
+
+      - name: Build
+        run: mise run ${{ matrix.mise_task }}
+        env:
+          CC: ${{ matrix.cc }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: dist/${{ matrix.output }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
