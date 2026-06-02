@@ -1,10 +1,13 @@
+[tools]
+go = "1.26"
+
 [tasks.build]
 description = "Build freshbreath (native)"
 run = "go build -ldflags \"-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo none)\" -o freshbreath ."
 
 [tasks."build:linux"]
-description = "Build for Linux amd64"
-run = "CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC=${CC:-gcc} go build -ldflags \"-X main.version=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)} -X main.commit=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}\" -o dist/freshbreath-linux-amd64 ."
+description = "Build for Linux x64"
+run = "CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC=${CC:-gcc} go build -ldflags \"-X main.version=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)} -X main.commit=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}\" -o dist/freshbreath-linux-x64 ."
 
 [tasks."build:linux-arm64"]
 description = "Build for Linux arm64 (requires aarch64-linux-gnu-gcc)"
@@ -14,17 +17,33 @@ run = "CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=${CC:-aarch64-linux-gnu-gcc} go 
 description = "Build for macOS arm64 (native on macOS runners; needs osxcross on Linux)"
 run = "CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 CC=${CC:-cc} go build -ldflags \"-X main.version=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)} -X main.commit=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}\" -o dist/freshbreath-darwin-arm64 ."
 
-[tasks."build:mac-amd64"]
-description = "Build for macOS amd64 (native on macOS runners; needs osxcross on Linux)"
-run = "CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC=${CC:-cc} go build -ldflags \"-X main.version=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)} -X main.commit=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}\" -o dist/freshbreath-darwin-amd64 ."
+[tasks."build:mac-x64"]
+description = "Build for macOS x64 (native on macOS runners; needs osxcross on Linux)"
+run = "CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 CC=${CC:-cc} go build -ldflags \"-X main.version=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)} -X main.commit=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}\" -o dist/freshbreath-darwin-x64 ."
 
 [tasks."build:windows"]
-description = "Build for Windows amd64 (requires x86_64-w64-mingw32-gcc on Linux)"
-run = "CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=${CC:-x86_64-w64-mingw32-gcc} go build -ldflags \"-X main.version=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)} -X main.commit=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}\" -o dist/freshbreath-windows-amd64.exe ."
+description = "Build for Windows x64 (requires x86_64-w64-mingw32-gcc on Linux)"
+run = "CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=${CC:-x86_64-w64-mingw32-gcc} go build -ldflags \"-X main.version=${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo dev)} -X main.commit=${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || echo none)}\" -o dist/freshbreath-windows-x64.exe ."
 
 [tasks."build:all"]
 description = "Build all platform binaries"
-depends = ["build:linux", "build:linux-arm64", "build:mac", "build:mac-amd64", "build:windows"]
+depends = ["build:linux", "build:linux-arm64", "build:mac", "build:mac-x64", "build:windows"]
+
+[tasks.release]
+confirm = 'Are you sure you want to cut a new release?'
+description = "Create a GitHub release (usage: mise run release v1.0)"
+usage = '''
+arg "<version>"
+'''
+run = """
+VERSION="${usage_version}"
+echo "→ Tagging $VERSION"
+git tag "$VERSION"
+git push origin "$VERSION"
+echo "→ Creating release"
+gh release create "$VERSION" --title "$VERSION" --generate-notes
+echo "✓ Release $VERSION created — CI will build and attach binaries"
+"""
 
 [tasks.test]
 description = "Run all tests"

@@ -16,7 +16,7 @@ jobs:
             goos: linux
             goarch: amd64
             cc: gcc
-            output: freshbreath-linux-amd64
+            output: freshbreath-linux-x64
             mise_task: build:linux
           - os: ubuntu-latest
             goos: linux
@@ -34,13 +34,13 @@ jobs:
             goos: darwin
             goarch: amd64
             cc: cc
-            output: freshbreath-darwin-amd64
-            mise_task: build:mac-amd64
+            output: freshbreath-darwin-x64
+            mise_task: build:mac-x64
           - os: windows-latest
             goos: windows
             goarch: amd64
             cc: gcc
-            output: freshbreath-windows-amd64.exe
+            output: freshbreath-windows-x64.exe
             mise_task: build:windows
 
     runs-on: ${{ matrix.os }}
