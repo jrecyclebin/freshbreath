@@ -157,7 +157,7 @@ func main() {
     }
   }()
 
-  log.Printf("*:・ﾟ✧ freshbreath server on %s", cfg.PublicBaseURL)
+  log.Printf("*:・ﾟ✧ freshbreath %s server on %s [db: %s]", version, cfg.PublicBaseURL, cfg.DBPath)
   if tlsEnabled {
     if err := http.ListenAndServeTLS(cfg.ListenAddr, cfg.TLSCertFile, cfg.TLSKeyFile, srv); err != nil {
       log.Fatal(err)

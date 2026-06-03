@@ -14,6 +14,7 @@ import (
   "net/http"
   "net/url"
   "os"
+  "os/exec"
   "path/filepath"
   "sort"
   "strconv"
@@ -84,6 +85,7 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/service/refresh",  s.handleRefresh)
   s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
   s.mux.HandleFunc("/service/{id}/",   s.handleServiceProxy)
+  s.mux.HandleFunc("/service/task/{id}", s.handleTaskCall)
 
   // Admin API — role-gated
   superuser := requireAnyRole("Superuser")
@@ -309,6 +311,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
   svc, err := s.store.GetServiceByURL(serviceURL)
   if err != nil {
     http.Error(w, "Service not registered", http.StatusForbidden)
+    return
+  }
+
+  // Tasks services don't use login
+  if svc.Descriptor.Type == "tasks" {
+    http.Error(w, "Task services don't login - instead pass in an `authService` object to ServiceProxy.", http.StatusForbidden)
     return
   }
 
@@ -596,6 +604,293 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Admin API ──
+
+// ── Tasks service ───────────────────────────────────────────────────────
+
+// Task represents a single named script parsed from a tasks file.
+type Task struct {
+  Name   string `json:"name"`
+  Desc   string `json:"description"`
+  Script string `json:"-"` // never serialized
+}
+
+// parseTaskHeader checks whether a line is a valid [task-name] header.
+// Returns (name, desc, true) on success, or ("", "", false) otherwise.
+// A valid header must start with '[', contain a ']' on the same line,
+// and have a non-empty name between them.
+func parseTaskHeader(line string) (name, desc string, ok bool) {
+  if !strings.HasPrefix(line, "[") {
+    return "", "", false
+  }
+  closeIdx := strings.Index(line, "]")
+  if closeIdx < 1 { // no ']' or empty name like "[]"
+    return "", "", false
+  }
+  name = line[1:closeIdx]
+  desc = strings.TrimSpace(line[closeIdx+1:])
+  return name, desc, true
+}
+
+// parseTasksFile parses the task definitions from a tasks file.
+//
+// Format: a [task-name] header optionally followed by a description
+// on the same line, then the script body until the next header or EOF.
+//
+//	[greet] Say hello to someone
+//	echo "Hello, $TASK_NAME"
+//	[build] Compile the project
+//	make all
+//
+// Lines starting with '[' that don't parse as a valid header are treated
+// as script body, so bash expressions like ${arr[0]} are safe.
+func parseTasksFile(data []byte) []Task {
+  var tasks []Task
+  var cur *Task
+  for _, line := range strings.Split(string(data), "\n") {
+    if name, desc, ok := parseTaskHeader(line); ok {
+      if cur != nil {
+        tasks = append(tasks, *cur)
+      }
+      cur = &Task{Name: name, Desc: desc}
+    } else if cur != nil {
+      if cur.Script != "" {
+        cur.Script += "\n"
+      }
+      cur.Script += line
+    }
+  }
+  if cur != nil {
+    tasks = append(tasks, *cur)
+  }
+  return tasks
+}
+
+// loadTasksForService reads and parses the tasks file for a service.
+func (s *Server) loadTasksForService(svc *Service) ([]Task, error) {
+  path := filepath.Join(s.config.Dir, "tasks", svc.Name+".txt")
+  data, err := os.ReadFile(path)
+  if err != nil {
+    return nil, fmt.Errorf("tasks file not found: %s", path)
+  }
+  return parseTasksFile(data), nil
+}
+
+func (s *Server) handleTaskCall(w http.ResponseWriter, r *http.Request) {
+  // ── Auth & access ────────────────────────────────────────────────────
+  nonce := r.Header.Get("X-App-Nonce")
+  if nonce == "" {
+    http.Error(w, "Missing X-App-Nonce header", http.StatusUnauthorized)
+    return
+  }
+
+  idStr := r.PathValue("id")
+  serviceID, err := strconv.ParseInt(idStr, 10, 64)
+  if err != nil {
+    http.Error(w, "Invalid service id", http.StatusBadRequest)
+    return
+  }
+
+  svc, err := s.store.GetService(serviceID)
+  if err != nil {
+    http.Error(w, "Service not found", http.StatusNotFound)
+    return
+  }
+  if svc.Descriptor.Type != "tasks" {
+    http.Error(w, "Service is not a tasks service", http.StatusBadRequest)
+    return
+  }
+
+  if nonce != s.adminNonce {
+    app, err := s.store.GetApp(nonce)
+    if err != nil {
+      http.Error(w, "Unknown app", http.StatusUnauthorized)
+      return
+    }
+    allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, serviceID)
+    if err != nil || !allowed {
+      http.Error(w, "Service not approved for this app", http.StatusForbidden)
+      return
+    }
+  }
+
+  // ── Optional token auth via a referenced service ──────────────────
+  if svc.Descriptor.AuthServiceID != "" {
+    authSvcID, err := strconv.ParseInt(svc.Descriptor.AuthServiceID, 10, 64)
+    if err != nil {
+      http.Error(w, "Invalid auth_service_id on service", http.StatusInternalServerError)
+      return
+    }
+    _, err = s.verifyTaskToken(r, authSvcID)
+    if err != nil {
+      http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+      return
+    }
+  }
+
+  // ── Route: GET = list tools, POST = call tool ────────────────────────
+  switch r.Method {
+  case http.MethodGet:
+    tasks, err := s.loadTasksForService(svc)
+    if err != nil {
+      http.Error(w, err.Error(), http.StatusNotFound)
+      return
+    }
+    tools := make([]map[string]string, len(tasks))
+    for i, t := range tasks {
+      tools[i] = map[string]string{"name": t.Name, "description": t.Desc}
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
+
+  case http.MethodPost:
+    s.handleTaskExec(w, r, svc)
+
+  default:
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+  }
+}
+
+func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Service) {
+  tasks, err := s.loadTasksForService(svc)
+  if err != nil {
+    http.Error(w, err.Error(), http.StatusNotFound)
+    return
+  }
+
+  // ── Parse request: JSON or multipart (for file uploads) ──────────────
+  var taskName string
+  var args map[string]interface{}
+  var fileArgs map[string][]byte // arg name → file bytes
+
+  contentType := r.Header.Get("Content-Type")
+  if strings.HasPrefix(contentType, "multipart/form-data") {
+    reader, err := r.MultipartReader()
+    if err != nil {
+      http.Error(w, "Invalid multipart body", http.StatusBadRequest)
+      return
+    }
+    args = make(map[string]interface{})
+    fileArgs = make(map[string][]byte)
+    for {
+      part, err := reader.NextPart()
+      if err == io.EOF {
+        break
+      }
+      if err != nil {
+        http.Error(w, "Error reading multipart", http.StatusBadRequest)
+        return
+      }
+      name := part.FormName()
+      if name == "task" {
+        b, _ := io.ReadAll(part)
+        taskName = strings.TrimSpace(string(b))
+      } else if part.FileName() != "" {
+        b, _ := io.ReadAll(part)
+        fileArgs[name] = b
+      } else {
+        b, _ := io.ReadAll(part)
+        // Try to parse as JSON value; fall back to string.
+        var val interface{}
+        if json.Unmarshal(b, &val) == nil {
+          args[name] = val
+        } else {
+          args[name] = string(b)
+        }
+      }
+    }
+  } else {
+    var body struct {
+      Task string                 `json:"task"`
+      Args map[string]interface{} `json:"args"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+      http.Error(w, "Invalid JSON", http.StatusBadRequest)
+      return
+    }
+    taskName = body.Task
+    args = body.Args
+    fileArgs = nil
+  }
+
+  if taskName == "" {
+    http.Error(w, "Missing 'task' field", http.StatusBadRequest)
+    return
+  }
+
+  // ── Find the task ────────────────────────────────────────────────────
+  var task *Task
+  for i := range tasks {
+    if tasks[i].Name == taskName {
+      task = &tasks[i]
+      break
+    }
+  }
+  if task == nil {
+    http.Error(w, fmt.Sprintf("Task %q not found", taskName), http.StatusNotFound)
+    return
+  }
+
+  // ── Prepare env vars ────────────────────────────────────────────────
+  env := os.Environ()
+  env = append(env, "TASK="+taskName)
+  if args != nil {
+    for k, v := range args {
+      jsonVal, err := json.Marshal(v)
+      if err != nil {
+        jsonVal = []byte(fmt.Sprintf("%v", v))
+      }
+      env = append(env, "TASK_"+strings.ToUpper(k)+"="+string(jsonVal))
+    }
+  }
+
+  // ── Write file args to temp dir ─────────────────────────────────────
+  var tmpDir string
+  if len(fileArgs) > 0 {
+    tmpDir, err = os.MkdirTemp("", "fbr-task-*")
+    if err != nil {
+      http.Error(w, "Failed to create temp dir", http.StatusInternalServerError)
+      return
+    }
+    defer os.RemoveAll(tmpDir)
+
+    for name, data := range fileArgs {
+      fp := filepath.Join(tmpDir, name)
+      if err := os.WriteFile(fp, data, 0600); err != nil {
+        http.Error(w, fmt.Sprintf("Failed to write file arg %q", name), http.StatusInternalServerError)
+        return
+      }
+      env = append(env, "TASK_"+strings.ToUpper(name)+"="+fp)
+    }
+  }
+
+  // ── Execute ─────────────────────────────────────────────────────────
+  cmd := exec.CommandContext(r.Context(), "sh", "-c", task.Script)
+  cmd.Env = env
+
+  var stdout, stderr bytes.Buffer
+  cmd.Stdout = &stdout
+  cmd.Stderr = &stderr
+
+  execErr := cmd.Run()
+
+  // ── Build MCP-format response ───────────────────────────────────────
+  result := map[string]interface{}{
+    "content": []map[string]interface{}{{
+      "type": "text",
+      "text": stdout.String(),
+    }},
+    "isError": execErr != nil,
+  }
+  if execErr != nil && stderr.Len() > 0 {
+    result["content"] = append(
+      result["content"].([]map[string]interface{}),
+      map[string]interface{}{"type": "text", "text": stderr.String()},
+    )
+  }
+
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(result)
+}
 
 // apps
 
@@ -1118,9 +1413,17 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
     http.Error(w, "Invalid JSON", http.StatusBadRequest)
     return
   }
-  if req.Name == "" || req.URL == "" {
-    http.Error(w, "name and url required", http.StatusBadRequest)
+  if req.Name == "" {
+    http.Error(w, "name required", http.StatusBadRequest)
     return
+  }
+  if req.URL == "" && req.Descriptor.Type != "tasks" {
+    http.Error(w, "url required", http.StatusBadRequest)
+    return
+  }
+  // Tasks services don't have a remote URL — use a placeholder.
+  if req.URL == "" {
+    req.URL = "-"
   }
 
   id, err := s.store.RegisterService(req.Name, req.URL, req.Descriptor)
@@ -1185,9 +1488,16 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if req.Name == "" || req.URL == "" {
-      http.Error(w, "name and url required", http.StatusBadRequest)
+    if req.Name == "" {
+      http.Error(w, "name required", http.StatusBadRequest)
       return
+    }
+    if req.URL == "" && req.Descriptor.Type != "tasks" {
+      http.Error(w, "url required", http.StatusBadRequest)
+      return
+    }
+    if req.URL == "" {
+      req.URL = "tasks://"
     }
     // Built-in SSH service: preserve name and URL
     if svc.Descriptor.Type == "ssh" {
@@ -1646,6 +1956,31 @@ func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*User, err
     return nil, fmt.Errorf("admin auth service not found")
   }
 
+  email, err := s.verifyIDToken(r.Context(), svc, idTokenRaw)
+  if err != nil {
+    return nil, err
+  }
+  user, err := s.store.GetUserByEmail(email)
+  if err != nil {
+    return nil, fmt.Errorf("user not found for %s", email)
+  }
+  return user, nil
+}
+
+// verifyTaskToken verifies a Bearer token against a referenced auth service.
+// Used by tasks services that require token auth. Returns the authenticated
+// user on success.
+func (s *Server) verifyTaskToken(r *http.Request, authSvcID int64) (*User, error) {
+  authHeader := r.Header.Get("Authorization")
+  if !strings.HasPrefix(authHeader, "Bearer ") {
+    return nil, fmt.Errorf("missing bearer token")
+  }
+  idTokenRaw := strings.TrimPrefix(authHeader, "Bearer ")
+
+  svc, err := s.store.GetService(authSvcID)
+  if err != nil {
+    return nil, fmt.Errorf("auth service not found")
+  }
   email, err := s.verifyIDToken(r.Context(), svc, idTokenRaw)
   if err != nil {
     return nil, err

@@ -85,17 +85,18 @@ type Service struct {
 }
 
 type ServiceDescriptor struct {
-  Type         string `json:"type"`                     // "mcp", "api", "oidc", or "ssh"
-  Auth         string `json:"auth,omitempty"`            // "key" for API-key auth
-  APIKey       string `json:"api_key,omitempty"`         // admin-set API key (injected by proxy)
-  Header       string `json:"header,omitempty"`          // custom header for API key; empty = Bearer
-  Proxied      bool   `json:"proxied,omitempty"`         // needs server-side proxy
-  ClientID     string `json:"client_id,omitempty"`       // pre-registered client_id
-  ClientSecret string `json:"client_secret,omitempty"`   // pre-registered client_secret
-  OAuthURL     string `json:"oauth_url,omitempty"`       // OAuth base URL override
-  Scopes         string `json:"scopes,omitempty"`               // space-separated scopes (OIDC)
-  UserInfoURL    string `json:"userinfo_url,omitempty"`         // explicit userinfo endpoint returning {email,name,...} for providers that don't advertise one
-  UserEmailsURL  string `json:"userinfo_emails_url,omitempty"`  // fallback endpoint returning [{email,primary,verified}] when userinfo has no email
+  Type          string `json:"type"`                     // "mcp", "api", "oidc", "tasks", or "ssh"
+  Auth          string `json:"auth,omitempty"`            // "key" for API-key auth
+  AuthServiceID string `json:"auth_service_id,omitempty"` // service ID used for token verification (tasks)
+  APIKey        string `json:"api_key,omitempty"`         // admin-set API key (injected by proxy)
+  Header        string `json:"header,omitempty"`          // custom header for API key; empty = Bearer
+  Proxied       bool   `json:"proxied,omitempty"`         // needs server-side proxy
+  ClientID      string `json:"client_id,omitempty"`       // pre-registered client_id
+  ClientSecret  string `json:"client_secret,omitempty"`   // pre-registered client_secret
+  OAuthURL      string `json:"oauth_url,omitempty"`       // OAuth base URL override
+  Scopes        string `json:"scopes,omitempty"`               // space-separated scopes (OIDC)
+  UserInfoURL   string `json:"userinfo_url,omitempty"`         // explicit userinfo endpoint returning {email,name,...} for providers that don't advertise one
+  UserEmailsURL string `json:"userinfo_emails_url,omitempty"`  // fallback endpoint returning [{email,primary,verified}] when userinfo has no email
 }
 
 // MarshalJSON serializes the descriptor, omitting zero-valued fields.

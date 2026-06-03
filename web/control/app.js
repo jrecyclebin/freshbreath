@@ -485,7 +485,9 @@ const copyText = async (text, toast) => {
 
 function serviceInstructions(service) {
   if (service.descriptor?.type === "ssh") {
-    return ` - ssh (see the SSH guide in the 'freshbreath' skill)`
+    return `  - ssh (see the SSH guide in the 'freshbreath' skill)`
+  } else if (service.descriptor?.type === "tasks") {
+    return `  - ${service.name} (see the tasks guide in the 'freshbreath' skill)`
   }
   return `  - ${service.name} (${service.descriptor?.type?.toLocaleUpperCase()}): "${service.url}"`
 }
@@ -1205,7 +1207,7 @@ function ServicesView({ token, services, onRefresh }) {
       <PageHead
         crumbs={['Workspace','Services']}
         title="Services"
-        sub="Registered MCP, OAuth, and API providers."
+        sub="Registered MCP, OAuth, API, and task providers."
         actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New service</button>}
       />
       <Toolbar search={q} onSearch={setQ} placeholder="Search services…"/>
@@ -1240,12 +1242,12 @@ function ServicesView({ token, services, onRefresh }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No services found.</b></div>}
       </div>
-      <ServiceDrawer token={token} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      <ServiceDrawer token={token} services={services} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
     </>
   );
 }
 
-function ServiceDrawer({ token, service, onClose, onSaved }) {
+function ServiceDrawer({ token, services, service, onClose, onSaved }) {
   const [form,setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false}});
   const toast = useToast();
   const isNew = service==='new';
@@ -1258,15 +1260,42 @@ function ServiceDrawer({ token, service, onClose, onSaved }) {
 
   const updDesc = (k,v) => setForm(f=>({...f,descriptor:{...f.descriptor,[k]:v}}));
 
+  // When switching to tasks type, clear fields that don't apply
+  const setType = (t) => {
+    const d = {...form.descriptor, type: t};
+    if (t === 'tasks') {
+      delete d.auth; delete d.api_key; delete d.header; delete d.proxied;
+      delete d.client_id; delete d.client_secret; delete d.oauth_url;
+      delete d.scopes; delete d.userinfo_url; delete d.userinfo_emails_url;
+    } else {
+      delete d.auth_service_id;
+    }
+    setForm(f=>({...f, descriptor: d}));
+  };
+
   const save = async () => {
     try {
-      if(isEdit) { await api(token, 'PUT','/api/services/'+service.id,form); toast('Service updated'); }
-      else { await api(token, 'POST','/api/services',form); toast('Service created'); }
+      // Strip auth_service_id if not tasks type
+      const payload = {...form};
+      if (payload.descriptor.type !== 'tasks' && payload.descriptor.auth_service_id) {
+        const d = {...payload.descriptor}; delete d.auth_service_id; payload.descriptor = d;
+      }
+      if(isEdit) { await api(token, 'PUT','/api/services/'+service.id,payload); toast('Service updated'); }
+      else { await api(token, 'POST','/api/services',payload); toast('Service created'); }
       onClose(); onSaved();
     } catch(e) { toast(e.message,true); }
   };
 
   const isSSH = isEdit && service.descriptor?.type === 'ssh';
+  const isTasks = form.descriptor.type === 'tasks';
+
+  // Auth service options for tasks: OIDC services + built-in SSH
+  const oidcSvc = services.filter(s => s.descriptor?.type === 'oidc');
+  const sshSvc = services.find(s => s.descriptor?.type === 'ssh');
+  const authSvcOptions = [
+    ...oidcSvc.map(s => ({ id: String(s.id), label: s.name, type: 'OIDC' })),
+    ...(sshSvc ? [{ id: String(sshSvc.id), label: 'SSH Key', type: 'SSH' }] : []),
+  ];
 
   return (
     <Drawer
@@ -1278,22 +1307,34 @@ function ServiceDrawer({ token, service, onClose, onSaved }) {
       </>}
     >
       <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} disabled={isSSH}/></div>
-      <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>
+      {!isTasks && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>}
       {isSSH ? (
         <div className="field"><label>Type</label><Badge tone="purple">SSH</Badge></div>
       ) : (
       <div className="field-row">
         <div className="field"><label>Type</label>
-          <select className="input" value={form.descriptor.type} onChange={e=>updDesc('type',e.target.value)}>
-            <option value="mcp">MCP</option><option value="api">API</option><option value="oidc">OIDC</option>
+          <select className="input" value={form.descriptor.type} onChange={e=>setType(e.target.value)}>
+            <option value="mcp">MCP</option><option value="api">API</option><option value="oidc">OIDC</option><option value="tasks">Tasks</option>
           </select>
         </div>
-        <div className="field"><label>Proxied</label>
+        {!isTasks && <div className="field"><label>Proxied</label>
           <select className="input" value={form.descriptor.proxied?'true':'false'} onChange={e=>updDesc('proxied',e.target.value==='true')}>
             <option value="false">No</option><option value="true">Yes</option>
           </select>
-        </div>
+        </div>}
       </div>
+      )}
+      {isTasks && (
+        <div className="field" style={{maxWidth:380}}>
+          <label>Auth service</label>
+          <select className="input" value={form.descriptor.auth_service_id||''} onChange={e=>updDesc('auth_service_id',e.target.value)}>
+            <option value="">— None (app nonce only) —</option>
+            {authSvcOptions.map(s => <option key={s.id} value={s.id}>{s.label} ({s.type})</option>)}
+          </select>
+          {authSvcOptions.length === 0 && (
+            <span className="help">No auth services available. Add an OIDC service or use the built-in SSH service.</span>
+          )}
+        </div>
       )}
       {form.descriptor.type==='api' && (
         <>

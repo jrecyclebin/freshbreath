@@ -8,6 +8,8 @@
 *.db-journal
 *.pem
 /apps
+/tasks
+/tmp
 static.html
 
 # Agent files
