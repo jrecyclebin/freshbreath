@@ -5,12 +5,12 @@ env_shell_expand = true
 go = "1.26"
 
 [env]
-VERSION = "{{ exec(command='git describe --tags --always --dirty 2>/dev/null || echo dev') }}"
-COMMIT = "{{ exec(command='git rev-parse --short HEAD 2>/dev/null || echo none') }}"
+GIT_VERSION = "{{ exec(command='git describe --tags --always --dirty 2>/dev/null || echo dev') }}"
+GIT_COMMIT = "{{ exec(command='git rev-parse --short HEAD 2>/dev/null || echo none') }}"
 
 [tasks.build]
 description = "Build freshbreath (native)"
-run = "go build -ldflags \"-X main.version=$VERSION -X main.commit=$COMMIT\" -o freshbreath ."
+run = "go build -ldflags \"-X main.version=$GIT_VERSION -X main.commit=$GIT_COMMIT\" -o freshbreath ."
 
 [tasks."build:linux"]
 description = "Build for Linux x64"

@@ -4,6 +4,8 @@ set -euo pipefail
 # ── Config from env (set by mise tasks or CI) ──────────────────────
 # Required: GOOS, GOARCH, VERSION, COMMIT
 # Optional: CC (defaults per platform below)
+VERSION=${VERSION:-$GIT_VERSION}
+COMMIT=${COMMIT:-$GIT_COMMIT}
 
 # ── Derive architecture label ──────────────────────────────────────
 case "$GOARCH" in
