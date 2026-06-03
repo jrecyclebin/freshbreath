@@ -398,7 +398,7 @@ function Sidebar({ active, onNav, counts, user, onLogout, mobileOpen, onMobileCl
           )}
         </div>
         <div className="sb-version" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
-          v{window.__HOMESLICE_CONFIG?.version || 'dev'}
+          {window.__HOMESLICE_CONFIG?.version || 'dev'}
         </div>
       </div>
     </aside>
