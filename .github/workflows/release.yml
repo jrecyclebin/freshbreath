@@ -36,10 +36,10 @@ jobs:
             cc: gcc
             archive: freshbreath-windows-x64.zip
             mise_task: build:windows
-          - os: ubuntu-latest
+          - os: windows-11-arm
             goos: windows
             goarch: arm64
-            cc: aarch64-w64-mingw32-gcc
+            cc: clang
             archive: freshbreath-windows-arm64.zip
             mise_task: build:windows-arm64
 
@@ -55,12 +55,6 @@ jobs:
         if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Install Windows arm64 cross-compiler
-        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y llvm-mingw-20220906
-
       - name: Install MinGW (Windows x64 only)
         if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
         uses: msys2/setup-msys2@v2
@@ -68,6 +62,14 @@ jobs:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
           path-type: inherit
+
+      - name: Install MinGW (Windows arm64 only)
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: clangarm64
+          update: true
+          install: mingw-w64-clang-aarch64-gcc
 
       - name: Build & package
         shell: bash
