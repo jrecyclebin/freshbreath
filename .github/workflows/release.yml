@@ -57,7 +57,9 @@ jobs:
 
       - name: Install Windows arm64 cross-compiler
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-w64-mingw32
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-mingw-20220906
 
       - name: Install MinGW (Windows x64 only)
         if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
