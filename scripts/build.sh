@@ -14,19 +14,19 @@ esac
 
 # ── Derive binary name ────────────────────────────────────────────
 if [ "$GOOS" = "windows" ]; then
-  binary="freshbreath-${GOOS}-${arch}.exe"
+  binary="freshbreath.exe"
 else
-  binary="freshbreath-${GOOS}-${arch}"
+  binary="freshbreath"
 fi
 
 # ── Build ──────────────────────────────────────────────────────────
 echo "→ Building $binary (GOOS=$GOOS GOARCH=$GOARCH CC=${CC:-default})"
-go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/$binary" .
+go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/${GOOS}-${arch}-$binary" .
 
 # ── Package ────────────────────────────────────────────────────────
 staging="dist/staging"
 mkdir -p "$staging"
-cp "dist/$binary" "$staging/"
+mv "dist/${GOOS}-${arch}-$binary" "$staging/$binary"
 cp -r web skills "$staging/"
 
 if [ "$GOOS" = "windows" ]; then
@@ -34,7 +34,11 @@ if [ "$GOOS" = "windows" ]; then
   echo "→ Packaging $archive"
   (cd "$staging" && zip -r "../$archive" .)
 else
-  archive="freshbreath-${GOOS}-${arch}.tar.gz"
+  if [ "$GOOS" = "darwin" ]; then
+    archive="freshbreath-macos-${arch}.tar.gz"
+  else
+    archive="freshbreath-${GOOS}-${arch}.tar.gz"
+  fi
   echo "→ Packaging $archive"
   tar -czf "dist/$archive" -C "$staging" .
 fi
