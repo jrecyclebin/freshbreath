@@ -1,5 +1,10 @@
-node_modules/
+# Local testing
 *.db
-/freshbreath
 *.db-journal
+
+# Builds
+/freshbreath
 dist/
+
+# Agent stuff
+.journal/
