@@ -92,6 +92,7 @@ The server starts on `:9009` by default with an SQLite database at `./freshbreat
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `FREBRE_DIR` | binary's directory | Where to find `web/` and `skills/` directories |
 | `FREBRE_DB_PATH` | `./freshbreath.db` | SQLite database file |
 | `FREBRE_BASE_URL` | auto-detected | Defaults to `http://localhost:9009` or `https://localhost:9009` depending on TLS. |
 | `FREBRE_LISTEN_ADDR` | `:9009` | HTTP bind address |
