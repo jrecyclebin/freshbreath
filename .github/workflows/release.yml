@@ -28,7 +28,7 @@ jobs:
             goos: darwin
             goarch: arm64
             cc: cc
-            archive: freshbreath-darwin-arm64.tar.gz
+            archive: freshbreath-macos-arm64.tar.gz
             mise_task: build:mac
           - os: windows-latest
             goos: windows
