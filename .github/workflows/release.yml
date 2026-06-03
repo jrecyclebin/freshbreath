@@ -71,6 +71,11 @@ jobs:
           update: true
           install: mingw-w64-clang-aarch64-gcc
 
+      - name: Install zip
+        if: matrix.goos == 'windows'
+        run: choco install zip -y
+        shell: powershell
+
       - name: Build & package
         shell: bash
         run: mise run ${{ matrix.mise_task }}
