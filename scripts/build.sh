@@ -32,14 +32,14 @@ mv "dist/${GOOS}-${arch}-$binary" "$staging/$binary"
 cp -r web skills "$staging/"
 
 if [ "$GOOS" = "windows" ]; then
-  archive="freshbreath-${GOOS}-${arch}.zip"
+  archive="freshbreath-${VERSION}-${GOOS}-${arch}.zip"
   echo "→ Packaging $archive"
   (cd "$staging" && zip -r "../$archive" .)
 else
   if [ "$GOOS" = "darwin" ]; then
-    archive="freshbreath-macos-${arch}.tar.gz"
+    archive="freshbreath-${VERSION}-macos-${arch}.tar.gz"
   else
-    archive="freshbreath-${GOOS}-${arch}.tar.gz"
+    archive="freshbreath-${VERSION}-${GOOS}-${arch}.tar.gz"
   fi
   echo "→ Packaging $archive"
   tar -czf "dist/$archive" -C "$staging" .

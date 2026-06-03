@@ -5,6 +5,7 @@ import (
   "log"
   "net/http"
   "os"
+  "path/filepath"
   "sync"
   "time"
 
@@ -14,6 +15,7 @@ import (
 )
 
 type Config struct {
+  Dir           string
   DBPath        string
   PublicBaseURL string
   ListenAddr    string
@@ -60,7 +62,11 @@ func main() {
   // Load .env file if present; ignore error — env vars may be set directly.
   _ = godotenv.Load()
 
+  exe, _ := os.Executable()
+  binDir, _ := filepath.EvalSymlinks(filepath.Dir(exe))
+
   cfg := Config{
+    Dir:           getEnv("FREBRE_DIR", binDir),
     DBPath:        getEnv("FREBRE_DB_PATH", "./freshbreath.db"),
     PublicBaseURL: getEnv("FREBRE_BASE_URL", "http://localhost:9009"),
     ListenAddr:    getEnv("FREBRE_LISTEN_ADDR", ":9009"),

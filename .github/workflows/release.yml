@@ -16,31 +16,36 @@ jobs:
             goos: linux
             goarch: amd64
             cc: gcc
-            archive: freshbreath-linux-x64.tar.gz
+            ext: .tar.gz
+            label: linux-x64
             mise_task: build:linux
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
             cc: aarch64-linux-gnu-gcc
-            archive: freshbreath-linux-arm64.tar.gz
+            ext: .tar.gz
+            label: linux-arm64
             mise_task: build:linux-arm64
           - os: macos-14
             goos: darwin
             goarch: arm64
             cc: cc
-            archive: freshbreath-macos-arm64.tar.gz
+            ext: .tar.gz
+            label: macos-arm64
             mise_task: build:mac
           - os: windows-latest
             goos: windows
             goarch: amd64
             cc: gcc
-            archive: freshbreath-windows-x64.zip
+            ext: .zip
+            label: windows-x64
             mise_task: build:windows
           - os: windows-11-arm
             goos: windows
             goarch: arm64
             cc: clang
-            archive: freshbreath-windows-arm64.zip
+            ext: .zip
+            label: windows-arm64
             mise_task: build:windows-arm64
 
     runs-on: ${{ matrix.os }}
@@ -87,8 +92,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.archive }}
-          path: dist/${{ matrix.archive }}
+          name: freshbreath-${{ github.ref_name }}-${{ matrix.label }}
+          path: dist/freshbreath-${{ github.ref_name }}-${{ matrix.label }}${{ matrix.ext }}
 
   release:
     needs: build

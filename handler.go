@@ -9,6 +9,7 @@ import (
   "net/http"
   "net/url"
   "os"
+  "path/filepath"
   "strconv"
   "strings"
   "time"
@@ -52,7 +53,7 @@ func (s *Server) SetupRoutes() {
   s.mux = http.NewServeMux()
   s.mux.HandleFunc("/",                s.handleIndex)
   s.mux.HandleFunc("/control",         s.handleControl)
-  s.mux.Handle("/control/",             http.StripPrefix("/control/", http.FileServer(http.Dir("web/control"))))
+  s.mux.Handle("/control/",             http.StripPrefix("/control/", http.FileServer(http.Dir(filepath.Join(s.config.Dir, "web", "control")))))
   s.mux.HandleFunc("/env.js",          s.handleEnv)
   s.mux.HandleFunc("/setup.js",        s.handleSetupStatic)
   s.mux.HandleFunc("/service/login",   s.handleLogin)
@@ -86,7 +87,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
-  data, err := os.ReadFile("web/control.html")
+  data, err := os.ReadFile(filepath.Join(s.config.Dir, "web", "control.html"))
   if err != nil {
     http.Error(w, "control.html not found", http.StatusInternalServerError)
     return
@@ -112,7 +113,7 @@ func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetupStatic(w http.ResponseWriter, r *http.Request) {
-  data, err := os.ReadFile("web/setup.js")
+  data, err := os.ReadFile(filepath.Join(s.config.Dir, "web", "setup.js"))
   if err != nil {
     http.Error(w, "setup.js not found", http.StatusInternalServerError)
     return
