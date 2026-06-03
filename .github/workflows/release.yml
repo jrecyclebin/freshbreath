@@ -30,12 +30,6 @@ jobs:
             cc: cc
             output: freshbreath-darwin-arm64
             mise_task: build:mac
-          - os: macos-13
-            goos: darwin
-            goarch: amd64
-            cc: cc
-            output: freshbreath-darwin-x64
-            mise_task: build:mac-x64
           - os: windows-latest
             goos: windows
             goarch: amd64
