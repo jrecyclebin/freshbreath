@@ -82,7 +82,6 @@ export class ServiceProxy extends EventEmitter {
   #apiKey;
   #apiHeader;
   #proxied;
-  #serviceType;
   #authService;
   #client = null;
 
@@ -95,15 +94,10 @@ export class ServiceProxy extends EventEmitter {
    * @param {string} [opts.apiKey]     — API key for key-auth services
    * @param {string} [opts.apiHeader]  — header name for the API key (from ServiceDescriptor.Header)
    * @param {boolean} [opts.proxied]   — whether to route through freshbreath proxy
-   * @param {string}  [opts.serviceType] — service descriptor type (e.g. "tasks", "mcp", "oidc")
    */
-  constructor({ appNonce, serviceURL, serviceID, data, apiKey, apiHeader, proxied, serviceType, authService }) {
+  constructor({ appNonce, serviceURL, serviceID, data, apiKey, apiHeader, proxied, authService }) {
     if (!appNonce || !serviceURL) {
       throw new Error("ServiceProxy requires appNonce and serviceURL");
-    }
-    if (serviceURL.startsWith("tasks://")) {
-      serviceID = Number(serviceURL.replace("tasks://", ""));
-      serviceType = "tasks";
     }
     super();
     this.#appNonce = appNonce;
@@ -113,7 +107,6 @@ export class ServiceProxy extends EventEmitter {
     this.#apiKey = apiKey ?? null;
     this.#apiHeader = apiHeader || null;
     this.#proxied = proxied ?? false;
-    this.#serviceType = serviceType ?? null;
     this.#authService = authService ?? null;
 
     for (const [event, handler] of ServiceProxy._defaults) {
@@ -128,7 +121,6 @@ export class ServiceProxy extends EventEmitter {
   get apiKey()     { return this.#apiKey; }
   get apiHeader()  { return this.#apiHeader; }
   get proxied()    { return this.#proxied; }
-  get serviceType() { return this.#serviceType; }
   get authService() { return this.#authService; }
 
   static fromJSON(appNonce, jsonString) {
@@ -149,7 +141,6 @@ export class ServiceProxy extends EventEmitter {
       apiKey: this.#apiKey,
       apiHeader: this.#apiHeader,
       proxied: this.#proxied,
-      serviceType: this.#serviceType,
     });
   }
 
@@ -256,7 +247,7 @@ export class ServiceProxy extends EventEmitter {
     if (this.isIdentity) {
       throw new Error("This ServiceProxy was obtained from an OIDC identity provider. Use .data.claims instead of MCP methods.");
     }
-    if (this.#serviceType === 'tasks') {
+    if (this.#serviceURL?.startsWith('tasks://')) {
       throw new Error("Tasks services don't use MCP connect. Use listTools/callTool directly.");
     }
     await this.checkToken();
@@ -282,10 +273,11 @@ export class ServiceProxy extends EventEmitter {
   }
 
   async listTools() {
-    if (this.#serviceType === 'tasks') {
+    if (this.#serviceURL?.startsWith('tasks://')) {
       const headers = { 'X-App-Nonce': this.#appNonce };
       this.addAuth(headers);
-      const r = await fetch(`${API}/service/task/${this.#serviceID}`, { headers });
+      const slug = this.#serviceURL.replace('tasks://', '');
+      const r = await fetch(`${API}/service/task/${slug}`, { headers });
       if (!r.ok) throw new Error(`listTools failed (${r.status})`);
       const { tools } = await r.json();
       return tools;
@@ -297,7 +289,7 @@ export class ServiceProxy extends EventEmitter {
   }
 
   async callTool(name, args = {}) {
-    if (this.#serviceType === 'tasks') {
+    if (this.#serviceURL?.startsWith('tasks://')) {
       return this.#callTask(name, args);
     }
     return this.#withRetry(() => this.#client.callTool({ name, arguments: args }));
@@ -311,7 +303,8 @@ export class ServiceProxy extends EventEmitter {
   async #callTask(name, args) {
     const hasFiles = Object.values(args).some(v => v instanceof File || v instanceof Blob);
     const headers = { 'X-App-Nonce': this.#appNonce };
-    const url = `${API}/service/task/${this.#serviceID}`;
+    const slug = this.#serviceURL.replace('tasks://', '');
+    const url = `${API}/service/task/${slug}`;
     this.addAuth(headers);
 
     if (hasFiles) {

@@ -85,7 +85,7 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/service/refresh",  s.handleRefresh)
   s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
   s.mux.HandleFunc("/service/{id}/",   s.handleServiceProxy)
-  s.mux.HandleFunc("/service/task/{id}", s.handleTaskCall)
+  s.mux.HandleFunc("/service/task/{name}", s.handleTaskCall)
 
   // Admin API — role-gated
   superuser := requireAnyRole("Superuser")
@@ -683,20 +683,11 @@ func (s *Server) handleTaskCall(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  idStr := r.PathValue("id")
-  serviceID, err := strconv.ParseInt(idStr, 10, 64)
-  if err != nil {
-    http.Error(w, "Invalid service id", http.StatusBadRequest)
-    return
-  }
+  slug := r.PathValue("name")
 
-  svc, err := s.store.GetService(serviceID)
+  svc, err := s.store.GetServiceByURL("tasks://" + slug)
   if err != nil {
-    http.Error(w, "Service not found", http.StatusNotFound)
-    return
-  }
-  if svc.Descriptor.Type != "tasks" {
-    http.Error(w, "Service is not a tasks service", http.StatusBadRequest)
+    http.Error(w, "Task service not found", http.StatusNotFound)
     return
   }
 
@@ -706,7 +697,7 @@ func (s *Server) handleTaskCall(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Unknown app", http.StatusUnauthorized)
       return
     }
-    allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, serviceID)
+    allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, svc.ID)
     if err != nil || !allowed {
       http.Error(w, "Service not approved for this app", http.StatusForbidden)
       return
@@ -1421,9 +1412,9 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
     http.Error(w, "url required", http.StatusBadRequest)
     return
   }
-  // Tasks services don't have a remote URL — use a placeholder.
+  // Tasks services don't have a remote URL — use a slugified name.
   if req.URL == "" {
-    req.URL = "-"
+    req.URL = "tasks://" + slugify(req.Name)
   }
 
   id, err := s.store.RegisterService(req.Name, req.URL, req.Descriptor)
@@ -1497,7 +1488,7 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
       return
     }
     if req.URL == "" {
-      req.URL = "tasks://"
+      req.URL = "tasks://" + slugify(req.Name)
     }
     // Built-in SSH service: preserve name and URL
     if svc.Descriptor.Type == "ssh" {
