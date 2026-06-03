@@ -6,6 +6,7 @@ import (
   "log"
   "net/http"
   "os"
+  "runtime"
   "strings"
   "path/filepath"
   "sync"
@@ -72,8 +73,8 @@ func main() {
   // Load .env file if present; ignore error — env vars may be set directly.
   _ = godotenv.Load()
 
-  exe, _ := os.Executable()
-  binDir, _ := filepath.EvalSymlinks(filepath.Dir(exe))
+  _, callerFile, _, _ := runtime.Caller(0)
+  binDir, _ := filepath.EvalSymlinks(filepath.Dir(callerFile))
 
   cfg := Config{
     Dir:           getEnv("FREBRE_DIR", binDir),

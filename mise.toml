@@ -109,7 +109,7 @@ depends = ["lint", "test"]
 description = "Run the server locally"
 run = "go run ."
 
-[tasks.dev]
+[tasks.default]
 description = "Run with auto-restart (requires entr or similar)"
 run = "find . -name '*.go' | entr -r go run ."
 
