@@ -15,31 +15,36 @@ run = "go build -ldflags \"-X main.version=$VERSION -X main.commit=$COMMIT\" -o 
 [tasks."build:linux"]
 description = "Build for Linux x64"
 env = { CGO_ENABLED = "1", GOOS = "linux", GOARCH = "amd64", CC = "${CC:-gcc}" }
-run = "go build -ldflags \"-X main.version=$VERSION -X main.commit=$COMMIT\" -o dist/freshbreath-linux-x64 ."
+run = "bash scripts/build.sh"
 
 [tasks."build:linux-arm64"]
 description = "Build for Linux arm64 (requires aarch64-linux-gnu-gcc)"
 env = { CGO_ENABLED = "1", GOOS = "linux", GOARCH = "arm64", CC = "${CC:-aarch64-linux-gnu-gcc}" }
-run = "go build -ldflags \"-X main.version=$VERSION -X main.commit=$COMMIT\" -o dist/freshbreath-linux-arm64 ."
+run = "bash scripts/build.sh"
 
 [tasks."build:mac"]
 description = "Build for macOS arm64 (native on macOS runners; needs osxcross on Linux)"
 env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "arm64", CC = "${CC:-cc}" }
-run = "go build -ldflags \"-X main.version=$VERSION -X main.commit=$COMMIT\" -o dist/freshbreath-darwin-arm64 ."
+run = "bash scripts/build.sh"
 
 [tasks."build:mac-x64"]
 description = "Build for macOS x64 (native on macOS runners; needs osxcross on Linux)"
 env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "amd64", CC = "${CC:-cc}" }
-run = "go build -ldflags \"-X main.version=$VERSION -X main.commit=$COMMIT\" -o dist/freshbreath-darwin-x64 ."
+run = "bash scripts/build.sh"
 
 [tasks."build:windows"]
 description = "Build for Windows x64 (requires x86_64-w64-mingw32-gcc on Linux)"
 env = { CGO_ENABLED = "1", GOOS = "windows", GOARCH = "amd64", CC = "${CC:-x86_64-w64-mingw32-gcc}" }
-run = "bash scripts/build-windows.sh"
+run = "bash scripts/build.sh"
+
+[tasks."build:windows-arm64"]
+description = "Build for Windows arm64 (requires aarch64-w64-mingw32-gcc on Linux)"
+env = { CGO_ENABLED = "1", GOOS = "windows", GOARCH = "arm64", CC = "${CC:-aarch64-w64-mingw32-gcc}" }
+run = "bash scripts/build.sh"
 
 [tasks."build:all"]
 description = "Build all platform binaries"
-depends = ["build:linux", "build:linux-arm64", "build:mac", "build:mac-x64", "build:windows"]
+depends = ["build:linux", "build:linux-arm64", "build:mac", "build:mac-x64", "build:windows", "build:windows-arm64"]
 
 [tasks.release]
 confirm = 'Are you sure you want to cut a new release?'

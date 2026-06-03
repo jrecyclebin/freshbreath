@@ -16,26 +16,32 @@ jobs:
             goos: linux
             goarch: amd64
             cc: gcc
-            output: freshbreath-linux-x64
+            archive: freshbreath-linux-x64.tar.gz
             mise_task: build:linux
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
             cc: aarch64-linux-gnu-gcc
-            output: freshbreath-linux-arm64
+            archive: freshbreath-linux-arm64.tar.gz
             mise_task: build:linux-arm64
           - os: macos-14
             goos: darwin
             goarch: arm64
             cc: cc
-            output: freshbreath-darwin-arm64
+            archive: freshbreath-darwin-arm64.tar.gz
             mise_task: build:mac
           - os: windows-latest
             goos: windows
             goarch: amd64
             cc: gcc
-            output: freshbreath-windows-x64.exe
+            archive: freshbreath-windows-x64.zip
             mise_task: build:windows
+          - os: ubuntu-latest
+            goos: windows
+            goarch: arm64
+            cc: aarch64-w64-mingw32-gcc
+            archive: freshbreath-windows-arm64.zip
+            mise_task: build:windows-arm64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -45,19 +51,23 @@ jobs:
 
       - uses: jdx/mise-action@v2
 
-      - name: Install arm64 cross-compiler (Linux arm64 only)
+      - name: Install Linux arm64 cross-compiler
         if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Install MinGW (Windows only)
-        if: matrix.goos == 'windows'
+      - name: Install Windows arm64 cross-compiler
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-w64-mingw32
+
+      - name: Install MinGW (Windows x64 only)
+        if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           install: mingw-w64-x86_64-gcc
           path-type: inherit
 
-      - name: Build
+      - name: Build & package
         shell: bash
         run: mise run ${{ matrix.mise_task }}
         env:
@@ -65,11 +75,11 @@ jobs:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
 
-      - name: Upload binary
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.output }}
-          path: dist/${{ matrix.output }}
+          name: ${{ matrix.archive }}
+          path: dist/${{ matrix.archive }}
 
   release:
     needs: build
@@ -86,4 +96,6 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
