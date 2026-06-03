@@ -47,7 +47,6 @@ description = "Build all platform binaries"
 depends = ["build:linux", "build:linux-arm64", "build:mac", "build:mac-x64", "build:windows", "build:windows-arm64"]
 
 [tasks.release]
-confirm = 'Are you sure you want to cut a new release?'
 description = "Create a GitHub release (usage: mise run release v1.0)"
 usage = '''
 arg "<version>"
@@ -60,6 +59,34 @@ git push origin "$VERSION"
 echo "→ Creating release"
 gh release create "$VERSION" --title "$VERSION" --generate-notes
 echo "✓ Release $VERSION created — CI will build and attach binaries"
+"""
+
+[tasks."release:undo"]
+confirm = 'This will delete the GitHub release AND the git tag. Sure?'
+description = "Retract a release: deletes the GitHub release and tag (usage: mise run release:undo v1.0)"
+usage = '''
+arg "<version>"
+'''
+run = """
+VERSION="${usage_version}"
+echo "→ Deleting GitHub release $VERSION"
+gh release delete "$VERSION" --yes --cleanup-tag || true
+echo "→ Deleting remote tag"
+git push origin --delete "$VERSION" 2>/dev/null || true
+echo "→ Deleting local tag"
+git tag --delete "$VERSION" 2>/dev/null || true
+echo "✓ Release $VERSION retracted — you can re-run 'mise run release $VERSION' to retry"
+"""
+
+[tasks."release:retry"]
+description = "Retract and re-cut a release (usage: mise run release:retry v1.0)"
+usage = '''
+arg "<version>"
+'''
+run = """
+VERSION="${usage_version}"
+mise run release:undo "$VERSION"
+mise run release "$VERSION"
 """
 
 [tasks.test]
