@@ -1,15 +1,21 @@
 package main
 
 import (
+  "archive/zip"
+  "bytes"
   "context"
   "encoding/base64"
   "encoding/json"
+  "errors"
   "fmt"
   "io"
+  "log"
+  "net"
   "net/http"
   "net/url"
   "os"
   "path/filepath"
+  "sort"
   "strconv"
   "strings"
   "time"
@@ -20,7 +26,13 @@ import (
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
   if origin := r.Header.Get("Origin"); origin != "" {
     if nonce := r.Header.Get("X-App-Nonce"); nonce != "" {
-      if app, err := s.store.GetApp(nonce); err == nil && app.URL != "" {
+      // Admin panel nonce — verify origin matches our own base URL
+      if nonce == s.adminNonce {
+        if u, err := url.Parse(s.config.PublicBaseURL); err == nil && u.Scheme+"://"+u.Host != origin {
+          http.Error(w, "Origin not allowed", http.StatusForbidden)
+          return
+        }
+      } else if app, err := s.store.GetApp(nonce); err == nil && app.URL != "" {
         if appURL, err := url.Parse(app.URL); err != nil || appURL.Scheme+"://"+appURL.Host != origin {
           http.Error(w, "Origin not allowed", http.StatusForbidden)
           return
@@ -53,11 +65,24 @@ func (s *Server) SetupRoutes() {
   s.mux = http.NewServeMux()
   s.mux.HandleFunc("/",                s.handleIndex)
   s.mux.HandleFunc("/control",         s.handleControl)
-  s.mux.Handle("/control/",             http.StripPrefix("/control/", http.FileServer(http.Dir(filepath.Join(s.config.Dir, "web", "control")))))
+  controlDir := filepath.Join(s.config.Dir, "web", "control")
+  controlFiles := http.StripPrefix("/control/", http.FileServer(http.Dir(controlDir)))
+  s.mux.HandleFunc("/control/", func(w http.ResponseWriter, r *http.Request) {
+    rel := strings.TrimPrefix(r.URL.Path, "/control/")
+    if rel != "" {
+      if fi, err := os.Stat(filepath.Join(controlDir, rel)); err == nil && !fi.IsDir() {
+        controlFiles.ServeHTTP(w, r)
+        return
+      }
+    }
+    s.handleControl(w, r)
+  })
   s.mux.HandleFunc("/env.js",          s.handleEnv)
-  s.mux.HandleFunc("/setup.js",        s.handleSetupStatic)
+  s.mux.HandleFunc("/frbr.js",         s.handleFrbr)
   s.mux.HandleFunc("/service/login",   s.handleLogin)
   s.mux.HandleFunc("/service/callback", s.handleCallback)
+  s.mux.HandleFunc("/service/refresh",  s.handleRefresh)
+  s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
   s.mux.HandleFunc("/service/{id}/",   s.handleServiceProxy)
 
   // Admin API — role-gated
@@ -74,16 +99,118 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/api/roles",             s.authWrap(pipeline(s.handleRoles, anyRole)))
   s.mux.HandleFunc("/api/audit",             s.authWrap(pipeline(s.handleAudit, anyRole)))
   s.mux.HandleFunc("/api/me",               s.authWrap(pipeline(s.handleMe, anyRole)))
+  s.mux.HandleFunc("/api/me/ssh-key",       s.authWrap(pipeline(s.handleSSHKey, anyRole)))
   s.mux.HandleFunc("/api/settings",         s.authWrap(pipeline(s.handleSettings, superuser)))
-  s.mux.HandleFunc("/api/refresh",          s.handleRefresh)
+
+  // SSH host keys (TOFU) — same access gate as SSH sessions
+  s.mux.HandleFunc("/ssh/known-hosts",       s.authWrap(pipeline(s.handleSSHHostKeys, s.requireAppServiceAccess("ssh"))))
+  s.mux.HandleFunc("/ssh/known-hosts/",      s.authWrap(pipeline(s.handleSSHHostKeyDetail, s.requireAppServiceAccess("ssh"))))
+
+  // SSH sessions — admin+ gets access via adminNonce; members via app service check
+  s.mux.HandleFunc("/ssh/sessions",     s.authWrap(pipeline(s.handleSSHSessions, s.requireAppServiceAccess("ssh"))))
+  s.mux.HandleFunc("/ssh/sessions/",    s.authWrap(pipeline(s.handleSSHSessionDetail, s.requireAppServiceAccess("ssh"))))
+
+  // File sync — same access gate as SSH sessions
+  s.mux.HandleFunc("/sync/files/diff",                    s.authWrap(pipeline(s.handleSyncDiff, s.requireAppServiceAccess("ssh"))))
+  s.mux.HandleFunc("/sync/files/{path...}",              s.authWrap(pipeline(s.handleSyncFileOps, s.requireAppServiceAccess("ssh"))))
+  s.mux.HandleFunc("/sync/files",                        s.authWrap(pipeline(s.handleSyncList, s.requireAppServiceAccess("ssh"))))
+
+  s.rebuildHostedRoutes()
+}
+
+// slugify converts a string to a lowercase hyphenated URL slug.
+func slugify(s string) string {
+  var b strings.Builder
+  prev := true
+  for _, r := range strings.ToLower(s) {
+    alnum := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+    if alnum {
+      b.WriteRune(r)
+      prev = false
+    } else if !prev {
+      b.WriteByte('-')
+      prev = true
+    }
+  }
+  return strings.TrimRight(b.String(), "-")
+}
+
+// appSlug returns the URL path segment for a hosted app.
+// If the app URL has no scheme it IS the route; otherwise derive from name.
+func appSlug(app *App) string {
+  if app.URL != "" && !strings.Contains(app.URL, "://") {
+    return strings.Trim(app.URL, "/")
+  }
+  return slugify(app.Name)
+}
+
+// rebuildHostedRoutes reloads the slug→nonce map from the DB.
+func (s *Server) rebuildHostedRoutes() {
+  apps, err := s.store.ListHostedApps()
+  if err != nil {
+    log.Printf("rebuildHostedRoutes: %v", err)
+    return
+  }
+  routes := make(map[string]string, len(apps))
+  for _, a := range apps {
+    if slug := appSlug(a); slug != "" {
+      routes[slug] = a.Nonce
+    }
+  }
+  s.hostedMu.Lock()
+  s.hostedRoutes = routes
+  s.hostedMu.Unlock()
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-  if r.URL.Path != "/" {
+  if r.URL.Path == "/" {
+    http.Redirect(w, r, "/control", http.StatusFound)
+    return
+  }
+  s.handleHostedApp(w, r)
+}
+
+func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
+  path := strings.TrimPrefix(r.URL.Path, "/")
+  slug, rest, _ := strings.Cut(path, "/")
+
+  s.hostedMu.RLock()
+  nonce, ok := s.hostedRoutes[slug]
+  s.hostedMu.RUnlock()
+
+  if !ok {
     http.NotFound(w, r)
     return
   }
-  http.Redirect(w, r, "/control", http.StatusFound)
+
+  // Redirect /app-name → /app-name/ so relative asset paths resolve correctly.
+  if rest == "" && !strings.HasSuffix(r.URL.Path, "/") {
+    http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+    return
+  }
+
+  webDir := filepath.Join("apps", nonce, "web")
+
+  if rest != "" {
+    clean := filepath.Clean(rest)
+    if !strings.HasPrefix(clean, "..") {
+      filePath := filepath.Join(webDir, clean)
+      if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
+        http.ServeFile(w, r, filePath)
+        return
+      }
+    }
+  }
+
+  // SPA fallback
+  f, err := os.Open(filepath.Join(webDir, "index.html"))
+  if err != nil {
+    http.NotFound(w, r)
+    return
+  }
+  defer f.Close()
+  fi, _ := f.Stat()
+  http.ServeContent(w, r, "index.html", fi.ModTime(), f)
 }
 
 func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -96,40 +223,44 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
   w.Write(data)
 }
 
-func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
+func (s *Server) renderEnvJS() []byte {
   authRequired := false
   authServiceName := ""
+  authServiceURL := ""
+  authServiceType := ""
   if svcIDStr, _ := s.store.GetSetting("admin_auth_service"); svcIDStr != "" {
     if svcID, err := strconv.ParseInt(svcIDStr, 10, 64); err == nil {
       if svc, err := s.store.GetService(svcID); err == nil {
         authRequired = true
         authServiceName = svc.Name
+        authServiceURL = svc.URL
+        authServiceType = svc.Descriptor.Type
       }
     }
   }
-  w.Header().Set("Content-Type", "application/javascript")
-  fmt.Fprintf(w, "window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, version: %q, commit: %q };\n",
-    s.config.PublicBaseURL, authRequired, authServiceName, version, commit)
+  return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, authServiceURL: %q, authServiceType: %q, adminNonce: %q, version: %q, commit: %q };\n",
+    s.config.PublicBaseURL, authRequired, authServiceName, authServiceURL, authServiceType, s.adminNonce, version, commit))
 }
 
-func (s *Server) handleSetupStatic(w http.ResponseWriter, r *http.Request) {
-  data, err := os.ReadFile(filepath.Join(s.config.Dir, "web", "setup.js"))
+func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
+  w.Header().Set("Content-Type", "application/javascript")
+  w.Write(s.renderEnvJS())
+}
+
+func (s *Server) handleFrbr(w http.ResponseWriter, r *http.Request) {
+  data, err := os.ReadFile("web/frbr.js")
   if err != nil {
-    http.Error(w, "setup.js not found", http.StatusInternalServerError)
+    http.Error(w, "frbr.js not found", http.StatusInternalServerError)
     return
   }
   w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+  w.Write(s.renderEnvJS())
   w.Write(data)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
   if r.Method != http.MethodGet {
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-    return
-  }
-
-  if r.Header.Get("X-Admin-Auth") == "1" {
-    s.handleAdminLogin(w, r)
     return
   }
 
@@ -148,12 +279,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  app, err := s.store.GetApp(nonce)
-  if err != nil {
-    http.Error(w, "Unknown app nonce", http.StatusUnauthorized)
-    return
+  // Admin nonce is ephemeral (not in the apps table).
+  // Regular app nonces must resolve to a registered app.
+  isAdmin := nonce == s.adminNonce
+  if !isAdmin {
+    if _, err := s.store.GetApp(nonce); err != nil {
+      http.Error(w, "Unknown app nonce", http.StatusUnauthorized)
+      return
+    }
   }
-  _ = app
 
   serviceURL := r.URL.Query().Get("url")
   if serviceURL == "" {
@@ -164,6 +298,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
   svc, err := s.store.GetServiceByURL(serviceURL)
   if err != nil {
     http.Error(w, "Service not registered", http.StatusForbidden)
+    return
+  }
+
+  // SSH auth — return a URL to the passphrase form
+  if svc.Descriptor.Type == "ssh" {
+    state := genNonce()
+    s.pendingMu.Lock()
+    s.pending[state] = &pendingAuth{
+      serviceID:   svc.ID,
+      serviceURL:  svc.URL,
+      appNonce:    nonce,
+      appState:    appState,
+      serviceType: "ssh",
+    }
+    s.pendingMu.Unlock()
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+      "type": "ssh",
+      "url":  fmt.Sprintf(s.config.PublicBaseURL + "/service/ssh-auth?state=%s&service_id=%d", state, svc.ID),
+    })
     return
   }
 
@@ -187,7 +342,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
       tokenEndpoint: tokenURL,
       scopes:        svc.Descriptor.Scopes,
       proxied:       svc.Descriptor.Proxied,
-      isOIDC:        true,
+      serviceType:   "oidc",
       oidcNonce:     oidcNonce,
       oidcIssuer:    svc.URL,
     }
@@ -195,8 +350,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(map[string]interface{}{
-      "type":       "redirect",
-      "url":        authURL,
+      "type": "redirect",
+      "url":  authURL,
     })
     return
   }
@@ -210,6 +365,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
       "state":      appState,
       "appNonce":   nonce,
       "apiKey":     svc.Descriptor.APIKey,
+      "apiHeader":  svc.Descriptor.Header,
       "serviceID":  svc.ID,
       "serviceURL": svc.URL,
       "auth":       "key",
@@ -237,6 +393,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
     tokenEndpoint: tokenURL,
     scopes:        svc.Descriptor.Scopes,
     proxied:       svc.Descriptor.Proxied,
+    serviceType:   svc.Descriptor.Type,
   }
   s.pendingMu.Unlock()
 
@@ -254,9 +411,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
   w.Header().Set("Content-Type", "application/json")
   json.NewEncoder(w).Encode(map[string]interface{}{
-    "type":       "redirect",
-    "url":        authURL,
+    "type": "redirect",
+    "url":  authURL,
   })
+}
+
+// completeAuth writes the postMessage callback page for a completed auth flow.
+// Used by both OIDC and SSH callback paths.
+func (s *Server) completeAuth(w http.ResponseWriter, pending *pendingAuth, oauth *OAuthData) {
+  w.Header().Set("Content-Type", "text/html; charset=utf-8")
+  writeCallbackPage(w, pending.appState, pending.appNonce, pending.serviceID, pending.serviceURL, oauth)
 }
 
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
@@ -279,14 +443,15 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  redirectURI := s.config.PublicBaseURL + "/service/callback"
-
-  if pending.isAdmin {
-    s.handleAdminCallback(w, r, pending, code, redirectURI)
+  // SSH auth never reaches /service/callback — it completes via /service/ssh-auth.
+  if pending.serviceType == "ssh" {
+    http.Error(w, "Unexpected callback for SSH auth", http.StatusBadRequest)
     return
   }
 
-  if pending.isOIDC {
+  redirectURI := s.config.PublicBaseURL + "/service/callback"
+
+  if pending.serviceType == "oidc" {
     svc, err := s.store.GetService(pending.serviceID)
     if err != nil {
       http.Error(w, "Service not found", http.StatusInternalServerError)
@@ -314,7 +479,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
       mergedClaims["picture"] = claims.Picture
     }
 
-    oauth := &OAuthData{
+    s.completeAuth(w, pending, &OAuthData{
       ClientID:      pending.clientID,
       AccessToken:   accessToken,
       RefreshToken:  refreshToken,
@@ -325,13 +490,11 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
       IDToken:       idToken,
       Proxied:       pending.proxied,
       Scopes:        pending.scopes,
-    }
-
-    w.Header().Set("Content-Type", "text/html; charset=utf-8")
-    writeCallbackPage(w, pending.appState, pending.appNonce, pending.serviceID, pending.serviceURL, oauth)
+    })
     return
   }
 
+  // Generic OAuth (MCP, API) — exchange code for token
   oauth, err := s.serviceExchangeCode(r.Context(), pending.tokenEndpoint, code, pending.verifier, pending.clientID, pending.clientSecret, redirectURI)
   if err != nil {
     http.Error(w, fmt.Sprintf("Token exchange failed: %v", err), http.StatusInternalServerError)
@@ -343,16 +506,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
   oauth.Proxied       = pending.proxied
   oauth.Scopes        = pending.scopes
 
-  // Compute expires_in from ExpiresAt for the browser
-  if !oauth.ExpiresAt.IsZero() {
-    oauth.ExpiresIn = int(time.Until(oauth.ExpiresAt).Seconds())
-    if oauth.ExpiresIn < 0 {
-      oauth.ExpiresIn = 0
-    }
-  }
-
-  w.Header().Set("Content-Type", "text/html; charset=utf-8")
-  writeCallbackPage(w, pending.appState, pending.appNonce, pending.serviceID, pending.serviceURL, oauth)
+  s.completeAuth(w, pending, oauth)
 }
 
 func writeCallbackPage(w io.Writer, appState, appNonce string, serviceID int64, serviceURL string, oauth *OAuthData) {
@@ -385,17 +539,25 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  _, err := s.store.GetApp(nonce)
-  if err != nil {
-    http.Error(w, "Unknown app", http.StatusUnauthorized)
-    return
-  }
-
   idStr := r.PathValue("id")
   serviceID, err := strconv.ParseInt(idStr, 10, 64)
   if err != nil {
     http.Error(w, "Invalid service id", http.StatusBadRequest)
     return
+  }
+
+  // Non-admin apps: only allow proxying services that are approved for this app.
+  if nonce != s.adminNonce {
+    app, err := s.store.GetApp(nonce)
+    if err != nil {
+      http.Error(w, "Unknown app", http.StatusUnauthorized)
+      return
+    }
+    allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, serviceID)
+    if err != nil || !allowed {
+      http.Error(w, "Service not approved for this app", http.StatusForbidden)
+      return
+    }
   }
 
   svc, err := s.store.GetService(serviceID)
@@ -546,6 +708,12 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
     return
   }
 
+  // Sub-route: /api/apps/{nonce}/web
+  if len(parts) >= 4 && parts[3] == "web" {
+    s.handleAppWeb(w, r, nonce)
+    return
+  }
+
   app, err := s.store.GetApp(nonce)
   if err != nil {
     http.Error(w, err.Error(), http.StatusNotFound)
@@ -583,6 +751,7 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, err.Error(), http.StatusInternalServerError)
       return
     }
+    s.rebuildHostedRoutes()
     s.auditLog(r.Context(), "updated app", req.Name)
     w.WriteHeader(http.StatusNoContent)
   case http.MethodDelete:
@@ -594,6 +763,8 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, err.Error(), http.StatusInternalServerError)
       return
     }
+    os.RemoveAll(filepath.Join("apps", nonce))
+    s.rebuildHostedRoutes()
     s.auditLog(r.Context(), "deleted app", app.Name)
     w.WriteHeader(http.StatusNoContent)
   default:
@@ -681,6 +852,232 @@ func (s *Server) handleAppServices(w http.ResponseWriter, r *http.Request, nonce
   default:
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
   }
+}
+
+func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce string) {
+  if !isAdminOrSuperuser(r.Context()) {
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+  }
+  app, err := s.store.GetApp(nonce)
+  if err != nil {
+    http.Error(w, err.Error(), http.StatusNotFound)
+    return
+  }
+  webDir := filepath.Join("apps", nonce, "web")
+
+  switch r.Method {
+  case http.MethodGet:
+    if _, err := os.Stat(webDir); os.IsNotExist(err) {
+      http.Error(w, "no web files uploaded", http.StatusNotFound)
+      return
+    }
+    slug := appSlug(app)
+    w.Header().Set("Content-Type", "application/zip")
+    w.Header().Set("Content-Disposition", `attachment; filename="`+slug+`.zip"`)
+    zw := zip.NewWriter(w)
+    err := filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+      if err != nil || fi.IsDir() {
+        return err
+      }
+      rel, _ := filepath.Rel(webDir, path)
+      fw, err := zw.Create(filepath.ToSlash(rel))
+      if err != nil {
+        return err
+      }
+      f, err := os.Open(path)
+      if err != nil {
+        return err
+      }
+      defer f.Close()
+      _, err = io.Copy(fw, f)
+      return err
+    })
+    if err != nil {
+      // Headers already sent; nothing useful we can do except close cleanly.
+      zw.Close()
+      return
+    }
+    zw.Close()
+
+  case http.MethodPost:
+    if err := r.ParseMultipartForm(50 << 20); err != nil {
+      http.Error(w, "file too large (50MB max)", http.StatusBadRequest)
+      return
+    }
+    file, header, err := r.FormFile("file")
+    if err != nil {
+      http.Error(w, "missing 'file' field", http.StatusBadRequest)
+      return
+    }
+    defer file.Close()
+
+    if err := os.RemoveAll(webDir); err != nil {
+      http.Error(w, "failed to clear web dir", http.StatusInternalServerError)
+      return
+    }
+    if err := os.MkdirAll(webDir, 0755); err != nil {
+      http.Error(w, "failed to create web dir", http.StatusInternalServerError)
+      return
+    }
+
+    name := strings.ToLower(header.Filename)
+    if strings.HasSuffix(name, ".html") {
+      data, err := io.ReadAll(file)
+      if err != nil {
+        http.Error(w, "read failed", http.StatusInternalServerError)
+        return
+      }
+      if err := os.WriteFile(filepath.Join(webDir, "index.html"), data, 0644); err != nil {
+        http.Error(w, "write failed", http.StatusInternalServerError)
+        return
+      }
+    } else if strings.HasSuffix(name, ".zip") {
+      if err := extractZip(file, webDir); err != nil {
+        http.Error(w, "zip error: "+err.Error(), http.StatusBadRequest)
+        return
+      }
+    } else {
+      http.Error(w, "unsupported file type (.html or .zip only)", http.StatusBadRequest)
+      return
+    }
+
+    now := time.Now().UTC()
+    details := app.Details
+    if details == nil {
+      details = &AppDetails{}
+    }
+    details.LastUploaded = &now
+    if err := s.store.UpdateAppDetails(nonce, details); err != nil {
+      http.Error(w, "failed to save details", http.StatusInternalServerError)
+      return
+    }
+    s.rebuildHostedRoutes()
+    s.auditLog(r.Context(), "uploaded web files", app.Name)
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]string{"route": "/" + appSlug(app)})
+
+  case http.MethodDelete:
+    if err := os.RemoveAll(webDir); err != nil {
+      http.Error(w, "failed to remove web dir", http.StatusInternalServerError)
+      return
+    }
+    if err := s.store.UpdateAppDetails(nonce, &AppDetails{}); err != nil {
+      http.Error(w, "failed to save details", http.StatusInternalServerError)
+      return
+    }
+    s.rebuildHostedRoutes()
+    s.auditLog(r.Context(), "removed web files", app.Name)
+    w.WriteHeader(http.StatusNoContent)
+
+  default:
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+  }
+}
+
+// extractZip extracts a zip archive to destDir, auto-detecting the content root
+// (unwrapping a single top-level folder if present) and ensuring an index.html
+// exists (renaming the first .html alphabetically if index.html is absent).
+func extractZip(r io.Reader, destDir string) error {
+  data, err := io.ReadAll(r)
+  if err != nil {
+    return fmt.Errorf("read: %w", err)
+  }
+  zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+  if err != nil {
+    return fmt.Errorf("open zip: %w", err)
+  }
+
+  // Determine effective root: if all file entries share a single top-level
+  // directory and there are no files directly at the root, strip that prefix.
+  topDirs := map[string]bool{}
+  hasRootFiles := false
+  for _, f := range zr.File {
+    name := filepath.ToSlash(f.Name)
+    if name == "" || strings.HasSuffix(name, "/") {
+      continue
+    }
+    if idx := strings.Index(name, "/"); idx >= 0 {
+      topDirs[name[:idx]] = true
+    } else {
+      hasRootFiles = true
+    }
+  }
+  root := ""
+  if !hasRootFiles && len(topDirs) == 1 {
+    for dir := range topDirs {
+      root = dir + "/"
+    }
+  }
+
+  // Find the entry point HTML: prefer index.html, else first .html alphabetically.
+  var htmlFiles []string
+  hasIndex := false
+  for _, f := range zr.File {
+    name := filepath.ToSlash(f.Name)
+    if !strings.HasPrefix(name, root) || strings.HasSuffix(name, "/") {
+      continue
+    }
+    rel := strings.TrimPrefix(name, root)
+    if rel == "index.html" {
+      hasIndex = true
+      break
+    }
+    if strings.HasSuffix(rel, ".html") {
+      htmlFiles = append(htmlFiles, rel)
+    }
+  }
+  var entryPoint string
+  if !hasIndex {
+    if len(htmlFiles) == 0 {
+      return fmt.Errorf("no HTML file found in zip")
+    }
+    sort.Strings(htmlFiles)
+    entryPoint = htmlFiles[0]
+  }
+
+  // Extract files.
+  for _, f := range zr.File {
+    if f.FileInfo().IsDir() {
+      continue
+    }
+    name := filepath.ToSlash(f.Name)
+    if !strings.HasPrefix(name, root) {
+      continue
+    }
+    rel := strings.TrimPrefix(name, root)
+    if rel == "" {
+      continue
+    }
+    if entryPoint != "" && rel == entryPoint {
+      rel = "index.html"
+    }
+    clean := filepath.Clean(rel)
+    if strings.HasPrefix(clean, "..") {
+      continue
+    }
+    destPath := filepath.Join(destDir, clean)
+    if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+      return fmt.Errorf("mkdir: %w", err)
+    }
+    rc, err := f.Open()
+    if err != nil {
+      return fmt.Errorf("open entry: %w", err)
+    }
+    out, err := os.Create(destPath)
+    if err != nil {
+      rc.Close()
+      return fmt.Errorf("create: %w", err)
+    }
+    _, copyErr := io.Copy(out, rc)
+    out.Close()
+    rc.Close()
+    if copyErr != nil {
+      return fmt.Errorf("extract: %w", copyErr)
+    }
+  }
+  return nil
 }
 
 // services
@@ -781,6 +1178,11 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "name and url required", http.StatusBadRequest)
       return
     }
+    // Built-in SSH service: preserve name and URL
+    if svc.Descriptor.Type == "ssh" {
+      req.Name = svc.Name
+      req.URL = svc.URL
+    }
     if err := s.store.UpdateService(serviceID, req.Name, req.URL, req.Descriptor); err != nil {
       http.Error(w, err.Error(), http.StatusInternalServerError)
       return
@@ -788,6 +1190,10 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
     s.auditLog(r.Context(), "updated service", req.Name)
     w.WriteHeader(http.StatusNoContent)
   case http.MethodDelete:
+    if svc.Descriptor.Type == "ssh" {
+      http.Error(w, "Cannot delete built-in SSH service", http.StatusForbidden)
+      return
+    }
     if err := s.store.DeleteService(serviceID); err != nil {
       http.Error(w, err.Error(), http.StatusInternalServerError)
       return
@@ -876,6 +1282,17 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
     return
   }
 
+  // Sub-route: /api/users/{id}/ssh-key (admin-only)
+  if len(parts) >= 4 && parts[3] == "ssh-key" {
+    actor, _ := r.Context().Value(userKey).(*User)
+    if actor == nil || (actor.Role != "Superuser" && actor.Role != "Admin") {
+      http.Error(w, "Forbidden", http.StatusForbidden)
+      return
+    }
+    s.handleUserSSHKey(w, r, id)
+    return
+  }
+
   user, err := s.store.GetUser(id)
   if err != nil {
     http.Error(w, err.Error(), http.StatusNotFound)
@@ -897,7 +1314,9 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if err := s.store.UpdateUser(id, req.Name, req.Email, req.Role, req.Status); err != nil {
+    // Preserve existing metadata (e.g. SSH key) — the update request
+    // only carries name/email/role/status.
+    if err := s.store.UpdateUser(id, req.Name, req.Email, req.Role, req.Status, user.Metadata); err != nil {
       http.Error(w, err.Error(), http.StatusInternalServerError)
       return
     }
@@ -944,7 +1363,81 @@ func (s *Server) handleUserApps(w http.ResponseWriter, r *http.Request, userID i
   }
 }
 
-// roles
+// handleUserSSHKey lets admins manage SSH keys for other users.
+func (s *Server) handleUserSSHKey(w http.ResponseWriter, r *http.Request, userID int64) {
+  user, err := s.store.GetUser(userID)
+  if err != nil {
+    http.Error(w, "User not found", http.StatusNotFound)
+    return
+  }
+
+  switch r.Method {
+  case http.MethodGet:
+    info := (*SSHKeyInfo)(nil)
+    if user.Metadata != nil && user.Metadata.SSHKey != nil {
+      info = user.Metadata.SSHKey
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{"ssh_key": info})
+
+  case http.MethodPost:
+    var req struct {
+      Passphrase string `json:"passphrase"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+      http.Error(w, "Invalid JSON", http.StatusBadRequest)
+      return
+    }
+    if len(req.Passphrase) < 8 {
+      http.Error(w, "Passphrase must be at least 8 characters", http.StatusBadRequest)
+      return
+    }
+    if user.Metadata != nil && user.Metadata.SSHKey != nil {
+      http.Error(w, "SSH key already exists — delete it first", http.StatusConflict)
+      return
+    }
+
+    keyInfo, err := GenerateSSHKey(req.Passphrase)
+    if err != nil {
+      http.Error(w, fmt.Sprintf("Key generation failed: %v", err), http.StatusInternalServerError)
+      return
+    }
+
+    meta := user.Metadata
+    if meta == nil {
+      meta = &UserMetadata{}
+    }
+    meta.SSHKey = keyInfo
+    if err := s.store.UpdateUser(user.ID, user.Name, user.Email, user.Role, user.Status, meta); err != nil {
+      http.Error(w, err.Error(), http.StatusInternalServerError)
+      return
+    }
+    s.auditLog(r.Context(), "generated SSH key for user", user.Email)
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{"ssh_key": &SSHKeyInfo{
+      PublicKey:   keyInfo.PublicKey,
+      Fingerprint: keyInfo.Fingerprint,
+      KeyType:     keyInfo.KeyType,
+    }})
+
+  case http.MethodDelete:
+    if user.Metadata == nil || user.Metadata.SSHKey == nil {
+      http.Error(w, "No SSH key to delete", http.StatusNotFound)
+      return
+    }
+    meta := &UserMetadata{}
+    if err := s.store.UpdateUser(user.ID, user.Name, user.Email, user.Role, user.Status, meta); err != nil {
+      http.Error(w, err.Error(), http.StatusInternalServerError)
+      return
+    }
+    s.auditLog(r.Context(), "deleted SSH key for user", user.Email)
+    w.WriteHeader(http.StatusNoContent)
+
+  default:
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+  }
+}
 
 func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
   if r.URL.Path != "/api/roles" {
@@ -997,7 +1490,7 @@ func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
     svcIDStr, err := s.store.GetSetting("admin_auth_service")
     if err != nil || svcIDStr == "" {
       // Auth off — synthetic superuser so role checks still work downstream.
-      ctx := context.WithValue(r.Context(), userKey, &User{ID: -1, Name: "setup", Role: "Superuser", Status: "Active"})
+      ctx := context.WithValue(r.Context(), userKey, &User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"})
       h(w, r.WithContext(ctx))
       return
     }
@@ -1005,6 +1498,16 @@ func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
     if err != nil {
       http.Error(w, "Unauthorized", http.StatusUnauthorized)
       return
+    }
+    if user.ID > 0 {
+      s.lastSeenMu.Lock()
+      if time.Since(s.lastSeenAt[user.ID]) > time.Minute {
+        s.lastSeenAt[user.ID] = time.Now()
+        s.lastSeenMu.Unlock()
+        _ = s.store.TouchLastSeen(user.ID)
+      } else {
+        s.lastSeenMu.Unlock()
+      }
     }
     h(w, r.WithContext(context.WithValue(r.Context(), userKey, user)))
   }
@@ -1031,12 +1534,89 @@ func requireAnyRole(roles ...string) func(http.HandlerFunc) http.HandlerFunc {
   }
 }
 
+const appNonceKey contextKey = "appNonce"
+
 // Pipeline chains middlewares right-to-left (outer to inner).
 func pipeline(h http.HandlerFunc, mw ...func(http.HandlerFunc) http.HandlerFunc) http.HandlerFunc {
   for i := len(mw) - 1; i >= 0; i-- {
     h = mw[i](h)
   }
   return h
+}
+
+// requireAppServiceAccess returns middleware that checks:
+//   1. X-App-Nonce header is present and corresponds to a real app
+//   2. The authenticated user is a member of that app (or admin/superuser)
+//   3. The app has a service of the given type with `allowed = true`
+// On success, the app nonce is stored in the request context.
+//
+// This gates both the SSH session/sync API and the service proxy:
+// a Member can only reach services that the app owner has approved.
+func (s *Server) requireAppServiceAccess(serviceType string) func(http.HandlerFunc) http.HandlerFunc {
+  return func(next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+      nonce := r.Header.Get("X-App-Nonce")
+      if nonce == "" {
+        http.Error(w, "Missing X-App-Nonce header", http.StatusUnauthorized)
+        return
+      }
+
+      // Admin nonce — skip app membership/service checks (admin panel).
+      if nonce == s.adminNonce {
+        next(w, r.WithContext(context.WithValue(r.Context(), appNonceKey, nonce)))
+        return
+      }
+
+      app, err := s.store.GetApp(nonce)
+      if err != nil {
+        http.Error(w, "Unknown app", http.StatusUnauthorized)
+        return
+      }
+
+      user, _ := r.Context().Value(userKey).(*User)
+      if user == nil {
+        http.Error(w, "Unauthorized", http.StatusUnauthorized)
+        return
+      }
+
+      // Superuser/Admin bypass membership checks.
+      if user.Role != "Superuser" && user.Role != "Admin" {
+        member, err := s.store.IsAppMember(app.Nonce, user.ID)
+        if err != nil || !member {
+          http.Error(w, "Not a member of this app", http.StatusForbidden)
+          return
+        }
+      }
+
+      // Find a service of the requested type that's allowed for this app.
+      links, err := s.store.GetAppServiceLinks(app.Nonce)
+      if err != nil {
+        http.Error(w, "Failed to check app services", http.StatusInternalServerError)
+        return
+      }
+
+      found := false
+      for _, link := range links {
+        if !link.Allowed {
+          continue
+        }
+        svc, err := s.store.GetService(link.ServiceID)
+        if err != nil {
+          continue
+        }
+        if svc.Descriptor.Type == serviceType {
+          found = true
+          break
+        }
+      }
+      if !found {
+        http.Error(w, fmt.Sprintf("App does not have %s service access", serviceType), http.StatusForbidden)
+        return
+      }
+
+      next(w, r.WithContext(context.WithValue(r.Context(), appNonceKey, nonce)))
+    }
+  }
 }
 
 func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*User, error) {
@@ -1121,87 +1701,6 @@ func (s *Server) getOIDCProvider(ctx context.Context, serviceID int64, issuer st
   return p, nil
 }
 
-func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
-  svcIDStr, err := s.store.GetSetting("admin_auth_service")
-  if err != nil || svcIDStr == "" {
-    http.Error(w, "Admin auth not configured", http.StatusForbidden)
-    return
-  }
-  svcID, err := strconv.ParseInt(svcIDStr, 10, 64)
-  if err != nil {
-    http.Error(w, "Invalid admin auth service ID", http.StatusInternalServerError)
-    return
-  }
-  svc, err := s.store.GetService(svcID)
-  if err != nil {
-    http.Error(w, "Admin auth service not found", http.StatusInternalServerError)
-    return
-  }
-
-  redirectURI := s.config.PublicBaseURL + "/service/callback"
-  authURL, state, verifier, oidcNonce, tokenURL, err := s.oidcBeginAuth(r.Context(), svc, redirectURI)
-  if err != nil {
-    http.Error(w, fmt.Sprintf("Failed to begin admin auth: %v", err), http.StatusInternalServerError)
-    return
-  }
-
-  s.pendingMu.Lock()
-  s.pending[state] = &pendingAuth{
-    serviceID:     svc.ID,
-    verifier:      verifier,
-    clientID:      svc.Descriptor.ClientID,
-    clientSecret:  svc.Descriptor.ClientSecret,
-    tokenEndpoint: tokenURL,
-    scopes:        svc.Descriptor.Scopes,
-    isOIDC:        true,
-    oidcNonce:     oidcNonce,
-    oidcIssuer:    svc.URL,
-    isAdmin:       true,
-  }
-  s.pendingMu.Unlock()
-
-  w.Header().Set("Content-Type", "application/json")
-  json.NewEncoder(w).Encode(map[string]interface{}{"type": "redirect", "url": authURL})
-}
-
-func (s *Server) handleAdminCallback(w http.ResponseWriter, r *http.Request, pending *pendingAuth, code, redirectURI string) {
-  svc, err := s.store.GetService(pending.serviceID)
-  if err != nil {
-    http.Error(w, "Service not found", http.StatusInternalServerError)
-    return
-  }
-
-  _, _, _, idTokenRaw, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
-  if err != nil {
-    http.Error(w, fmt.Sprintf("OIDC exchange failed: %v", err), http.StatusInternalServerError)
-    return
-  }
-
-  email, err := s.verifyIDToken(r.Context(), svc, idTokenRaw)
-  if err != nil {
-    http.Redirect(w, r, "/control?auth_error=invalid_token", http.StatusFound)
-    return
-  }
-  if _, err := s.store.GetUserByEmail(email); err != nil {
-    http.Redirect(w, r, "/control?auth_error=no_user", http.StatusFound)
-    return
-  }
-  _ = s.store.LogAudit(email, "login", "admin panel")
-
-  tokenData, _ := json.Marshal(map[string]interface{}{
-    "id_token":       idTokenRaw,
-    "service_id":     pending.serviceID,
-    "token_endpoint": pending.tokenEndpoint,
-    "client_id":      pending.clientID,
-  })
-
-  w.Header().Set("Content-Type", "text/html; charset=utf-8")
-  fmt.Fprintf(w, `<!doctype html><html><body><script>
-localStorage.setItem('frebre_admin',JSON.stringify(%s));
-window.location.href='/control';
-</script></body></html>`, tokenData)
-}
-
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
   if r.Method != http.MethodGet {
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1210,6 +1709,191 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
   user, _ := r.Context().Value(userKey).(*User)
   w.Header().Set("Content-Type", "application/json")
   json.NewEncoder(w).Encode(map[string]interface{}{"user": user})
+}
+
+func (s *Server) handleSSHKey(w http.ResponseWriter, r *http.Request) {
+  user, _ := r.Context().Value(userKey).(*User)
+  if user == nil || user.ID < 0 {
+    http.Error(w, "Unauthorized", http.StatusUnauthorized)
+    return
+  }
+
+  s.handleUserSSHKey(w, r, user.ID)
+}
+
+// handleSSHSessions handles POST /ssh/sessions — open a new SSH session.
+func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
+  if r.Method != http.MethodPost {
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+    return
+  }
+
+  user, _ := r.Context().Value(userKey).(*User)
+  if user == nil || user.ID < 0 {
+    http.Error(w, "Unauthorized", http.StatusUnauthorized)
+    return
+  }
+
+  var req struct {
+    Host     string `json:"host"`
+    Port     int    `json:"port"`
+    Username string `json:"username"`
+  }
+  if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+    http.Error(w, "Invalid JSON", http.StatusBadRequest)
+    return
+  }
+  if req.Host == "" {
+    http.Error(w, "host is required", http.StatusBadRequest)
+    return
+  }
+  if req.Port == 0 {
+    req.Port = 22
+  }
+  if req.Username == "" {
+    req.Username = user.Email
+  }
+
+  session, err := s.sessionMgr.Open(user.ID, req.Host, req.Port, req.Username)
+  if err != nil {
+    if errors.Is(err, ErrNoKey) {
+      http.Error(w, err.Error(), http.StatusUnauthorized)
+      return
+    }
+    http.Error(w, fmt.Sprintf("Failed to open SSH session: %v", err), http.StatusBadGateway)
+    return
+  }
+
+  _ = s.store.LogAudit(user.Email, "ssh_session_open", fmt.Sprintf("%s@%s:%d", req.Username, req.Host, req.Port))
+
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(map[string]interface{}{
+    "sessionId": session.ID,
+    "expiresAt": session.ExpiresAt,
+  })
+}
+
+// handleSSHSessionDetail handles GET/DELETE /ssh/sessions/{id}.
+func (s *Server) handleSSHSessionDetail(w http.ResponseWriter, r *http.Request) {
+  id := r.PathValue("id")
+  if id == "" {
+    // Fallback: parse from URL path for Go <1.22 style
+    id = strings.TrimPrefix(r.URL.Path, "/ssh/sessions/")
+  }
+  if id == "" {
+    http.Error(w, "Missing session ID", http.StatusBadRequest)
+    return
+  }
+
+  switch r.Method {
+  case http.MethodGet:
+    session, err := s.sessionMgr.Get(id)
+    if err != nil {
+      http.Error(w, err.Error(), http.StatusNotFound)
+      return
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+      "sessionId":    session.ID,
+      "host":         session.Host,
+      "port":         session.Port,
+      "username":     session.Username,
+      "connectedAt":  session.ConnectedAt,
+      "expiresAt":    session.ExpiresAt,
+    })
+
+  case http.MethodDelete:
+    user, _ := r.Context().Value(userKey).(*User)
+    if err := s.sessionMgr.Close(id); err != nil {
+      http.Error(w, err.Error(), http.StatusNotFound)
+      return
+    }
+    if user != nil {
+      _ = s.store.LogAudit(user.Email, "ssh_session_close", id)
+    }
+    w.WriteHeader(http.StatusNoContent)
+
+  default:
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+  }
+}
+
+// handleSSHHostKeys handles GET /ssh/known-hosts — list all stored host keys.
+func (s *Server) handleSSHHostKeys(w http.ResponseWriter, r *http.Request) {
+  if r.Method != http.MethodGet {
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+    return
+  }
+
+  rows, err := s.store.db.Query("SELECT host, port, fingerprint, trusted_at FROM ssh_host_keys ORDER BY host, port")
+  if err != nil {
+    http.Error(w, "Failed to list host keys", http.StatusInternalServerError)
+    return
+  }
+  defer rows.Close()
+
+  var keys []map[string]interface{}
+  for rows.Next() {
+    var host string
+    var port int
+    var fp, trustedAt string
+    if err := rows.Scan(&host, &port, &fp, &trustedAt); err != nil {
+      continue
+    }
+    keys = append(keys, map[string]interface{}{
+      "host":        host,
+      "port":        port,
+      "fingerprint": fp,
+      "trustedAt":   trustedAt,
+    })
+  }
+  if keys == nil {
+    keys = []map[string]interface{}{}
+  }
+
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(map[string]interface{}{"keys": keys})
+}
+
+// handleSSHHostKeyDetail handles DELETE /ssh/known-hosts/{host}:{port}
+// Removes a stored host key so a changed key can be accepted on next connect.
+func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) {
+  if r.Method != http.MethodDelete {
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+    return
+  }
+
+  id := r.PathValue("id")
+  if id == "" {
+    id = strings.TrimPrefix(r.URL.Path, "/ssh/known-hosts/")
+  }
+  if id == "" {
+    http.Error(w, "Missing host key identifier", http.StatusBadRequest)
+    return
+  }
+
+  // Parse "host:port" from the path segment
+  host, portStr, err := net.SplitHostPort(id)
+  if err != nil {
+    http.Error(w, "Invalid host:port format", http.StatusBadRequest)
+    return
+  }
+  var port int
+  fmt.Sscanf(portStr, "%d", &port)
+  if port == 0 {
+    port = 22
+  }
+
+  if err := s.store.DeleteSSHHostKey(host, port); err != nil {
+    http.Error(w, "Failed to delete host key", http.StatusInternalServerError)
+    return
+  }
+
+  user, _ := r.Context().Value(userKey).(*User)
+  if user != nil {
+    _ = s.store.LogAudit(user.Email, "ssh_host_key_delete", fmt.Sprintf("%s:%d", host, port))
+  }
+  w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -1255,6 +1939,8 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
   var body struct {
     RefreshToken  string `json:"refresh_token"`
     ServiceID     int64  `json:"service_id"`
+    ClientID      string `json:"client_id,omitempty"`
+    TokenEndpoint string `json:"token_endpoint,omitempty"`
   }
   if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
     http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -1270,27 +1956,47 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  // Retrieve the token endpoint from the OIDC provider discovery
-  provider, err := s.getOIDCProvider(r.Context(), svc.ID, svc.URL)
+  // Resolve token endpoint ourselves using the service's config.
+  tokenEndpoint, err := s.resolveTokenEndpoint(r.Context(), svc)
   if err != nil {
-    http.Error(w, "OIDC provider error", http.StatusInternalServerError)
+    http.Error(w, "Could not determine token endpoint", http.StatusInternalServerError)
     return
   }
-  var providerClaims struct {
-    TokenEndpoint string `json:"token_endpoint"`
+
+  // If client sent a token_endpoint, validate it matches our service — prevents
+  // confused-deputy attacks where service_id is trusted but endpoint is swapped.
+  if body.TokenEndpoint != "" {
+    clientNorm := strings.TrimSuffix(body.TokenEndpoint, "/")
+    serverNorm := strings.TrimSuffix(tokenEndpoint, "/")
+    if clientNorm != serverNorm {
+      http.Error(w, "token_endpoint does not match service", http.StatusBadRequest)
+      return
+    }
   }
-  if err := provider.Claims(&providerClaims); err != nil || providerClaims.TokenEndpoint == "" {
-    http.Error(w, "Could not determine token endpoint", http.StatusInternalServerError)
+
+  // client_id: descriptor wins for pre-registered; body wins for DCR services
+  clientID := svc.Descriptor.ClientID
+  if clientID == "" {
+    clientID = body.ClientID
+  }
+  if clientID == "" {
+    http.Error(w, "client_id required", http.StatusBadRequest)
     return
   }
 
   form := url.Values{
     "grant_type":    {"refresh_token"},
     "refresh_token": {body.RefreshToken},
-    "client_id":     {svc.Descriptor.ClientID},
-    "client_secret": {svc.Descriptor.ClientSecret},
+    "client_id":     {clientID},
   }
-  resp, err := s.httpClient.PostForm(providerClaims.TokenEndpoint, form)
+  if svc.Descriptor.ClientSecret != "" {
+    form.Set("client_secret", svc.Descriptor.ClientSecret)
+  }
+  if svc.Descriptor.Scopes != "" {
+    form.Set("scope", svc.Descriptor.Scopes)
+  }
+
+  resp, err := s.httpClient.PostForm(tokenEndpoint, form)
   if err != nil {
     http.Error(w, fmt.Sprintf("Refresh request failed: %v", err), http.StatusBadGateway)
     return
@@ -1302,3 +2008,156 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
   w.WriteHeader(resp.StatusCode)
   w.Write(respBody)
 }
+
+// handleSSHAuth handles the SSH passphrase login flow.
+// GET renders the email + passphrase form.
+// POST verifies credentials and completes auth via postMessage.
+func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
+  switch r.Method {
+  case http.MethodGet:
+    state := r.URL.Query().Get("state")
+    if state == "" {
+      http.Error(w, "Missing state parameter", http.StatusBadRequest)
+      return
+    }
+    w.Header().Set("Content-Type", "text/html; charset=utf-8")
+    html := strings.Replace(sshAuthFormHTML, "{{STATE}}", state, 1)
+    w.Write([]byte(html))
+
+  case http.MethodPost:
+    var req struct {
+      State      string `json:"state"`
+      Email      string `json:"email"`
+      Passphrase string `json:"passphrase"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+      http.Error(w, "Invalid JSON", http.StatusBadRequest)
+      return
+    }
+    if req.State == "" || req.Email == "" || req.Passphrase == "" {
+      http.Error(w, "state, email, and passphrase required", http.StatusBadRequest)
+      return
+    }
+
+    // Look up the pending auth entry
+    s.pendingMu.Lock()
+    pending, ok := s.pending[req.State]
+    if ok && pending.serviceType == "ssh" {
+      delete(s.pending, req.State)
+    } else {
+      ok = false
+    }
+    s.pendingMu.Unlock()
+
+    if !ok {
+      http.Error(w, "Unknown or expired auth state", http.StatusBadRequest)
+      return
+    }
+
+    // Look up the user by email
+    user, err := s.store.GetUserByEmail(req.Email)
+    if err != nil {
+      http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+      return
+    }
+    if user.Metadata == nil || user.Metadata.SSHKey == nil {
+      http.Error(w, "No SSH key configured for this user", http.StatusUnauthorized)
+      return
+    }
+
+    // Verify the passphrase
+    if !VerifyPassphrase(user.Metadata.SSHKey, req.Passphrase) {
+      http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+      return
+    }
+
+    // Add decrypted key to the in-process SSH agent with 1h TTL.
+    // Agent TTL is decoupled from the web JWT — agent timeout doesn't
+    // invalidate the web session, and vice versa.
+    if s.agentMgr != nil {
+      if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, 1*time.Hour); err != nil {
+        log.Printf("agent add key for user %d: %v", user.ID, err)
+      }
+    }
+
+    _ = s.store.LogAudit(req.Email, "login", "admin panel (SSH)")
+
+    // Fabricate a JWT for this user
+    idToken, err := s.fabricateIDToken(user.Email, user.Name, fmt.Sprintf("user:%d", user.ID))
+    if err != nil {
+      http.Error(w, "Token generation failed", http.StatusInternalServerError)
+      return
+    }
+
+    now := time.Now()
+    s.completeAuth(w, pending, &OAuthData{
+      AccessToken: idToken,
+      TokenType:   "Bearer",
+      ExpiresAt:   now.Add(24 * time.Hour),
+      Claims: map[string]interface{}{
+        "email": user.Email,
+        "name":  user.Name,
+        "sub":   fmt.Sprintf("user:%d", user.ID),
+        "iss":   "freshbreath",
+      },
+      IDToken: idToken,
+    })
+
+  default:
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+  }
+}
+
+const sshAuthFormHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SSH Login — Fresh Breath</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f11;color:#e4e4e7;display:grid;place-items:center;min-height:100vh}
+  .card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:32px;width:100%;max-width:380px}
+  h1{font-size:18px;font-weight:600;margin-bottom:4px}
+  p.lead{color:#71717a;font-size:14px;margin-bottom:24px}
+  label{display:block;font-size:13px;color:#a1a1aa;margin-bottom:6px;font-weight:500}
+  input{width:100%;padding:10px 12px;border:1px solid #27272a;border-radius:8px;background:#0f0f11;color:#e4e4e7;font-size:14px;margin-bottom:16px;outline:none}
+  input:focus{border-color:#6366f1}
+  button{width:100%;padding:10px;border:none;border-radius:8px;background:#6366f1;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+  button:hover{background:#4f46e5}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .err{color:#f87171;font-size:13px;margin-bottom:12px;display:none}
+  .err.show{display:block}
+</style></head><body>
+<div class="card">
+  <h1>SSH Authentication</h1>
+  <p class="lead">Sign in with your SSH key passphrase.</p>
+  <div class="err" id="err"></div>
+  <form id="f">
+    <label for="e">Email</label>
+    <input id="e" type="email" required autocomplete="email" autofocus/>
+    <label for="p">Passphrase</label>
+    <input id="p" type="password" required autocomplete="current-password"/>
+    <button type="submit" id="btn">Sign in</button>
+  </form>
+</div>
+<script>
+(function(){
+  var state="{{STATE}}";
+  document.getElementById('f').onsubmit=function(ev){
+    ev.preventDefault();
+    var btn=document.getElementById('btn');
+    var errEl=document.getElementById('err');
+    errEl.className='err';
+    errEl.textContent='';
+    btn.disabled=true;btn.textContent='Signing in…';
+    fetch('/service/ssh-auth',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state:state,email:document.getElementById('e').value,passphrase:document.getElementById('p').value})
+    }).then(function(r){
+      if(!r.ok){
+        r.text().then(function(t){errEl.textContent=t||'Login failed';errEl.className='err show'});
+        btn.disabled=false;btn.textContent='Sign in';
+        return;
+      }
+      r.text().then(function(html){document.open();document.write(html);document.close()});
+    }).catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Sign in'});
+  };
+})();
+</script></body></html>`

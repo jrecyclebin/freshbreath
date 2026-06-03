@@ -9,10 +9,15 @@ type App struct {
   ID          int64
   Nonce       string
   Name        string
-  URL         string     `json:"url,omitempty"`
-  OwnerID     *int64     `json:"owner_id,omitempty"`
-  Environment string     `json:"environment,omitempty"`
+  URL         string      `json:"url,omitempty"`
+  OwnerID     *int64      `json:"owner_id,omitempty"`
+  Environment string      `json:"environment,omitempty"`
+  Details     *AppDetails `json:"details,omitempty"`
   CreatedAt   time.Time
+}
+
+type AppDetails struct {
+  LastUploaded *time.Time `json:"last_uploaded,omitempty"`
 }
 
 type User struct {
@@ -24,6 +29,37 @@ type User struct {
   LastSeen  *time.Time `json:"last_seen,omitempty"`
   CreatedAt time.Time  `json:"created_at"`
   Apps      []string   `json:"apps,omitempty"`
+  Metadata  *UserMetadata `json:"metadata,omitempty"`
+}
+
+type UserMetadata struct {
+  SSHKey *SSHKeyInfo `json:"ssh_key,omitempty"`
+}
+
+type SSHKeyInfo struct {
+  PublicKey       string `json:"public_key"`
+  Fingerprint     string `json:"fingerprint"`
+  KeyType         string `json:"key_type"`
+  EncryptedSecret string `json:"encrypted_secret,omitempty"` // AES-256-GCM encrypted private key (never sent to frontend)
+  Salt            string `json:"salt,omitempty"`            // Argon2id salt (hex)
+  Nonce           string `json:"nonce,omitempty"`          // GCM nonce (hex)
+}
+
+// MarshalJSON masks sensitive SSH key fields before sending to the frontend.
+// The DB stores metadata separately via json.Marshal(metadata) which is unaffected.
+func (u User) MarshalJSON() ([]byte, error) {
+  type Alias User
+  out := Alias(u)
+  if out.Metadata != nil && out.Metadata.SSHKey != nil {
+    out.Metadata = &UserMetadata{
+      SSHKey: &SSHKeyInfo{
+        PublicKey:   out.Metadata.SSHKey.PublicKey,
+        Fingerprint: out.Metadata.SSHKey.Fingerprint,
+        KeyType:     out.Metadata.SSHKey.KeyType,
+      },
+    }
+  }
+  return json.Marshal(out)
 }
 
 type Role struct {
@@ -49,7 +85,7 @@ type Service struct {
 }
 
 type ServiceDescriptor struct {
-  Type         string `json:"type"`                     // "mcp", "api", or "oidc"
+  Type         string `json:"type"`                     // "mcp", "api", "oidc", or "ssh"
   Auth         string `json:"auth,omitempty"`            // "key" for API-key auth
   APIKey       string `json:"api_key,omitempty"`         // admin-set API key (injected by proxy)
   Header       string `json:"header,omitempty"`          // custom header for API key; empty = Bearer
@@ -83,8 +119,7 @@ type OAuthData struct {
   RefreshToken  string                 `json:"refresh_token"`
   TokenType     string                 `json:"token_type"`
   TokenEndpoint string                 `json:"token_endpoint"`
-  ExpiresAt     time.Time              `json:"-"`
-  ExpiresIn     int                    `json:"expires_in"`
+  ExpiresAt     time.Time              `json:"expires_at"`
   Claims        map[string]interface{} `json:"claims,omitempty"`
   IDToken       string                 `json:"id_token,omitempty"`
   Proxied       bool                   `json:"proxied,omitempty"`

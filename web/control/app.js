@@ -31,7 +31,9 @@ const Icon = ({ name, size = 16 }) => {
     lock:    <><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></>,
     mail:    <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></>,
     cog:     <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></>,
+    plug:    <><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></>,
     signout: <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></>,
+    menu:    <><path d="M3 6h18M3 12h18M3 18h18"/></>,
     moon:    <><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></>,
     sun:     <><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></>,
   };
@@ -177,40 +179,45 @@ const ToastProvider = ({children}) => {
 
 // ── Auth ───────────────────────────────────────────────────────────────
 
-const AuthCtx = createContext({ user: null, authRequired: false, serviceName: '', sessionExpired: false, login: ()=>{}, logout: ()=>{}, clearExpired: ()=>{} });
+const AuthCtx = createContext({ user: null, token: null, authRequired: false, serviceName: '', sessionExpired: false, login: ()=>{}, logout: ()=>{}, clearExpired: ()=>{} });
 const useAuth = () => useContext(AuthCtx);
 
 function AuthProvider({ children }) {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState(null);
+  const [token, setToken] = useState(null);
   const [authRequired, setAuthRequired] = useState(false);
   const [serviceName, setServiceName] = useState('');
   const [sessionExpired, setSessionExpired] = useState(false);
   const [authError, setAuthError] = useState('');
 
   useEffect(() => {
-    _onUnauthorized = () => { setUser(null); setSessionExpired(true); };
+    _onUnauthorized = () => { setUser(null); setToken(null); setSessionExpired(true); };
     return () => { _onUnauthorized = null; };
-  }, []);
-
-  useEffect(() => {
-    // Show auth errors from redirect (e.g. no_user, invalid_token)
-    const params = new URLSearchParams(window.location.search);
-    const err = params.get('auth_error');
-    if (err) { setAuthError(err); history.replaceState(null, '', window.location.pathname); }
   }, []);
 
   useEffect(() => {
     (async () => {
       try {
         const cfg = window.__HOMESLICE_CONFIG || {};
+        window.FreshBreath.ServiceProxy.on('refresh', rtoken => {
+          console.log("Access token expired, refreshing...");
+          localStorage.setItem('frebre_admin', rtoken.toJSON());
+          setToken(rtoken);
+        });
+
         if (!cfg.authRequired) { setReady(true); return; }
         setAuthRequired(true);
         setServiceName(cfg.authServiceName || '');
-        const token = getStoredToken();
-        if (token?.id_token) {
-          const r = await fetch('/api/me', { headers: { 'Authorization': 'Bearer ' + token.id_token } });
-          if (r.ok) { const d = await r.json(); setUser(d.user); }
+
+        const stored = localStorage.getItem('frebre_admin');
+        if (stored) {
+          const appNonce = cfg.adminNonce;
+          const result = window.FreshBreath.load(appNonce, stored);
+          setToken(result);
+
+          const d = await api(result, 'GET','/api/me');
+          setUser(d.user);
         }
       } catch {}
       setReady(true);
@@ -218,11 +225,19 @@ function AuthProvider({ children }) {
   }, []);
 
   const login = async () => {
-    try {
-      const r = await fetch('/service/login', { headers: { 'X-Admin-Auth': '1' } });
-      const d = await r.json();
-      window.location.href = d.url;
-    } catch {}
+    const cfg = window.__HOMESLICE_CONFIG || {};
+    const appNonce = cfg.adminNonce;
+    const serviceURL = cfg.authServiceURL;
+    if (!appNonce || !serviceURL) return;
+
+    const result = await window.FreshBreath.login({ appNonce, serviceURL });
+    if (result.appNonce !== appNonce) return;
+    localStorage.setItem('frebre_admin', result.toJSON());
+    setToken(result);
+
+    // Verify the token and load user
+    const d = await api(result, 'GET', '/api/me');
+    setUser(d.user);
   };
 
   const logout = () => { localStorage.removeItem('frebre_admin'); setUser(null); setSessionExpired(false); };
@@ -231,13 +246,15 @@ function AuthProvider({ children }) {
   if (!ready) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
   return (
-    <AuthCtx.Provider value={{ user, authRequired, serviceName, sessionExpired, login, logout, clearExpired, authError }}>
+    <AuthCtx.Provider value={{ user, token, authRequired, serviceName, sessionExpired, login, logout, clearExpired, authError }}>
       {children}
     </AuthCtx.Provider>
   );
 }
 
 function LoginScreen({ serviceName, onLogin, authError }) {
+  const cfg = window.__HOMESLICE_CONFIG || {};
+  const isSSH = cfg.authServiceType === 'ssh';
   const errorMessages = {
     no_user: 'Your account is not registered. Please contact an administrator.',
     invalid_token: 'Authentication failed. Please try again.',
@@ -269,7 +286,7 @@ function LoginScreen({ serviceName, onLogin, authError }) {
         <div className="login-card">
           <div>
             <h2>Sign in to Fresh Breath</h2>
-            <p className="lead">Use your work account to access the control panel.</p>
+            <p className="lead">{isSSH ? 'Sign in with your SSH key passphrase.' : 'Use your work account to access the control panel.'}</p>
           </div>
           {authError && (
             <div className="login-error">
@@ -278,9 +295,9 @@ function LoginScreen({ serviceName, onLogin, authError }) {
             </div>
           )}
           <button className="oidc-btn oidc-primary" onClick={onLogin}>
-            <span className="glyph"><Icon name="lock" size={16}/></span>
-            Continue with {serviceName || 'your identity provider'}
-            <span className="meta">OIDC</span>
+            <span className="glyph"><Icon name={isSSH ? 'lock' : 'lock'} size={16}/></span>
+            {isSSH ? 'Sign in with SSH key' : `Continue with ${serviceName || 'your identity provider'}`}
+            <span className="meta">{isSSH ? 'SSH' : 'OIDC'}</span>
           </button>
         </div>
       </main>
@@ -305,15 +322,32 @@ function SessionBanner({ onLogin, onDismiss }) {
 
 const NAV = [
   { id:'home',     label:'Overview', icon:'home' },
-  { id:'users',    label:'Users',    icon:'users', countKey:'users' },
   { id:'apps',     label:'Apps',     icon:'apps', countKey:'apps' },
-  { id:'services', label:'Services', icon:'cog', countKey:'services' },
+  { id:'services', label:'Services', icon:'plug', countKey:'services' },
+  { id:'users',    label:'Users',    icon:'users', countKey:'users' },
   { id:'roles',    label:'Roles',    icon:'shield' },
   { id:'audit',    label:'Audit log',icon:'log' },
-  { id:'settings', label:'Settings', icon:'lock' },
+  { id:'settings', label:'Settings', icon:'cog' },
 ];
 
-function Sidebar({ active, onNav, counts, user, onLogout }) {
+function MobileTopBar({ onMenuOpen, pageLabel }) {
+  return (
+    <div className="mobile-topbar">
+      <div className="mb-brand">
+        <span className="brand-mark"/>
+        Fresh Breath
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:8}}>
+        {pageLabel && <span className="mb-page">{pageLabel}</span>}
+        <button className="btn btn-icon btn-ghost" onClick={onMenuOpen} aria-label="Open menu">
+          <Icon name="menu" size={18}/>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Sidebar({ active, onNav, counts, user, onLogout, mobileOpen, onMobileClose }) {
   const workspace = NAV.slice(0,4);
   const security  = NAV.slice(4);
   const displayName = user?.name || 'Admin';
@@ -327,11 +361,12 @@ function Sidebar({ active, onNav, counts, user, onLogout }) {
   const toggleTheme = () => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
-    localStorage.setItem('frebre-theme', next);
+    localStorage.setItem('frebre_theme', next);
     setDark(next === 'dark');
   };
+  const handleNav = (id) => { onNav(id); onMobileClose?.(); };
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar${mobileOpen ? ' mobile-open' : ''}`}>
       <div className="sb-brand">
         <span style={{display:'flex',alignItems:'center',gap:10}}><span className="brand-mark"/>Fresh Breath</span>
         <button className="theme-toggle" onClick={toggleTheme} title={dark ? 'Switch to light' : 'Switch to dark'}>
@@ -341,13 +376,13 @@ function Sidebar({ active, onNav, counts, user, onLogout }) {
       <div>
         <div className="sb-section">Workspace</div>
         <div className="sb-nav">
-          {workspace.map(n=>NavLink(n,active,onNav,counts))}
+          {workspace.map(n=>NavLink(n,active,handleNav,counts))}
         </div>
       </div>
       <div>
         <div className="sb-section">Security</div>
         <div className="sb-nav">
-          {security.map(n=>NavLink(n,active,onNav,counts))}
+          {security.map(n=>NavLink(n,active,handleNav,counts))}
         </div>
       </div>
       <div className="sb-foot">
@@ -416,16 +451,25 @@ function Toolbar({ search, onSearch, placeholder, filters=[], activeFilter, onFi
 
 let _onUnauthorized = null;
 
-function getStoredToken() {
-  try { return JSON.parse(localStorage.getItem('frebre_admin')); } catch { return null; }
-}
-
-async function api(method, path, body) {
+async function api(token, method, path, body) {
   const opts = { method, headers: {} };
-  const token = getStoredToken();
-  if (token?.id_token) opts.headers['Authorization'] = 'Bearer ' + token.id_token;
+  if (token?.data?.id_token) opts.headers['Authorization'] = 'Bearer ' + token.data.id_token;
   if (body) { opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
-  const r = await fetch(path, opts);
+
+  let r = await fetch(path, opts);
+
+  // Stale token — try refresh once
+  if (r.status === 401 && token?.data?.refresh_token) {
+    try {
+      await token.refresh();
+      opts.headers['Authorization'] = 'Bearer ' + token.data.id_token;
+      r = await fetch(path, opts);
+    } catch {
+      _onUnauthorized?.();
+      throw new Error('Session expired');
+    }
+  }
+
   if (r.status === 401) { _onUnauthorized?.(); throw new Error('Session expired'); }
   if (!r.ok) {
     const t = await r.text().catch(()=>'');
@@ -439,10 +483,17 @@ const copyText = async (text, toast) => {
   catch { toast('Failed to copy', true); }
 };
 
+function serviceInstructions(service) {
+  if (service.descriptor?.type === "ssh") {
+    return ` - ssh (see the SSH guide in the 'freshbreath' skill)`
+  }
+  return `  - ${service.name} (${service.descriptor?.type?.toLocaleUpperCase()}): "${service.url}"`
+}
+
 function buildPrompt(app, appServices) {
   const fbURL = window.__HOMESLICE_CONFIG?.apiBase || window.location.origin;
   const serviceLines = appServices.length
-    ? ("\nIntegrations: (be sure to use these exact URLs)\n" + appServices.map(s => `  - ${s.name} (${s.descriptor?.type?.toLocaleUpperCase()}): "${s.url}"`).join('\n'))
+    ? ("\nIntegrations: (be sure to use any URLs exactly)\n" + appServices.map(serviceInstructions).join('\n'))
     : '';
   return `Use the 'freshbreath' skill to add integrations to this app.\n\nSettings:\n  App nonce: ${app.nonce}\n  Fresh Breath URL: ${fbURL}\n${serviceLines}`;
 }
@@ -461,11 +512,6 @@ function Overview({ users, apps, services, audit }) {
       />
       <div className="stats">
         <div className="stat">
-          <span className="lbl">Users</span>
-          <span className="val">{users.length}</span>
-          <span className="sub">{activeUsers} active · {users.length-activeUsers} other</span>
-        </div>
-        <div className="stat">
           <span className="lbl">Applications</span>
           <span className="val">{apps.length}</span>
           <span className="sub">{prodApps} in production</span>
@@ -480,9 +526,14 @@ function Overview({ users, apps, services, audit }) {
           <span className="val">{Math.min(audit.length,10)}</span>
           <span className="sub">last {Math.min(audit.length,100)} records</span>
         </div>
+        <div className="stat">
+          <span className="lbl">Users</span>
+          <span className="val">{users.length}</span>
+          <span className="sub">{activeUsers} active · {users.length-activeUsers} other</span>
+        </div>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'1.4fr 1fr',gap:24}}>
+      <div className="overview-grid">
         <div>
           <h3 style={{margin:'0 0 12px',fontSize:14,fontWeight:500}}>Recent activity</h3>
           <div className="table-wrap"><div style={{padding:'8px 16px'}}>
@@ -496,7 +547,7 @@ function Overview({ users, apps, services, audit }) {
                   const ai = actionIcon(a.action);
                   return (
                     <div key={a.id} className="tl-row">
-                      <span className="tl-when">{a.when}</span>
+                      <span className="tl-when">{fmtAuditTime(a.when)}</span>
                       <span className={`tl-icn tone-${ai.tone}`}><Icon name={ai.icon} size={14}/></span>
                       <div className="tl-body">
                         <div><b>{a.actor}</b> <span className="muted">{a.action}</span></div>
@@ -536,7 +587,7 @@ function Overview({ users, apps, services, audit }) {
 
 // ── Users ──────────────────────────────────────────────────────────────
 
-function UsersView({ users, apps, onRefresh }) {
+function UsersView({ token, users, apps, onRefresh }) {
   const [q,setQ] = useState('');
   const [filter,setFilter] = useState(null);
   const [editing,setEditing] = useState(null);
@@ -550,7 +601,7 @@ function UsersView({ users, apps, onRefresh }) {
 
   const remove = async (id) => {
     if (!confirm('Delete this user?')) return;
-    try { await api('DELETE','/api/users/'+id); toast('User deleted'); onRefresh(); }
+    try { await api(token, 'DELETE','/api/users/'+id); toast('User deleted'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -559,7 +610,7 @@ function UsersView({ users, apps, onRefresh }) {
       <PageHead
         crumbs={['Workspace','Users']}
         title="Users"
-        sub="People with access."
+        sub="Say who can manage apps and services and their permissions."
         actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New user</button>}
       />
       <Toolbar
@@ -569,22 +620,22 @@ function UsersView({ users, apps, onRefresh }) {
         activeFilter={filter} onFilter={setFilter}
       />
       <div className="table-wrap">
-        <table className="tbl">
+        <table className="tbl" data-mobile>
           <thead><tr><th style={{width:'28%'}}>Name</th><th>Role</th><th>Status</th><th>Apps</th><th>Last seen</th><th style={{width:80}}></th></tr></thead>
           <tbody>
             {filtered.map(u=>
               <tr key={u.id}>
-                <td>
+                <td data-col="identity">
                   <div className="user-cell">
                     <Avatar name={u.name}/>
                     <div className="meta"><b>{u.name}</b><span>{u.email}</span></div>
                   </div>
                 </td>
-                <td><Badge tone={roleTone(u.role)}>{u.role}</Badge></td>
-                <td><Badge tone={statusTone(u.status)}>{u.status}</Badge></td>
-                <td><UserAppTags apps={u.apps} appList={apps}/></td>
-                <td className="muted">{u.last_seen||'—'}</td>
-                <td>
+                <td data-col="detail"><Badge tone={roleTone(u.role)}>{u.role}</Badge></td>
+                <td data-col="badge"><Badge tone={statusTone(u.status)}>{u.status}</Badge></td>
+                <td data-col="detail"><UserAppTags apps={u.apps} appList={apps}/></td>
+                <td data-col="detail" className="muted">{fmtAuditTime(u.last_seen)}</td>
+                <td data-col="actions">
                   <div className="row-actions">
                     <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(u)} title="Edit"><Icon name="edit" size={14}/></button>
                     <button className="btn btn-icon btn-ghost" onClick={()=>remove(u.id)} title="Delete"><Icon name="trash" size={14}/></button>
@@ -596,14 +647,21 @@ function UsersView({ users, apps, onRefresh }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No users match.</b>Try a different search.</div>}
       </div>
-      <UserDrawer user={editing} apps={apps} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      <UserDrawer user={editing} token={token} apps={apps} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
     </>
   );
 }
 
-function UserDrawer({ user, apps, onClose, onSaved }) {
+function UserDrawer({ user, token, apps, onClose, onSaved }) {
+  const { user: actor } = useAuth();
+  const canManageSSH = actor && (actor.role === 'Superuser' || actor.role === 'Admin');
   const [form,setForm] = useState({name:'',email:'',role:'Member',status:'Active',apps:[]});
   const [loading,setLoading] = useState(false);
+  const [sshKey, setSSHKey] = useState(null);
+  const [sshLoading, setSSHLoading] = useState(false);
+  const [showSSHGen, setShowSSHGen] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
+  const [passConfirm, setPassConfirm] = useState('');
   const toast = useToast();
   const isNew = user==='new';
   const isEdit = user && user.id;
@@ -612,28 +670,41 @@ function UserDrawer({ user, apps, onClose, onSaved }) {
     if(isEdit) {
       setForm({name:user.name,email:user.email,role:user.role||'Member',status:user.status||'Active',apps:[]});
       setLoading(true);
-      api('GET','/api/users/'+user.id+'/apps')
+      api(token, 'GET','/api/users/'+user.id+'/apps')
         .then(d=>{
           setForm(f=>({...f,apps:d.apps||[]}));
         })
         .catch(e=>toast(e.message,true))
         .finally(()=>setLoading(false));
+      // Load SSH key status for admins
+      if (canManageSSH) {
+        setSSHLoading(true);
+        api(token, 'GET','/api/users/'+user.id+'/ssh-key')
+          .then(d => setSSHKey(d.ssh_key))
+          .catch(() => setSSHKey(null))
+          .finally(() => setSSHLoading(false));
+      }
     } else {
       setForm({name:'',email:'',role:'Member',status:'Active',apps:[]});
+      setSSHKey(null);
     }
+    setShowSSHGen(false);
+    setSSHLoading(false);
+    setPassphrase('');
+    setPassConfirm('');
   },[user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async () => {
     try {
       let uid;
       if(isEdit) {
-        await api('PUT','/api/users/'+user.id,form);
-        await api('PUT','/api/users/'+user.id+'/apps',{apps:form.apps||[]});
+        await api(token, 'PUT','/api/users/'+user.id,form);
+        await api(token, 'PUT','/api/users/'+user.id+'/apps',{apps:form.apps||[]});
         toast('User updated');
       } else {
-        const resp = await api('POST','/api/users',form);
+        const resp = await api(token, 'POST','/api/users',form);
         uid = resp.id;
-        await api('PUT','/api/users/'+uid+'/apps',{apps:form.apps||[]});
+        await api(token, 'PUT','/api/users/'+uid+'/apps',{apps:form.apps||[]});
         toast('User created');
       }
       onClose(); onSaved();
@@ -649,6 +720,7 @@ function UserDrawer({ user, apps, onClose, onSaved }) {
         <button className="btn btn-primary" onClick={save}>{isNew?'Create':'Save'}</button>
       </>}
     >
+      <p><strong>NOTE:</strong> You don't need to create accounts for people who are just using the apps and logging in with their own creds! This is only for users who need to log in to this admin panel and manage apps and services.</p>
       <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Ada Lovelace"/></div>
       <div className="field"><label>Email</label><input className="input" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))} placeholder="ada@company.com"/></div>
       <div className="field-row">
@@ -676,6 +748,63 @@ function UserDrawer({ user, apps, onClose, onSaved }) {
             />
           )}
         </div>
+      )}
+      {isEdit && canManageSSH && (
+        <>
+          <div style={{marginTop:20,borderTop:'1px solid var(--border)',paddingTop:16}}>
+            <label style={{fontSize:13,fontWeight:600,color:'var(--ink-2)',marginBottom:12,display:'block'}}>SSH Key</label>
+            {sshLoading ? <span className="muted">Loading…</span> : sshKey ? (
+              <>
+                <div style={{marginBottom:8}}>
+                  <Badge tone="green">Active</Badge>
+                  <span className="muted" style={{marginLeft:8,fontSize:13}}>{sshKey.key_type?.toUpperCase()} · {sshKey.fingerprint}</span>
+                </div>
+                <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                  <input className="input mono" value={sshKey.public_key?.trim()} readOnly style={{fontSize:11}} />
+                  <button className="btn btn-ghost" onClick={() => copyText(sshKey.public_key?.trim(), toast)}><Icon name="copy" size={14}/></button>
+                </div>
+                <button className="btn btn-ghost" style={{color:'var(--red)',marginTop:8}} onClick={async () => {
+                  if (!confirm('Delete this user\'s SSH key? They\'ll need a new one to use SSH auth.')) return;
+                  try { await api(token, 'DELETE','/api/users/'+user.id+'/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
+                  catch(e) { toast(e.message, true); }
+                }}>Delete key</button>
+              </>
+            ) : (
+              <button className="btn btn-ghost" onClick={() => setShowSSHGen(true)}><Icon name="lock" size={14}/> Generate SSH Key</button>
+            )}
+          </div>
+          {showSSHGen && (
+            <div className="modal-overlay" onClick={() => { setShowSSHGen(false); setPassphrase(''); setPassConfirm(''); }}>
+              <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
+                <h3 style={{marginBottom:16}}>Generate SSH Key</h3>
+                <p className="muted" style={{fontSize:13,marginBottom:16}}>
+                  Choose a passphrase for {user.name}'s SSH key. They'll need it each time they log in via SSH.
+                </p>
+                <div className="field">
+                  <label>Passphrase</label>
+                  <input className="input" type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
+                </div>
+                <div className="field">
+                  <label>Confirm passphrase</label>
+                  <input className="input" type="password" value={passConfirm} onChange={e => setPassConfirm(e.target.value)} placeholder="Re-enter passphrase" />
+                </div>
+                <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:20}}>
+                  <button className="btn btn-ghost" onClick={() => { setShowSSHGen(false); setPassphrase(''); setPassConfirm(''); }}>Cancel</button>
+                  <button className="btn btn-primary" disabled={passphrase.length < 8 || passphrase !== passConfirm} onClick={async () => {
+                    try {
+                      const d = await api(token, 'POST','/api/users/'+user.id+'/ssh-key', { passphrase });
+                      setSSHKey(d.ssh_key);
+                      setShowSSHGen(false);
+                      setPassphrase('');
+                      setPassConfirm('');
+                      toast('SSH key generated');
+                    } catch(e) { toast(e.message, true); }
+                  }}>Generate</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </Drawer>
   );
@@ -713,7 +842,7 @@ function UserAppTags({ apps, appList }) {
   );
 }
 
-function AppsView({ apps, services, users, onRefresh }) {
+function AppsView({ token, apps, services, users, onRefresh }) {
   const [q,setQ] = useState('');
   const [filter,setFilter] = useState(null);
   const [editing,setEditing] = useState(null);
@@ -727,7 +856,7 @@ function AppsView({ apps, services, users, onRefresh }) {
 
   const remove = async (nonce) => {
     if(!confirm('Delete this app?')) return;
-    try { await api('DELETE','/api/apps/'+nonce); toast('App deleted'); onRefresh(); }
+    try { await api(token, 'DELETE','/api/apps/'+nonce); toast('App deleted'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -735,7 +864,7 @@ function AppsView({ apps, services, users, onRefresh }) {
 
   const copyPrompt = async (a) => {
     try {
-      const r = await api('GET', '/api/apps/' + a.nonce + '/services');
+      const r = await api(token, 'GET', '/api/apps/' + a.nonce + '/services');
       const allowedIds = (r.services || []).filter(l => l.allowed).map(l => l.service_id);
       const appSvcs = services.filter(s => allowedIds.includes(s.id));
       copyText(buildPrompt(a, appSvcs), toast);
@@ -757,12 +886,12 @@ function AppsView({ apps, services, users, onRefresh }) {
         activeFilter={filter} onFilter={setFilter}
       />
       <div className="table-wrap">
-        <table className="tbl">
+        <table className="tbl" data-mobile>
           <thead><tr><th style={{width:'26%'}}>Name</th><th>Environment</th><th>Owner</th><th>Members</th><th>Services</th><th style={{width:80}}></th></tr></thead>
           <tbody>
             {filtered.map(a=>
               <tr key={a.nonce}>
-                <td>
+                <td data-col="identity">
                   <div className="user-cell">
                     <div className="avatar" style={{
                       width:32,height:32,borderRadius:8,
@@ -770,18 +899,21 @@ function AppsView({ apps, services, users, onRefresh }) {
                       fontSize:13,color:'white',display:'grid',placeItems:'center'
                     }}>{a.name?.[0]}</div>
                     <div className="meta">
-                      <b>{a.name}</b>
+                      <div style={{display:'flex',alignItems:'center',gap:6}}>
+                        <b>{a.name}</b>
+                        {a.details?.last_uploaded && <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'oklch(from var(--tone-green) var(--tone-bg-l) calc(c*.25) h)',color:'oklch(from var(--tone-green) var(--tone-fg-l) calc(c*.67) h)',border:'1px solid oklch(from var(--tone-green) var(--tone-border-l) calc(c*.33) h)',lineHeight:1.4}}>hosted</span>}
+                      </div>
                       <span className="mono" style={{cursor:'pointer'}} onClick={()=>copyNonce(a.nonce)} title={`${a.nonce} — click to copy`}>
                         {a.nonce.slice(0,8)}… <span style={{opacity:0.6,verticalAlign:'middle',marginLeft:2}}><Icon name="copy" size={12}/></span>
                       </span>
                     </div>
                   </div>
                 </td>
-                <td><Badge tone={envTone(a.environment)}>{a.environment||'—'}</Badge></td>
-                <td>{a.owner_name||<span className="muted">—</span>}</td>
-                <td className="mono">{a.member_count??0}</td>
-                <td className="mono">{a.service_count??0}</td>
-                <td>
+                <td data-col="badge"><Badge tone={envTone(a.environment)}>{a.environment||'—'}</Badge></td>
+                <td data-col="detail">{a.owner_name||<span className="muted">—</span>}</td>
+                <td data-col="detail" className="mono">{a.member_count??0}</td>
+                <td data-col="detail" className="mono">{a.service_count??0}</td>
+                <td data-col="actions">
                   <div className="row-actions">
                     <button className="btn btn-icon btn-ghost" onClick={()=>copyPrompt(a)} title="Copy setup prompt"><Icon name="sparkle" size={14}/></button>
                     <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(a)} title="Edit"><Icon name="edit" size={14}/></button>
@@ -794,12 +926,106 @@ function AppsView({ apps, services, users, onRefresh }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No apps found.</b></div>}
       </div>
-      <AppDrawer app={editing} services={services} users={users} apps={apps} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      <AppDrawer token={token} app={editing} services={services} users={users} apps={apps} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
     </>
   );
 }
 
-function AppDrawer({ app, services, users, apps, onClose, onSaved }) {
+function HostUpload({ token, app, onRefresh }) {
+  const isHosted = !!(app.details?.last_uploaded);
+  const [hosted, setHosted] = useState(isHosted);
+  const [uploadedAt, setUploadedAt] = useState(app.details?.last_uploaded || null);
+  const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef(null);
+  const toast = useToast();
+
+  const route = (() => {
+    if (app.url && !app.url.includes('://')) return '/' + app.url.replace(/^\//, '');
+    const slug = (app.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    return '/' + slug;
+  })();
+
+  const upload = async (file) => {
+    if (!file) return;
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext !== 'html' && ext !== 'zip') {
+      toast('Please upload an .html or .zip file', true);
+      return;
+    }
+    setUploading(true);
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const res = await fetch('/api/apps/' + app.nonce + '/web', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token?.data?.id_token },
+        body: fd,
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const now = new Date().toISOString();
+      setHosted(true);
+      setUploadedAt(now);
+      toast('Hosted at ' + route);
+      onRefresh();
+    } catch(e) {
+      toast(e.message, true);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const remove = async () => {
+    try {
+      const res = await fetch('/api/apps/' + app.nonce + '/web', {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token?.data?.id_token },
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setHosted(false);
+      setUploadedAt(null);
+      toast('Hosting removed');
+      onRefresh();
+    } catch(e) {
+      toast(e.message, true);
+    }
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragging(false);
+    upload(e.dataTransfer.files[0]);
+  };
+
+  return (
+    <div className="field">
+      <label>Web hosting</label>
+      {hosted ? (
+        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:4}}>
+          <Badge tone="green">Hosted</Badge>
+          <span className="mono" style={{fontSize:13}}>{route}</span>
+          <span className="muted" style={{fontSize:12,flex:1}}>uploaded {fmtAuditTime(uploadedAt)}</span>
+          <button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:12,color:'var(--tone-red)'}} onClick={remove}>Remove</button>
+        </div>
+      ) : (
+        <span className="help">Upload an HTML file or a ZIP containing your app.</span>
+      )}
+      <div
+        className={'drop-zone' + (dragging ? ' drop-zone-active' : '')}
+        onDragOver={e=>{e.preventDefault();setDragging(true);}}
+        onDragLeave={()=>setDragging(false)}
+        onDrop={onDrop}
+        onClick={()=>inputRef.current?.click()}
+      >
+        {uploading ? 'Uploading…' : (hosted ? 'Drop to replace' : 'Drop .html or .zip here, or click to browse')}
+        <input ref={inputRef} type="file" accept=".html,.zip" style={{display:'none'}}
+          onChange={e=>upload(e.target.files[0])}/>
+      </div>
+    </div>
+  );
+}
+
+function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
   const [form,setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[]});
   const [loading,setLoading] = useState(false);
   const toast = useToast();
@@ -811,8 +1037,8 @@ function AppDrawer({ app, services, users, apps, onClose, onSaved }) {
       setForm({name:app.name||'',environment:app.environment||'Development',url:app.url,owner_id:app.owner_id?String(app.owner_id):'',services:[],members:[]});
       setLoading(true);
       Promise.all([
-        api('GET','/api/apps/'+app.nonce+'/services'),
-        api('GET','/api/apps/'+app.nonce+'/members'),
+        api(token, 'GET','/api/apps/'+app.nonce+'/services'),
+        api(token, 'GET','/api/apps/'+app.nonce+'/members'),
       ])
         .then(([svcs,mems])=>{
           const allowed = (svcs.services||[]).filter(l=>l.allowed).map(l=>l.service_id);
@@ -834,15 +1060,15 @@ function AppDrawer({ app, services, users, apps, onClose, onSaved }) {
     try {
       let nonce;
       if(isEdit) {
-        await api('PUT','/api/apps/'+app.nonce,payload);
-        await api('PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
-        await api('PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
+        await api(token, 'PUT','/api/apps/'+app.nonce,payload);
+        await api(token, 'PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
+        await api(token, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
         toast('App updated');
       } else {
-        const resp = await api('POST','/api/apps',payload);
+        const resp = await api(token, 'POST','/api/apps',payload);
         nonce = resp.nonce;
-        await api('PUT','/api/apps/'+nonce+'/members',{members:form.members||[]});
-        await api('PUT','/api/apps/'+nonce+'/services',{services:form.services||[]});
+        await api(token, 'PUT','/api/apps/'+nonce+'/members',{members:form.members||[]});
+        await api(token, 'PUT','/api/apps/'+nonce+'/services',{services:form.services||[]});
         toast('App created');
       }
       onClose(); onSaved();
@@ -942,13 +1168,16 @@ function AppDrawer({ app, services, users, apps, onClose, onSaved }) {
           </div>
         </div>
       )}
+      {isEdit && !loading && (
+        <HostUpload token={token} app={app} onRefresh={onSaved}/>
+      )}
     </Drawer>
   );
 }
 
 // ── Services ───────────────────────────────────────────────────────────
 
-function ServicesView({ services, onRefresh }) {
+function ServicesView({ token, services, onRefresh }) {
   const [q,setQ] = useState('');
   const [editing,setEditing] = useState(null);
   const toast = useToast();
@@ -960,14 +1189,14 @@ function ServicesView({ services, onRefresh }) {
 
   const remove = async (id) => {
     let apps = [];
-    try { const r = await api('GET','/api/services/'+id+'/apps'); apps = r.apps||[]; }
+    try { const r = await api(token, 'GET','/api/services/'+id+'/apps'); apps = r.apps||[]; }
     catch(e) { /* ignore */ }
     let msg = 'Delete this service?';
     if(apps.length>0) {
       msg += `\n\nIt's used by ${apps.length} app${apps.length>1?'s':''}:\n${apps.map(a=>a.name).join(', ')}`;
     }
     if(!confirm(msg)) return;
-    try { await api('DELETE','/api/services/'+id); toast('Service deleted'); onRefresh(); }
+    try { await api(token, 'DELETE','/api/services/'+id); toast('Service deleted'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -981,13 +1210,13 @@ function ServicesView({ services, onRefresh }) {
       />
       <Toolbar search={q} onSearch={setQ} placeholder="Search services…"/>
       <div className="table-wrap">
-        <table className="tbl">
+        <table className="tbl" data-mobile>
           <thead><tr><th style={{width:'25%'}}>Name</th><th>URL</th><th>Type</th><th>Proxied</th><th style={{width:80}}></th></tr></thead>
           <tbody>
             {filtered.map(s=>
               <tr key={s.id}>
-                <td><b>{s.name}</b></td>
-                <td>
+                <td data-col="identity"><b>{s.name}</b>{s.descriptor?.type==='ssh' && <Badge tone="purple" style={{marginLeft:6}}>Built-in</Badge>}</td>
+                <td data-col="url">
                   <span
                     className="mono"
                     style={{fontSize:12.5, color:'var(--ink-3)', cursor:'pointer'}}
@@ -997,12 +1226,12 @@ function ServicesView({ services, onRefresh }) {
                     {s.url.length>48?s.url.slice(0,48)+'…':s.url} <span style={{opacity:0.6,verticalAlign:'middle',marginLeft:2}}><Icon name="copy" size={12}/></span>
                   </span>
                 </td>
-                <td><Badge dot={false} tone="gray">{s.descriptor?.type?.toLocaleUpperCase()||'—'}</Badge></td>
-                <td>{s.descriptor?.proxied ? <Badge tone="blue">Proxied</Badge> : <span className="muted">—</span>}</td>
-                <td>
+                <td data-col="badge"><Badge dot={false} tone="gray">{s.descriptor?.type?.toLocaleUpperCase()||'—'}</Badge></td>
+                <td data-col="detail">{s.descriptor?.proxied ? <Badge tone="blue">Proxied</Badge> : <span className="muted">—</span>}</td>
+                <td data-col="actions">
                   <div className="row-actions">
                     <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(s)} title="Edit"><Icon name="edit" size={14}/></button>
-                    <button className="btn btn-icon btn-ghost" onClick={()=>remove(s.id)} title="Delete"><Icon name="trash" size={14}/></button>
+                    {s.descriptor?.type!=='ssh' && <button className="btn btn-icon btn-ghost" onClick={()=>remove(s.id)} title="Delete"><Icon name="trash" size={14}/></button>}
                   </div>
                 </td>
               </tr>
@@ -1011,12 +1240,12 @@ function ServicesView({ services, onRefresh }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No services found.</b></div>}
       </div>
-      <ServiceDrawer service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      <ServiceDrawer token={token} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
     </>
   );
 }
 
-function ServiceDrawer({ service, onClose, onSaved }) {
+function ServiceDrawer({ token, service, onClose, onSaved }) {
   const [form,setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false}});
   const toast = useToast();
   const isNew = service==='new';
@@ -1031,11 +1260,13 @@ function ServiceDrawer({ service, onClose, onSaved }) {
 
   const save = async () => {
     try {
-      if(isEdit) { await api('PUT','/api/services/'+service.id,form); toast('Service updated'); }
-      else { await api('POST','/api/services',form); toast('Service created'); }
+      if(isEdit) { await api(token, 'PUT','/api/services/'+service.id,form); toast('Service updated'); }
+      else { await api(token, 'POST','/api/services',form); toast('Service created'); }
       onClose(); onSaved();
     } catch(e) { toast(e.message,true); }
   };
+
+  const isSSH = isEdit && service.descriptor?.type === 'ssh';
 
   return (
     <Drawer
@@ -1046,8 +1277,11 @@ function ServiceDrawer({ service, onClose, onSaved }) {
         <button className="btn btn-primary" onClick={save}>{isNew?'Create':'Save'}</button>
       </>}
     >
-      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
-      <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))}/></div>
+      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} disabled={isSSH}/></div>
+      <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>
+      {isSSH ? (
+        <div className="field"><label>Type</label><Badge tone="purple">SSH</Badge></div>
+      ) : (
       <div className="field-row">
         <div className="field"><label>Type</label>
           <select className="input" value={form.descriptor.type} onChange={e=>updDesc('type',e.target.value)}>
@@ -1060,6 +1294,7 @@ function ServiceDrawer({ service, onClose, onSaved }) {
           </select>
         </div>
       </div>
+      )}
       {form.descriptor.type==='api' && (
         <>
           <div className="field-row">
@@ -1068,20 +1303,16 @@ function ServiceDrawer({ service, onClose, onSaved }) {
                 <option value="">OAuth (default)</option><option value="key">API key</option>
               </select>
             </div>
-            {form.descriptor.auth==='key' ?
-              <div className="field"><label>API Key</label><input className="input mono" type="password" value={form.descriptor.api_key||''} onChange={e=>updDesc('api_key',e.target.value)}/></div> :
-              <div className="field"><label>Client ID</label><input className="input mono" value={form.descriptor.client_id||''} onChange={e=>updDesc('client_id',e.target.value)}/></div>}
+            {form.descriptor.auth==='key' &&
+              <div className="field"><label>API Key</label><input className="input mono" type="password" value={form.descriptor.api_key||''} onChange={e=>updDesc('api_key',e.target.value)}/></div>
+            }
           </div>
-          {form.descriptor.auth!=='key' ? (
-            <>
-              <div className="field"><label>OAuth URL</label><input className="input mono" value={form.descriptor.oauth_url||''} onChange={e=>updDesc('oauth_url',e.target.value)} placeholder="https://provider.com/oauth"/></div>
-              <div className="field"><label>Client Secret</label><input className="input mono" type="password" value={form.descriptor.client_secret||''} onChange={e=>updDesc('client_secret',e.target.value)}/></div>
-            </>) :
+          {form.descriptor.auth==='key' &&
             <div className="field"><label>API Key Header</label><input className="input mono" value={form.descriptor.header||''} onChange={e=>updDesc('header',e.target.value)} placeholder="X-API-Key (or empty for Bearer)"/></div>
           }
         </>
       )}
-      {form.descriptor.type==='oidc' && (
+      {(form.descriptor.type==='oidc' || (form.descriptor.type==='api' && !form.descriptor.auth)) && (
         <>
           <div className="field"><label>OAuth URL</label><input className="input mono" value={form.descriptor.oauth_url||''} onChange={e=>updDesc('oauth_url',e.target.value)} placeholder="https://provider.com/oauth"/></div>
           <div className="field-row">
@@ -1089,6 +1320,10 @@ function ServiceDrawer({ service, onClose, onSaved }) {
             <div className="field"><label>Scopes</label><input className="input" value={form.descriptor.scopes||''} onChange={e=>updDesc('scopes',e.target.value)} placeholder="openid profile email"/></div>
           </div>
           <div className="field"><label>Client Secret</label><input className="input mono" type="password" value={form.descriptor.client_secret||''} onChange={e=>updDesc('client_secret',e.target.value)}/></div>
+        </>
+      )}
+      {form.descriptor.type==='oidc' && (
+        <>
           <div className="field"><label>Userinfo URL</label><input className="input mono" value={form.descriptor.userinfo_url||''} onChange={e=>updDesc('userinfo_url',e.target.value)}/></div>
           <div className="field"><label>User Email URL</label><input className="input mono" value={form.descriptor.userinfo_emails_url||''} onChange={e=>updDesc('userinfo_emails_url',e.target.value)}/></div>
         </>
@@ -1101,9 +1336,9 @@ function ServiceDrawer({ service, onClose, onSaved }) {
 
 function RolesView({ roles }) {
   const PERMS = [
-    { group:'Users',   items:['Read','Invite','Suspend','Delete'] },
     { group:'Apps',    items:['Read','Create','Edit','Delete'] },
     { group:'Services',items:['Read','Create','Edit','Delete'] },
+    { group:'Users',   items:['Read','Invite','Suspend','Delete'] },
   ];
   const checkedFor = (role,group,item) => {
     if(role.name==='Superuser') return true;
@@ -1170,7 +1405,7 @@ function AuditView({ audit }) {
             const ai = actionIcon(a.action);
             return (
               <div key={a.id} className="tl-row">
-                <span className="tl-when">{a.when||a.created_at}</span>
+                <span className="tl-when">{fmtAuditTime(a.when)}</span>
                 <span className={`tl-icn tone-${ai.tone}`}><Icon name={ai.icon} size={14}/></span>
                 <div className="tl-body">
                   <div><b>{a.actor}</b> <span className="muted">{a.action}</span></div>
@@ -1187,14 +1422,19 @@ function AuditView({ audit }) {
 
 // ── Settings ───────────────────────────────────────────────────────────
 
-function SettingsView({ services }) {
+function SettingsView({ token, services }) {
   const [selectedSvc, setSelectedSvc] = useState('');
   const [currentSvc, setCurrentSvc] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [sshKey, setSSHKey] = useState(null);
+  const [sshLoading, setSSHLoading] = useState(false);
+  const [showGenModal, setShowGenModal] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
+  const [passConfirm, setPassConfirm] = useState('');
   const toast = useToast();
 
   useEffect(() => {
-    api('GET', '/api/settings')
+    api(token, 'GET', '/api/settings')
       .then(d => {
         const id = d.admin_auth_service || '';
         setSelectedSvc(id);
@@ -1204,11 +1444,25 @@ function SettingsView({ services }) {
       .finally(() => setLoading(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    setSSHLoading(true);
+    api(token, 'GET', '/api/me/ssh-key')
+      .then(d => setSSHKey(d.ssh_key))
+      .catch(() => setSSHKey(null))
+      .finally(() => setSSHLoading(false));
+  }, []);
+
   const oidcServices = services.filter(s => s.descriptor?.type === 'oidc');
+  const sshService = services.find(s => s.descriptor?.type === 'ssh');
+
+  const authServices = [
+    ...oidcServices.map(s => ({ id: String(s.id), label: s.name, type: 'OIDC' })),
+    ...(sshService ? [{ id: String(sshService.id), label: 'SSH Key', type: 'SSH' }] : []),
+  ];
 
   const save = async () => {
     try {
-      await api('PUT', '/api/settings', { admin_auth_service: selectedSvc });
+      await api(token, 'PUT', '/api/settings', { admin_auth_service: selectedSvc });
       setCurrentSvc(oidcServices.find(s => String(s.id) === selectedSvc) || null);
       toast('Settings saved');
     } catch(e) { toast(e.message, true); }
@@ -1217,7 +1471,7 @@ function SettingsView({ services }) {
   const unlink = async () => {
     if (!confirm('Remove admin auth? The control panel will be open until auth is reconfigured.')) return;
     try {
-      await api('PUT', '/api/settings', { admin_auth_service: '' });
+      await api(token, 'PUT', '/api/settings', { admin_auth_service: '' });
       setSelectedSvc(''); setCurrentSvc(null);
       toast('Admin auth removed');
     } catch(e) { toast(e.message, true); }
@@ -1237,10 +1491,10 @@ function SettingsView({ services }) {
               <label>Auth service</label>
               <select className="input" value={selectedSvc} onChange={e => setSelectedSvc(e.target.value)}>
                 <option value="">— None (open access) —</option>
-                {oidcServices.map(s => <option key={s.id} value={String(s.id)}>{s.name}</option>)}
+                {authServices.map(s => <option key={s.id} value={s.id}>{s.label} ({s.type})</option>)}
               </select>
-              {oidcServices.length === 0 && (
-                <span className="help">No OIDC services registered. Add one in Services first.</span>
+              {oidcServices.length === 0 && !sshService && (
+                <span className="help">No auth services available. Add an OIDC service or use the built-in SSH service.</span>
               )}
             </div>
             <div style={{display:'flex',gap:8,marginTop:16}}>
@@ -1250,15 +1504,111 @@ function SettingsView({ services }) {
           </>
         )}
       </div>
+
+      <div className="setting-section" style={{marginTop:32}}>
+        <h3 className="setting-heading">SSH Key</h3>
+        <p className="muted" style={{marginBottom:20,fontSize:13}}>
+          Generate an SSH key pair for authentication and agent forwarding. Only the public key is shown after creation.
+        </p>
+        {sshLoading ? <span className="muted">Loading…</span> : sshKey ? (
+          <>
+            <div style={{marginBottom:12}}>
+              <Badge tone="green">Active</Badge>
+              <span className="muted" style={{marginLeft:8,fontSize:13}}>{sshKey.key_type?.toUpperCase()} · {sshKey.fingerprint}</span>
+            </div>
+            <div className="field" style={{maxWidth:560}}>
+              <label>Public key</label>
+              <div style={{display:'flex',gap:8}}>
+                <input className="input mono" value={sshKey.public_key?.trim()} readOnly style={{fontSize:12}} />
+                <button className="btn btn-ghost" onClick={() => copyText(sshKey.public_key?.trim(), toast)}><Icon name="copy" size={14}/></button>
+              </div>
+            </div>
+            <div style={{marginTop:12}}>
+              <button className="btn btn-ghost" style={{color:'var(--red)'}} onClick={async () => {
+                if (!confirm('Delete your SSH key? You\'ll need to generate a new one to use SSH auth.')) return;
+                try { await api(token, 'DELETE', '/api/me/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
+                catch(e) { toast(e.message, true); }
+              }}>Delete key</button>
+            </div>
+          </>
+        ) : (
+          <button className="btn btn-primary" onClick={() => setShowGenModal(true)}><Icon name="key" size={14}/> Generate SSH Key</button>
+        )}
+      </div>
+
+      {showGenModal && (
+        <div className="modal-overlay" onClick={() => setShowGenModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
+            <h3 style={{marginBottom:16}}>Generate SSH Key</h3>
+            <p className="muted" style={{fontSize:13,marginBottom:16}}>
+              Choose a strong passphrase. You'll need it each time you log in via SSH. It cannot be recovered if forgotten.
+            </p>
+            <div className="field">
+              <label>Passphrase</label>
+              <input className="input" type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
+            </div>
+            <div className="field">
+              <label>Confirm passphrase</label>
+              <input className="input" type="password" value={passConfirm} onChange={e => setPassConfirm(e.target.value)} placeholder="Re-enter passphrase" />
+            </div>
+            <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:20}}>
+              <button className="btn btn-ghost" onClick={() => { setShowGenModal(false); setPassphrase(''); setPassConfirm(''); }}>Cancel</button>
+              <button className="btn btn-primary" disabled={passphrase.length < 8 || passphrase !== passConfirm} onClick={async () => {
+                try {
+                  const d = await api(token, 'POST', '/api/me/ssh-key', { passphrase });
+                  setSSHKey(d.ssh_key);
+                  setShowGenModal(false);
+                  setPassphrase('');
+                  setPassConfirm('');
+                  toast('SSH key generated');
+                } catch(e) { toast(e.message, true); }
+              }}>Generate</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────
+
+const fmtAuditTime = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  });
+};
+
+// ── Routing ────────────────────────────────────────────────────────────
+
+const getPageFromPath = () => {
+  const seg = window.location.pathname.replace(/^\/control\/?/, '');
+  return (seg && NAV.some(n => n.id === seg)) ? seg : 'home';
+};
+
 // ── App ────────────────────────────────────────────────────────────────
 
 function AppShell() {
-  const { user, authRequired, serviceName, login, logout, sessionExpired, clearExpired, authError } = useAuth();
-  const [active,setActive] = useState('home');
+  const { user, token, authRequired, serviceName, login, logout, sessionExpired, clearExpired, authError } = useAuth();
+  const [active,setActive] = useState(getPageFromPath);
+  const [sidebarOpen,setSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    const onPop = () => setActive(getPageFromPath());
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  const navigate = (id) => {
+    const path = id === 'home' ? '/control' : `/control/${id}`;
+    history.pushState(null, '', path);
+    setActive(id);
+  };
   const [users,setUsers] = useState([]);
   const [apps,setApps] = useState([]);
   const [services,setServices] = useState([]);
@@ -1271,11 +1621,11 @@ function AppShell() {
     setLoading(true);
     try {
       const [u,a,s,r,au] = await Promise.all([
-        api('GET','/api/users'),
-        api('GET','/api/apps'),
-        api('GET','/api/services'),
-        api('GET','/api/roles'),
-        api('GET','/api/audit'),
+        api(token, 'GET','/api/users'),
+        api(token, 'GET','/api/apps'),
+        api(token, 'GET','/api/services'),
+        api(token, 'GET','/api/roles'),
+        api(token, 'GET','/api/audit'),
       ]);
       setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]); setRoles(r.roles||[]); setAudit(au.audit||[]);
     } catch(e) { if (!authRequired || user) toast('Failed to load: '+e.message, true); }
@@ -1293,18 +1643,21 @@ function AppShell() {
 
   if(loading) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
+  const activeLabel = NAV.find(n=>n.id===active)?.label;
   return (
     <div className="app-shell">
-      <Sidebar active={active} onNav={setActive} counts={counts} user={user} onLogout={user ? logout : null}/>
-      <main className="main" data-screen-label={NAV.find(n=>n.id===active)?.label}>
+      <div className={`sidebar-scrim${sidebarOpen?' open':''}`} onClick={()=>setSidebarOpen(false)}/>
+      <Sidebar active={active} onNav={navigate} counts={counts} user={user} onLogout={user ? logout : null} mobileOpen={sidebarOpen} onMobileClose={()=>setSidebarOpen(false)}/>
+      <main className="main" data-screen-label={activeLabel}>
+        <MobileTopBar onMenuOpen={()=>setSidebarOpen(true)} pageLabel={activeLabel}/>
         {sessionExpired && <SessionBanner onLogin={login} onDismiss={clearExpired}/>}
         {active==='home'     && <Overview users={users} apps={apps} services={services} audit={audit}/>}
-        {active==='users'    && <UsersView users={users} apps={apps} onRefresh={load}/>}
-        {active==='apps'     && <AppsView apps={apps} services={services} users={users} onRefresh={load}/>}
-        {active==='services' && <ServicesView services={services} onRefresh={load}/>}
+        {active==='apps'     && <AppsView token={token} apps={apps} services={services} users={users} onRefresh={load}/>}
+        {active==='services' && <ServicesView token={token} services={services} onRefresh={load}/>}
+        {active==='users'    && <UsersView token={token} users={users} apps={apps} onRefresh={load}/>}
         {active==='roles'    && <RolesView roles={roles}/>}
         {active==='audit'    && <AuditView audit={audit}/>}
-        {active==='settings' && <SettingsView services={services}/>}
+        {active==='settings' && <SettingsView token={token} services={services}/>}
       </main>
     </div>
   );

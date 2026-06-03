@@ -6,6 +6,7 @@ import (
   "encoding/hex"
   "encoding/json"
   "errors"
+  "fmt"
   "time"
 )
 
@@ -75,6 +76,15 @@ func (s *Store) Migrate() error {
       value TEXT NOT NULL DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS ssh_host_keys (
+      host        TEXT NOT NULL,
+      port        INTEGER NOT NULL DEFAULT 22,
+      fingerprint TEXT NOT NULL,
+      key_data    BLOB NOT NULL,
+      trusted_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      PRIMARY KEY (host, port)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_services_url ON services(url);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
@@ -85,6 +95,26 @@ func (s *Store) Migrate() error {
   `)
   if err != nil {
     return err
+  }
+
+  // Add metadata column to users if missing
+  var hasMetadata bool
+  s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name='metadata'").Scan(&hasMetadata)
+  if !hasMetadata {
+    _, err = s.db.Exec("ALTER TABLE users ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+    if err != nil {
+      return err
+    }
+  }
+
+  // Add details column to apps if missing
+  var hasDetails bool
+  s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('apps') WHERE name='details'").Scan(&hasDetails)
+  if !hasDetails {
+    _, err = s.db.Exec("ALTER TABLE apps ADD COLUMN details TEXT NOT NULL DEFAULT '{}'")
+    if err != nil {
+      return err
+    }
   }
 
   // Seed built-in roles if empty
@@ -126,7 +156,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64) (string,
 
 func (s *Store) ListApps() ([]map[string]interface{}, error) {
   rows, err := s.db.Query(`
-    SELECT a.nonce, a.name, a.environment, a.url, a.created_at,
+    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details,
            u.id, u.name,
            (SELECT COUNT(DISTINCT user_id) FROM app_members WHERE app_nonce = a.nonce) as member_count,
            (SELECT COUNT(DISTINCT service_id) FROM app_service_links WHERE app_nonce = a.nonce AND allowed = 1) as service_count
@@ -141,11 +171,11 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 
   var apps []map[string]interface{}
   for rows.Next() {
-    var nonce, name, env, url, created string
+    var nonce, name, env, url, created, detailsStr string
     var ownerID sql.NullInt64
     var ownerName sql.NullString
     var memberCount, serviceCount int
-    if err := rows.Scan(&nonce, &name, &env, &url, &created, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
+    if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
       return nil, err
     }
     app := map[string]interface{}{
@@ -161,6 +191,12 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
       app["owner_id"] = ownerID.Int64
       app["owner_name"] = ownerName.String
     }
+    if detailsStr != "" && detailsStr != "{}" {
+      var d AppDetails
+      if json.Unmarshal([]byte(detailsStr), &d) == nil {
+        app["details"] = d
+      }
+    }
     apps = append(apps, app)
   }
 
@@ -169,7 +205,7 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 
 func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) {
   rows, err := s.db.Query(`
-    SELECT a.nonce, a.name, a.environment, a.url, a.created_at,
+    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details,
            u.id, u.name,
            (SELECT COUNT(DISTINCT user_id) FROM app_members WHERE app_nonce = a.nonce) as member_count,
            (SELECT COUNT(DISTINCT service_id) FROM app_service_links WHERE app_nonce = a.nonce AND allowed = 1) as service_count
@@ -185,11 +221,11 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 
   var apps []map[string]interface{}
   for rows.Next() {
-    var nonce, name, env, url, created string
+    var nonce, name, env, url, created, detailsStr string
     var ownerID sql.NullInt64
     var ownerName sql.NullString
     var memberCount, serviceCount int
-    if err := rows.Scan(&nonce, &name, &env, &url, &created, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
+    if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
       return nil, err
     }
     app := map[string]interface{}{
@@ -205,6 +241,12 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
       app["owner_id"] = ownerID.Int64
       app["owner_name"] = ownerName.String
     }
+    if detailsStr != "" && detailsStr != "{}" {
+      var d AppDetails
+      if json.Unmarshal([]byte(detailsStr), &d) == nil {
+        app["details"] = d
+      }
+    }
     apps = append(apps, app)
   }
 
@@ -212,13 +254,53 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 }
 
 func (s *Store) GetApp(nonce string) (*App, error) {
-  row := s.db.QueryRow("SELECT id, nonce, name, url FROM apps WHERE nonce = ?", nonce)
+  row := s.db.QueryRow("SELECT id, nonce, name, url, details FROM apps WHERE nonce = ?", nonce)
   a := &App{}
-  err := row.Scan(&a.ID, &a.Nonce, &a.Name, &a.URL)
+  var detailsStr string
+  err := row.Scan(&a.ID, &a.Nonce, &a.Name, &a.URL, &detailsStr)
   if err == sql.ErrNoRows {
     return nil, errors.New("app not found")
   }
-  return a, err
+  if err != nil {
+    return nil, err
+  }
+  if detailsStr != "" && detailsStr != "{}" {
+    a.Details = &AppDetails{}
+    json.Unmarshal([]byte(detailsStr), a.Details)
+  }
+  return a, nil
+}
+
+func (s *Store) UpdateAppDetails(nonce string, details *AppDetails) error {
+  data, err := json.Marshal(details)
+  if err != nil {
+    return err
+  }
+  _, err = s.db.Exec("UPDATE apps SET details = ? WHERE nonce = ?", string(data), nonce)
+  return err
+}
+
+func (s *Store) ListHostedApps() ([]*App, error) {
+  rows, err := s.db.Query("SELECT nonce, name, url, details FROM apps WHERE details != '{}'")
+  if err != nil {
+    return nil, err
+  }
+  defer rows.Close()
+  var apps []*App
+  for rows.Next() {
+    a := &App{}
+    var detailsStr string
+    if err := rows.Scan(&a.Nonce, &a.Name, &a.URL, &detailsStr); err != nil {
+      return nil, err
+    }
+    var d AppDetails
+    if json.Unmarshal([]byte(detailsStr), &d) != nil || d.LastUploaded == nil {
+      continue
+    }
+    a.Details = &d
+    apps = append(apps, a)
+  }
+  return apps, rows.Err()
 }
 
 func (s *Store) UpdateApp(nonce string, name, env string, url string, ownerID *int64) error {
@@ -248,7 +330,7 @@ func (s *Store) CreateUser(name, email, role, status string) (*User, error) {
   if role == "" { role = "Member" }
   if status == "" { status = "Active" }
   res, err := s.db.Exec(
-    "INSERT INTO users (name, email, role, status) VALUES (?, ?, ?, ?)",
+    "INSERT INTO users (name, email, role, status, metadata) VALUES (?, ?, ?, ?, '{}')",
     name, email, role, status,
   )
   if err != nil {
@@ -263,12 +345,13 @@ func (s *Store) CreateUser(name, email, role, status string) (*User, error) {
 
 func (s *Store) GetUser(id int64) (*User, error) {
   row := s.db.QueryRow(
-    "SELECT id, name, email, role, status, last_seen, created_at FROM users WHERE id = ?", id,
+    "SELECT id, name, email, role, status, last_seen, created_at, metadata FROM users WHERE id = ?", id,
   )
   u := &User{}
   var lastSeen sql.NullString
   var createdAt string
-  err := row.Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.Status, &lastSeen, &createdAt)
+  var metadataStr string
+  err := row.Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.Status, &lastSeen, &createdAt, &metadataStr)
   if err == sql.ErrNoRows {
     return nil, errors.New("user not found")
   }
@@ -280,18 +363,23 @@ func (s *Store) GetUser(id int64) (*User, error) {
     if t, err := time.Parse(time.RFC3339, lastSeen.String); err == nil {
       u.LastSeen = &t
     }
+  }
+  if metadataStr != "" && metadataStr != "{}" {
+    u.Metadata = &UserMetadata{}
+    json.Unmarshal([]byte(metadataStr), u.Metadata)
   }
   return u, nil
 }
 
 func (s *Store) GetUserByEmail(email string) (*User, error) {
   row := s.db.QueryRow(
-    "SELECT id, name, email, role, status, last_seen, created_at FROM users WHERE email = ?", email,
+    "SELECT id, name, email, role, status, last_seen, created_at, metadata FROM users WHERE email = ?", email,
   )
   u := &User{}
   var lastSeen sql.NullString
   var createdAt string
-  err := row.Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.Status, &lastSeen, &createdAt)
+  var metadataStr string
+  err := row.Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.Status, &lastSeen, &createdAt, &metadataStr)
   if err == sql.ErrNoRows {
     return nil, errors.New("user not found")
   }
@@ -304,11 +392,15 @@ func (s *Store) GetUserByEmail(email string) (*User, error) {
       u.LastSeen = &t
     }
   }
+  if metadataStr != "" && metadataStr != "{}" {
+    u.Metadata = &UserMetadata{}
+    json.Unmarshal([]byte(metadataStr), u.Metadata)
+  }
   return u, nil
 }
 
 func (s *Store) ListUsers() ([]*User, error) {
-  rows, err := s.db.Query("SELECT id, name, email, role, status, last_seen, created_at FROM users ORDER BY name")
+  rows, err := s.db.Query("SELECT id, name, email, role, status, last_seen, created_at, metadata FROM users ORDER BY name")
   if err != nil {
     return nil, err
   }
@@ -319,7 +411,8 @@ func (s *Store) ListUsers() ([]*User, error) {
     u := &User{}
     var lastSeen sql.NullString
     var createdAt string
-    if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.Status, &lastSeen, &createdAt); err != nil {
+    var metadataStr string
+    if err := rows.Scan(&u.ID, &u.Name, &u.Email, &u.Role, &u.Status, &lastSeen, &createdAt, &metadataStr); err != nil {
       return nil, err
     }
     u.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
@@ -328,15 +421,36 @@ func (s *Store) ListUsers() ([]*User, error) {
         u.LastSeen = &t
       }
     }
+    if metadataStr != "" && metadataStr != "{}" {
+      u.Metadata = &UserMetadata{}
+      json.Unmarshal([]byte(metadataStr), u.Metadata)
+    }
     users = append(users, u)
   }
   return users, rows.Err()
 }
 
-func (s *Store) UpdateUser(id int64, name, email, role, status string) error {
+func (s *Store) TouchLastSeen(userID int64) error {
   _, err := s.db.Exec(
-    "UPDATE users SET name = ?, email = ?, role = ?, status = ? WHERE id = ?",
-    name, email, role, status, id,
+    "UPDATE users SET last_seen = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?", userID,
+  )
+  return err
+}
+
+func (s *Store) UpdateUser(id int64, name, email, role, status string, metadata *UserMetadata) error {
+  var metadataStr string
+  if metadata != nil {
+    data, err := json.Marshal(metadata)
+    if err != nil {
+      return err
+    }
+    metadataStr = string(data)
+  } else {
+    metadataStr = "{}"
+  }
+  _, err := s.db.Exec(
+    "UPDATE users SET name = ?, email = ?, role = ?, status = ?, metadata = ? WHERE id = ?",
+    name, email, role, status, metadataStr, id,
   )
   return err
 }
@@ -398,7 +512,7 @@ func (s *Store) LogAudit(actor, action, target string) error {
 func (s *Store) ListAudit(limit int) ([]*AuditEntry, error) {
   if limit <= 0 { limit = 100 }
   rows, err := s.db.Query(
-    "SELECT id, strftime('%H:%M', created_at) as when_str, actor, action, target FROM audit_log ORDER BY created_at DESC LIMIT ?",
+    "SELECT id, created_at, actor, action, target FROM audit_log ORDER BY created_at DESC LIMIT ?",
     limit,
   )
   if err != nil {
@@ -459,7 +573,7 @@ func (s *Store) GetService(serviceID int64) (*Service, error) {
 
 func (s *Store) GetServiceByURL(serviceURL string) (*Service, error) {
   row := s.db.QueryRow(
-    "SELECT id, name, url, descriptor FROM services WHERE url = ?",
+    "SELECT id, name, url, descriptor FROM services WHERE rtrim(url, '/') = rtrim(?, '/')",
     serviceURL,
   )
   svc := &Service{}
@@ -689,6 +803,15 @@ func (s *Store) SetAppServiceAllowed(appNonce string, serviceID int64, allowed b
   return err
 }
 
+func (s *Store) IsServiceAllowedForApp(appNonce string, serviceID int64) (bool, error) {
+  var allowed int
+  err := s.db.QueryRow(
+    "SELECT COALESCE((SELECT allowed FROM app_service_links WHERE app_nonce = ? AND service_id = ?), 0)",
+    appNonce, serviceID,
+  ).Scan(&allowed)
+  return allowed != 0, err
+}
+
 func (s *Store) ListServices() ([]*Service, error) {
   rows, err := s.db.Query(
     "SELECT id, name, url, descriptor FROM services ORDER BY name",
@@ -729,6 +852,28 @@ func isUnique(err error) bool {
     (len(msg) > 13 && msg[:13] == "UNIQUE const")
 }
 
+// ── SSH Service ──
+
+func (s *Store) EnsureSSHService() (int64, error) {
+  svc, err := s.GetServiceByURL("ssh://")
+  if err == nil {
+    return svc.ID, nil
+  }
+  id, err := s.RegisterService("SSH", "ssh://", ServiceDescriptor{Type: "ssh"})
+  if err != nil {
+    return 0, fmt.Errorf("seed SSH service: %w", err)
+  }
+  return id, nil
+}
+
+func (s *Store) IsSSHService(id int64) bool {
+  svc, err := s.GetService(id)
+  if err != nil {
+    return false
+  }
+  return svc.Descriptor.Type == "ssh"
+}
+
 // ── Settings ──
 
 func (s *Store) GetSetting(key string) (string, error) {
@@ -767,4 +912,38 @@ func (s *Store) GetOrCreateLocalSigningKey() ([]byte, error) {
     return nil, err
   }
   return key, nil
+}
+
+// GetSSHHostKey returns the stored host key data and fingerprint for a host:port.
+// Returns nil if no key is on record (first connection).
+func (s *Store) GetSSHHostKey(host string, port int) (keyData []byte, fingerprint string, err error) {
+  row := s.db.QueryRow(
+    "SELECT key_data, fingerprint FROM ssh_host_keys WHERE host = ? AND port = ?",
+    host, port,
+  )
+  var data []byte
+  var fp string
+  if err := row.Scan(&data, &fp); err != nil {
+    if err == sql.ErrNoRows {
+      return nil, "", nil
+    }
+    return nil, "", err
+  }
+  return data, fp, nil
+}
+
+// StoreSSHHostKey records a trusted host key (TOFU — trust on first use).
+func (s *Store) StoreSSHHostKey(host string, port int, keyData []byte, fingerprint string) error {
+  _, err := s.db.Exec(
+    "INSERT OR REPLACE INTO ssh_host_keys (host, port, fingerprint, key_data, trusted_at) VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+    host, port, fingerprint, keyData,
+  )
+  return err
+}
+
+// DeleteSSHHostKey removes a stored host key. Used when an admin wants to
+// accept a changed key.
+func (s *Store) DeleteSSHHostKey(host string, port int) error {
+  _, err := s.db.Exec("DELETE FROM ssh_host_keys WHERE host = ? AND port = ?", host, port)
+  return err
 }

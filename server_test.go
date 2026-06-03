@@ -7,6 +7,7 @@ import (
   "io"
   "net/http"
   "net/http/httptest"
+  "strconv"
   "strings"
   "testing"
 )
@@ -75,7 +76,7 @@ func TestHandleIndexRedirect(t *testing.T) {
 
 func TestHandleSetupJS(t *testing.T) {
   srv := newTestServer(t)
-  rr := testRequest(t, srv, "GET", "/setup.js", nil, nil)
+  rr := testRequest(t, srv, "GET", "/frbr.js", nil, nil)
   if rr.Code != 200 {
     t.Fatalf("status = %d, want 200", rr.Code)
   }
@@ -259,6 +260,7 @@ func TestProxyForwardsRequest(t *testing.T) {
   srv := newTestServer(t)
   nonce := createApp(t, srv, "proxy")
   id := registerService(t, srv, "mock", mockService.URL, ServiceDescriptor{Type: "mcp"})
+  linkServiceToApp(t, srv, nonce, id)
 
   rr := testRequest(t, srv, "POST", "/service/"+id+"/tools/list",
     strings.NewReader(`{"method":"tools/list"}`),
@@ -541,6 +543,7 @@ func TestProxyInjectsAdminAPIKey(t *testing.T) {
     Auth:   "key",
     APIKey: "admin-secret-key",
   })
+  linkServiceToApp(t, srv, nonce, id)
 
   // Request WITHOUT Authorization header — proxy should inject the key
   rr := testRequest(t, srv, "GET", "/service/"+id+"/forecast", nil,
@@ -569,6 +572,7 @@ func TestProxyDoesNotOverrideUserAPIKey(t *testing.T) {
     Auth:   "key",
     APIKey: "admin-secret-key",
   })
+  linkServiceToApp(t, srv, nonce, id)
 
   // Request WITH Authorization header — user's key wins
   rr := testRequest(t, srv, "GET", "/service/"+id+"/forecast", nil,
@@ -661,6 +665,17 @@ func registerService(t *testing.T, srv *Server, name, serviceURL string, descrip
   json.Unmarshal(rr.Body.Bytes(), &res)
   idf := res["id"].(float64)
   return formatInt(int64(idf))
+}
+
+func linkServiceToApp(t *testing.T, srv *Server, appNonce string, serviceID string) {
+  t.Helper()
+  id, err := strconv.ParseInt(serviceID, 10, 64)
+  if err != nil {
+    t.Fatalf("parse service ID: %v", err)
+  }
+  if err := srv.store.SetAppServiceAllowed(appNonce, id, true); err != nil {
+    t.Fatalf("link service to app: %v", err)
+  }
 }
 
 func mockHTTPClient(fn func(req *http.Request) *http.Response) *http.Client {

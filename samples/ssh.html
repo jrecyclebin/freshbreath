@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freshbreath SSH · Sync</title>
+  <style>
+    :root {
+      --bg:        #f5f5f5;
+      --surface:   #ffffff;
+      --border:    #e0e0e0;
+      --text:      #1a1a1a;
+      --muted:     #6b7280;
+      --accent:    #4f6ef7;
+      --accent-bg: #eef1fe;
+      --tag-bg:    #ebebeb;
+      --code-bg:   #f0f0f0;
+      --danger:    #e05252;
+      --ok:        #4caf7d;
+      --radius:    6px;
+      --font-mono: "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+      --font-ui:   system-ui, -apple-system, sans-serif;
+    }
+    [data-theme="dark"] {
+      --bg:        #1a1a1a;
+      --surface:   #242424;
+      --border:    #333333;
+      --text:      #e8e8e8;
+      --muted:     #8a8a9a;
+      --accent:    #7b96f8;
+      --accent-bg: #1e2440;
+      --tag-bg:    #2e2e2e;
+      --code-bg:   #1e1e1e;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-ui);
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .shell {
+      max-width: 820px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .wordmark { font-size: 13px; font-weight: 600; letter-spacing: .02em; }
+    .wordmark span { color: var(--muted); font-weight: 400; }
+
+    .header-controls { display: flex; align-items: center; gap: 8px; }
+
+    .conn-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 12px;
+      color: var(--muted);
+      background: none;
+    }
+    .conn-chip.clickable { cursor: pointer; }
+    .conn-chip.clickable:hover { border-color: var(--accent); color: var(--accent); }
+    .conn-chip.clickable:hover .status-dot { background: var(--accent); }
+    .conn-chip .status-dot { margin: 0; }
+
+    #theme-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 4px 8px;
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    #theme-btn:hover { color: var(--text); border-color: var(--muted); }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .panel-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .panel-body { padding: 12px; }
+
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--border);
+      flex-shrink: 0;
+    }
+    .status-dot.ok  { background: var(--ok); }
+    .status-dot.err { background: var(--danger); }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: var(--radius);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: opacity .1s;
+    }
+    .btn:disabled { opacity: .4; cursor: default; }
+    .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .btn-primary:not(:disabled):hover { opacity: .88; }
+    .btn-ghost { background: none; border-color: var(--border); color: var(--text); }
+    .btn-ghost:not(:disabled):hover { border-color: var(--muted); }
+    .btn-danger { background: none; border-color: var(--border); color: var(--danger); }
+    .btn-danger:not(:disabled):hover { border-color: var(--danger); }
+    .btn-sm { padding: 3px 8px; font-size: 11px; }
+
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+    input, textarea {
+      width: 100%;
+      padding: 6px 8px;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text);
+      resize: vertical;
+    }
+    input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+    textarea { min-height: 60px; }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 2fr 1fr 2fr;
+      gap: 12px;
+      align-items: end;
+    }
+    @media (max-width: 600px) { .form-row { grid-template-columns: 1fr; } }
+
+    .form-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .session-info {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .session-info strong { color: var(--text); font-weight: 500; }
+
+    /* file browser */
+    .file-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .file-item:hover { background: var(--tag-bg); }
+    .file-item .icon { flex-shrink: 0; width: 16px; text-align: center; color: var(--muted); }
+    .file-item .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .file-item .size { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .file-item .actions { display: flex; gap: 4px; opacity: 0; transition: opacity .1s; }
+    .file-item:hover .actions { opacity: 1; }
+
+    .breadcrumb {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .breadcrumb a {
+      color: var(--accent);
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .breadcrumb a:hover { text-decoration: underline; }
+    .breadcrumb .sep { color: var(--border); }
+
+    .empty-state {
+      text-align: center;
+      padding: 24px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    #result {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.6;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      color: var(--text);
+      min-height: 48px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .hidden { display: none !important; }
+
+    /* upload drop zone */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color .15s, color .15s;
+    }
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .drop-zone input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div class="wordmark">Freshbreath SSH <span>/ sync</span></div>
+      <div class="header-controls">
+        <div class="conn-chip" id="conn-chip">
+          <div class="status-dot" id="status-dot"></div>
+          <span id="status-text">Not connected</span>
+          <button class="btn btn-danger btn-sm hidden" id="signout">Sign out</button>
+        </div>
+        <button id="theme-btn">Light</button>
+      </div>
+    </header>
+
+    <!-- SSH connect form -->
+    <div class="panel" id="connect-panel">
+      <div class="panel-header">SSH Session</div>
+      <div class="panel-body">
+        <div class="form-row">
+          <div>
+            <label for="ssh-host">Host</label>
+            <input id="ssh-host" placeholder="your-server.example.com" autocomplete="off" spellcheck="false" />
+          </div>
+          <div>
+            <label for="ssh-port">Port</label>
+            <input id="ssh-port" type="number" value="22" min="1" max="65535" />
+          </div>
+          <div>
+            <label for="ssh-user">Username</label>
+            <input id="ssh-user" placeholder="(defaults to your email)" autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" id="connect-btn">Connect</button>
+          <button class="btn btn-danger hidden" id="disconnect-btn">Disconnect</button>
+          <span id="connect-status" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <div id="session-detail" class="session-info hidden" style="margin-top:8px">
+          Session <strong id="session-id"></strong> · expires <strong id="session-expires"></strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- File browser -->
+    <div class="panel hidden" id="browser-panel">
+      <div class="panel-header">
+        <span>Files</span>
+        <span style="margin-left:auto;font-size:10px;text-transform:none;letter-spacing:0" id="path-label">/</span>
+      </div>
+      <div class="panel-body">
+        <div class="breadcrumb" id="breadcrumb"></div>
+        <ul class="file-list" id="file-list"></ul>
+        <div class="empty-state hidden" id="empty-state">Empty directory</div>
+
+        <!-- upload drop zone -->
+        <div class="drop-zone" id="drop-zone" style="margin-top:12px">
+          <input type="file" id="file-input" multiple />
+          Drop files here or click to upload
+        </div>
+      </div>
+    </div>
+
+    <!-- Known hosts -->
+    <div class="panel hidden" id="hosts-panel">
+      <div class="panel-header">Known Hosts</div>
+      <div class="panel-body">
+        <ul class="file-list" id="host-list"></ul>
+        <div class="empty-state hidden" id="hosts-empty">No known hosts yet</div>
+      </div>
+    </div>
+
+    <!-- Result / error display -->
+    <div class="panel hidden" id="result-panel">
+      <div class="panel-header">Result</div>
+      <div class="panel-body">
+        <pre id="result"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { login, ServiceProxy } from "https://localhost:9009/frbr.js";
+
+    const API = window.__HOMESLICE_CONFIG?.apiBase;
+    const AUTH_KEY = "ssh-demo-auth";
+    const SESSION_KEY = "ssh-demo-session";
+
+    // -- Custom constants
+    // ── App nonce -- replace this with one you create
+    const APP_NONCE = "59b89b7682d21a4d3512087513b1671fb43a748405da8a4d";
+    // The SSH service URL — must match a registered service of type "ssh"
+    const SSH_SERVICE_URL = "ssh://";
+
+    // ── state ──
+    let authToken = null;   // Bearer token (id_token from SSH auth)
+    let sessionId = null;   // active SSH session ID
+    let currentPath = "/";  // current remote directory
+
+    // ── DOM refs ──
+    const connChip    = document.getElementById("conn-chip");
+    const statusDot   = document.getElementById("status-dot");
+    const statusText  = document.getElementById("status-text");
+    const signoutBtn  = document.getElementById("signout");
+    const connectBtn  = document.getElementById("connect-btn");
+    const disconnectBtn = document.getElementById("disconnect-btn");
+    const connectSt   = document.getElementById("connect-status");
+    const sessionInfo = document.getElementById("session-detail");
+    const sessionIdEl = document.getElementById("session-id");
+    const sessionExp  = document.getElementById("session-expires");
+    const browserPanel= document.getElementById("browser-panel");
+    const hostsPanel  = document.getElementById("hosts-panel");
+    const fileList    = document.getElementById("file-list");
+    const breadcrumb  = document.getElementById("breadcrumb");
+    const pathLabel   = document.getElementById("path-label");
+    const emptyState  = document.getElementById("empty-state");
+    const hostList    = document.getElementById("host-list");
+    const hostsEmpty  = document.getElementById("hosts-empty");
+    const dropZone    = document.getElementById("drop-zone");
+    const fileInput   = document.getElementById("file-input");
+
+    // ── helpers ──
+
+    function setStatus(ok, msg) {
+      statusDot.className = "status-dot" + (ok === true ? " ok" : ok === false ? " err" : "");
+      statusText.textContent = msg;
+    }
+
+    async function api(path, opts = {}) {
+      const headers = new Headers(opts.headers || {});
+      headers.set("Authorization", `Bearer ${authToken}`);
+      headers.set("X-App-Nonce", APP_NONCE);
+      if (!headers.has("Content-Type") && opts.body && typeof opts.body === "string") {
+        headers.set("Content-Type", "application/json");
+      }
+      const res = await fetch(`${API}${path}`, { ...opts, headers });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(`${res.status}: ${text}`);
+      }
+      if (res.status === 204) return null;
+      const ct = res.headers.get("Content-Type") || "";
+      if (ct.includes("application/json")) return res.json();
+      if (ct.includes("octet-stream")) return res.blob();
+      return res.text();
+    }
+
+    function fmtSize(bytes) {
+      if (bytes == null) return "";
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function fmtTime(iso) {
+      if (!iso) return "";
+      try { return new Date(iso).toLocaleString(); } catch { return iso; }
+    }
+
+    function showResult(data) {
+      document.getElementById("result-panel").classList.remove("hidden");
+      document.getElementById("result").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    }
+
+    // ── auth ──
+
+    async function startLogin() {
+      setStatus(null, "Opening SSH login…");
+      try {
+        const result = await login({ appNonce: APP_NONCE, serviceURL: SSH_SERVICE_URL });
+        localStorage.setItem(AUTH_KEY, result.toJSON());
+        authToken = result.data?.id_token || result.data?.access_token;
+        const c = result.data?.claims || {};
+        setStatus(true, `Authenticated · ${c.email || c.name || "SSH"}`);
+        connChip.classList.remove("clickable");
+        signoutBtn.classList.remove("hidden");
+      } catch (e) {
+        setStatus(false, e.message);
+      }
+    }
+
+    connChip.classList.add("clickable");
+    connChip.onclick = (e) => {
+      if (e.target === signoutBtn || signoutBtn.contains(e.target)) return;
+      if (connChip.classList.contains("clickable")) startLogin();
+    };
+
+    // restore saved auth
+    const savedAuth = localStorage.getItem(AUTH_KEY);
+    if (savedAuth) {
+      try {
+        const parsed = ServiceProxy.fromJSON(APP_NONCE, savedAuth);
+        authToken = parsed.data?.id_token || parsed.data?.access_token;
+        if (authToken) {
+          const c = parsed.data?.claims || {};
+          setStatus(true, `Authenticated · ${c.email || c.name || "SSH"}`);
+          connChip.classList.remove("clickable");
+          signoutBtn.classList.remove("hidden");
+        }
+      } catch {
+        localStorage.removeItem(AUTH_KEY);
+      }
+    }
+
+    // restore saved session
+    const savedSession = localStorage.getItem(SESSION_KEY);
+    if (savedSession) {
+      try {
+        const s = JSON.parse(savedSession);
+        sessionId = s.sessionId;
+        currentPath = s.currentPath || "/";
+        if (sessionId) {
+          sessionInfo.classList.remove("hidden");
+          sessionIdEl.textContent = sessionId.slice(0, 8) + "…";
+          sessionExp.textContent = fmtTime(s.expiresAt);
+          // verify the session is still alive
+          api(`/ssh/sessions/${sessionId}`).then(data => {
+            sessionExp.textContent = fmtTime(data.expiresAt);
+            connectBtn.classList.add("hidden");
+            disconnectBtn.classList.remove("hidden");
+            browserPanel.classList.remove("hidden");
+            hostsPanel.classList.remove("hidden");
+            loadFiles(currentPath);
+            loadHosts();
+          }).catch(() => {
+            // session expired
+            sessionId = null;
+            localStorage.removeItem(SESSION_KEY);
+            sessionInfo.classList.add("hidden");
+          });
+        }
+      } catch {
+        localStorage.removeItem(SESSION_KEY);
+      }
+    }
+
+    // ── sign out ──
+    signoutBtn.onclick = () => {
+      localStorage.removeItem(AUTH_KEY);
+      localStorage.removeItem(SESSION_KEY);
+      authToken = null;
+      sessionId = null;
+      connChip.classList.add("clickable");
+      signoutBtn.classList.add("hidden");
+      setStatus(null, "Not connected");
+      sessionInfo.classList.add("hidden");
+      connectBtn.classList.remove("hidden");
+      disconnectBtn.classList.add("hidden");
+      browserPanel.classList.add("hidden");
+      hostsPanel.classList.add("hidden");
+      document.getElementById("result-panel").classList.add("hidden");
+    };
+
+    // ── connect (open SSH session) ──
+    connectBtn.onclick = async () => {
+      if (!authToken) { startLogin(); return; }
+
+      const host = document.getElementById("ssh-host").value.trim();
+      const port = parseInt(document.getElementById("ssh-port").value, 10) || 22;
+      const username = document.getElementById("ssh-user").value.trim();
+
+      if (!host) { connectSt.textContent = "Host is required."; return; }
+
+      connectBtn.disabled = true;
+      connectSt.textContent = "Opening session…";
+
+      try {
+        const data = await api("/ssh/sessions", {
+          method: "POST",
+          body: JSON.stringify({ host, port, username: username || undefined }),
+        });
+        sessionId = data.sessionId;
+        localStorage.setItem(SESSION_KEY, JSON.stringify({
+          sessionId,
+          expiresAt: data.expiresAt,
+          currentPath: "/",
+        }));
+        sessionInfo.classList.remove("hidden");
+        sessionIdEl.textContent = sessionId.slice(0, 8) + "…";
+        sessionExp.textContent = fmtTime(data.expiresAt);
+        connectSt.textContent = "";
+
+        connectBtn.classList.add("hidden");
+        disconnectBtn.classList.remove("hidden");
+        browserPanel.classList.remove("hidden");
+        hostsPanel.classList.remove("hidden");
+        currentPath = "/";
+        loadFiles("/");
+        loadHosts();
+      } catch (e) {
+        if (e.message && e.message.startsWith("401:")) {
+          connectSt.textContent = "SSH key expired — re-authenticating…";
+          startLogin().then(() => connectBtn.click());
+        } else {
+          connectSt.textContent = e.message;
+        }
+      } finally {
+        connectBtn.disabled = false;
+      }
+    };
+
+    // ── disconnect ──
+    disconnectBtn.onclick = async () => {
+      if (!sessionId) return;
+      disconnectBtn.disabled = true;
+      try {
+        await api(`/ssh/sessions/${sessionId}`, { method: "DELETE" });
+      } catch { /* session may already be gone */ }
+      sessionId = null;
+      localStorage.removeItem(SESSION_KEY);
+      sessionInfo.classList.add("hidden");
+      connectBtn.classList.remove("hidden");
+      disconnectBtn.classList.add("hidden");
+      disconnectBtn.disabled = false;
+      browserPanel.classList.add("hidden");
+      hostsPanel.classList.add("hidden");
+      fileList.innerHTML = "";
+      hostList.innerHTML = "";
+    };
+
+    // ── file browser ──
+
+    async function loadFiles(dirPath) {
+      currentPath = dirPath || "/";
+      pathLabel.textContent = currentPath;
+      localStorage.setItem(SESSION_KEY, JSON.stringify({
+        sessionId,
+        expiresAt: sessionExp.textContent,
+        currentPath,
+      }));
+
+      renderBreadcrumb(currentPath);
+
+      try {
+        const data = await api(`/sync/files?sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(currentPath)}`);
+        const files = data.files || [];
+        fileList.innerHTML = "";
+        emptyState.classList.toggle("hidden", files.length > 0);
+
+        files.sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+
+        files.forEach(f => {
+          const li = document.createElement("li");
+          li.className = "file-item";
+          li.innerHTML = `
+            <span class="icon">${f.isDir ? "📁" : "📄"}</span>
+            <span class="name">${f.name}</span>
+            <span class="size">${f.isDir ? "" : fmtSize(f.size)}</span>
+            <span class="actions">
+              ${!f.isDir ? `<button class="btn btn-ghost btn-sm dl-btn">⬇</button>` : ""}
+              <button class="btn btn-danger btn-sm rm-btn">✕</button>
+            </span>
+          `;
+          li.onclick = (e) => {
+            if (e.target.closest(".dl-btn") || e.target.closest(".rm-btn")) return;
+            if (f.isDir) {
+              loadFiles(f.path);
+            }
+          };
+
+          // download
+          const dlBtn = li.querySelector(".dl-btn");
+          if (dlBtn) {
+            dlBtn.onclick = async (e) => {
+              e.stopPropagation();
+              try {
+                const blob = await api(`/sync/files/${f.path}?sessionId=${encodeURIComponent(sessionId)}`);
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = f.name; a.click();
+                URL.revokeObjectURL(url);
+              } catch (err) { showResult({ error: err.message }); }
+            };
+          }
+
+          // delete
+          const rmBtn = li.querySelector(".rm-btn");
+          rmBtn.onclick = async (e) => {
+            e.stopPropagation();
+            if (!confirm(`Delete ${f.path}?`)) return;
+            try {
+              await api(`/sync/files/${f.path}?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+              loadFiles(currentPath);
+            } catch (err) { showResult({ error: err.message }); }
+          };
+
+          fileList.appendChild(li);
+        });
+      } catch (e) {
+        showResult({ error: `Failed to list ${currentPath}: ${e.message}` });
+      }
+    }
+
+    function renderBreadcrumb(path) {
+      breadcrumb.innerHTML = "";
+      const parts = path.split("/").filter(Boolean);
+      const rootLink = document.createElement("a");
+      rootLink.textContent = "/";
+      rootLink.onclick = () => loadFiles("/");
+      breadcrumb.appendChild(rootLink);
+
+      let accumulated = "";
+      parts.forEach((part, i) => {
+        accumulated += "/" + part;
+        const sep = document.createElement("span");
+        sep.className = "sep";
+        sep.textContent = " / ";
+        breadcrumb.appendChild(sep);
+
+        if (i < parts.length - 1) {
+          const link = document.createElement("a");
+          link.textContent = part;
+          const target = accumulated;
+          link.onclick = () => loadFiles(target);
+          breadcrumb.appendChild(link);
+        } else {
+          const span = document.createElement("span");
+          span.textContent = part;
+          span.style.color = "var(--text)";
+          breadcrumb.appendChild(span);
+        }
+      });
+    }
+
+    // ── upload ──
+
+    async function uploadFile(file, remotePath) {
+      const hashBuffer = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hash = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+
+      try {
+        const data = await api(`/sync/files${remotePath}?sessionId=${encodeURIComponent(sessionId)}`, {
+          method: "PUT",
+          headers: { "X-Hash": hash, "Content-Type": "application/octet-stream" },
+          body: file,
+        });
+        return data;
+      } catch (e) {
+        throw new Error(`Upload ${remotePath} failed: ${e.message}`);
+      }
+    }
+
+    dropZone.onclick = () => fileInput.click();
+    dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add("dragover"); };
+    dropZone.ondragleave = () => dropZone.classList.remove("dragover");
+    dropZone.ondrop = (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+      handleFiles(e.dataTransfer.files);
+    };
+    fileInput.onchange = () => handleFiles(fileInput.files);
+
+    async function handleFiles(files) {
+      if (!files.length) return;
+      for (const file of files) {
+        const remotePath = currentPath === "/"
+          ? `/${file.name}`
+          : `${currentPath}/${file.name}`;
+        try {
+          dropZone.textContent = `Uploading ${file.name}…`;
+          await uploadFile(file, remotePath);
+        } catch (e) {
+          showResult({ error: e.message });
+          break;
+        }
+      }
+      dropZone.textContent = "Drop files here or click to upload";
+      fileInput.value = "";
+      loadFiles(currentPath);
+    }
+
+    // ── known hosts ──
+
+    async function loadHosts() {
+      try {
+        // The known-hosts endpoint returns rows from ssh_host_keys
+        const res = await api("/ssh/known-hosts");
+        // Parse the raw JSON array
+        const hosts = Array.isArray(res) ? res : (res.keys || []);
+        hostList.innerHTML = "";
+        hostsEmpty.classList.toggle("hidden", hosts.length > 0);
+
+        hosts.forEach(h => {
+          const li = document.createElement("li");
+          li.className = "file-item";
+          li.innerHTML = `
+            <span class="icon">🔑</span>
+            <span class="name">${h.host}:${h.port}</span>
+            <span class="size" style="font-size:10px">${h.fingerprint || ""}</span>
+            <span class="actions">
+              <button class="btn btn-danger btn-sm rm-btn">✕</button>
+            </span>
+          `;
+          li.querySelector(".rm-btn").onclick = async () => {
+            if (!confirm(`Remove known host ${h.host}:${h.port}?`)) return;
+            try {
+              await api(`/ssh/known-hosts/${h.host}:${h.port}`, { method: "DELETE" });
+              loadHosts();
+            } catch (err) { showResult({ error: err.message }); }
+          };
+          hostList.appendChild(li);
+        });
+      } catch (e) {
+        // Non-critical — hosts panel is supplementary
+        console.warn("Failed to load known hosts:", e);
+      }
+    }
+
+    // ── theme ──
+    const root = document.documentElement;
+    const themeBtn = document.getElementById("theme-btn");
+    const savedTheme = localStorage.getItem("ssh-demo-theme");
+    let dark = savedTheme ? savedTheme === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+    function applyTheme() {
+      root.dataset.theme = dark ? "dark" : "light";
+      themeBtn.textContent = dark ? "Light" : "Dark";
+    }
+    applyTheme();
+    themeBtn.onclick = () => { dark = !dark; applyTheme(); localStorage.setItem("ssh-demo-theme", dark ? "dark" : "light"); };
+  </script>
+</body>
+</html>

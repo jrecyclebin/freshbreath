@@ -125,6 +125,46 @@ func (s *Server) serviceBeginAuth(ctx context.Context, svc *Service, redirectURI
   return authURL, clientID, clientSecret, tokenURL, state, verifier, nil
 }
 
+// resolveTokenEndpoint discovers the token endpoint for any service.
+// OIDC services use .well-known/openid-configuration; MCP/API services use
+// OAuth metadata discovery (OAuthURL or derived from svc.URL).
+func (s *Server) resolveTokenEndpoint(ctx context.Context, svc *Service) (string, error) {
+  if svc.Descriptor.Type == "oidc" {
+    provider, err := s.getOIDCProvider(ctx, svc.ID, svc.URL)
+    if err != nil {
+      return "", fmt.Errorf("oidc provider: %w", err)
+    }
+    var claims struct {
+      TokenEndpoint string `json:"token_endpoint"`
+    }
+    if err := provider.Claims(&claims); err != nil || claims.TokenEndpoint == "" {
+      return "", fmt.Errorf("oidc: no token_endpoint in provider metadata")
+    }
+    return claims.TokenEndpoint, nil
+  }
+
+  svcURL, err := url.Parse(svc.URL)
+  if err != nil {
+    return "", fmt.Errorf("bad service url: %w", err)
+  }
+
+  base := svc.Descriptor.OAuthURL
+  if base == "" {
+    base = (&url.URL{Scheme: svcURL.Scheme, Host: svcURL.Host}).String()
+  } else {
+    base = strings.TrimSuffix(base, "/authorize")
+  }
+
+  asm, err := auth.GetAuthServerMetadata(ctx, base, s.httpClient)
+  if err != nil || asm == nil {
+    return base + "/token", nil
+  }
+  if asm.TokenEndpoint != "" {
+    return asm.TokenEndpoint, nil
+  }
+  return base + "/token", nil
+}
+
 func (s *Server) serviceExchangeCode(ctx context.Context, tokenEndpoint, code, verifier, clientID, clientSecret, redirectURI string) (*OAuthData, error) {
   cfg := &oauth2.Config{
     ClientID:     clientID,

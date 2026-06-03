@@ -65,6 +65,12 @@ func copyHeaders(dst, src http.Header) {
     if kl == "content-length" || kl == "transfer-encoding" || kl == "connection" {
       continue
     }
+    // Skip CORS headers — our ServeHTTP middleware already sets these.
+    // Upstream values would duplicate and cause browser rejections
+    // ("header contains multiple values").
+    if strings.HasPrefix(kl, "access-control-") {
+      continue
+    }
     for _, v := range vv {
       dst.Add(k, v)
     }

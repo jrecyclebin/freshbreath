@@ -1,10 +1,23 @@
+# Builds
+/dist
+
 # Local testing
+.env
+/freshbreath
 *.db
 *.db-journal
+*.pem
+/apps
+static.html
 
-# Builds
-/freshbreath
-dist/
-
-# Agent stuff
-.journal/
+# Agent files
+/.journal
+.todos/
+.sidecar/
+.sidecar-agent
+.sidecar-task
+.sidecar-pr
+.sidecar-start.sh
+.sidecar-base
+.td-root
+/design
