@@ -1422,9 +1422,10 @@ function AuditView({ audit }) {
 
 // ── Settings ───────────────────────────────────────────────────────────
 
-function SettingsView({ token, services }) {
+function SettingsView({ token, services, apps }) {
   const [selectedSvc, setSelectedSvc] = useState('');
   const [currentSvc, setCurrentSvc] = useState(null);
+  const [defaultApp, setDefaultApp] = useState('');
   const [loading, setLoading] = useState(true);
   const [sshKey, setSSHKey] = useState(null);
   const [sshLoading, setSSHLoading] = useState(false);
@@ -1439,6 +1440,7 @@ function SettingsView({ token, services }) {
         const id = d.admin_auth_service || '';
         setSelectedSvc(id);
         setCurrentSvc(id ? (services.find(s => String(s.id) === id) || null) : null);
+        setDefaultApp(d.default_app || '');
       })
       .catch(e => toast(e.message, true))
       .finally(() => setLoading(false));
@@ -1460,7 +1462,7 @@ function SettingsView({ token, services }) {
     ...(sshService ? [{ id: String(sshService.id), label: 'SSH Key', type: 'SSH' }] : []),
   ];
 
-  const save = async () => {
+  const saveAuth = async () => {
     try {
       await api(token, 'PUT', '/api/settings', { admin_auth_service: selectedSvc });
       setCurrentSvc(oidcServices.find(s => String(s.id) === selectedSvc) || null);
@@ -1474,6 +1476,13 @@ function SettingsView({ token, services }) {
       await api(token, 'PUT', '/api/settings', { admin_auth_service: '' });
       setSelectedSvc(''); setCurrentSvc(null);
       toast('Admin auth removed');
+    } catch(e) { toast(e.message, true); }
+  };
+
+  const saveLanding = async () => {
+    try {
+      await api(token, 'PUT', '/api/settings', { default_app: defaultApp });
+      toast('Landing page saved');
     } catch(e) { toast(e.message, true); }
   };
 
@@ -1498,10 +1507,34 @@ function SettingsView({ token, services }) {
               )}
             </div>
             <div style={{display:'flex',gap:8,marginTop:16}}>
-              <button className="btn btn-primary" onClick={save}>Save</button>
+              <button className="btn btn-primary" onClick={saveAuth}>Save</button>
               {currentSvc && <button className="btn btn-ghost" onClick={unlink}>Unlink</button>}
             </div>
           </>
+        )}
+      </div>
+
+      <div className="setting-section" style={{marginTop:32}}>
+        <h3 className="setting-heading">Default landing page</h3>
+        <p className="muted" style={{marginBottom:20,fontSize:13}}>
+          Choose where visitors land when they hit the root URL. Only hosted apps are available as targets.
+        </p>
+        {loading ? <span className="muted">Loading…</span> : (
+          <div className="field" style={{maxWidth:380}}>
+            <label>Landing page</label>
+            <select className="input" value={defaultApp} onChange={e => setDefaultApp(e.target.value)}>
+              <option value="">Control Panel</option>
+              {apps.filter(a => a.details?.last_uploaded).map(a => (
+                <option key={a.nonce} value={a.nonce}>{a.name}</option>
+              ))}
+            </select>
+            {apps.filter(a => a.details?.last_uploaded).length === 0 && (
+              <span className="help">No hosted apps yet. Upload web content to an app to make it available as a landing page.</span>
+            )}
+            <div style={{display:'flex',gap:8,marginTop:16}}>
+              <button className="btn btn-primary" onClick={saveLanding}>Save</button>
+            </div>
+          </div>
         )}
       </div>
 
@@ -1657,7 +1690,7 @@ function AppShell() {
         {active==='users'    && <UsersView token={token} users={users} apps={apps} onRefresh={load}/>}
         {active==='roles'    && <RolesView roles={roles}/>}
         {active==='audit'    && <AuditView audit={audit}/>}
-        {active==='settings' && <SettingsView token={token} services={services}/>}
+        {active==='settings' && <SettingsView token={token} services={services} apps={apps}/>}
       </main>
     </div>
   );

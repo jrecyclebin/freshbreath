@@ -164,6 +164,17 @@ func (s *Server) rebuildHostedRoutes() {
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
   if r.URL.Path == "/" {
+    if nonce, _ := s.store.GetSetting("default_app"); nonce != "" && nonce != "control" {
+      s.hostedMu.RLock()
+      for slug, n := range s.hostedRoutes {
+        if n == nonce {
+          s.hostedMu.RUnlock()
+          http.Redirect(w, r, "/"+slug+"/", http.StatusFound)
+          return
+        }
+      }
+      s.hostedMu.RUnlock()
+    }
     http.Redirect(w, r, "/control", http.StatusFound)
     return
   }
@@ -1899,32 +1910,59 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
   switch r.Method {
   case http.MethodGet:
-    svcIDStr, err := s.store.GetSetting("admin_auth_service")
-    result := map[string]interface{}{"admin_auth_service": nil}
-    if err == nil && svcIDStr != "" {
-      result["admin_auth_service"] = svcIDStr
+    result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil}
+    if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
+      result["admin_auth_service"] = v
+    }
+    if v, err := s.store.GetSetting("default_app"); err == nil && v != "" {
+      result["default_app"] = v
     }
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(result)
   case http.MethodPut:
     var body struct {
-      AdminAuthService string `json:"admin_auth_service"`
+      AdminAuthService *string `json:"admin_auth_service"`
+      DefaultApp       *string `json:"default_app"`
     }
     if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if body.AdminAuthService != "" {
-      if _, err := strconv.ParseInt(body.AdminAuthService, 10, 64); err != nil {
-        http.Error(w, "admin_auth_service must be a numeric service ID", http.StatusBadRequest)
+    if body.AdminAuthService != nil {
+      if *body.AdminAuthService != "" {
+        if _, err := strconv.ParseInt(*body.AdminAuthService, 10, 64); err != nil {
+          http.Error(w, "admin_auth_service must be a numeric service ID", http.StatusBadRequest)
+          return
+        }
+      }
+      if err := s.store.SetSetting("admin_auth_service", *body.AdminAuthService); err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
         return
       }
+      s.auditLog(r.Context(), "updated settings", "admin_auth_service")
     }
-    if err := s.store.SetSetting("admin_auth_service", body.AdminAuthService); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      return
+    if body.DefaultApp != nil {
+      if *body.DefaultApp != "" && *body.DefaultApp != "control" {
+        found := false
+        s.hostedMu.RLock()
+        for _, n := range s.hostedRoutes {
+          if n == *body.DefaultApp {
+            found = true
+            break
+          }
+        }
+        s.hostedMu.RUnlock()
+        if !found {
+          http.Error(w, "default_app must be a hosted app nonce or \"control\"", http.StatusBadRequest)
+          return
+        }
+      }
+      if err := s.store.SetSetting("default_app", *body.DefaultApp); err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+        return
+      }
+      s.auditLog(r.Context(), "updated settings", "default_app")
     }
-    s.auditLog(r.Context(), "updated settings", "admin_auth_service")
     w.WriteHeader(http.StatusNoContent)
   default:
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
