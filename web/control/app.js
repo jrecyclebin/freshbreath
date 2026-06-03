@@ -262,7 +262,7 @@ function LoginScreen({ serviceName, onLogin, authError }) {
         </div>
         <div className="login-foot">
           <span>admin panel</span>
-          <span>v{window.__HOMESLICE_CONFIG?.version || 'dev'}</span>
+          <span>{window.__HOMESLICE_CONFIG?.version || 'dev'}</span>
         </div>
       </aside>
       <main className="login-main">
