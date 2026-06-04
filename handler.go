@@ -751,7 +751,11 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
   // ── Parse request: JSON or multipart (for file uploads) ──────────────
   var taskName string
   var args map[string]interface{}
-  var fileArgs map[string][]byte // arg name → file bytes
+  type fileArg struct {
+    name string // original filename (e.g. "test.png")
+    data []byte
+  }
+  var fileArgs map[string]fileArg // arg name → file arg
 
   contentType := r.Header.Get("Content-Type")
   if strings.HasPrefix(contentType, "multipart/form-data") {
@@ -761,7 +765,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
       return
     }
     args = make(map[string]interface{})
-    fileArgs = make(map[string][]byte)
+    fileArgs = make(map[string]fileArg)
     for {
       part, err := reader.NextPart()
       if err == io.EOF {
@@ -777,7 +781,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
         taskName = strings.TrimSpace(string(b))
       } else if part.FileName() != "" {
         b, _ := io.ReadAll(part)
-        fileArgs[name] = b
+        fileArgs[name] = fileArg{name: part.FileName(), data: b}
       } else {
         b, _ := io.ReadAll(part)
         // Try to parse as JSON value; fall back to string.
@@ -844,13 +848,13 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
     }
     defer os.RemoveAll(tmpDir)
 
-    for name, data := range fileArgs {
-      fp := filepath.Join(tmpDir, name)
-      if err := os.WriteFile(fp, data, 0600); err != nil {
-        http.Error(w, fmt.Sprintf("Failed to write file arg %q", name), http.StatusInternalServerError)
+    for key, fa := range fileArgs {
+      fp := filepath.Join(tmpDir, fa.name)
+      if err := os.WriteFile(fp, fa.data, 0600); err != nil {
+        http.Error(w, fmt.Sprintf("Failed to write file arg %q", key), http.StatusInternalServerError)
         return
       }
-      env = append(env, "TASK_"+strings.ToUpper(name)+"="+fp)
+      env = append(env, "TASK_"+strings.ToUpper(key)+"="+fp)
     }
   }
 
