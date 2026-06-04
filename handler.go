@@ -18,6 +18,7 @@ import (
   "path/filepath"
   "sort"
   "strconv"
+  "runtime"
   "strings"
   "time"
 
@@ -34,7 +35,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
           return
         }
       } else if app, err := s.store.GetApp(nonce); err == nil && app.URL != "" {
-        if appURL, err := url.Parse(app.URL); err != nil || appURL.Scheme+"://"+appURL.Host != origin {
+        appURL, _ := url.Parse(app.URL)
+        appOrigin := appURL.Scheme + "://" + appURL.Host
+        if appOrigin == "://" {
+          // Absolute path (e.g. /import) — same-origin as the server
+          if u, err := url.Parse(s.config.PublicBaseURL); err == nil {
+            appOrigin = u.Scheme + "://" + u.Host
+          }
+        }
+        if appOrigin != origin {
           http.Error(w, "Origin not allowed", http.StatusForbidden)
           return
         }
@@ -859,7 +868,11 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
   }
 
   // ── Execute ─────────────────────────────────────────────────────────
-  cmd := exec.CommandContext(r.Context(), "sh", "-c", task.Script)
+  shell, flag := "sh", "-c"
+  if runtime.GOOS == "windows" {
+    shell, flag = "powershell", "-Command"
+  }
+  cmd := exec.CommandContext(r.Context(), shell, flag, task.Script)
   cmd.Env = env
 
   var stdout, stderr bytes.Buffer

@@ -655,8 +655,8 @@ function UsersView({ token, users, apps, onRefresh }) {
 }
 
 function UserDrawer({ user, token, apps, onClose, onSaved }) {
-  const { user: actor } = useAuth();
-  const canManageSSH = actor && (actor.role === 'Superuser' || actor.role === 'Admin');
+  const { user: actor, authRequired } = useAuth();
+  const canManageSSH = (!authRequired) || (actor && (actor.role === 'Superuser' || actor.role === 'Admin'));
   const [form,setForm] = useState({name:'',email:'',role:'Member',status:'Active',apps:[]});
   const [loading,setLoading] = useState(false);
   const [sshKey, setSSHKey] = useState(null);
@@ -1463,7 +1463,7 @@ function AuditView({ audit }) {
 
 // ── Settings ───────────────────────────────────────────────────────────
 
-function SettingsView({ token, services, apps }) {
+function SettingsView({ token, services, apps, user }) {
   const [selectedSvc, setSelectedSvc] = useState('');
   const [currentSvc, setCurrentSvc] = useState(null);
   const [defaultApp, setDefaultApp] = useState('');
@@ -1488,12 +1488,13 @@ function SettingsView({ token, services, apps }) {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (!user || user.id < 0) return;
     setSSHLoading(true);
     api(token, 'GET', '/api/me/ssh-key')
       .then(d => setSSHKey(d.ssh_key))
       .catch(() => setSSHKey(null))
       .finally(() => setSSHLoading(false));
-  }, []);
+  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const oidcServices = services.filter(s => s.descriptor?.type === 'oidc');
   const sshService = services.find(s => s.descriptor?.type === 'ssh');
@@ -1579,6 +1580,7 @@ function SettingsView({ token, services, apps }) {
         )}
       </div>
 
+      {user && user.id > 0 && (
       <div className="setting-section" style={{marginTop:32}}>
         <h3 className="setting-heading">SSH Key</h3>
         <p className="muted" style={{marginBottom:20,fontSize:13}}>
@@ -1609,6 +1611,7 @@ function SettingsView({ token, services, apps }) {
           <button className="btn btn-primary" onClick={() => setShowGenModal(true)}><Icon name="key" size={14}/> Generate SSH Key</button>
         )}
       </div>
+      )}
 
       {showGenModal && (
         <div className="modal-overlay" onClick={() => setShowGenModal(false)}>
@@ -1731,7 +1734,7 @@ function AppShell() {
         {active==='users'    && <UsersView token={token} users={users} apps={apps} onRefresh={load}/>}
         {active==='roles'    && <RolesView roles={roles}/>}
         {active==='audit'    && <AuditView audit={audit}/>}
-        {active==='settings' && <SettingsView token={token} services={services} apps={apps}/>}
+        {active==='settings' && <SettingsView token={token} services={services} apps={apps} user={user}/>}
       </main>
     </div>
   );

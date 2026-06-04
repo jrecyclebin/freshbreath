@@ -92,14 +92,14 @@ The server starts on `:9009` by default with an SQLite database at `./freshbreat
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FREBRE_DIR` | binary's directory | Where to find `web/` and `skills/` directories |
-| `FREBRE_DB_PATH` | `./freshbreath.db` | SQLite database file |
-| `FREBRE_BASE_URL` | auto-detected | Defaults to `http://localhost:9009` or `https://localhost:9009` depending on TLS. |
-| `FREBRE_LISTEN_ADDR` | `:9009` | HTTP bind address |
-| `FREBRE_TLS_CERT` | *(none)* | Path to TLS certificate (PEM) |
-| `FREBRE_TLS_KEY` | *(none)* | Path to TLS private key (PEM) |
+| `FRBR_DIR` | binary's directory | Where to find `web/` and `skills/` directories |
+| `FRBR_DB_PATH` | `./freshbreath.db` | SQLite database file |
+| `FRBR_BASE_URL` | auto-detected | Defaults to `http://localhost:9009` or `https://localhost:9009` depending on TLS. |
+| `FRBR_LISTEN_ADDR` | `:9009` | HTTP bind address |
+| `FRBR_TLS_CERT` | *(none)* | Path to TLS certificate (PEM) |
+| `FRBR_TLS_KEY` | *(none)* | Path to TLS private key (PEM) |
 
-When both `FREBRE_TLS_CERT` and `FREBRE_TLS_KEY` are provided, the server uses TLS (`https:`). Otherwise it serves plain HTTP.
+When both `FRBR_TLS_CERT` and `FRBR_TLS_KEY` are provided, the server uses TLS (`https:`). Otherwise it serves plain HTTP.
 
 ### TLS certificates
 
@@ -116,9 +116,9 @@ mkcert localhost 127.0.0.1 ::1
 
 Then set:
 ```bash
-FREBRE_TLS_CERT=./localhost+2.pem
-FREBRE_TLS_KEY=./localhost+2-key.pem
-FREBRE_BASE_URL=https://localhost:9009
+FRBR_TLS_CERT=./localhost+2.pem
+FRBR_TLS_KEY=./localhost+2-key.pem
+FRBR_BASE_URL=https://localhost:9009
 ```
 
 **For production** — Let's Encrypt:
@@ -126,7 +126,7 @@ FREBRE_BASE_URL=https://localhost:9009
 sudo certbot certonly --standalone -d freshbreath.poggers.institute
 # Certs land in /etc/letsencrypt/live/freshbreath.poggers.institute/
 ```
-Point `FREBRE_TLS_CERT` at `fullchain.pem` and `FREBRE_TLS_KEY` at `privkey.pem`. Add a cron job or systemd timer to run `certbot renew`.
+Point `FRBR_TLS_CERT` at `fullchain.pem` and `FRBR_TLS_KEY` at `privkey.pem`. Add a cron job or systemd timer to run `certbot renew`.
 
 Create a `.env` file in the project root — the server loads it automatically on startup.
 

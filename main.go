@@ -77,12 +77,12 @@ func main() {
   binDir, _ := filepath.EvalSymlinks(filepath.Dir(callerFile))
 
   cfg := Config{
-    Dir:           getEnv("FREBRE_DIR", binDir),
-    DBPath:        getEnv("FREBRE_DB_PATH", "./freshbreath.db"),
-    PublicBaseURL: getEnv("FREBRE_BASE_URL", ""),
-    ListenAddr:    getEnv("FREBRE_LISTEN_ADDR", ":9009"),
-    TLSCertFile:   getEnv("FREBRE_TLS_CERT", ""),
-    TLSKeyFile:    getEnv("FREBRE_TLS_KEY", ""),
+    Dir:           getEnv("FRBR_DIR", binDir),
+    DBPath:        getEnv("FRBR_DB_PATH", "./freshbreath.db"),
+    PublicBaseURL: getEnv("FRBR_BASE_URL", ""),
+    ListenAddr:    getEnv("FRBR_LISTEN_ADDR", ":9009"),
+    TLSCertFile:   getEnv("FRBR_TLS_CERT", ""),
+    TLSKeyFile:    getEnv("FRBR_TLS_KEY", ""),
   }
 
   tlsEnabled := cfg.TLSCertFile != "" && cfg.TLSKeyFile != ""

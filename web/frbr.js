@@ -377,5 +377,5 @@ export default ServiceProxy;
 
 // Expose to window for non-module consumers (e.g. the admin panel)
 if (typeof window !== 'undefined') {
-  window.FreshBreath = { login, load, ServiceProxy };
+  window.FreshBreath = window.FrBr = { login, load, ServiceProxy, Svc: ServiceProxy };
 }
