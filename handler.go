@@ -94,7 +94,7 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/service/refresh",  s.handleRefresh)
   s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
   s.mux.HandleFunc("/service/{id}/",   s.handleServiceProxy)
-  s.mux.HandleFunc("/service/task/{name}", s.handleTaskCall)
+  s.mux.HandleFunc("/service/call/{name}", s.handleServiceCall)
 
   // Admin API — role-gated
   superuser := requireAnyRole("Superuser")
@@ -684,7 +684,7 @@ func (s *Server) loadTasksForService(svc *Service) ([]Task, error) {
   return parseTasksFile(data), nil
 }
 
-func (s *Server) handleTaskCall(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
   // ── Auth & access ────────────────────────────────────────────────────
   nonce := r.Header.Get("X-App-Nonce")
   if nonce == "" {
@@ -694,10 +694,14 @@ func (s *Server) handleTaskCall(w http.ResponseWriter, r *http.Request) {
 
   slug := r.PathValue("name")
 
+  // Try tasks:// first, then /mcp/ for virtual services.
   svc, err := s.store.GetServiceByURL("tasks://" + slug)
   if err != nil {
-    http.Error(w, "Task service not found", http.StatusNotFound)
-    return
+    svc, err = s.store.GetServiceByURL("/mcp/" + slug)
+    if err != nil {
+      http.Error(w, "Service not found", http.StatusNotFound)
+      return
+    }
   }
 
   if nonce != s.adminNonce {
@@ -727,7 +731,18 @@ func (s *Server) handleTaskCall(w http.ResponseWriter, r *http.Request) {
     }
   }
 
-  // ── Route: GET = list tools, POST = call tool ────────────────────────
+  // ── Dispatch by service type ────────────────────────────────────
+  switch svc.Descriptor.Type {
+  case "tasks":
+    s.handleTaskCallInner(w, r, svc)
+  case "virtual":
+    s.handleVirtualCallInner(w, r, svc)
+  default:
+    http.Error(w, "Service type does not support /service/call", http.StatusBadRequest)
+  }
+}
+
+func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc *Service) {
   switch r.Method {
   case http.MethodGet:
     tasks, err := s.loadTasksForService(svc)
@@ -748,6 +763,82 @@ func (s *Server) handleTaskCall(w http.ResponseWriter, r *http.Request) {
   default:
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
   }
+}
+
+func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *Service) {
+  switch r.Method {
+  case http.MethodGet:
+    tools, err := loadVirtualTools(s.config.Dir, svc.Name)
+    if err != nil {
+      http.Error(w, err.Error(), http.StatusNotFound)
+      return
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{"tools": virtualToolSummaries(tools)})
+
+  case http.MethodPost:
+    s.handleVirtualExec(w, r, svc)
+
+  default:
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+  }
+}
+
+func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *Service) {
+  tools, err := loadVirtualTools(s.config.Dir, svc.Name)
+  if err != nil {
+    http.Error(w, err.Error(), http.StatusNotFound)
+    return
+  }
+
+  var body struct {
+    Task string                 `json:"task"`
+    Args map[string]interface{} `json:"args"`
+  }
+  if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+    http.Error(w, "Invalid JSON", http.StatusBadRequest)
+    return
+  }
+  if body.Task == "" {
+    http.Error(w, "Missing 'task' field", http.StatusBadRequest)
+    return
+  }
+
+  // Extract bearer token if present.
+  token := ""
+  if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+    token = strings.TrimPrefix(auth, "Bearer ")
+  }
+
+  result, err := executeVirtualTool(s.httpClient, tools, body.Task, body.Args, token)
+  if err != nil {
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+      "content": []map[string]interface{}{{
+        "type": "text",
+        "text": err.Error(),
+      }},
+      "isError": true,
+    })
+    return
+  }
+
+  // Wrap result in MCP-format response.
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(map[string]interface{}{
+    "content": []map[string]interface{}{{
+      "type": "text",
+      "text": mustJSON(result),
+    }},
+  })
+}
+
+func mustJSON(v interface{}) string {
+  b, err := json.Marshal(v)
+  if err != nil {
+    return fmt.Sprintf("%v", v)
+  }
+  return string(b)
 }
 
 func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Service) {
@@ -1425,13 +1516,17 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
     http.Error(w, "name required", http.StatusBadRequest)
     return
   }
-  if req.URL == "" && req.Descriptor.Type != "tasks" {
+  if req.URL == "" && req.Descriptor.Type != "tasks" && req.Descriptor.Type != "virtual" {
     http.Error(w, "url required", http.StatusBadRequest)
     return
   }
   // Tasks services don't have a remote URL — use a slugified name.
-  if req.URL == "" {
+  if req.URL == "" && req.Descriptor.Type == "tasks" {
     req.URL = "tasks://" + slugify(req.Name)
+  }
+  // Virtual services get a /mcp/ URL.
+  if req.URL == "" && req.Descriptor.Type == "virtual" {
+    req.URL = "/mcp/" + slugify(req.Name)
   }
 
   id, err := s.store.RegisterService(req.Name, req.URL, req.Descriptor)
@@ -1500,12 +1595,15 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "name required", http.StatusBadRequest)
       return
     }
-    if req.URL == "" && req.Descriptor.Type != "tasks" {
+    if req.URL == "" && req.Descriptor.Type != "tasks" && req.Descriptor.Type != "virtual" {
       http.Error(w, "url required", http.StatusBadRequest)
       return
     }
-    if req.URL == "" {
+    if req.URL == "" && req.Descriptor.Type == "tasks" {
       req.URL = "tasks://" + slugify(req.Name)
+    }
+    if req.URL == "" && req.Descriptor.Type == "virtual" {
+      req.URL = "/mcp/" + slugify(req.Name)
     }
     // Built-in SSH service: preserve name and URL
     if svc.Descriptor.Type == "ssh" {

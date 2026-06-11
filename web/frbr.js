@@ -272,12 +272,23 @@ export class ServiceProxy extends EventEmitter {
     }
   }
 
-  async listTools() {
+  // Returns the slug for task or virtual services, or null.
+  #serviceSlug() {
     if (this.#serviceURL?.startsWith('tasks://')) {
+      return this.#serviceURL.replace('tasks://', '');
+    }
+    if (this.#serviceURL?.startsWith('/mcp/')) {
+      return this.#serviceURL.replace('/mcp/', '');
+    }
+    return null;
+  }
+
+  async listTools() {
+    const slug = this.#serviceSlug();
+    if (slug) {
       const headers = { 'X-App-Nonce': this.#appNonce };
       this.addAuth(headers);
-      const slug = this.#serviceURL.replace('tasks://', '');
-      const r = await fetch(`${API}/service/task/${slug}`, { headers });
+      const r = await fetch(`${API}/service/call/${slug}`, { headers });
       if (!r.ok) throw new Error(`listTools failed (${r.status})`);
       const { tools } = await r.json();
       return tools;
@@ -289,7 +300,7 @@ export class ServiceProxy extends EventEmitter {
   }
 
   async callTool(name, args = {}) {
-    if (this.#serviceURL?.startsWith('tasks://')) {
+    if (this.#serviceSlug()) {
       return this.#callTask(name, args);
     }
     const result = await this.#withRetry(() => this.#client.callTool({ name, arguments: args }));
@@ -313,8 +324,8 @@ export class ServiceProxy extends EventEmitter {
   async #callTask(name, args) {
     const hasFiles = Object.values(args).some(v => v instanceof File || v instanceof Blob);
     const headers = { 'X-App-Nonce': this.#appNonce };
-    const slug = this.#serviceURL.replace('tasks://', '');
-    const url = `${API}/service/task/${slug}`;
+    const slug = this.#serviceSlug();
+    const url = `${API}/service/call/${slug}`;
     this.addAuth(headers);
 
     if (hasFiles) {

@@ -1,0 +1,111 @@
+[get-site] Resolve a SharePoint site URL to a site ID.
+
+$hostname = host($url)
+$pathname = path($url)
+GET https://graph.microsoft.com/v1.0/sites/$hostname:$pathname
+Authorization: Bearer $token
+
+HTTP 200
+---
+[get-lists] Fetch all non-hidden lists for a site.
+
+GET https://graph.microsoft.com/v1.0/sites/$site_id/lists?$$select=id,displayName,description,list&$$top=200
+Authorization: Bearer $token
+
+HTTP 200
+---
+[create-list] Create a new generic list on the site.
+
+POST https://graph.microsoft.com/v1.0/sites/$site_id/lists
+Authorization: Bearer $token
+Content-Type: application/json
+{
+  "displayName": $name,
+  "description": $description,
+  "list": {
+    "template": "genericList"
+  }
+}
+
+HTTP 201
+---
+[update-list] Update a list's display name and description.
+
+PATCH https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id
+Authorization: Bearer $token
+Content-Type: application/json
+{
+  "displayName": $name,
+  "description": $description
+}
+
+HTTP 200
+---
+[delete-list] Permanently delete a list and all its items.
+
+DELETE https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id
+Authorization: Bearer $token
+
+HTTP 204
+---
+[get-list-columns] Load all columns for a list (used to build the items table and add/edit forms).
+
+GET https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/columns?$$top=200
+Authorization: Bearer $token
+
+HTTP 200
+---
+[get-list-items] Load the first page of items with their fields expanded.
+# Captures next_link for use in [get-list-next] when there are >50 items.
+
+GET https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items?expand=fields&$$top=50
+Authorization: Bearer $token
+
+# $obj = $.value
+# $next_link = $['@odata']['nextLink']
+HTTP 200
+{
+  "value": $.value,
+  "next_link": $['@odata']['nextLink']
+}
+---
+[get-list-next] Fetch the next page of items using the @odata.nextLink from a previous response.
+
+assert(host($next_link) == "graph.microsoft.com", "Invalid nextLink")
+GET $next_link
+Authorization: Bearer $token
+
+HTTP 200
+---
+[add-list-item] Add a new item to a list.
+# Adjust the fields object to match your list's actual columns.
+
+POST https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items
+Authorization: Bearer $token
+Content-Type: application/json
+{
+  "fields": {
+    "Title": $title
+  }
+}
+
+HTTP 201
+---
+[update-list-item] Update fields on an existing item.
+# Adjust the body to match the columns you want to update.
+
+PATCH https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items/$item_id/fields
+Authorization: Bearer $token
+Content-Type: application/json
+{
+  "Title": $title
+}
+
+HTTP 200
+---
+[delete-list-item] Delete a single item from a list.
+
+DELETE https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items/$item_id
+Authorization: Bearer $token
+
+HTTP 204

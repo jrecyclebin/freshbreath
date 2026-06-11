@@ -1,7 +1,12 @@
 package main
 
 import (
+  "fmt"
+  "io"
+  "net/http"
+  "net/http/httptest"
   "os"
+  "strings"
   "testing"
 )
 
@@ -570,50 +575,6 @@ func TestResolveMultipleVarsInURL(t *testing.T) {
   }
 }
 
-// ── JSON Path Query Tests ────────────────────────────────────────────
-
-func TestJSONPathQuery(t *testing.T) {
-  scope := map[string]interface{}{
-    "value": []interface{}{"a", "b"},
-    "@odata": map[string]interface{}{
-      "nextLink": "https://example.com/next",
-    },
-  }
-
-  val, err := jsonPathQuery(scope, []string{"value"})
-  if err != nil {
-    t.Fatal(err)
-  }
-  arr, ok := val.([]interface{})
-  if !ok || len(arr) != 2 {
-    t.Errorf("value = %v", val)
-  }
-
-  val, err = jsonPathQuery(scope, []string{"@odata", "nextLink"})
-  if err != nil {
-    t.Fatal(err)
-  }
-  if val != "https://example.com/next" {
-    t.Errorf("nextLink = %v", val)
-  }
-}
-
-func TestJSONPathQueryNotFound(t *testing.T) {
-  scope := map[string]interface{}{"key": "value"}
-  _, err := jsonPathQuery(scope, []string{"missing"})
-  if err == nil {
-    t.Error("expected error for missing key")
-  }
-}
-
-func TestJSONPathQueryNotObject(t *testing.T) {
-  scope := "not an object"
-  _, err := jsonPathQuery(scope, []string{"key"})
-  if err == nil {
-    t.Error("expected error for non-object scope")
-  }
-}
-
 // ── Expression Evaluation Tests ──────────────────────────────────────
 
 func TestEvalExprHost(t *testing.T) {
@@ -733,4 +694,213 @@ func findTool(tools []VirtualTool, name string) *VirtualTool {
     }
   }
   return nil
+}
+
+// ── Executor tests ───────────────────────────────────────────────────
+
+func TestExecuteVirtualToolBasicGET(t *testing.T) {
+  // Spin up a test HTTP server.
+  called := false
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    called = true
+    if r.URL.Path != "/api/hello" {
+      t.Errorf("path = %q, want /api/hello", r.URL.Path)
+    }
+    if r.Header.Get("Authorization") != "Bearer test-token" {
+      t.Errorf("auth header = %q", r.Header.Get("Authorization"))
+    }
+    w.Header().Set("Content-Type", "application/json")
+    fmt.Fprintln(w, `{"message": "hello"}`)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[greet]
+GET %s/api/hello
+Authorization: Bearer $token
+HTTP 200
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  result, err := executeVirtualTool(http.DefaultClient, tools, "greet", nil, "test-token")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if !called {
+    t.Error("server was never called")
+  }
+  m, ok := result.(map[string]interface{})
+  if !ok {
+    t.Fatalf("result type = %T, want map", result)
+  }
+  if m["message"] != "hello" {
+    t.Errorf("message = %v, want hello", m["message"])
+  }
+}
+
+func TestExecuteVirtualToolPOSTWithBody(t *testing.T) {
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    if r.Method != "POST" {
+      t.Errorf("method = %q", r.Method)
+    }
+    body, _ := io.ReadAll(r.Body)
+    if !strings.Contains(string(body), `"name": "Ada"`) {
+      t.Errorf("body = %q", body)
+    }
+    w.Header().Set("Content-Type", "application/json")
+    fmt.Fprintln(w, `{"id": 42, "name": "Ada"}`)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[create]
+POST %s/api/items
+Content-Type: application/json
+
+{"name": $name}
+HTTP 200
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  result, err := executeVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"name": "Ada"}, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  m := result.(map[string]interface{})
+  if m["id"] != float64(42) {
+    t.Errorf("id = %v, want 42", m["id"])
+  }
+}
+
+func TestExecuteVirtualToolShaping(t *testing.T) {
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    fmt.Fprintln(w, `{"id": 1, "displayName": "My Site", "webUrl": "https://example.com"}`)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[get-site]
+GET %s/api/site
+HTTP 200
+{"name": $.displayName, "url": $.webUrl}
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  result, err := executeVirtualTool(http.DefaultClient, tools, "get-site", nil, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  m := result.(map[string]interface{})
+  if m["name"] != "My Site" {
+    t.Errorf("name = %v", m["name"])
+  }
+  if m["url"] != "https://example.com" {
+    t.Errorf("url = %v", m["url"])
+  }
+}
+
+func TestExecuteVirtualToolUnexpectedStatus(t *testing.T) {
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    w.WriteHeader(500)
+    fmt.Fprintln(w, `{"error": "boom"}`)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[oof]
+GET %s/api/oops
+HTTP 200
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  _, err = executeVirtualTool(http.DefaultClient, tools, "oof", nil, "")
+  if err == nil {
+    t.Fatal("expected error for 500")
+  }
+  if !strings.Contains(err.Error(), "unexpected status 500") {
+    t.Errorf("error = %v", err)
+  }
+}
+
+func TestExecuteVirtualToolAssignment(t *testing.T) {
+  reqNum := 0
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    reqNum++
+    if reqNum == 1 {
+      w.Header().Set("Content-Type", "application/json")
+      fmt.Fprintln(w, `{"siteId": "abc-123"}`)
+    } else {
+      if r.URL.Path != "/api/sites/abc-123/lists" {
+        t.Errorf("path = %q", r.URL.Path)
+      }
+      w.Header().Set("Content-Type", "application/json")
+      fmt.Fprintln(w, `{"lists": []}`)
+    }
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[get-lists]
+GET %s/api/site
+HTTP 200
+$site_id = $.siteId
+
+GET %s/api/sites/$site_id/lists
+HTTP 200
+`, srv.URL, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  result, err := executeVirtualTool(http.DefaultClient, tools, "get-lists", nil, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if reqNum != 2 {
+    t.Errorf("reqNum = %d, want 2", reqNum)
+  }
+  m := result.(map[string]interface{})
+  if m["lists"] == nil {
+    t.Error("expected lists key in result")
+  }
+}
+
+func TestExecuteVirtualToolAssertionFails(t *testing.T) {
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    w.Header().Set("Content-Type", "application/json")
+    fmt.Fprintln(w, `{"nextLink": "https://evil.com/next"}`)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[fetch]
+GET %s/api/page
+HTTP 200
+assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  _, err = executeVirtualTool(http.DefaultClient, tools, "fetch", nil, "")
+  if err == nil {
+    t.Fatal("assertion should have failed")
+  }
+  if !strings.Contains(err.Error(), "Invalid nextLink host") {
+    t.Errorf("error = %v", err)
+  }
+}
+
+func TestExecuteVirtualToolNotFound(t *testing.T) {
+  tools := []VirtualTool{{Name: "greet"}}
+  _, err := executeVirtualTool(http.DefaultClient, tools, "missing", nil, "")
+  if err == nil {
+    t.Fatal("expected error")
+  }
+  if !strings.Contains(err.Error(), `tool "missing" not found`) {
+    t.Errorf("error = %v", err)
+  }
 }

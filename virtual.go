@@ -1,13 +1,20 @@
 package main
 
 import (
+  "context"
   "encoding/json"
   "fmt"
+  "io"
+  "net/http"
   "net/url"
+  "os"
+  "path/filepath"
   "regexp"
   "strconv"
   "strings"
   "unicode"
+
+  "github.com/tidwall/gjson"
 )
 
 // ── Data Structures ──────────────────────────────────────────────────
@@ -201,6 +208,9 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) {
         shapingLines = []string{lines[i]}
         braceDepth = countBraces(line)
         if braceDepth <= 0 {
+          if block := step.Responses[lastHTTPStatus]; block != nil {
+            block.Shaping = strings.Join(shapingLines, "\n")
+          }
           shapingLines = nil
         } else {
           state = sShaping
@@ -442,21 +452,21 @@ func resolveVarRef(s string, vars map[string]interface{}, scope interface{}, tok
     return nil, 0, fmt.Errorf("lonely $ at end of string")
   }
 
-  // $.field.path — dot-notation JSON path
+  // $.field.path — dot-notation JSON path (gjson)
   if s[1] == '.' {
     path, consumed := parseDotPath(s[1:])
-    val, err := jsonPathQuery(scope, path)
+    val, err := gjsonQuery(scope, path)
     if err != nil {
       return nil, consumed + 1, err
     }
     return val, consumed + 1, nil
   }
 
-  // $['key'] — bracket-notation JSON path
+  // $['key'] — bracket-notation JSON path (gjson)
   if len(s) > 2 && s[1] == '[' {
     path, consumed := parseBracketPath(s[1:])
     if len(path) > 0 {
-      val, err := jsonPathQuery(scope, path)
+      val, err := gjsonQuery(scope, path)
       if err != nil {
         return nil, consumed + 1, err
       }
@@ -553,20 +563,19 @@ func encodeValue(val interface{}, mode ResolveMode) (string, error) {
 // ── JSON Path Queries ────────────────────────────────────────────────
 
 // jsonPathQuery navigates a JSON structure using path segments.
-func jsonPathQuery(root interface{}, path []string) (interface{}, error) {
-  cur := root
-  for _, key := range path {
-    m, ok := cur.(map[string]interface{})
-    if !ok {
-      return nil, fmt.Errorf("$.%s: not an object", strings.Join(path, "."))
-    }
-    next, ok := m[key]
-    if !ok {
-      return nil, fmt.Errorf("$.%s: key %q not found", strings.Join(path, "."), key)
-    }
-    cur = next
+// gjsonQuery resolves a JSON path against a scope using gjson.
+// path is the dot-separated keys (e.g. ["displayName", "webUrl"] → "displayName.webUrl").
+func gjsonQuery(scope interface{}, path []string) (interface{}, error) {
+  jsonBytes, err := json.Marshal(scope)
+  if err != nil {
+    return nil, fmt.Errorf("$.%s: marshal scope: %w", strings.Join(path, "."), err)
   }
-  return cur, nil
+  gjsonPath := strings.Join(path, ".")
+  result := gjson.GetBytes(jsonBytes, gjsonPath)
+  if !result.Exists() {
+    return nil, fmt.Errorf("$.%s: not found", gjsonPath)
+  }
+  return result.Value(), nil
 }
 
 // ── Expression Evaluation ────────────────────────────────────────────
@@ -711,4 +720,168 @@ func evalComparison(leftExpr, rightExpr, msg string, vars map[string]interface{}
     return fmt.Errorf("assertion failed: %v %s %v", lStr, op, rStr)
   }
   return nil
+}
+
+// ── Executor ─────────────────────────────────────────────────────────
+
+// loadVirtualTools reads and parses the virtual description file for a service.
+func loadVirtualTools(dir string, svcName string) ([]VirtualTool, error) {
+  path := filepath.Join(dir, "virtual", svcName+".txt")
+  data, err := os.ReadFile(path)
+  if err != nil {
+    return nil, fmt.Errorf("virtual file not found: %s", path)
+  }
+  return parseVirtualFile(data)
+}
+
+// findVirtualTool looks up a tool by name (case-insensitive).
+func findVirtualTool(tools []VirtualTool, name string) *VirtualTool {
+  for i := range tools {
+    if strings.EqualFold(tools[i].Name, name) {
+      return &tools[i]
+    }
+  }
+  return nil
+}
+
+// virtualToolSummaries returns lightweight tool descriptions for listing.
+func virtualToolSummaries(tools []VirtualTool) []map[string]string {
+  out := make([]map[string]string, len(tools))
+  for i, t := range tools {
+    out[i] = map[string]string{"name": t.Name, "description": t.Description}
+  }
+  return out
+}
+
+// executeVirtualTool runs a virtual tool's steps and returns the result.
+// The token comes from auth middleware context (or "" for unauthenticated calls).
+func executeVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, token string) (interface{}, error) {
+  tool := findVirtualTool(tools, toolName)
+  if tool == nil {
+    return nil, fmt.Errorf("tool %q not found", toolName)
+  }
+
+  vars := make(map[string]interface{})
+  scope := map[string]interface{}{}
+  // Input args become the initial scope for JSON path queries.
+  for k, v := range args {
+    scope[k] = v
+  }
+
+  for stepIdx, step := range tool.Steps {
+    // Execute assignments first.
+    for _, a := range step.Assignments {
+      val, err := evalExpr(a.Expr, vars, scope, token)
+      if err != nil {
+        return nil, fmt.Errorf("step %d, assignment $%s: %w", stepIdx, a.VarName, err)
+      }
+      vars[a.VarName] = val
+    }
+
+    // Run assertions.
+    for _, a := range step.Assertions {
+      if err := evalAssertion(a.Expr, a.Msg, vars, scope, token); err != nil {
+        return nil, fmt.Errorf("step %d: %w", stepIdx, err)
+      }
+    }
+
+    // Resolve URL, headers, body.
+    resolvedURL, err := resolveTemplate(step.URL, vars, scope, token, ResolveURL)
+    if err != nil {
+      return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
+    }
+
+    resolvedHeaders := make(map[string]string)
+    for k, v := range step.Headers {
+      resolved, err := resolveTemplate(v, vars, scope, token, ResolveHeader)
+      if err != nil {
+        return nil, fmt.Errorf("step %d, header %s: %w", stepIdx, k, err)
+      }
+      resolvedHeaders[k] = resolved
+    }
+
+    var bodyReader io.Reader
+    if step.Body != "" {
+      resolvedBody, err := resolveTemplate(step.Body, vars, scope, token, ResolveBody)
+      if err != nil {
+        return nil, fmt.Errorf("step %d, body: %w", stepIdx, err)
+      }
+      bodyReader = strings.NewReader(resolvedBody)
+    }
+
+    // Build the HTTP request.
+    req, err := http.NewRequestWithContext(context.Background(), step.Method, resolvedURL, bodyReader)
+    if err != nil {
+      return nil, fmt.Errorf("step %d: %w", stepIdx, err)
+    }
+    for k, v := range resolvedHeaders {
+      req.Header.Set(k, v)
+    }
+    if step.Body != "" {
+      req.Header.Set("Content-Type", "application/json")
+    }
+
+    resp, err := httpClient.Do(req)
+    if err != nil {
+      return nil, fmt.Errorf("step %d, request: %w", stepIdx, err)
+    }
+
+    // Read response body.
+    respBody, err := io.ReadAll(resp.Body)
+    resp.Body.Close()
+    if err != nil {
+      return nil, fmt.Errorf("step %d, read body: %w", stepIdx, err)
+    }
+
+    // Check status against expected responses.
+    vr, expected := step.Responses[resp.StatusCode]
+    if !expected {
+      var known []int
+      for code := range step.Responses {
+        known = append(known, code)
+      }
+      return nil, fmt.Errorf("step %d: unexpected status %d (expected %v), body: %s",
+        stepIdx, resp.StatusCode, known, truncate(string(respBody), 200))
+    }
+
+    // Parse response body into scope for the next step.
+    var parsed interface{}
+    if len(respBody) > 0 {
+      if err := json.Unmarshal(respBody, &parsed); err != nil {
+        return nil, fmt.Errorf("step %d, parse response: %w", stepIdx, err)
+      }
+    }
+    if m, ok := parsed.(map[string]interface{}); ok {
+      scope = m
+    } else {
+      // Non-object response: wrap under a "value" key so JSON path still works.
+      scope = map[string]interface{}{"value": parsed}
+    }
+
+    // Apply shaping if present.
+    if vr.Shaping != "" {
+      shaped, err := resolveTemplate(vr.Shaping, vars, scope, token, ResolveBody)
+      if err != nil {
+        return nil, fmt.Errorf("step %d, shaping: %w", stepIdx, err)
+      }
+      // Parse shaped output so we return structured data, not a string.
+      var shapedVal interface{}
+      if err := json.Unmarshal([]byte(shaped), &shapedVal); err != nil {
+        return nil, fmt.Errorf("step %d, shaping parse: %w", stepIdx, err)
+      }
+      return shapedVal, nil
+    }
+  }
+
+  // No shaping on the final step — return raw scope (the last response body).
+  return scope, nil
+}
+
+// truncate shortens s to maxRunes, appending "..." if truncated.
+func truncate(s string, maxRunes int) string {
+  runes := []rune(s)
+  if len(runes) <= maxRunes {
+    return s
+  }
+  return string(runes[:maxRunes]) + "..."
 }

@@ -485,9 +485,11 @@ const copyText = async (text, toast) => {
 
 function serviceInstructions(service) {
   if (service.descriptor?.type === "ssh") {
-    return `  - ssh (see the SSH guide in the 'freshbreath' skill)`
+    return `  - ${service.name} (see the SSH guide in the 'freshbreath' skill)`
   } else if (service.descriptor?.type === "tasks") {
     return `  - ${service.name} (see the tasks guide in the 'freshbreath' skill)`
+  } else if (service.descriptor?.type === "virtual") {
+    return `  - ${service.name} (MCP): "${service.url}"`
   }
   return `  - ${service.name} (${service.descriptor?.type?.toLocaleUpperCase()}): "${service.url}"`
 }
@@ -1260,13 +1262,16 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
 
   const updDesc = (k,v) => setForm(f=>({...f,descriptor:{...f.descriptor,[k]:v}}));
 
-  // When switching to tasks type, clear fields that don't apply
+  // When switching type, clear fields that don't apply
   const setType = (t) => {
     const d = {...form.descriptor, type: t};
     if (t === 'tasks') {
       delete d.auth; delete d.api_key; delete d.header; delete d.proxied;
       delete d.client_id; delete d.client_secret; delete d.oauth_url;
       delete d.scopes; delete d.userinfo_url; delete d.userinfo_emails_url;
+    } else if (t === 'virtual') {
+      delete d.auth; delete d.api_key; delete d.header; delete d.proxied;
+      delete d.auth_service_id; delete d.userinfo_url; delete d.userinfo_emails_url;
     } else {
       delete d.auth_service_id;
     }
@@ -1280,6 +1285,10 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
       if (payload.descriptor.type !== 'tasks' && payload.descriptor.auth_service_id) {
         const d = {...payload.descriptor}; delete d.auth_service_id; payload.descriptor = d;
       }
+      // Virtual services don't need a URL — server generates /mcp/{slug}
+      if (payload.descriptor.type === 'virtual') {
+        payload.url = '';
+      }
       if(isEdit) { await api(token, 'PUT','/api/services/'+service.id,payload); toast('Service updated'); }
       else { await api(token, 'POST','/api/services',payload); toast('Service created'); }
       onClose(); onSaved();
@@ -1288,6 +1297,7 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
 
   const isSSH = isEdit && service.descriptor?.type === 'ssh';
   const isTasks = form.descriptor.type === 'tasks';
+  const isVirtual = form.descriptor.type === 'virtual';
 
   // Auth service options for tasks: OIDC services + built-in SSH
   const oidcSvc = services.filter(s => s.descriptor?.type === 'oidc');
@@ -1307,17 +1317,17 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
       </>}
     >
       <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} disabled={isSSH}/></div>
-      {!isTasks && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>}
+      {!isTasks && !isVirtual && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>}
       {isSSH ? (
         <div className="field"><label>Type</label><Badge tone="purple">SSH</Badge></div>
       ) : (
       <div className="field-row">
         <div className="field"><label>Type</label>
           <select className="input" value={form.descriptor.type} onChange={e=>setType(e.target.value)}>
-            <option value="mcp">MCP</option><option value="api">API</option><option value="oidc">OIDC</option><option value="tasks">Tasks</option>
+            <option value="mcp">MCP</option><option value="api">API</option><option value="oidc">OIDC</option><option value="tasks">Tasks</option><option value="virtual">Virtual</option>
           </select>
         </div>
-        {!isTasks && <div className="field"><label>Proxied</label>
+        {!isTasks && !isVirtual && <div className="field"><label>Proxied</label>
           <select className="input" value={form.descriptor.proxied?'true':'false'} onChange={e=>updDesc('proxied',e.target.value==='true')}>
             <option value="false">No</option><option value="true">Yes</option>
           </select>
@@ -1353,7 +1363,7 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
           }
         </>
       )}
-      {(form.descriptor.type==='oidc' || (form.descriptor.type==='api' && !form.descriptor.auth)) && (
+      {(form.descriptor.type==='oidc' || (form.descriptor.type==='api' && !form.descriptor.auth) || form.descriptor.type==='virtual') && (
         <>
           <div className="field"><label>OAuth URL</label><input className="input mono" value={form.descriptor.oauth_url||''} onChange={e=>updDesc('oauth_url',e.target.value)} placeholder="https://provider.com/oauth"/></div>
           <div className="field-row">
