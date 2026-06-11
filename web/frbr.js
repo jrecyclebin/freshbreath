@@ -292,7 +292,17 @@ export class ServiceProxy extends EventEmitter {
     if (this.#serviceURL?.startsWith('tasks://')) {
       return this.#callTask(name, args);
     }
-    return this.#withRetry(() => this.#client.callTool({ name, arguments: args }));
+    const result = await this.#withRetry(() => this.#client.callTool({ name, arguments: args }));
+    const text = result.content
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('\n');
+    if (result.isError) throw new Error(`Tool error: ${text}`);
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
   }
 
   /**
