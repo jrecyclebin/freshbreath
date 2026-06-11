@@ -1,0 +1,688 @@
+package main
+
+import (
+  "encoding/json"
+  "fmt"
+  "net/url"
+  "regexp"
+  "strconv"
+  "strings"
+  "unicode"
+)
+
+// ── Data Structures ──────────────────────────────────────────────────
+
+// VirtualTool defines a single tool in a virtual service description.
+type VirtualTool struct {
+  Name        string
+  Description string
+  Steps       []VirtualStep
+}
+
+// VirtualStep is one HTTP request step within a tool's script.
+type VirtualStep struct {
+  Assignments []VirtualAssignment
+  Assertions  []VirtualAssertion
+  Method      string // GET, POST, PUT, PATCH, DELETE
+  URL         string // URL template with $variable interpolation
+  Headers     map[string]string
+  Body        string                   // Raw JSON body template
+  Responses   map[int]*VirtualResponse // Expected status → response handling
+}
+
+// VirtualAssignment binds a variable name to an expression.
+type VirtualAssignment struct {
+  VarName string // without the $
+  Expr    string // e.g. "host($url)", "$.value", "$['@odata']['nextLink']"
+}
+
+// VirtualAssertion is a safety check that must pass before proceeding.
+type VirtualAssertion struct {
+  Expr string // e.g. 'host($next_link) == "graph.microsoft.com"'
+  Msg  string // error message if the assertion fails
+}
+
+// VirtualResponse describes what to do after receiving a particular status code.
+type VirtualResponse struct {
+  Shaping string // Raw JSON template for response shaping
+}
+
+// ── Parser ───────────────────────────────────────────────────────────
+
+var toolNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
+// parseVirtualFile parses a virtual service description file into tools.
+// Tools are separated by --- delimiters and begin with [name] headers.
+func parseVirtualFile(data []byte) ([]VirtualTool, error) {
+  var tools []VirtualTool
+  var cur *VirtualTool
+  var curLines []string
+
+  flush := func() {
+    if cur != nil {
+      parseVirtualToolBody(cur, curLines)
+      tools = append(tools, *cur)
+    }
+    cur = nil
+    curLines = nil
+  }
+
+  for _, line := range strings.Split(string(data), "\n") {
+    trimmed := strings.TrimSpace(line)
+
+    if trimmed == "---" {
+      flush()
+      continue
+    }
+
+    if name, desc, ok := parseVirtualToolHeader(trimmed); ok {
+      flush()
+      cur = &VirtualTool{Name: name, Description: desc}
+      curLines = nil
+      continue
+    }
+
+    if cur != nil {
+      curLines = append(curLines, line)
+    }
+  }
+  flush()
+
+  return tools, nil
+}
+
+// parseVirtualToolHeader validates a [name] header for virtual tools.
+// Names must be valid identifiers (letters, digits, underscores, hyphens).
+func parseVirtualToolHeader(line string) (name, desc string, ok bool) {
+  name, desc, ok = parseTaskHeader(line)
+  if !ok || !toolNameRe.MatchString(name) {
+    return "", "", false
+  }
+  return name, desc, true
+}
+
+// parseVirtualToolBody parses the lines of a tool definition into steps.
+func parseVirtualToolBody(tool *VirtualTool, lines []string) {
+  var step *VirtualStep
+  var bodyLines, shapingLines []string
+  var braceDepth int
+  var lastHTTPStatus int
+
+  const (
+    sPre = iota
+    sHeaders
+    sBody
+    sResp
+    sShaping
+  )
+  state := sPre
+
+  newStep := func() {
+    if step != nil && (step.Method != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+      tool.Steps = append(tool.Steps, *step)
+    }
+    step = &VirtualStep{Responses: make(map[int]*VirtualResponse)}
+    state = sPre
+  }
+  newStep()
+
+  for i := 0; i < len(lines); i++ {
+    line := strings.TrimSpace(lines[i])
+
+    // Inside JSON blocks, only skip comment lines; preserve blanks
+    if state == sBody || state == sShaping {
+      if strings.HasPrefix(line, "#") {
+        continue
+      }
+    } else {
+      if line == "" || strings.HasPrefix(line, "#") {
+        continue
+      }
+    }
+
+    // In response/shaping states, detect start of a new step
+    if state == sResp || state == sShaping {
+      if isPreRequestLine(line) {
+        if state == sShaping && len(shapingLines) > 0 {
+          if block := step.Responses[lastHTTPStatus]; block != nil {
+            block.Shaping = strings.Join(shapingLines, "\n")
+          }
+          shapingLines = nil
+        }
+        newStep()
+      }
+    }
+
+    switch state {
+    case sPre:
+      if ok, vn, ex := tryParseAssignment(line); ok {
+        step.Assignments = append(step.Assignments, VirtualAssignment{VarName: vn, Expr: ex})
+      } else if ok, ex, msg := tryParseAssertion(line); ok {
+        step.Assertions = append(step.Assertions, VirtualAssertion{Expr: ex, Msg: msg})
+      } else if ok, m, u := tryParseRequest(line); ok {
+        step.Method = m
+        step.URL = u
+        state = sHeaders
+      }
+
+    case sHeaders:
+      if strings.HasPrefix(line, "{") {
+        bodyLines = []string{lines[i]}
+        braceDepth = countBraces(line)
+        if braceDepth <= 0 {
+          step.Body = strings.Join(bodyLines, "\n")
+          bodyLines = nil
+          state = sResp
+        } else {
+          state = sBody
+        }
+      } else if ok, code := tryParseHTTPStatus(line); ok {
+        step.Responses[code] = &VirtualResponse{}
+        lastHTTPStatus = code
+        state = sResp
+      } else if k, v, ok := parseHeaderLine(line); ok {
+        if step.Headers == nil {
+          step.Headers = make(map[string]string)
+        }
+        step.Headers[k] = v
+      }
+
+    case sBody:
+      bodyLines = append(bodyLines, lines[i])
+      braceDepth += countBraces(line)
+      if braceDepth <= 0 {
+        step.Body = strings.Join(bodyLines, "\n")
+        bodyLines = nil
+        state = sResp
+      }
+
+    case sResp:
+      if strings.HasPrefix(line, "{") {
+        shapingLines = []string{lines[i]}
+        braceDepth = countBraces(line)
+        if braceDepth <= 0 {
+          shapingLines = nil
+        } else {
+          state = sShaping
+        }
+      } else if ok, code := tryParseHTTPStatus(line); ok {
+        step.Responses[code] = &VirtualResponse{}
+        lastHTTPStatus = code
+      }
+
+    case sShaping:
+      shapingLines = append(shapingLines, lines[i])
+      braceDepth += countBraces(line)
+      if braceDepth <= 0 {
+        if block := step.Responses[lastHTTPStatus]; block != nil {
+          block.Shaping = strings.Join(shapingLines, "\n")
+        }
+        shapingLines = nil
+        state = sResp
+      }
+    }
+  }
+
+  // Finalize any open shaping block
+  if state == sShaping && len(shapingLines) > 0 {
+    if block := step.Responses[lastHTTPStatus]; block != nil {
+      block.Shaping = strings.Join(shapingLines, "\n")
+    }
+  }
+
+  // Finalize last step
+  if step != nil && (step.Method != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+    tool.Steps = append(tool.Steps, *step)
+  }
+}
+
+// ── Line Classifiers ─────────────────────────────────────────────────
+
+var identRe = regexp.MustCompile(`^[a-zA-Z_]\w*$`)
+
+func tryParseAssignment(line string) (ok bool, varName, expr string) {
+  if !strings.HasPrefix(line, "$") {
+    return false, "", ""
+  }
+  rest := line[1:]
+  eqIdx := strings.Index(rest, " = ")
+  if eqIdx < 0 {
+    return false, "", ""
+  }
+  name := rest[:eqIdx]
+  if !identRe.MatchString(name) {
+    return false, "", ""
+  }
+  return true, name, strings.TrimSpace(rest[eqIdx+3:])
+}
+
+func tryParseAssertion(line string) (ok bool, expr, msg string) {
+  if !strings.HasPrefix(line, "assert(") || !strings.HasSuffix(line, ")") {
+    return false, "", ""
+  }
+  inner := line[7 : len(line)-1]
+
+  // Find the last top-level comma to split expr from message.
+  // The message is always a string literal at the end.
+  depth := 0
+  lastComma := -1
+  for i, ch := range inner {
+    switch ch {
+    case '(', '[', '{':
+      depth++
+    case ')', ']', '}':
+      depth--
+    case ',':
+      if depth == 0 {
+        lastComma = i
+      }
+    }
+  }
+  if lastComma < 0 {
+    return true, inner, ""
+  }
+  expr = strings.TrimSpace(inner[:lastComma])
+  msg = strings.TrimSpace(inner[lastComma+1:])
+  msg = strings.Trim(msg, "\"")
+  return true, expr, msg
+}
+
+func tryParseRequest(line string) (ok bool, method, reqURL string) {
+  for _, m := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+    if strings.HasPrefix(line, m+" ") {
+      return true, m, strings.TrimSpace(line[len(m)+1:])
+    }
+  }
+  return false, "", ""
+}
+
+func tryParseHTTPStatus(line string) (ok bool, code int) {
+  if !strings.HasPrefix(line, "HTTP ") {
+    return false, 0
+  }
+  rest := strings.TrimSpace(line[5:])
+  parts := strings.SplitN(rest, " ", 2)
+  n, err := strconv.Atoi(parts[0])
+  if err != nil {
+    return false, 0
+  }
+  return true, n
+}
+
+func parseHeaderLine(line string) (key, value string, ok bool) {
+  idx := strings.Index(line, ":")
+  if idx < 1 {
+    return "", "", false
+  }
+  key = strings.TrimSpace(line[:idx])
+  value = strings.TrimSpace(line[idx+1:])
+  // Header keys start with a letter (Authorization, Content-Type, etc.)
+  if len(key) == 0 || !unicode.IsLetter(rune(key[0])) {
+    return "", "", false
+  }
+  return key, value, true
+}
+
+func isPreRequestLine(line string) bool {
+  if ok, _, _ := tryParseAssignment(line); ok {
+    return true
+  }
+  if ok, _, _ := tryParseAssertion(line); ok {
+    return true
+  }
+  if ok, _, _ := tryParseRequest(line); ok {
+    return true
+  }
+  return false
+}
+
+func countBraces(s string) int {
+  d := 0
+  for _, ch := range s {
+    if ch == '{' { d++ }
+    if ch == '}' { d-- }
+  }
+  return d
+}
+
+// ── Variable Resolution ──────────────────────────────────────────────
+
+// ResolveMode controls how variable values are encoded when substituted into a template.
+type ResolveMode int
+
+const (
+  ResolveURL    ResolveMode = iota // Raw string substitution, $$ → $
+  ResolveBody                      // JSON-encode values; skip $ inside JSON strings
+  ResolveHeader                    // Raw string substitution
+)
+
+// resolveTemplate replaces $variable references in a template string.
+func resolveTemplate(tmpl string, vars map[string]interface{}, scope interface{}, token string, mode ResolveMode) (string, error) {
+  var b strings.Builder
+  i := 0
+  inString := false
+
+  for i < len(tmpl) {
+    ch := tmpl[i]
+
+    // In body mode, track JSON string boundaries so $ inside
+    // quoted strings stays literal.
+    if mode == ResolveBody {
+      if ch == '"' && (i == 0 || tmpl[i-1] != '\\') {
+        inString = !inString
+        b.WriteByte(ch)
+        i++
+        continue
+      }
+      if inString {
+        b.WriteByte(ch)
+        i++
+        continue
+      }
+    }
+
+    if ch != '$' {
+      b.WriteByte(ch)
+      i++
+      continue
+    }
+
+    // $$ → literal $ (URL mode)
+    if mode == ResolveURL && i+1 < len(tmpl) && tmpl[i+1] == '$' {
+      b.WriteByte('$')
+      i += 2
+      continue
+    }
+
+    // Resolve variable reference starting at $
+    val, consumed, err := resolveVarRef(tmpl[i:], vars, scope, token)
+    if err != nil {
+      return "", fmt.Errorf("position %d: %w", i, err)
+    }
+
+    encoded, err := encodeValue(val, mode)
+    if err != nil {
+      return "", err
+    }
+    b.WriteString(encoded)
+    i += consumed
+  }
+
+  return b.String(), nil
+}
+
+// resolveVarRef parses a variable reference starting at $ and returns
+// the resolved value and the number of characters consumed.
+func resolveVarRef(s string, vars map[string]interface{}, scope interface{}, token string) (interface{}, int, error) {
+  if len(s) < 2 {
+    return nil, 0, fmt.Errorf("lonely $ at end of string")
+  }
+
+  // $.field.path — dot-notation JSON path
+  if s[1] == '.' {
+    path, consumed := parseDotPath(s[1:])
+    val, err := jsonPathQuery(scope, path)
+    if err != nil {
+      return nil, consumed + 1, err
+    }
+    return val, consumed + 1, nil
+  }
+
+  // $['key'] — bracket-notation JSON path
+  if len(s) > 2 && s[1] == '[' {
+    path, consumed := parseBracketPath(s[1:])
+    if len(path) > 0 {
+      val, err := jsonPathQuery(scope, path)
+      if err != nil {
+        return nil, consumed + 1, err
+      }
+      return val, consumed + 1, nil
+    }
+  }
+
+  // $name — plain variable lookup
+  name, consumed := parseIdent(s[1:])
+  if name == "" {
+    return nil, 0, fmt.Errorf("invalid variable reference after $")
+  }
+  total := consumed + 1
+
+  // Special: $token from auth context
+  if name == "token" && token != "" {
+    return token, total, nil
+  }
+
+  // Look up in assigned variables
+  if val, ok := vars[name]; ok {
+    return val, total, nil
+  }
+
+  // Look up in scope (input args before first request, response after)
+  if m, ok := scope.(map[string]interface{}); ok {
+    if val, ok := m[name]; ok {
+      return val, total, nil
+    }
+  }
+
+  return nil, 0, fmt.Errorf("undefined variable: $%s", name)
+}
+
+func parseDotPath(s string) ([]string, int) {
+  var segs []string
+  i := 0
+  for i < len(s) && s[i] == '.' {
+    i++ // skip dot
+    name, consumed := parseIdent(s[i:])
+    if name == "" {
+      break
+    }
+    segs = append(segs, name)
+    i += consumed
+  }
+  return segs, i
+}
+
+func parseBracketPath(s string) ([]string, int) {
+  var segs []string
+  i := 0
+  for i < len(s) && s[i] == '[' {
+    if i+1 >= len(s) || s[i+1] != '\'' {
+      break
+    }
+    closeIdx := strings.Index(s[i+2:], "']")
+    if closeIdx < 0 {
+      break
+    }
+    key := s[i+2 : i+2+closeIdx]
+    segs = append(segs, key)
+    i += 2 + closeIdx + 2 // [ ' key ' ]
+  }
+  return segs, i
+}
+
+func parseIdent(s string) (string, int) {
+  for i, r := range s {
+    if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+      return s[:i], i
+    }
+  }
+  return s, len(s)
+}
+
+func encodeValue(val interface{}, mode ResolveMode) (string, error) {
+  switch mode {
+  case ResolveURL, ResolveHeader:
+    return fmt.Sprintf("%v", val), nil
+  case ResolveBody:
+    j, err := json.Marshal(val)
+    if err != nil {
+      return "", err
+    }
+    return string(j), nil
+  default:
+    return fmt.Sprintf("%v", val), nil
+  }
+}
+
+// ── JSON Path Queries ────────────────────────────────────────────────
+
+// jsonPathQuery navigates a JSON structure using path segments.
+func jsonPathQuery(root interface{}, path []string) (interface{}, error) {
+  cur := root
+  for _, key := range path {
+    m, ok := cur.(map[string]interface{})
+    if !ok {
+      return nil, fmt.Errorf("$.%s: not an object", strings.Join(path, "."))
+    }
+    next, ok := m[key]
+    if !ok {
+      return nil, fmt.Errorf("$.%s: key %q not found", strings.Join(path, "."), key)
+    }
+    cur = next
+  }
+  return cur, nil
+}
+
+// ── Expression Evaluation ────────────────────────────────────────────
+
+// evalExpr evaluates an expression string and returns its value.
+func evalExpr(expr string, vars map[string]interface{}, scope interface{}, token string) (interface{}, error) {
+  expr = strings.TrimSpace(expr)
+
+  // Function call: name(args)
+  if idx := strings.Index(expr, "("); idx > 0 && strings.HasSuffix(expr, ")") {
+    fnName := expr[:idx]
+    argsStr := expr[idx+1 : len(expr)-1]
+    return evalFunction(fnName, argsStr, vars, scope, token)
+  }
+
+  // JSON path or variable: $.field, $['key'], $name
+  if strings.HasPrefix(expr, "$") {
+    val, _, err := resolveVarRef(expr, vars, scope, token)
+    return val, err
+  }
+
+  // String literal
+  if len(expr) >= 2 && expr[0] == '"' && expr[len(expr)-1] == '"' {
+    return expr[1 : len(expr)-1], nil
+  }
+
+  // Number literal
+  if n, err := strconv.ParseInt(expr, 10, 64); err == nil {
+    return n, nil
+  }
+
+  return nil, fmt.Errorf("unsupported expression: %s", expr)
+}
+
+func evalFunction(name, argsStr string, vars map[string]interface{}, scope interface{}, token string) (interface{}, error) {
+  args := splitFunctionArgs(argsStr)
+  resolved := make([]interface{}, len(args))
+  for i, arg := range args {
+    val, err := evalExpr(strings.TrimSpace(arg), vars, scope, token)
+    if err != nil {
+      return nil, fmt.Errorf("%s arg %d: %w", name, i+1, err)
+    }
+    resolved[i] = val
+  }
+
+  switch name {
+  case "host":
+    if len(resolved) != 1 {
+      return nil, fmt.Errorf("host() takes 1 argument, got %d", len(resolved))
+    }
+    u, err := url.Parse(fmt.Sprintf("%v", resolved[0]))
+    if err != nil {
+      return nil, fmt.Errorf("host(): %w", err)
+    }
+    return u.Host, nil
+  case "path":
+    if len(resolved) != 1 {
+      return nil, fmt.Errorf("path() takes 1 argument, got %d", len(resolved))
+    }
+    u, err := url.Parse(fmt.Sprintf("%v", resolved[0]))
+    if err != nil {
+      return nil, fmt.Errorf("path(): %w", err)
+    }
+    return u.Path, nil
+  default:
+    return nil, fmt.Errorf("unknown function: %s", name)
+  }
+}
+
+// splitFunctionArgs splits a comma-separated argument list, respecting nesting.
+func splitFunctionArgs(s string) []string {
+  var args []string
+  depth := 0
+  start := 0
+  for i, ch := range s {
+    switch ch {
+    case '(', '[', '{':
+      depth++
+    case ')', ']', '}':
+      depth--
+    case ',':
+      if depth == 0 {
+        args = append(args, s[start:i])
+        start = i + 1
+      }
+    }
+  }
+  if start < len(s) {
+    args = append(args, s[start:])
+  }
+  return args
+}
+
+// ── Assertion Evaluation ─────────────────────────────────────────────
+
+// evalAssertion evaluates an assertion expression. Returns nil on success.
+func evalAssertion(expr, msg string, vars map[string]interface{}, scope interface{}, token string) error {
+  if parts := splitComparison(expr, "=="); len(parts) == 2 {
+    return evalComparison(parts[0], parts[1], msg, vars, scope, token, false)
+  }
+  if parts := splitComparison(expr, "!="); len(parts) == 2 {
+    return evalComparison(parts[0], parts[1], msg, vars, scope, token, true)
+  }
+  return fmt.Errorf("unsupported assertion: %s", expr)
+}
+
+func splitComparison(expr, op string) []string {
+  search := " " + op + " "
+  idx := strings.Index(expr, search)
+  if idx < 0 {
+    return nil
+  }
+  return []string{
+    strings.TrimSpace(expr[:idx]),
+    strings.TrimSpace(expr[idx+len(search):]),
+  }
+}
+
+func evalComparison(leftExpr, rightExpr, msg string, vars map[string]interface{}, scope interface{}, token string, negate bool) error {
+  left, err := evalExpr(leftExpr, vars, scope, token)
+  if err != nil {
+    return fmt.Errorf("%s: %w", msg, err)
+  }
+  right, err := evalExpr(rightExpr, vars, scope, token)
+  if err != nil {
+    return fmt.Errorf("%s: %w", msg, err)
+  }
+  lStr := fmt.Sprintf("%v", left)
+  rStr := fmt.Sprintf("%v", right)
+  eq := lStr == rStr
+  if negate {
+    eq = !eq
+  }
+  if !eq {
+    op := "=="
+    if negate {
+      op = "!="
+    }
+    if msg != "" {
+      return fmt.Errorf("%s (%v %s %v)", msg, lStr, op, rStr)
+    }
+    return fmt.Errorf("assertion failed: %v %s %v", lStr, op, rStr)
+  }
+  return nil
+}
