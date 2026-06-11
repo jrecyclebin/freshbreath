@@ -55,28 +55,29 @@ Add a `virtual` service type to Freshbreath that wraps API calls in an MCP tool 
 - [x] Implement JSON path query evaluation: `$.field`, `$['key']['subkey']`
 - [x] Implement variable resolution: plain variables ($name) and JSON path queries ($[...])
 - [x] URL-encode variables in URL positions; JSON-encode variables in JSON body positions
-  - Note: URL mode uses raw string substitution (not QueryEscape) to preserve path
-    structure; JSON-encode in body mode works correctly via json.Marshal
+  - URL mode splits at '?': path portion stays raw, query values pass through
+    url.QueryEscape; JSON-encode in body mode works correctly via json.Marshal
+  - Uses gjson library for JSON path queries
 
-## Phase 2: Backend — HTTP Executor & Route Generalization
+## Phase 2: Backend — HTTP Executor & Route Generalization ✅
 
-- [ ] Implement the virtual HTTP executor
-  - [ ] Execute variable assignments as they occur
-  - [ ] Prior to requests, JSON path queries access the incoming arguments
+- [x] Implement the virtual HTTP executor
+  - [x] Execute variable assignments as they occur
+  - [x] Prior to requests, JSON path queries access the incoming arguments
      (i.e. `$.token` and `$.arg_name` both work and are useful for complex
      object arguments.)
-  - [ ] Step execution: resolve variables in URL/headers/body, make HTTP request
-  - [ ] Check response status against assertion (e.g. `HTTP 200`)
-  - [ ] Support multiple response code blocks after a request (branching)
-  - [ ] Bring response body into scope for JSON path queries
-  - [ ] Apply response shaping (if present) to produce tool output
-  - [ ] If no shaping, return raw response body
-- [ ] Rename `/service/task/{name}` → `/service/call/{name}`
-- [ ] Generalize `handleTaskCall` → `handleServiceCall` dispatching by service type
-  - [ ] Tasks → shell executor (existing)
-  - [ ] Virtual → HTTP executor (new)
-- [ ] Update `handleCreateService` / `handleServiceDetail` for virtual type with `/mcp/` URLs
-- [ ] Update `handleLogin` to reject virtual services (like tasks)
+  - [x] Step execution: resolve variables in URL/headers/body, make HTTP request
+  - [x] Check response status against assertion (e.g. `HTTP 200`)
+  - [x] Support multiple response code blocks after a request (branching)
+  - [x] Bring response body into scope for JSON path queries
+  - [x] Apply response shaping (if present) to produce tool output
+  - [x] If no shaping, return raw response body
+- [x] Rename `/service/task/{name}` → `/service/call/{name}`
+- [x] Generalize `handleTaskCall` → `handleServiceCall` dispatching by service type
+  - [x] Tasks → shell executor (existing)
+  - [x] Virtual → HTTP executor (new)
+- [x] Update `handleCreateService` / `handleServiceDetail` for virtual type with `/mcp/` URLs
+- [x] Virtual services use login (same as API type — they need $token for upstream auth)
 
 ## Phase 3: Backend — MCP Server Endpoint (Go MCP SDK)
 
