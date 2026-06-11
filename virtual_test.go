@@ -392,6 +392,66 @@ func TestResolveDollarDollarWithVars(t *testing.T) {
   }
 }
 
+func TestResolveURLQueryEscape(t *testing.T) {
+  // Variables in the query string should be escaped.
+  vars := map[string]interface{}{"folder": "My Documents", "site_id": "abc-123"}
+  result, err := resolveTemplate(
+    "https://graph.microsoft.com/v1.0/sites/$site_id/drive/root/children?path=$folder",
+    vars, nil, "", ResolveURL,
+  )
+  if err != nil {
+    t.Fatal(err)
+  }
+  if result != "https://graph.microsoft.com/v1.0/sites/abc-123/drive/root/children?path=My+Documents" {
+    t.Errorf("result = %q", result)
+  }
+}
+
+func TestResolveURLQueryEscapeSpecialChars(t *testing.T) {
+  // Ampersands, equals, and spaces in query values must be escaped.
+  vars := map[string]interface{}{"q": "hello & goodbye", "site_id": "abc"}
+  result, err := resolveTemplate(
+    "https://graph.microsoft.com/v1.0/sites/$site_id/search?query=$q",
+    vars, nil, "", ResolveURL,
+  )
+  if err != nil {
+    t.Fatal(err)
+  }
+  if result != "https://graph.microsoft.com/v1.0/sites/abc/search?query=hello+%26+goodbye" {
+    t.Errorf("result = %q", result)
+  }
+}
+
+func TestResolveURLQueryNoEscapePath(t *testing.T) {
+  // Path variables stay raw even when the URL also has a query string.
+  vars := map[string]interface{}{"site_id": "contoso.sharepoint.com:/sites/My Site", "top": "10"}
+  result, err := resolveTemplate(
+    "https://graph.microsoft.com/v1.0/sites/$site_id/lists?$$top=$top",
+    vars, nil, "", ResolveURL,
+  )
+  if err != nil {
+    t.Fatal(err)
+  }
+  if result != "https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/My Site/lists?$top=10" {
+    t.Errorf("result = %q", result)
+  }
+}
+
+func TestResolveURLNoQuery(t *testing.T) {
+  // URLs without a query string should still resolve path variables.
+  vars := map[string]interface{}{"site_id": "abc-123"}
+  result, err := resolveTemplate(
+    "https://graph.microsoft.com/v1.0/sites/$site_id",
+    vars, nil, "", ResolveURL,
+  )
+  if err != nil {
+    t.Fatal(err)
+  }
+  if result != "https://graph.microsoft.com/v1.0/sites/abc-123" {
+    t.Errorf("result = %q", result)
+  }
+}
+
 func TestResolveBodyStrings(t *testing.T) {
   vars := map[string]interface{}{
     "name": "My List",

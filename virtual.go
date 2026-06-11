@@ -351,13 +351,37 @@ func countBraces(s string) int {
 type ResolveMode int
 
 const (
-  ResolveURL    ResolveMode = iota // Raw string substitution, $$ → $
+  ResolveURL    ResolveMode = iota // Split path/query; query values escaped
   ResolveBody                      // JSON-encode values; skip $ inside JSON strings
   ResolveHeader                    // Raw string substitution
+
+  resolvePath  // Internal: raw substitution, $$ → $
+  resolveQuery // Internal: QueryEscape values, $$ → $
 )
 
 // resolveTemplate replaces $variable references in a template string.
 func resolveTemplate(tmpl string, vars map[string]interface{}, scope interface{}, token string, mode ResolveMode) (string, error) {
+  // For URL mode, split path and query so query values get escaped.
+  if mode == ResolveURL {
+    qIdx := strings.Index(tmpl, "?")
+    if qIdx == -1 {
+      return resolveTemplateInner(tmpl, vars, scope, token, resolvePath)
+    }
+    path, err := resolveTemplateInner(tmpl[:qIdx], vars, scope, token, resolvePath)
+    if err != nil {
+      return "", err
+    }
+    query, err := resolveTemplateInner(tmpl[qIdx+1:], vars, scope, token, resolveQuery)
+    if err != nil {
+      return "", err
+    }
+    return path + "?" + query, nil
+  }
+  return resolveTemplateInner(tmpl, vars, scope, token, mode)
+}
+
+// resolveTemplateInner does the actual variable replacement.
+func resolveTemplateInner(tmpl string, vars map[string]interface{}, scope interface{}, token string, mode ResolveMode) (string, error) {
   var b strings.Builder
   i := 0
   inString := false
@@ -387,8 +411,8 @@ func resolveTemplate(tmpl string, vars map[string]interface{}, scope interface{}
       continue
     }
 
-    // $$ → literal $ (URL mode)
-    if mode == ResolveURL && i+1 < len(tmpl) && tmpl[i+1] == '$' {
+    // $$ → literal $ (path and query modes)
+    if (mode == resolvePath || mode == resolveQuery) && i+1 < len(tmpl) && tmpl[i+1] == '$' {
       b.WriteByte('$')
       i += 2
       continue
@@ -511,8 +535,10 @@ func parseIdent(s string) (string, int) {
 
 func encodeValue(val interface{}, mode ResolveMode) (string, error) {
   switch mode {
-  case ResolveURL, ResolveHeader:
+  case ResolveURL, resolvePath, ResolveHeader:
     return fmt.Sprintf("%v", val), nil
+  case resolveQuery:
+    return url.QueryEscape(fmt.Sprintf("%v", val)), nil
   case ResolveBody:
     j, err := json.Marshal(val)
     if err != nil {
