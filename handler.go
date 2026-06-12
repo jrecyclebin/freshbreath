@@ -4,6 +4,7 @@ import (
   "archive/zip"
   "bytes"
   "context"
+  "crypto/rand"
   "encoding/base64"
   "encoding/json"
   "errors"
@@ -99,6 +100,14 @@ func (s *Server) SetupRoutes() {
   // MCP endpoints for virtual services — single routes dispatch by slug
   s.mux.HandleFunc("/mcp/{name}", s.handleMCP)
   s.mux.HandleFunc("/.well-known/oauth-protected-resource/mcp/{name}", s.handleMCPPRM)
+
+  // OAuth authorization server endpoints (Freshbreath acts as auth server for MCP clients)
+  s.mux.HandleFunc("/.well-known/oauth-authorization-server", s.oauthSrv.handleMetadata)
+  s.mux.HandleFunc("/.well-known/oauth-authorization-server/", s.oauthSrv.handleMetadata) // resource-specific path
+  s.mux.HandleFunc("/oauth/register", s.oauthSrv.handleRegister)
+  s.mux.HandleFunc("/oauth/authorize", s.oauthSrv.handleAuthorize)
+  s.mux.HandleFunc("/oauth/token", s.oauthSrv.handleToken)
+  s.mux.HandleFunc("/oauth/jwks", s.oauthSrv.handleJWKS)
 
   // Admin API — role-gated
   superuser := requireAnyRole("Superuser")
@@ -321,6 +330,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
     return
   }
 
+  // MCP auth flows must go through /oauth/authorize, not /service/login.
+  if strings.HasPrefix(nonce, "mcp:") {
+    http.Error(w, "MCP auth flows must use /oauth/authorize", http.StatusBadRequest)
+    return
+  }
+
   // Admin nonce is ephemeral (not in the apps table).
   // Regular app nonces must resolve to a registered app.
   isAdmin := nonce == s.adminNonce
@@ -471,6 +486,98 @@ func (s *Server) completeAuth(w http.ResponseWriter, pending *pendingAuth, oauth
   writeCallbackPage(w, pending.appState, pending.appNonce, pending.serviceID, pending.serviceURL, oauth)
 }
 
+// completeMCPAuth handles the callback for MCP OAuth flows.
+// Exchanges the upstream code, stores the upstream token in the mcpPendingAuth,
+// generates a Freshbreath auth code, and redirects to the MCP client's redirect_uri.
+func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, code string) {
+  // The appNonce is "mcp:<key>" — extract the key to find our mcpPendingAuth.
+  mcpKey := strings.TrimPrefix(pending.appNonce, "mcp:")
+  mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(mcpKey)
+  if !ok {
+    http.Error(w, "MCP auth session expired", http.StatusBadRequest)
+    return
+  }
+  mcpPending := mcpPendingVal.(*mcpPendingAuth)
+
+  redirectURI := s.config.PublicBaseURL + "/service/callback"
+
+  // Exchange upstream code for token.
+  // Virtual services with OIDC providers use the OIDC path;
+  // others use the generic OAuth path.
+  var upstreamToken, upstreamRefresh, upstreamTokenURL string
+  var upstreamExpiry time.Time
+  var userEmail string
+  var upstreamScopes string
+
+  svc, err := s.store.GetService(pending.serviceID)
+  if err != nil {
+    http.Error(w, "Service not found", http.StatusInternalServerError)
+    return
+  }
+
+  if svc.Descriptor.Type == "oidc" {
+    claims, accessToken, refreshToken, _, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
+    if err != nil {
+      http.Error(w, fmt.Sprintf("OIDC exchange failed: %v", err), http.StatusInternalServerError)
+      return
+    }
+    upstreamToken = accessToken
+    upstreamRefresh = refreshToken
+    upstreamTokenURL = pending.tokenEndpoint
+    upstreamExpiry = time.Unix(claims.Expiry, 0)
+    userEmail = firstNonEmpty(claims.Email, claims.Subject)
+    upstreamScopes = pending.scopes
+  } else {
+    // Generic OAuth (GitHub, etc.)
+    oauth, err := s.serviceExchangeCode(r.Context(), pending.tokenEndpoint, code, pending.verifier, pending.clientID, pending.clientSecret, redirectURI)
+    if err != nil {
+      http.Error(w, fmt.Sprintf("Token exchange failed: %v", err), http.StatusInternalServerError)
+      return
+    }
+    upstreamToken = oauth.AccessToken
+    upstreamRefresh = oauth.RefreshToken
+    upstreamTokenURL = oauth.TokenEndpoint
+    upstreamExpiry = oauth.ExpiresAt
+    upstreamScopes = oauth.Scopes
+
+    // Try to extract email from the upstream token's claims or userinfo.
+    // For non-OIDC providers, the access token is opaque — resolve via service login.
+    if oauth.Claims != nil {
+      if email, ok := oauth.Claims["email"].(string); ok && email != "" {
+        userEmail = email
+      }
+      if sub, ok := oauth.Claims["sub"].(string); ok && userEmail == "" {
+        userEmail = sub
+      }
+    }
+  }
+
+  if userEmail == "" {
+    userEmail = "mcp-user"
+  }
+
+  // Populate the MCP pending auth with the upstream token
+  mcpPending.upstreamToken = upstreamToken
+  mcpPending.upstreamRefresh = upstreamRefresh
+  mcpPending.upstreamTokenURL = upstreamTokenURL
+  mcpPending.upstreamExpiry = upstreamExpiry
+  mcpPending.userEmail = userEmail
+  mcpPending.upstreamScopes = upstreamScopes
+
+  // Generate a Freshbreath auth code and store it
+  fbCode := rand.Text()
+  s.oauthSrv.codesMu.Lock()
+  s.oauthSrv.codes[fbCode] = &mcpAuthCode{
+    pending: mcpPending,
+    issued:  time.Now(),
+  }
+  s.oauthSrv.codesMu.Unlock()
+
+  // Redirect to the MCP client's redirect_uri with the code and their original state
+  redirectURL := fmt.Sprintf("%s?code=%s&state=%s", mcpPending.redirectURI, fbCode, mcpPending.state)
+  http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
   code := r.URL.Query().Get("code")
   state := r.URL.Query().Get("state")
@@ -494,6 +601,12 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
   // SSH auth never reaches /service/callback — it completes via /service/ssh-auth.
   if pending.serviceType == "ssh" {
     http.Error(w, "Unexpected callback for SSH auth", http.StatusBadRequest)
+    return
+  }
+
+  // MCP auth flows — after upstream exchange, redirect to the MCP client's redirect_uri
+  if pending.serviceType == "mcp" {
+    s.completeMCPAuth(w, r, pending, code)
     return
   }
 

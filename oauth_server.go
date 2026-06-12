@@ -1,0 +1,501 @@
+package main
+
+import (
+  "crypto/rand"
+  "crypto/sha256"
+  "encoding/base64"
+  "encoding/json"
+  "fmt"
+  "net/http"
+  "strings"
+  "sync"
+  "time"
+
+  jose "github.com/go-jose/go-jose/v4"
+  josejwt "github.com/go-jose/go-jose/v4/jwt"
+  "github.com/modelcontextprotocol/go-sdk/oauthex"
+)
+
+// ── OAuth Authorization Server ──────────────────────────────────────
+//
+// Freshbreath acts as an OAuth authorization server for MCP clients.
+// The flow:
+//
+//  1. MCP client registers at /oauth/register (DCR)
+//  2. MCP client sends user to /oauth/authorize
+//  3. Freshbreath stores the MCP request, kicks off upstream OAuth
+//  4. User authenticates upstream, callback arrives at /service/callback
+//  5. Freshbreath exchanges upstream code → upstream token
+//  6. Freshbreath generates its own auth code, stores it with the upstream token
+//  7. Freshbreath redirects MCP client to their redirect_uri
+//  8. MCP client exchanges code at /oauth/token
+//  9. Freshbreath verifies PKCE, mints a JWT wrapping the upstream token
+//  10. MCP client uses that JWT as a Bearer token; Freshbreath unwraps it
+//      to get the real upstream token for virtual scripts.
+
+// ── DCR Client Store ────────────────────────────────────────────────
+
+type oauthClient struct {
+  id          string
+  secret      string
+  redirectURIs []string
+}
+
+type oauthClientStore struct {
+  mu      sync.RWMutex
+  clients map[string]*oauthClient // client_id → client
+}
+
+func newOAuthClientStore() *oauthClientStore {
+  return &oauthClientStore{clients: make(map[string]*oauthClient)}
+}
+
+func (cs *oauthClientStore) register(redirectURIs []string) *oauthClient {
+  c := &oauthClient{
+    id:           rand.Text(),
+    secret:       rand.Text(),
+    redirectURIs: redirectURIs,
+  }
+  cs.mu.Lock()
+  cs.clients[c.id] = c
+  cs.mu.Unlock()
+  return c
+}
+
+func (cs *oauthClientStore) get(id string) *oauthClient {
+  cs.mu.RLock()
+  defer cs.mu.RUnlock()
+  return cs.clients[id]
+}
+
+// ── MCP Auth Pending State ──────────────────────────────────────────
+//
+// When an MCP client hits /oauth/authorize, we store their request
+// so we can resume after the upstream OAuth flow completes.
+
+type mcpPendingAuth struct {
+  // MCP client's original params
+  clientID     string
+  redirectURI  string
+  state        string
+  codeChallenge string
+  codeChallengeMethod string
+  resource     string // /mcp/{slug}
+
+  // The virtual service being accessed
+  serviceID  int64
+  serviceURL string
+
+  // Populated after upstream callback
+  upstreamToken    string
+  upstreamRefresh  string
+  upstreamTokenURL string
+  upstreamExpiry   time.Time
+  userEmail        string
+  upstreamScopes   string
+}
+
+// ── MCP Auth Code Store ─────────────────────────────────────────────
+//
+// After upstream callback, we issue a short-lived auth code that
+// maps to the MCP pending state. The MCP client exchanges this at /oauth/token.
+
+type mcpAuthCode struct {
+  pending *mcpPendingAuth
+  issued  time.Time
+}
+
+// ── OAuth Server ────────────────────────────────────────────────────
+
+type oauthServer struct {
+  clients    *oauthClientStore
+  codes      map[string]*mcpAuthCode // code → pending auth
+  codesMu    sync.Mutex
+  server     *Server // back-reference for upstream flow
+}
+
+func newOAuthServer(s *Server) *oauthServer {
+  return &oauthServer{
+    clients: newOAuthClientStore(),
+    codes:   make(map[string]*mcpAuthCode),
+    server:  s,
+  }
+}
+
+// ── Auth Server Metadata ────────────────────────────────────────────
+
+func (os *oauthServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
+  base := os.server.config.PublicBaseURL
+  meta := &oauthex.AuthServerMeta{
+    Issuer:                            base,
+    AuthorizationEndpoint:             base + "/oauth/authorize",
+    TokenEndpoint:                     base + "/oauth/token",
+    RegistrationEndpoint:              base + "/oauth/register",
+    JWKSURI:                           base + "/oauth/jwks",
+    ResponseTypesSupported:            []string{"code"},
+    GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
+    CodeChallengeMethodsSupported:     []string{"S256"},
+    TokenEndpointAuthMethodsSupported: []string{"client_secret_post", "client_secret_basic", "none"},
+    ScopesSupported:                   []string{"openid", "email", "profile"},
+  }
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(meta)
+}
+
+// ── DCR: Dynamic Client Registration ────────────────────────────────
+
+func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
+  if r.Method != http.MethodPost {
+    http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+    return
+  }
+
+  var meta oauthex.ClientRegistrationMetadata
+  if err := json.NewDecoder(r.Body).Decode(&meta); err != nil {
+    http.Error(w, "invalid JSON", http.StatusBadRequest)
+    return
+  }
+  if len(meta.RedirectURIs) == 0 {
+    http.Error(w, "redirect_uris is required", http.StatusBadRequest)
+    return
+  }
+
+  c := os.clients.register(meta.RedirectURIs)
+
+  w.Header().Set("Content-Type", "application/json")
+  w.WriteHeader(http.StatusCreated)
+  json.NewEncoder(w).Encode(&oauthex.ClientRegistrationResponse{
+    ClientID:     c.id,
+    ClientSecret: c.secret,
+    ClientRegistrationMetadata: oauthex.ClientRegistrationMetadata{
+      RedirectURIs:       c.redirectURIs,
+      ClientName:         meta.ClientName,
+      TokenEndpointAuthMethod: firstNonEmpty(meta.TokenEndpointAuthMethod, "client_secret_basic"),
+      GrantTypes:         []string{"authorization_code", "refresh_token"},
+      ResponseTypes:      []string{"code"},
+      Scope:              meta.Scope,
+    },
+  })
+}
+
+// ── Authorization Endpoint ──────────────────────────────────────────
+//
+// The MCP client sends the user here. We store their request,
+// begin the upstream OAuth flow, and redirect the user's browser
+// directly to the upstream provider's login page.
+
+func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
+  if r.Method != http.MethodGet {
+    http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+    return
+  }
+
+  q := r.URL.Query()
+  clientID := q.Get("client_id")
+  redirectURI := q.Get("redirect_uri")
+  state := q.Get("state")
+  codeChallenge := q.Get("code_challenge")
+  codeChallengeMethod := q.Get("code_challenge_method")
+  resource := q.Get("resource")
+
+  if clientID == "" || redirectURI == "" || state == "" || codeChallenge == "" {
+    http.Error(w, "missing required OAuth parameters", http.StatusBadRequest)
+    return
+  }
+
+  // Validate client
+  c := os.clients.get(clientID)
+  if c == nil {
+    http.Error(w, "unknown client_id", http.StatusBadRequest)
+    return
+  }
+  validRedirect := false
+  for _, u := range c.redirectURIs {
+    if u == redirectURI {
+      validRedirect = true
+      break
+    }
+  }
+  if !validRedirect {
+    http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+    return
+  }
+
+  // Resolve the virtual service from the resource parameter.
+  // resource is like "/mcp/sharepoint" or a full URL like "https://host/mcp/sharepoint".
+  slug := resource
+  if strings.HasPrefix(slug, "http") {
+    parts := strings.SplitN(slug, "/mcp/", 2)
+    if len(parts) == 2 {
+      slug = "/mcp/" + parts[1]
+    }
+  }
+  svc, err := os.server.store.GetServiceByURL(slug)
+  if err != nil {
+    http.Error(w, "virtual service not found for resource", http.StatusNotFound)
+    return
+  }
+
+  // Store the MCP client's pending auth request.
+  mcpPendingKey := rand.Text()
+  mcpPending := &mcpPendingAuth{
+    clientID:            clientID,
+    redirectURI:        redirectURI,
+    state:              state,
+    codeChallenge:      codeChallenge,
+    codeChallengeMethod: codeChallengeMethod,
+    resource:           resource,
+    serviceID:          svc.ID,
+    serviceURL:        svc.URL,
+  }
+  os.server.mcpAuthPending.Store(mcpPendingKey, mcpPending)
+
+  // Begin the upstream OAuth flow.
+  // We create a regular pendingAuth for the callback, using the MCP
+  // pending key as the app_nonce (prefixed with "mcp:") so we can
+  // detect and complete the MCP flow in handleCallback.
+  callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
+
+  var authURL string
+
+  if svc.Descriptor.Type == "oidc" {
+    au, st, vf, nc, tu, err := os.server.oidcBeginAuth(r.Context(), svc, callbackRedirectURI)
+    if err != nil {
+      http.Error(w, fmt.Sprintf("upstream OIDC auth failed: %v", err), http.StatusInternalServerError)
+      return
+    }
+    authURL = au
+    os.server.pendingMu.Lock()
+    os.server.pending[st] = &pendingAuth{
+      serviceID:     svc.ID,
+      serviceURL:    svc.URL,
+      appNonce:      "mcp:" + mcpPendingKey,
+      appState:      mcpPendingKey,
+      verifier:      vf,
+      clientID:      svc.Descriptor.ClientID,
+      clientSecret:  svc.Descriptor.ClientSecret,
+      tokenEndpoint: tu,
+      scopes:        svc.Descriptor.Scopes,
+      proxied:       svc.Descriptor.Proxied,
+      serviceType:   "mcp",
+      oidcNonce:     nc,
+      oidcIssuer:    svc.URL,
+    }
+    os.server.pendingMu.Unlock()
+  } else {
+    au, ci, cs, tu, st, vf, err := os.server.serviceBeginAuth(r.Context(), svc, callbackRedirectURI)
+    if err != nil {
+      http.Error(w, fmt.Sprintf("upstream auth failed: %v", err), http.StatusInternalServerError)
+      return
+    }
+    authURL = au
+    os.server.pendingMu.Lock()
+    os.server.pending[st] = &pendingAuth{
+      serviceID:     svc.ID,
+      serviceURL:    svc.URL,
+      appNonce:      "mcp:" + mcpPendingKey,
+      appState:      mcpPendingKey,
+      verifier:      vf,
+      clientID:      ci,
+      clientSecret:  cs,
+      tokenEndpoint: tu,
+      scopes:        svc.Descriptor.Scopes,
+      proxied:       svc.Descriptor.Proxied,
+      serviceType:   "mcp",
+    }
+    os.server.pendingMu.Unlock()
+  }
+
+  // Redirect the user's browser directly to the upstream provider.
+  http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// ── Token Endpoint ──────────────────────────────────────────────────
+//
+// The MCP client exchanges their auth code for a Freshbreath JWT
+// that wraps the upstream access token.
+
+func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
+  if r.Method != http.MethodPost {
+    http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+    return
+  }
+
+  if err := r.ParseForm(); err != nil {
+    http.Error(w, "invalid form data", http.StatusBadRequest)
+    return
+  }
+
+  grantType := r.Form.Get("grant_type")
+  if grantType != "authorization_code" {
+    http.Error(w, "unsupported grant_type", http.StatusBadRequest)
+    return
+  }
+
+  code := r.Form.Get("code")
+  verifier := r.Form.Get("code_verifier")
+  if code == "" || verifier == "" {
+    http.Error(w, "missing code or code_verifier", http.StatusBadRequest)
+    return
+  }
+
+  // Authenticate the client
+  clientID, clientSecret, hasBasic := r.BasicAuth()
+  if !hasBasic {
+    clientID = r.Form.Get("client_id")
+    clientSecret = r.Form.Get("client_secret")
+  }
+  c := os.clients.get(clientID)
+  if c == nil || c.secret != clientSecret {
+    http.Error(w, "invalid client credentials", http.StatusUnauthorized)
+    return
+  }
+
+  // Look up the auth code
+  os.codesMu.Lock()
+  mcpCode, ok := os.codes[code]
+  if ok {
+    delete(os.codes, code)
+  }
+  os.codesMu.Unlock()
+
+  if !ok {
+    http.Error(w, "invalid or expired authorization code", http.StatusBadRequest)
+    return
+  }
+  if time.Since(mcpCode.issued) > 10*time.Minute {
+    http.Error(w, "authorization code expired", http.StatusBadRequest)
+    return
+  }
+
+  pending := mcpCode.pending
+
+  // Verify PKCE
+  if pending.codeChallengeMethod != "S256" {
+    http.Error(w, "unsupported code_challenge_method", http.StatusBadRequest)
+    return
+  }
+  if !verifyPKCE(verifier, pending.codeChallenge) {
+    http.Error(w, "PKCE verification failed", http.StatusBadRequest)
+    return
+  }
+
+  // Verify client matches
+  if pending.clientID != clientID {
+    http.Error(w, "client_id mismatch", http.StatusBadRequest)
+    return
+  }
+
+  // Mint a Freshbreath JWT wrapping the upstream token
+  jwt, err := os.mintWrappedToken(pending)
+  if err != nil {
+    http.Error(w, "token issuance failed", http.StatusInternalServerError)
+    return
+  }
+
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(map[string]interface{}{
+    "access_token": jwt,
+    "token_type":   "Bearer",
+    "expires_in":   int(time.Until(pending.upstreamExpiry).Seconds()),
+    "scope":        pending.upstreamScopes,
+  })
+}
+
+// ── JWKS Endpoint ───────────────────────────────────────────────────
+//
+// Serves the public key for verifying Freshbreath JWTs.
+// Since we use HMAC-SHA256, there's no public key — but the MCP spec
+// requires jwks_uri. We serve an empty key set. Token verification
+// is done by Freshbreath itself (not by the MCP client).
+
+func (os *oauthServer) handleJWKS(w http.ResponseWriter, r *http.Request) {
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(map[string]interface{}{
+    "keys": []interface{}{},
+  })
+}
+
+// ── JWT Minting ─────────────────────────────────────────────────────
+//
+// Mint a Freshbreath JWT that wraps the upstream access token as claims.
+// The MCP client holds this as an opaque Bearer token. When it comes
+// back to /mcp/{name}, we crack it open to get the real upstream token.
+
+func (os *oauthServer) mintWrappedToken(pending *mcpPendingAuth) (string, error) {
+  sig, err := jose.NewSigner(
+    jose.SigningKey{Algorithm: jose.HS256, Key: os.server.localKey},
+    (&jose.SignerOptions{}).WithType("JWT"),
+  )
+  if err != nil {
+    return "", err
+  }
+
+  claims := wrappedTokenClaims{
+    Claims: josejwt.Claims{
+      Issuer:   "freshbreath",
+      Subject:  pending.userEmail,
+      Audience: josejwt.Audience{"freshbreath"},
+      IssuedAt: josejwt.NewNumericDate(time.Now()),
+      Expiry:   josejwt.NewNumericDate(pending.upstreamExpiry),
+    },
+    ServiceID:        pending.serviceID,
+    UpstreamToken:    pending.upstreamToken,
+    UpstreamRefresh:  pending.upstreamRefresh,
+    UpstreamTokenURL: pending.upstreamTokenURL,
+    UpstreamScopes:   pending.upstreamScopes,
+  }
+
+  return josejwt.Signed(sig).Claims(claims).Serialize()
+}
+
+type wrappedTokenClaims struct {
+  josejwt.Claims
+  ServiceID        int64  `json:"service_id"`
+  UpstreamToken    string `json:"upstream_token"`
+  UpstreamRefresh  string `json:"upstream_refresh,omitempty"`
+  UpstreamTokenURL string `json:"upstream_token_url,omitempty"`
+  UpstreamScopes   string `json:"upstream_scopes,omitempty"`
+}
+
+// verifyAndUnwrapToken checks if a Bearer token is a Freshbreath-wrapped JWT
+// and returns the upstream token if so. Returns ("", nil) if the token is
+// not a Freshbreath JWT (i.e., it's a direct upstream token or something else).
+func (s *Server) verifyAndUnwrapToken(raw string, expectedServiceID int64) (string, error) {
+  if !isFreshbreathToken(raw) {
+    return raw, nil // not our JWT — pass through as-is
+  }
+
+  tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
+  if err != nil {
+    return "", fmt.Errorf("parse wrapped token: %w", err)
+  }
+
+  var claims wrappedTokenClaims
+  if err := tok.Claims(s.localKey, &claims); err != nil {
+    return "", fmt.Errorf("verify wrapped token: %w", err)
+  }
+
+  if err := claims.Claims.Validate(josejwt.Expected{
+    Issuer:      "freshbreath",
+    AnyAudience: josejwt.Audience{"freshbreath"},
+    Time:        time.Now(),
+  }); err != nil {
+    return "", fmt.Errorf("wrapped token invalid: %w", err)
+  }
+
+  if claims.ServiceID != expectedServiceID {
+    return "", fmt.Errorf("wrapped token service_id mismatch")
+  }
+
+  return claims.UpstreamToken, nil
+}
+
+// ── PKCE Verification ───────────────────────────────────────────────
+
+func verifyPKCE(verifier, challenge string) bool {
+  // S256: BASE64URL(SHA256(verifier))
+  h := sha256.Sum256([]byte(verifier))
+  computed := base64.RawURLEncoding.EncodeToString(h[:])
+  return computed == challenge
+}

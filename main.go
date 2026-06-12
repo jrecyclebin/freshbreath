@@ -44,6 +44,8 @@ type Server struct {
   hostedRoutes     map[string]string // slug → app nonce
   hostedMu         sync.RWMutex
   virtualMCPs      *virtualMCPRegistry // slug → MCP server entries
+  mcpAuthPending   *sync.Map          // key → *mcpPendingAuth (MCP OAuth flow state)
+  oauthSrv         *oauthServer        // Freshbreath OAuth authorization server
 }
 
 type pendingAuth struct {
@@ -146,7 +148,9 @@ func main() {
     agentMgr:     agentMgr,
     sessionMgr:   sessionMgr,
     virtualMCPs:  newVirtualMCPRegistry(),
+    mcpAuthPending: &sync.Map{},
   }
+  srv.oauthSrv = newOAuthServer(srv)
   srv.SetupRoutes()
 
   // Periodically expire stale SSH agent keys and sessions.

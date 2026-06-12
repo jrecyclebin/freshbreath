@@ -39,12 +39,6 @@ func buildOIDCScopes(descriptorScopes string) []string {
 	return parts
 }
 
-func randomState() string {
-  b := make([]byte, 32)
-  rand.Read(b)
-  return base64.RawURLEncoding.EncodeToString(b)
-}
-
 // serviceBeginAuth discovers the service's OAuth config, dynamically registers a client,
 // and returns the authorization URL plus the values needed for the callback.
 func (s *Server) serviceBeginAuth(ctx context.Context, svc *Service, redirectURI string) (authURL, clientID, clientSecret, tokenURL, state, verifier string, err error) {
@@ -99,7 +93,7 @@ func (s *Server) serviceBeginAuth(ctx context.Context, svc *Service, redirectURI
     clientSecret = regResp.ClientSecret
   }
 
-  state = randomState()
+  state = randomNonce()
   verifier = oauth2.GenerateVerifier()
 
   reqScopes := buildOIDCScopes(svc.Descriptor.Scopes)
@@ -214,7 +208,7 @@ func (s *Server) oidcBeginAuth(ctx context.Context, svc *Service, redirectURI st
     Scopes:       scopes,
   }
 
-  state = randomState()
+  state = randomNonce()
   verifier = oauth2.GenerateVerifier()
   oidcNonce = randomNonce()
 

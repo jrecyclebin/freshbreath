@@ -9,6 +9,8 @@ import (
   "sync"
   "time"
 
+  jose "github.com/go-jose/go-jose/v4"
+  josejwt "github.com/go-jose/go-jose/v4/jwt"
   "github.com/coreos/go-oidc/v3/oidc"
   "github.com/modelcontextprotocol/go-sdk/auth"
   "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -111,10 +113,20 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
     capturedName := vt.Name
     mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
       // Extract token from request header.
+      // If it's a Freshbreath-wrapped JWT (MCP OAuth flow), unwrap to get
+      // the real upstream token for $token in virtual scripts.
       token := ""
       if req.Extra != nil && req.Extra.Header != nil {
         if ah := req.Extra.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
-          token = strings.TrimPrefix(ah, "Bearer ")
+          raw := strings.TrimPrefix(ah, "Bearer ")
+          unwrapped, err := s.verifyAndUnwrapToken(raw, svc.ID)
+          if err != nil {
+            return &mcp.CallToolResult{
+              Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("auth error: %v", err)}},
+              IsError: true,
+            }, nil
+          }
+          token = unwrapped
         }
       }
 
@@ -156,9 +168,35 @@ func virtualToolInputSchema(vt VirtualTool) map[string]interface{} {
 
 // virtualTokenVerifier returns a TokenVerifier that validates Bearer tokens
 // using the service's inline OIDC config.
+//
+// Tokens can arrive in three forms:
+//  1. Freshbreath-wrapped JWT (from MCP OAuth flow) — contains upstream_token claim
+//  2. Freshbreath-issued token (from /service/login flow) — email-based
+//  3. Direct upstream OIDC JWT — verified against the upstream issuer
 func (s *Server) virtualTokenVerifier(svc *Service) auth.TokenVerifier {
   return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
-    // First check if it's a freshbreath-issued token (from the login flow).
+    // Try to unwrap a Freshbreath-wrapped JWT (MCP OAuth flow).
+    // verifyAndUnwrapToken returns the raw token unchanged if it's not
+    // a Freshbreath JWT, so this is safe to call first.
+    upstreamToken, err := s.verifyAndUnwrapToken(token, svc.ID)
+    if err != nil {
+      return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
+    }
+
+    // If we got a different token back, it was a wrapped JWT — we already
+    // verified it. Extract the user identity from its claims.
+    if upstreamToken != token {
+      tok, _ := josejwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.HS256})
+      var claims wrappedTokenClaims
+      tok.Claims(s.localKey, &claims)
+      return &auth.TokenInfo{
+        UserID:     claims.Subject,
+        Scopes:     buildOIDCScopes(claims.UpstreamScopes),
+        Expiration: claims.Expiry.Time(),
+      }, nil
+    }
+
+    // Check if it's a freshbreath-issued token (from the login flow).
     if isFreshbreathToken(token) {
       email, err := s.verifyFreshbreathToken(token)
       if err != nil {
@@ -188,19 +226,19 @@ func (s *Server) virtualTokenVerifier(svc *Service) auth.TokenVerifier {
       return nil, fmt.Errorf("%w: token verification: %v", auth.ErrInvalidToken, err)
     }
 
-    var claims struct {
+    var oidcClaims struct {
       Email string `json:"email"`
       Sub   string `json:"sub"`
       Exp   int64  `json:"exp"`
     }
-    if err := idToken.Claims(&claims); err != nil {
+    if err := idToken.Claims(&oidcClaims); err != nil {
       return nil, fmt.Errorf("%w: claims: %v", auth.ErrInvalidToken, err)
     }
 
     return &auth.TokenInfo{
-      UserID:     firstNonEmpty(claims.Email, claims.Sub),
+      UserID:     firstNonEmpty(oidcClaims.Email, oidcClaims.Sub),
       Scopes:     buildOIDCScopes(svc.Descriptor.Scopes),
-      Expiration: time.Unix(claims.Exp, 0),
+      Expiration: time.Unix(oidcClaims.Exp, 0),
     }, nil
   }
 }
@@ -208,23 +246,15 @@ func (s *Server) virtualTokenVerifier(svc *Service) auth.TokenVerifier {
 // ── Protected Resource Metadata ─────────────────────────────────────
 
 // virtualPRM builds the Protected Resource Metadata document for a virtual service.
+// The authorization_servers field points to Freshbreath itself, since Freshbreath
+// acts as the OAuth authorization server for MCP clients.
 func (s *Server) virtualPRM(svc *Service) *oauthex.ProtectedResourceMetadata {
   slug := strings.TrimPrefix(svc.URL, "/mcp/")
   resourceURL := s.config.PublicBaseURL + "/mcp/" + slug
 
-  issuer := svc.Descriptor.OAuthURL
-  if issuer != "" {
-    issuer = strings.TrimSuffix(issuer, "/authorize")
-  }
-
-  var authServers []string
-  if issuer != "" {
-    authServers = []string{issuer}
-  }
-
   return &oauthex.ProtectedResourceMetadata{
     Resource:               resourceURL,
-    AuthorizationServers:   authServers,
+    AuthorizationServers:   []string{s.config.PublicBaseURL},
     ScopesSupported:        buildOIDCScopes(svc.Descriptor.Scopes),
     BearerMethodsSupported: []string{"header"},
     ResourceName:           svc.Name,
