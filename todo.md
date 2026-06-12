@@ -79,31 +79,32 @@ Add a `virtual` service type to Freshbreath that wraps API calls in an MCP tool 
 - [x] Update `handleCreateService` / `handleServiceDetail` for virtual type with `/mcp/` URLs
 - [x] Virtual services use login (same as API type — they need $token for upstream auth)
 
-## Phase 3: Backend — MCP Server Endpoint (Go MCP SDK)
+## Phase 3: Backend — MCP Server Endpoint (Go MCP SDK) ✅
 
-- [ ] Add `github.com/modelcontextprotocol/go-sdk` dependency
-- [ ] Create MCP server factory for virtual services
-  - [ ] `newVirtualMCPServer(svc *ServiceDescriptor) *mcp.Server` — creates an `mcp.Server` with tools from the parsed virtual file
-  - [ ] For each VirtualTool: `mcp.AddTool(server, &mcp.Tool{...}, handler)` where handler executes the virtual HTTP script
-  - [ ] Tool handler extracts `$token` from context via `auth.TokenInfoFromContext(ctx)`
-  - [ ] Tool handler executes virtual script steps and returns `*mcp.CallToolResult`
-- [ ] Mount MCP endpoint at `/mcp/{name}`
-  - [ ] Use `mcp.StreamableHTTPHandler` to wrap the server into an `http.Handler`
-  - [ ] Wrap with `auth.RequireBearerToken` middleware using a custom `TokenVerifier`
-  - [ ] `TokenVerifier` validates Bearer token using the service's inline OIDC config (JWT validation against the issuer, or OIDC introspection)
-  - [ ] When no OIDC fields are configured (public virtual service), skip the `RequireBearerToken` middleware
-- [ ] Serve Protected Resource Metadata (RFC 9728)
-  - [ ] Mount `auth.ProtectedResourceMetadataHandler` at `/.well-known/oauth-protected-resource/mcp/{name}`
-  - [ ] Build `oauthex.ProtectedResourceMetadata` from the service's inline OIDC config:
-    - `Resource`: the MCP endpoint URL (`/mcp/{slug}`)
-    - `AuthorizationServers`: the issuer URL from the service's OIDC fields
-    - `ScopesSupported`: scopes from the service's OIDC fields
-    - `BearerMethodsSupported`: `["header"]`
-  - [ ] `RequireBearerTokenOptions.ResourceMetadataURL` points to this PRM endpoint
-  - [ ] When no OIDC fields are configured, no PRM endpoint is needed
-- [ ] Wire it all together in route registration
-  - [ ] `/mcp/{name}` → `RequireBearerToken(mcpHandler)` (or just `mcpHandler` if public)
-  - [ ] `/.well-known/oauth-protected-resource/mcp/{name}` → PRM handler (only when auth is configured)
+- [x] Add `github.com/modelcontextprotocol/go-sdk` dependency
+- [x] Create MCP server factory for virtual services
+  - [x] `newVirtualMCPServer(svc *Service) *mcp.Server` — creates an `mcp.Server` with tools from the parsed virtual file
+  - [x] For each VirtualTool: `mcp.Server.AddTool(tool, handler)` where handler executes the virtual HTTP script
+  - [x] Tool handler extracts `$token` from request header via `req.Extra.Header`
+  - [x] Tool handler executes virtual script steps and returns `*mcp.CallToolResult`
+- [x] Mount MCP endpoint at `/mcp/{name}`
+  - [x] Use `mcp.NewStreamableHTTPHandler` to wrap the server into an `http.Handler` (stateless mode)
+  - [x] Wrap with `auth.RequireBearerToken` middleware using a custom `TokenVerifier`
+  - [x] `TokenVerifier` validates Bearer token using the service's inline OIDC config (JWT validation against the issuer, or freshbreath-issued token from login flow)
+  - [x] When no OIDC fields are configured (public virtual service), skip the `RequireBearerToken` middleware
+- [x] Serve Protected Resource Metadata (RFC 9728)
+  - [x] `auth.ProtectedResourceMetadataHandler` served at `/.well-known/oauth-protected-resource/mcp/{name}`
+  - [x] Build `oauthex.ProtectedResourceMetadata` from the service's inline OIDC config
+  - [x] `AuthorizationServers` points to the issuer URL from the service's OIDC fields
+  - [x] `ScopesSupported` from the service's OIDC fields
+  - [x] `BearerMethodsSupported: ["header"]`
+  - [x] `RequireBearerTokenOptions.ResourceMetadataURL` points to the PRM endpoint
+  - [x] When no OIDC fields are configured, no PRM endpoint served (returns 404)
+- [x] Wire it all together in route registration
+  - [x] Single `/mcp/{name}` route dispatches by slug via `virtualMCPRegistry`
+  - [x] Single `/.well-known/oauth-protected-resource/mcp/{name}` route for PRM
+  - [x] Dynamic registration: services added/updated/deleted at runtime via registry
+  - [x] Startup: `mountAllVirtualMCP()` loads all existing virtual services
 
 ## Phase 4: Frontend — frbr.js & Control Panel
 

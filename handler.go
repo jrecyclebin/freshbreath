@@ -96,6 +96,10 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/service/{id}/",   s.handleServiceProxy)
   s.mux.HandleFunc("/service/call/{name}", s.handleServiceCall)
 
+  // MCP endpoints for virtual services — single routes dispatch by slug
+  s.mux.HandleFunc("/mcp/{name}", s.handleMCP)
+  s.mux.HandleFunc("/.well-known/oauth-protected-resource/mcp/{name}", s.handleMCPPRM)
+
   // Admin API — role-gated
   superuser := requireAnyRole("Superuser")
   adminPlus := requireAnyRole("Superuser", "Admin")
@@ -127,6 +131,22 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/sync/files",                        s.authWrap(pipeline(s.handleSyncList, s.requireAppServiceAccess("ssh"))))
 
   s.rebuildHostedRoutes()
+
+  // Mount MCP endpoints for existing virtual services.
+  s.mountAllVirtualMCP()
+}
+
+// mountAllVirtualMCP discovers all virtual services and registers their MCP entries.
+func (s *Server) mountAllVirtualMCP() {
+  services, err := s.store.ListServices()
+  if err != nil {
+    return
+  }
+  for _, svc := range services {
+    if svc.Descriptor.Type == "virtual" && strings.HasPrefix(svc.URL, "/mcp/") {
+      s.virtualMCPs.add(s, svc)
+    }
+  }
 }
 
 // slugify converts a string to a lowercase hyphenated URL slug.
@@ -1522,6 +1542,12 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
     return
   }
 
+  // Register MCP endpoint for virtual services.
+  if req.Descriptor.Type == "virtual" {
+    svc := &Service{ID: id, Name: req.Name, URL: req.URL, Descriptor: req.Descriptor}
+    s.virtualMCPs.add(s, svc)
+  }
+
   w.Header().Set("Content-Type", "application/json")
   s.auditLog(r.Context(), "created service", req.Name)
   json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1601,6 +1627,14 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, err.Error(), http.StatusInternalServerError)
       return
     }
+    // Re-register MCP endpoint for virtual services.
+    if req.Descriptor.Type == "virtual" {
+      svc := &Service{ID: serviceID, Name: req.Name, URL: req.URL, Descriptor: req.Descriptor}
+      s.virtualMCPs.add(s, svc)
+    } else {
+      slug := strings.TrimPrefix(svc.URL, "/mcp/")
+      s.virtualMCPs.remove(slug)
+    }
     s.auditLog(r.Context(), "updated service", req.Name)
     w.WriteHeader(http.StatusNoContent)
   case http.MethodDelete:
@@ -1611,6 +1645,11 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
     if err := s.store.DeleteService(serviceID); err != nil {
       http.Error(w, err.Error(), http.StatusInternalServerError)
       return
+    }
+    // Remove MCP endpoint for virtual services.
+    if svc.Descriptor.Type == "virtual" {
+      slug := strings.TrimPrefix(svc.URL, "/mcp/")
+      s.virtualMCPs.remove(slug)
     }
     s.auditLog(r.Context(), "deleted service", svc.Name)
     w.WriteHeader(http.StatusNoContent)

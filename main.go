@@ -43,6 +43,7 @@ type Server struct {
   lastSeenMu       sync.Mutex
   hostedRoutes     map[string]string // slug → app nonce
   hostedMu         sync.RWMutex
+  virtualMCPs      *virtualMCPRegistry // slug → MCP server entries
 }
 
 type pendingAuth struct {
@@ -144,6 +145,7 @@ func main() {
     adminNonce:    genNonce(),
     agentMgr:     agentMgr,
     sessionMgr:   sessionMgr,
+    virtualMCPs:  newVirtualMCPRegistry(),
   }
   srv.SetupRoutes()
 
