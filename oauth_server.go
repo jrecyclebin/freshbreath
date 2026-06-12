@@ -256,7 +256,17 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   // detect and complete the MCP flow in handleCallback.
   callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
 
-  var authURL string
+  pa := &pendingAuth{
+    serviceID:   svc.ID,
+    serviceURL:  svc.URL,
+    appNonce:    "mcp:" + mcpPendingKey,
+    appState:    mcpPendingKey,
+    scopes:      svc.Descriptor.Scopes,
+    proxied:     svc.Descriptor.Proxied,
+    serviceType: "mcp",
+  }
+
+  var authURL, oauthState string
 
   if svc.Descriptor.Type == "oidc" {
     au, st, vf, nc, tu, err := os.server.oidcBeginAuth(r.Context(), svc, callbackRedirectURI)
@@ -264,47 +274,29 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
       http.Error(w, fmt.Sprintf("upstream OIDC auth failed: %v", err), http.StatusInternalServerError)
       return
     }
-    authURL = au
-    os.server.pendingMu.Lock()
-    os.server.pending[st] = &pendingAuth{
-      serviceID:     svc.ID,
-      serviceURL:    svc.URL,
-      appNonce:      "mcp:" + mcpPendingKey,
-      appState:      mcpPendingKey,
-      verifier:      vf,
-      clientID:      svc.Descriptor.ClientID,
-      clientSecret:  svc.Descriptor.ClientSecret,
-      tokenEndpoint: tu,
-      scopes:        svc.Descriptor.Scopes,
-      proxied:       svc.Descriptor.Proxied,
-      serviceType:   "mcp",
-      oidcNonce:     nc,
-      oidcIssuer:    svc.URL,
-    }
-    os.server.pendingMu.Unlock()
+    authURL, oauthState = au, st
+    pa.verifier = vf
+    pa.clientID = svc.Descriptor.ClientID
+    pa.clientSecret = svc.Descriptor.ClientSecret
+    pa.tokenEndpoint = tu
+    pa.oidcNonce = nc
+    pa.oidcIssuer = svc.URL
   } else {
     au, ci, cs, tu, st, vf, err := os.server.serviceBeginAuth(r.Context(), svc, callbackRedirectURI)
     if err != nil {
       http.Error(w, fmt.Sprintf("upstream auth failed: %v", err), http.StatusInternalServerError)
       return
     }
-    authURL = au
-    os.server.pendingMu.Lock()
-    os.server.pending[st] = &pendingAuth{
-      serviceID:     svc.ID,
-      serviceURL:    svc.URL,
-      appNonce:      "mcp:" + mcpPendingKey,
-      appState:      mcpPendingKey,
-      verifier:      vf,
-      clientID:      ci,
-      clientSecret:  cs,
-      tokenEndpoint: tu,
-      scopes:        svc.Descriptor.Scopes,
-      proxied:       svc.Descriptor.Proxied,
-      serviceType:   "mcp",
-    }
-    os.server.pendingMu.Unlock()
+    authURL, oauthState = au, st
+    pa.verifier = vf
+    pa.clientID = ci
+    pa.clientSecret = cs
+    pa.tokenEndpoint = tu
   }
+
+  os.server.pendingMu.Lock()
+  os.server.pending[oauthState] = pa
+  os.server.pendingMu.Unlock()
 
   // Redirect the user's browser directly to the upstream provider.
   http.Redirect(w, r, authURL, http.StatusFound)
@@ -393,11 +385,16 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     return
   }
 
+  expiresIn := int(time.Until(pending.upstreamExpiry).Seconds())
+  if expiresIn < 0 {
+    expiresIn = 0
+  }
+
   w.Header().Set("Content-Type", "application/json")
   json.NewEncoder(w).Encode(map[string]interface{}{
     "access_token": jwt,
     "token_type":   "Bearer",
-    "expires_in":   int(time.Until(pending.upstreamExpiry).Seconds()),
+    "expires_in":   expiresIn,
     "scope":        pending.upstreamScopes,
   })
 }
@@ -459,21 +456,21 @@ type wrappedTokenClaims struct {
 }
 
 // verifyAndUnwrapToken checks if a Bearer token is a Freshbreath-wrapped JWT
-// and returns the upstream token if so. Returns ("", nil) if the token is
-// not a Freshbreath JWT (i.e., it's a direct upstream token or something else).
-func (s *Server) verifyAndUnwrapToken(raw string, expectedServiceID int64) (string, error) {
+// and returns the full claims if so. Returns (nil, nil) if the token is not
+// a Freshbreath JWT — the caller should use the raw token as-is.
+func (s *Server) verifyAndUnwrapToken(raw string, expectedServiceID int64) (*wrappedTokenClaims, error) {
   if !isFreshbreathToken(raw) {
-    return raw, nil // not our JWT — pass through as-is
+    return nil, nil
   }
 
   tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
   if err != nil {
-    return "", fmt.Errorf("parse wrapped token: %w", err)
+    return nil, fmt.Errorf("parse wrapped token: %w", err)
   }
 
   var claims wrappedTokenClaims
   if err := tok.Claims(s.localKey, &claims); err != nil {
-    return "", fmt.Errorf("verify wrapped token: %w", err)
+    return nil, fmt.Errorf("verify wrapped token: %w", err)
   }
 
   if err := claims.Claims.Validate(josejwt.Expected{
@@ -481,14 +478,14 @@ func (s *Server) verifyAndUnwrapToken(raw string, expectedServiceID int64) (stri
     AnyAudience: josejwt.Audience{"freshbreath"},
     Time:        time.Now(),
   }); err != nil {
-    return "", fmt.Errorf("wrapped token invalid: %w", err)
+    return nil, fmt.Errorf("wrapped token invalid: %w", err)
   }
 
   if claims.ServiceID != expectedServiceID {
-    return "", fmt.Errorf("wrapped token service_id mismatch")
+    return nil, fmt.Errorf("wrapped token service_id mismatch")
   }
 
-  return claims.UpstreamToken, nil
+  return &claims, nil
 }
 
 // ── PKCE Verification ───────────────────────────────────────────────

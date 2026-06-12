@@ -10,6 +10,7 @@ import (
   "os"
   "path/filepath"
   "regexp"
+  "sort"
   "strconv"
   "strings"
   "unicode"
@@ -23,6 +24,7 @@ import (
 type VirtualTool struct {
   Name        string
   Description string
+  Params      []string // input parameter names inferred from template references
   Steps       []VirtualStep
 }
 
@@ -57,6 +59,7 @@ type VirtualResponse struct {
 // ── Parser ───────────────────────────────────────────────────────────
 
 var toolNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+var plainVarRe = regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
 
 // parseVirtualFile parses a virtual service description file into tools.
 // Tools are separated by --- delimiters and begin with [name] headers.
@@ -68,6 +71,7 @@ func parseVirtualFile(data []byte) ([]VirtualTool, error) {
   flush := func() {
     if cur != nil {
       parseVirtualToolBody(cur, curLines)
+      cur.Params = toolParams(*cur)
       tools = append(tools, *cur)
     }
     cur = nil
@@ -96,6 +100,51 @@ func parseVirtualFile(data []byte) ([]VirtualTool, error) {
   flush()
 
   return tools, nil
+}
+
+// toolParams scans all template strings and expressions in a tool's steps and
+// returns the variable names that are referenced but not locally assigned — i.e.
+// the parameters the caller must supply. $token is excluded (it's the auth token).
+func toolParams(tool VirtualTool) []string {
+  defined := map[string]bool{"token": true}
+  for _, step := range tool.Steps {
+    for _, a := range step.Assignments {
+      defined[a.VarName] = true
+    }
+  }
+
+  seen := map[string]bool{}
+  scan := func(s string) {
+    for _, m := range plainVarRe.FindAllStringSubmatch(s, -1) {
+      if name := m[1]; !defined[name] {
+        seen[name] = true
+      }
+    }
+  }
+
+  for _, step := range tool.Steps {
+    scan(step.URL)
+    for _, v := range step.Headers {
+      scan(v)
+    }
+    scan(step.Body)
+    for _, a := range step.Assignments {
+      scan(a.Expr)
+    }
+    for _, a := range step.Assertions {
+      scan(a.Expr)
+    }
+    for _, resp := range step.Responses {
+      scan(resp.Shaping)
+    }
+  }
+
+  params := make([]string, 0, len(seen))
+  for name := range seen {
+    params = append(params, name)
+  }
+  sort.Strings(params)
+  return params
 }
 
 // parseVirtualToolHeader validates a [name] header for virtual tools.

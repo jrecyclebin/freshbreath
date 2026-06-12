@@ -9,8 +9,6 @@ import (
   "sync"
   "time"
 
-  jose "github.com/go-jose/go-jose/v4"
-  josejwt "github.com/go-jose/go-jose/v4/jwt"
   "github.com/coreos/go-oidc/v3/oidc"
   "github.com/modelcontextprotocol/go-sdk/auth"
   "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -98,7 +96,7 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
   }
 
   mcps := mcp.NewServer(&mcp.Implementation{
-    Name:    "freshbreath-virtual",
+    Name:    fmt.Sprintf("frbr-%s", slugify(svc.Name)),
     Version: "1.0.0",
   }, &mcp.ServerOptions{
     Instructions: fmt.Sprintf("Virtual service: %s", svc.Name),
@@ -119,14 +117,18 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
       if req.Extra != nil && req.Extra.Header != nil {
         if ah := req.Extra.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
           raw := strings.TrimPrefix(ah, "Bearer ")
-          unwrapped, err := s.verifyAndUnwrapToken(raw, svc.ID)
+          wrapped, err := s.verifyAndUnwrapToken(raw, svc.ID)
           if err != nil {
             return &mcp.CallToolResult{
               Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("auth error: %v", err)}},
               IsError: true,
             }, nil
           }
-          token = unwrapped
+          if wrapped != nil {
+            token = wrapped.UpstreamToken
+          } else {
+            token = raw
+          }
         }
       }
 
@@ -155,12 +157,16 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
 }
 
 // virtualToolInputSchema builds a JSON Schema input object for a virtual tool.
-// Since virtual tools accept arbitrary arguments (resolved via $name in templates),
-// we use an open object schema with no required properties.
+// Parameters are inferred from $name references in the tool's templates that
+// aren't locally assigned — these are what the caller must supply.
 func virtualToolInputSchema(vt VirtualTool) map[string]interface{} {
+  props := map[string]interface{}{}
+  for _, p := range vt.Params {
+    props[p] = map[string]interface{}{"type": "string"}
+  }
   return map[string]interface{}{
     "type":       "object",
-    "properties": map[string]interface{}{},
+    "properties": props,
   }
 }
 
@@ -169,43 +175,21 @@ func virtualToolInputSchema(vt VirtualTool) map[string]interface{} {
 // virtualTokenVerifier returns a TokenVerifier that validates Bearer tokens
 // using the service's inline OIDC config.
 //
-// Tokens can arrive in three forms:
+// Tokens arrive in two forms:
 //  1. Freshbreath-wrapped JWT (from MCP OAuth flow) — contains upstream_token claim
-//  2. Freshbreath-issued token (from /service/login flow) — email-based
-//  3. Direct upstream OIDC JWT — verified against the upstream issuer
+//  2. Direct upstream OIDC JWT — verified against the upstream issuer
 func (s *Server) virtualTokenVerifier(svc *Service) auth.TokenVerifier {
   return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
     // Try to unwrap a Freshbreath-wrapped JWT (MCP OAuth flow).
-    // verifyAndUnwrapToken returns the raw token unchanged if it's not
-    // a Freshbreath JWT, so this is safe to call first.
-    upstreamToken, err := s.verifyAndUnwrapToken(token, svc.ID)
+    claims, err := s.verifyAndUnwrapToken(token, svc.ID)
     if err != nil {
       return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
     }
-
-    // If we got a different token back, it was a wrapped JWT — we already
-    // verified it. Extract the user identity from its claims.
-    if upstreamToken != token {
-      tok, _ := josejwt.ParseSigned(token, []jose.SignatureAlgorithm{jose.HS256})
-      var claims wrappedTokenClaims
-      tok.Claims(s.localKey, &claims)
+    if claims != nil {
       return &auth.TokenInfo{
         UserID:     claims.Subject,
         Scopes:     buildOIDCScopes(claims.UpstreamScopes),
         Expiration: claims.Expiry.Time(),
-      }, nil
-    }
-
-    // Check if it's a freshbreath-issued token (from the login flow).
-    if isFreshbreathToken(token) {
-      email, err := s.verifyFreshbreathToken(token)
-      if err != nil {
-        return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
-      }
-      return &auth.TokenInfo{
-        UserID:     email,
-        Scopes:     buildOIDCScopes(svc.Descriptor.Scopes),
-        Expiration: time.Now().Add(1 * time.Hour),
       }, nil
     }
 
