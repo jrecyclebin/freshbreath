@@ -64,10 +64,6 @@ Authorization: Bearer $token
 # $obj = $.value
 # $next_link = $['@odata']['nextLink']
 HTTP 200
-{
-  "value": $.value,
-  "next_link": $['@odata']['nextLink']
-}
 ---
 [get-list-next] Fetch the next page of items using the @odata.nextLink from a previous response.
 
@@ -84,9 +80,7 @@ POST https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items
 Authorization: Bearer $token
 Content-Type: application/json
 {
-  "fields": {
-    "Title": $title
-  }
+  "fields": $fields
 }
 
 HTTP 201
@@ -97,9 +91,7 @@ HTTP 201
 PATCH https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items/$item_id/fields
 Authorization: Bearer $token
 Content-Type: application/json
-{
-  "Title": $title
-}
+{...$fields}
 
 HTTP 200
 ---

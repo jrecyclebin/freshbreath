@@ -95,7 +95,7 @@ func TestParseSharepoint(t *testing.T) {
     t.Error("create-list missing HTTP 201 response")
   }
 
-  // ── [get-list-items] — has response shaping ──────────────────────
+  // ── [get-list-items] — no response shaping (raw response) ────────
   gli := findTool(tools, "get-list-items")
   if gli == nil {
     t.Fatal("get-list-items tool not found")
@@ -104,8 +104,8 @@ func TestParseSharepoint(t *testing.T) {
   if gliStep.Responses[200] == nil {
     t.Fatal("get-list-items missing HTTP 200")
   }
-  if gliStep.Responses[200].Shaping == "" {
-    t.Error("get-list-items missing response shaping")
+  if gliStep.Responses[200].Shaping != "" {
+    t.Errorf("get-list-items unexpected shaping: %q", gliStep.Responses[200].Shaping)
   }
 
   // ── [get-list-next] — has assertion ──────────────────────────────
@@ -502,6 +502,69 @@ func TestResolveBodySkipDollarInStrings(t *testing.T) {
   }
 }
 
+func TestResolveBodySpreadOnly(t *testing.T) {
+  vars := map[string]interface{}{
+    "fields": map[string]interface{}{"Title": "Hello", "Color": "Red"},
+  }
+  result, err := resolveTemplate(
+    `{...$fields}`,
+    vars, nil, "", ResolveBody,
+  )
+  if err != nil {
+    t.Fatal(err)
+  }
+  if result != `{"Color":"Red","Title":"Hello"}` {
+    t.Errorf("result = %q", result)
+  }
+}
+
+func TestResolveBodySpreadWithOtherFields(t *testing.T) {
+  vars := map[string]interface{}{
+    "name":   "test",
+    "fields": map[string]interface{}{"Title": "Hello", "Color": "Red"},
+  }
+  result, err := resolveTemplate(
+    `{"name": $name, ...$fields}`,
+    vars, nil, "", ResolveBody,
+  )
+  if err != nil {
+    t.Fatal(err)
+  }
+  if result != `{"name": "test", "Color":"Red","Title":"Hello"}` {
+    t.Errorf("result = %q", result)
+  }
+}
+
+func TestResolveBodySpreadNonObjectFails(t *testing.T) {
+  vars := map[string]interface{}{
+    "val": "not an object",
+  }
+  _, err := resolveTemplate(
+    `{...$val}`,
+    vars, nil, "", ResolveBody,
+  )
+  if err == nil {
+    t.Fatal("expected error for spreading non-object")
+  }
+  if !strings.Contains(err.Error(), "spread requires an object") {
+    t.Errorf("error = %v", err)
+  }
+}
+
+func TestResolveBodyLiteralDots(t *testing.T) {
+  // ... not followed by $ should be literal dots
+  result, err := resolveTemplate(
+    `{"msg": "loading..."}`,
+    nil, nil, "", ResolveBody,
+  )
+  if err != nil {
+    t.Fatal(err)
+  }
+  if result != `{"msg": "loading..."}` {
+    t.Errorf("result = %q", result)
+  }
+}
+
 func TestResolveHeaderToken(t *testing.T) {
   vars := map[string]interface{}{}
   result, err := resolveTemplate(
@@ -818,12 +881,23 @@ HTTP 200
     t.Fatal(err)
   }
 
-  _, err = executeVirtualTool(http.DefaultClient, tools, "oof", nil, "")
-  if err == nil {
-    t.Fatal("expected error for 500")
+  result, err := executeVirtualTool(http.DefaultClient, tools, "oof", nil, "")
+  if err != nil {
+    t.Fatalf("unexpected error: %v", err)
   }
-  if !strings.Contains(err.Error(), "unexpected status 500") {
-    t.Errorf("error = %v", err)
+  m, ok := result.(map[string]interface{})
+  if !ok {
+    t.Fatalf("expected map result, got %T", result)
+  }
+  if m["status"] != 500 {
+    t.Errorf("status = %v, want 500", m["status"])
+  }
+  if !strings.Contains(fmt.Sprint(m["error"]), "unexpected status 500") {
+    t.Errorf("error = %v", m["error"])
+  }
+  body, _ := m["body"].(map[string]interface{})
+  if body["error"] != "boom" {
+    t.Errorf("body.error = %v", body)
   }
 }
 

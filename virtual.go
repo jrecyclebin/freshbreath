@@ -415,6 +415,34 @@ func resolveTemplateInner(tmpl string, vars map[string]interface{}, scope interf
       }
     }
 
+    // In body mode, detect spread syntax: ...$var
+    if mode == ResolveBody && ch == '.' && i+2 < len(tmpl) && tmpl[i+1] == '.' && tmpl[i+2] == '.' {
+      // Look ahead for $
+      if i+3 < len(tmpl) && tmpl[i+3] == '$' {
+        val, consumed, err := resolveVarRef(tmpl[i+3:], vars, scope, token)
+        if err != nil {
+          return "", fmt.Errorf("position %d: %w", i, err)
+        }
+        m, ok := val.(map[string]interface{})
+        if !ok {
+          return "", fmt.Errorf("position %d: spread requires an object, got %T", i, val)
+        }
+        j, err := json.Marshal(m)
+        if err != nil {
+          return "", fmt.Errorf("position %d: marshal spread: %w", i, err)
+        }
+        // Strip outer { } so the inner key-value pairs merge into the surrounding object.
+        inner := string(j[1 : len(j)-1])
+        b.WriteString(inner)
+        i += 3 + consumed // skip ... and the variable reference
+        continue
+      }
+      // Not a spread — literal dots
+      b.WriteString("...")
+      i += 3
+      continue
+    }
+
     if ch != '$' {
       b.WriteByte(ch)
       i++
@@ -836,12 +864,16 @@ func executeVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
     // Check status against expected responses.
     vr, expected := step.Responses[resp.StatusCode]
     if !expected {
-      var known []int
-      for code := range step.Responses {
-        known = append(known, code)
+      // Return the raw upstream response so the caller can see what happened.
+      var parsedBody interface{}
+      if len(respBody) > 0 {
+        json.Unmarshal(respBody, &parsedBody)
       }
-      return nil, fmt.Errorf("step %d: unexpected status %d (expected %v), body: %s",
-        stepIdx, resp.StatusCode, known, truncate(string(respBody), 200))
+      return map[string]interface{}{
+        "error":  fmt.Sprintf("unexpected status %d", resp.StatusCode),
+        "status": resp.StatusCode,
+        "body":   parsedBody,
+      }, nil
     }
 
     // Parse response body into scope for the next step.

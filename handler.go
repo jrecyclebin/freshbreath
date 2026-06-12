@@ -812,25 +812,12 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 
   result, err := executeVirtualTool(s.httpClient, tools, body.Task, body.Args, token)
   if err != nil {
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]interface{}{
-      "content": []map[string]interface{}{{
-        "type": "text",
-        "text": err.Error(),
-      }},
-      "isError": true,
-    })
+    http.Error(w, err.Error(), http.StatusInternalServerError)
     return
   }
 
-  // Wrap result in MCP-format response.
   w.Header().Set("Content-Type", "application/json")
-  json.NewEncoder(w).Encode(map[string]interface{}{
-    "content": []map[string]interface{}{{
-      "type": "text",
-      "text": mustJSON(result),
-    }},
-  })
+  json.NewEncoder(w).Encode(result)
 }
 
 func mustJSON(v interface{}) string {
