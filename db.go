@@ -85,6 +85,13 @@ func (s *Store) Migrate() error {
       PRIMARY KEY (host, port)
     );
 
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      client_id      TEXT NOT NULL PRIMARY KEY,
+      client_secret  TEXT NOT NULL,
+      redirect_uris  TEXT NOT NULL DEFAULT '[]',
+      created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_services_url ON services(url);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
@@ -92,6 +99,7 @@ func (s *Store) Migrate() error {
     CREATE INDEX IF NOT EXISTS idx_app_members_nonce ON app_members(app_nonce);
     CREATE INDEX IF NOT EXISTS idx_app_service_app ON app_service_links(app_nonce);
     CREATE INDEX IF NOT EXISTS idx_app_service_svc ON app_service_links(service_id);
+    CREATE INDEX IF NOT EXISTS idx_oauth_clients_id ON oauth_clients(client_id);
   `)
   if err != nil {
     return err
@@ -946,4 +954,38 @@ func (s *Store) StoreSSHHostKey(host string, port int, keyData []byte, fingerpri
 func (s *Store) DeleteSSHHostKey(host string, port int) error {
   _, err := s.db.Exec("DELETE FROM ssh_host_keys WHERE host = ? AND port = ?", host, port)
   return err
+}
+
+// ── OAuth Clients (DCR persistence) ──
+
+// RegisterOAuthClient persists a dynamically-registered OAuth client.
+func (s *Store) RegisterOAuthClient(clientID, clientSecret string, redirectURIs []string) error {
+  urisJSON, err := json.Marshal(redirectURIs)
+  if err != nil {
+    return err
+  }
+  _, err = s.db.Exec(
+    "INSERT INTO oauth_clients (client_id, client_secret, redirect_uris) VALUES (?, ?, ?)",
+    clientID, clientSecret, string(urisJSON),
+  )
+  return err
+}
+
+// GetOAuthClient looks up a registered OAuth client by ID.
+func (s *Store) GetOAuthClient(clientID string) (clientSecret string, redirectURIs []string, ok bool, err error) {
+  var secretStr, urisStr string
+  err = s.db.QueryRow(
+    "SELECT client_secret, redirect_uris FROM oauth_clients WHERE client_id = ?", clientID,
+  ).Scan(&secretStr, &urisStr)
+  if err == sql.ErrNoRows {
+    return "", nil, false, nil
+  }
+  if err != nil {
+    return "", nil, false, err
+  }
+  var uris []string
+  if err := json.Unmarshal([]byte(urisStr), &uris); err != nil {
+    return "", nil, false, err
+  }
+  return secretStr, uris, true, nil
 }

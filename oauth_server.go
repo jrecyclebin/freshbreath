@@ -35,37 +35,27 @@ import (
 
 // ── DCR Client Store ────────────────────────────────────────────────
 
-type oauthClient struct {
-  id          string
-  secret      string
-  redirectURIs []string
-}
-
+// oauthClientStore persists DCR clients to the database so they survive restarts.
+// MCP clients (like Claude Code) cache their client_id across sessions.
 type oauthClientStore struct {
-  mu      sync.RWMutex
-  clients map[string]*oauthClient // client_id → client
+  store *Store
 }
 
-func newOAuthClientStore() *oauthClientStore {
-  return &oauthClientStore{clients: make(map[string]*oauthClient)}
+func newOAuthClientStore(s *Store) *oauthClientStore {
+  return &oauthClientStore{store: s}
 }
 
-func (cs *oauthClientStore) register(redirectURIs []string) *oauthClient {
-  c := &oauthClient{
-    id:           rand.Text(),
-    secret:       rand.Text(),
-    redirectURIs: redirectURIs,
+func (cs *oauthClientStore) register(redirectURIs []string) (string, string, error) {
+  id := rand.Text()
+  secret := rand.Text()
+  if err := cs.store.RegisterOAuthClient(id, secret, redirectURIs); err != nil {
+    return "", "", err
   }
-  cs.mu.Lock()
-  cs.clients[c.id] = c
-  cs.mu.Unlock()
-  return c
+  return id, secret, nil
 }
 
-func (cs *oauthClientStore) get(id string) *oauthClient {
-  cs.mu.RLock()
-  defer cs.mu.RUnlock()
-  return cs.clients[id]
+func (cs *oauthClientStore) get(id string) (string, []string, bool, error) {
+  return cs.store.GetOAuthClient(id)
 }
 
 // ── MCP Auth Pending State ──────────────────────────────────────────
@@ -116,7 +106,7 @@ type oauthServer struct {
 
 func newOAuthServer(s *Server) *oauthServer {
   return &oauthServer{
-    clients: newOAuthClientStore(),
+    clients: newOAuthClientStore(s.store),
     codes:   make(map[string]*mcpAuthCode),
     server:  s,
   }
@@ -160,15 +150,19 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  c := os.clients.register(meta.RedirectURIs)
+  clientID, clientSecret, err := os.clients.register(meta.RedirectURIs)
+  if err != nil {
+    http.Error(w, "client registration failed", http.StatusInternalServerError)
+    return
+  }
 
   w.Header().Set("Content-Type", "application/json")
   w.WriteHeader(http.StatusCreated)
   json.NewEncoder(w).Encode(&oauthex.ClientRegistrationResponse{
-    ClientID:     c.id,
-    ClientSecret: c.secret,
+    ClientID:     clientID,
+    ClientSecret: clientSecret,
     ClientRegistrationMetadata: oauthex.ClientRegistrationMetadata{
-      RedirectURIs:       c.redirectURIs,
+      RedirectURIs:       meta.RedirectURIs,
       ClientName:         meta.ClientName,
       TokenEndpointAuthMethod: firstNonEmpty(meta.TokenEndpointAuthMethod, "client_secret_basic"),
       GrantTypes:         []string{"authorization_code", "refresh_token"},
@@ -204,13 +198,17 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   }
 
   // Validate client
-  c := os.clients.get(clientID)
-  if c == nil {
+  clientSecret, clientRedirectURIs, clientOK, err := os.clients.get(clientID)
+  if err != nil {
+    http.Error(w, "client lookup error", http.StatusInternalServerError)
+    return
+  }
+  if !clientOK {
     http.Error(w, "unknown client_id", http.StatusBadRequest)
     return
   }
   validRedirect := false
-  for _, u := range c.redirectURIs {
+  for _, u := range clientRedirectURIs {
     if u == redirectURI {
       validRedirect = true
       break
@@ -220,6 +218,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
     http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
     return
   }
+  _ = clientSecret
 
   // Resolve the virtual service from the resource parameter.
   // resource is like "/mcp/sharepoint" or a full URL like "https://host/mcp/sharepoint".
@@ -337,8 +336,12 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     clientID = r.Form.Get("client_id")
     clientSecret = r.Form.Get("client_secret")
   }
-  c := os.clients.get(clientID)
-  if c == nil || c.secret != clientSecret {
+  storedSecret, _, clientOK, err := os.clients.get(clientID)
+  if err != nil {
+    http.Error(w, "client lookup error", http.StatusInternalServerError)
+    return
+  }
+  if !clientOK || storedSecret != clientSecret {
     http.Error(w, "invalid client credentials", http.StatusUnauthorized)
     return
   }

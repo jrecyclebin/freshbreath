@@ -246,18 +246,35 @@ func TestStoreAPIKeyDescriptorRoundTrip(t *testing.T) {
   }
 }
 
-func TestStoreOAuthRoundTrip(t *testing.T) {
-  // OAuth data is no longer stored server-side — verify the table is gone.
+func TestStoreOAuthClientRoundTrip(t *testing.T) {
   store := newTestStore(t)
-  _, _ = store.RegisterService("slack", "https://example/mcp", ServiceDescriptor{Type: "mcp"})
 
-  var count int
-  err := store.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='mcp_oauth'").Scan(&count)
-  if err != nil {
-    t.Fatalf("check table: %v", err)
+  uris := []string{"https://client.example/callback"}
+  if err := store.RegisterOAuthClient("test-client-id", "test-secret", uris); err != nil {
+    t.Fatalf("register: %v", err)
   }
-  if count != 0 {
-    t.Error("expected mcp_oauth table to be absent")
+
+  secret, gotURIs, ok, err := store.GetOAuthClient("test-client-id")
+  if err != nil {
+    t.Fatalf("get: %v", err)
+  }
+  if !ok {
+    t.Fatal("expected client to be found")
+  }
+  if secret != "test-secret" {
+    t.Errorf("secret = %q, want test-secret", secret)
+  }
+  if len(gotURIs) != 1 || gotURIs[0] != uris[0] {
+    t.Errorf("redirect_uris = %v, want %v", gotURIs, uris)
+  }
+
+  // Nonexistent client returns ok=false, no error.
+  _, _, ok, err = store.GetOAuthClient("nope")
+  if err != nil {
+    t.Fatalf("get nonexistent: %v", err)
+  }
+  if ok {
+    t.Error("expected ok=false for nonexistent client")
   }
 }
 
