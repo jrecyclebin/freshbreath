@@ -33,6 +33,22 @@ import (
 //  10. MCP client uses that JWT as a Bearer token; Freshbreath unwraps it
 //      to get the real upstream token for virtual scripts.
 
+// ── OAuth JSON Error Responses ──────────────────────────────────────
+//
+// RFC 6749 §5.2 requires error responses to be application/json with
+// "error" and "error_description" fields. We use this across all OAuth
+// endpoints so MCP clients can parse errors instead of choking on
+// plain text.
+
+func oauthWriteError(w http.ResponseWriter, status int, code string, desc string) {
+  w.Header().Set("Content-Type", "application/json")
+  w.WriteHeader(status)
+  json.NewEncoder(w).Encode(map[string]string{
+    "error":             code,
+    "error_description": desc,
+  })
+}
+
 // ── DCR Client Store ────────────────────────────────────────────────
 
 // oauthClientStore persists DCR clients to the database so they survive restarts.
@@ -136,23 +152,23 @@ func (os *oauthServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
 
 func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
   if r.Method != http.MethodPost {
-    http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+    oauthWriteError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
     return
   }
 
   var meta oauthex.ClientRegistrationMetadata
   if err := json.NewDecoder(r.Body).Decode(&meta); err != nil {
-    http.Error(w, "invalid JSON", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "invalid JSON")
     return
   }
   if len(meta.RedirectURIs) == 0 {
-    http.Error(w, "redirect_uris is required", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "redirect_uris is required")
     return
   }
 
   clientID, clientSecret, err := os.clients.register(meta.RedirectURIs)
   if err != nil {
-    http.Error(w, "client registration failed", http.StatusInternalServerError)
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "client registration failed")
     return
   }
 
@@ -180,7 +196,7 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   if r.Method != http.MethodGet {
-    http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+    oauthWriteError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
     return
   }
 
@@ -193,18 +209,18 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   resource := q.Get("resource")
 
   if clientID == "" || redirectURI == "" || state == "" || codeChallenge == "" {
-    http.Error(w, "missing required OAuth parameters", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "missing required OAuth parameters")
     return
   }
 
   // Validate client
   clientSecret, clientRedirectURIs, clientOK, err := os.clients.get(clientID)
   if err != nil {
-    http.Error(w, "client lookup error", http.StatusInternalServerError)
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "client lookup error")
     return
   }
   if !clientOK {
-    http.Error(w, "unknown client_id", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_client", "unknown client_id")
     return
   }
   validRedirect := false
@@ -215,7 +231,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
     }
   }
   if !validRedirect {
-    http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "invalid redirect_uri")
     return
   }
   _ = clientSecret
@@ -231,7 +247,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   }
   svc, err := os.server.store.GetServiceByURL(slug)
   if err != nil {
-    http.Error(w, "virtual service not found for resource", http.StatusNotFound)
+    oauthWriteError(w, http.StatusNotFound, "invalid_scope", "virtual service not found for resource")
     return
   }
 
@@ -270,7 +286,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   if svc.Descriptor.Type == "oidc" {
     au, st, vf, nc, tu, err := os.server.oidcBeginAuth(r.Context(), svc, callbackRedirectURI)
     if err != nil {
-      http.Error(w, fmt.Sprintf("upstream OIDC auth failed: %v", err), http.StatusInternalServerError)
+      oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("upstream OIDC auth failed: %v", err))
       return
     }
     authURL, oauthState = au, st
@@ -283,7 +299,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   } else {
     au, ci, cs, tu, st, vf, err := os.server.serviceBeginAuth(r.Context(), svc, callbackRedirectURI)
     if err != nil {
-      http.Error(w, fmt.Sprintf("upstream auth failed: %v", err), http.StatusInternalServerError)
+      oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("upstream auth failed: %v", err))
       return
     }
     authURL, oauthState = au, st
@@ -308,25 +324,25 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
   if r.Method != http.MethodPost {
-    http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+    oauthWriteError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
     return
   }
 
   if err := r.ParseForm(); err != nil {
-    http.Error(w, "invalid form data", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "invalid form data")
     return
   }
 
   grantType := r.Form.Get("grant_type")
   if grantType != "authorization_code" {
-    http.Error(w, "unsupported grant_type", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "unsupported_grant_type", "unsupported grant_type")
     return
   }
 
   code := r.Form.Get("code")
   verifier := r.Form.Get("code_verifier")
   if code == "" || verifier == "" {
-    http.Error(w, "missing code or code_verifier", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "missing code or code_verifier")
     return
   }
 
@@ -338,11 +354,11 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
   }
   storedSecret, _, clientOK, err := os.clients.get(clientID)
   if err != nil {
-    http.Error(w, "client lookup error", http.StatusInternalServerError)
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "client lookup error")
     return
   }
   if !clientOK || (clientSecret != "" && storedSecret != clientSecret) {
-    http.Error(w, "invalid client credentials", http.StatusUnauthorized)
+    oauthWriteError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
     return
   }
 
@@ -355,11 +371,11 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
   os.codesMu.Unlock()
 
   if !ok {
-    http.Error(w, "invalid or expired authorization code", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired authorization code")
     return
   }
   if time.Since(mcpCode.issued) > 10*time.Minute {
-    http.Error(w, "authorization code expired", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "authorization code expired")
     return
   }
 
@@ -367,24 +383,24 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 
   // Verify PKCE
   if pending.codeChallengeMethod != "S256" {
-    http.Error(w, "unsupported code_challenge_method", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "unsupported code_challenge_method")
     return
   }
   if !verifyPKCE(verifier, pending.codeChallenge) {
-    http.Error(w, "PKCE verification failed", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
     return
   }
 
   // Verify client matches
   if pending.clientID != clientID {
-    http.Error(w, "client_id mismatch", http.StatusBadRequest)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
     return
   }
 
   // Mint a Freshbreath JWT wrapping the upstream token
   jwt, err := os.mintWrappedToken(pending)
   if err != nil {
-    http.Error(w, "token issuance failed", http.StatusInternalServerError)
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "token issuance failed")
     return
   }
 
