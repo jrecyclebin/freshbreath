@@ -164,7 +164,7 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
     ClientRegistrationMetadata: oauthex.ClientRegistrationMetadata{
       RedirectURIs:       meta.RedirectURIs,
       ClientName:         meta.ClientName,
-      TokenEndpointAuthMethod: firstNonEmpty(meta.TokenEndpointAuthMethod, "client_secret_basic"),
+      TokenEndpointAuthMethod: firstNonEmpty(meta.TokenEndpointAuthMethod, "client_secret_post"),
       GrantTypes:         []string{"authorization_code", "refresh_token"},
       ResponseTypes:      []string{"code"},
       Scope:              meta.Scope,
@@ -341,7 +341,7 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     http.Error(w, "client lookup error", http.StatusInternalServerError)
     return
   }
-  if !clientOK || storedSecret != clientSecret {
+  if !clientOK || (clientSecret != "" && storedSecret != clientSecret) {
     http.Error(w, "invalid client credentials", http.StatusUnauthorized)
     return
   }
