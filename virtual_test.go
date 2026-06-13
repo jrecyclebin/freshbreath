@@ -13,7 +13,7 @@ import (
 // ── Parser Tests ─────────────────────────────────────────────────────
 
 func TestParseSharepoint(t *testing.T) {
-  data, err := os.ReadFile("Sharepoint.txt")
+  data, err := os.ReadFile("samples/Sharepoint.txt")
   if err != nil {
     t.Fatal(err)
   }
