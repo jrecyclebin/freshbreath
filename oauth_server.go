@@ -265,6 +265,26 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   }
   os.server.mcpAuthPending.Store(mcpPendingKey, mcpPending)
 
+  // For virtual services with API-key auth, skip the upstream OAuth flow.
+  // Redirect the user to a key-entry form instead.
+  if svc.Descriptor.Auth == "key" {
+    stateKey := rand.Text()
+    os.server.pendingMu.Lock()
+    os.server.pending[stateKey] = &pendingAuth{
+      serviceID:   svc.ID,
+      serviceURL:  svc.URL,
+      appNonce:    "mcp:" + mcpPendingKey,
+      appState:    mcpPendingKey,
+      serviceType: "apikey",
+    }
+    os.server.pendingMu.Unlock()
+
+    keyAuthURL := fmt.Sprintf("%s/service/apikey-auth?state=%s&service_id=%d&mcp=1",
+      os.server.config.PublicBaseURL, stateKey, svc.ID)
+    http.Redirect(w, r, keyAuthURL, http.StatusFound)
+    return
+  }
+
   // Begin the upstream OAuth flow.
   // We create a regular pendingAuth for the callback, using the MCP
   // pending key as the app_nonce (prefixed with "mcp:") so we can

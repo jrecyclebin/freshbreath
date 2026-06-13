@@ -47,7 +47,7 @@ func (r *virtualMCPRegistry) add(s *Server, svc *Service) {
     return mcps
   }, &mcp.StreamableHTTPOptions{Stateless: true})
 
-  hasAuth := svc.Descriptor.OAuthURL != "" || svc.Descriptor.ClientID != ""
+  hasAuth := svc.Descriptor.OAuthURL != "" || svc.Descriptor.ClientID != "" || svc.Descriptor.Auth == "key"
   var finalHandler http.Handler
   var prm *oauthex.ProtectedResourceMetadata
 
@@ -113,6 +113,8 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
       // Extract token from request header.
       // If it's a Freshbreath-wrapped JWT (MCP OAuth flow), unwrap to get
       // the real upstream token for $token in virtual scripts.
+      // If no bearer token and the service uses API-key auth, fall back
+      // to the admin-configured key.
       token := ""
       if req.Extra != nil && req.Extra.Header != nil {
         if ah := req.Extra.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
@@ -130,6 +132,9 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
             token = raw
           }
         }
+      }
+      if token == "" && svc.Descriptor.Auth == "key" {
+        token = svc.Descriptor.APIKey
       }
 
       // Parse arguments from raw JSON.

@@ -1270,7 +1270,7 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
       delete d.client_id; delete d.client_secret; delete d.oauth_url;
       delete d.scopes; delete d.userinfo_url; delete d.userinfo_emails_url;
     } else if (t === 'virtual') {
-      delete d.auth; delete d.api_key; delete d.header; delete d.proxied;
+      delete d.proxied;
       delete d.auth_service_id; delete d.userinfo_url; delete d.userinfo_emails_url;
     } else {
       delete d.auth_service_id;
@@ -1346,7 +1346,7 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
           )}
         </div>
       )}
-      {form.descriptor.type==='api' && (
+      {(form.descriptor.type==='api' || form.descriptor.type==='virtual') && (
         <>
           <div className="field-row">
             <div className="field"><label>Auth</label>
@@ -1363,7 +1363,7 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
           }
         </>
       )}
-      {(form.descriptor.type==='oidc' || (form.descriptor.type==='api' && !form.descriptor.auth) || form.descriptor.type==='virtual') && (
+      {(form.descriptor.type==='oidc' || ((form.descriptor.type==='api' || form.descriptor.type==='virtual') && !form.descriptor.auth)) && (
         <>
           <div className="field"><label>OAuth URL</label><input className="input mono" value={form.descriptor.oauth_url||''} onChange={e=>updDesc('oauth_url',e.target.value)} placeholder="https://provider.com/oauth"/></div>
           <div className="field-row">

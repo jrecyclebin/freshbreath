@@ -94,6 +94,7 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/service/callback", s.handleCallback)
   s.mux.HandleFunc("/service/refresh",  s.handleRefresh)
   s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
+  s.mux.HandleFunc("/service/apikey-auth", s.handleAPIKeyAuth)
   s.mux.HandleFunc("/service/{id}/",   s.handleServiceProxy)
   s.mux.HandleFunc("/service/call/{name}", s.handleServiceCall)
 
@@ -419,8 +420,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  // API-key auth — no OAuth flow, just return service info as JSON
-  if svc.Descriptor.Auth == "key" {
+  // API-key auth for non-virtual services — no OAuth flow, just return service info as JSON
+  if svc.Descriptor.Auth == "key" && svc.Descriptor.Type != "virtual" {
     _ = s.store.LinkAppService(nonce, svc.ID)
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(map[string]interface{}{
@@ -434,6 +435,27 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
       "auth":       "key",
       "proxied":    svc.Descriptor.Proxied,
       "hasKey":     svc.Descriptor.APIKey != "",
+    })
+    return
+  }
+
+  // Virtual services with API-key auth — redirect to key entry form
+  if svc.Descriptor.Auth == "key" && svc.Descriptor.Type == "virtual" {
+    state := genNonce()
+    s.pendingMu.Lock()
+    s.pending[state] = &pendingAuth{
+      serviceID:   svc.ID,
+      serviceURL:  svc.URL,
+      appNonce:    nonce,
+      appState:    appState,
+      serviceType: "apikey",
+    }
+    s.pendingMu.Unlock()
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+      "type": "redirect",
+      "url":  fmt.Sprintf(s.config.PublicBaseURL+"/service/apikey-auth?state=%s&service_id=%d", state, svc.ID),
     })
     return
   }
@@ -2776,6 +2798,171 @@ const sshAuthFormHTML = `<!doctype html>
       }
       r.text().then(function(html){document.open();document.write(html);document.close()});
     }).catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Sign in'});
+  };
+})();
+</script></body></html>`
+
+// handleAPIKeyAuth handles the API key entry flow.
+// GET renders the key entry form.
+// POST accepts the key and completes auth via postMessage or MCP redirect.
+func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
+  switch r.Method {
+  case http.MethodGet:
+    state := r.URL.Query().Get("state")
+    if state == "" {
+      http.Error(w, "Missing state parameter", http.StatusBadRequest)
+      return
+    }
+    svcID := r.URL.Query().Get("service_id")
+    isMCP := r.URL.Query().Get("mcp") == "1"
+    w.Header().Set("Content-Type", "text/html; charset=utf-8")
+    html := strings.Replace(apiKeyAuthFormHTML, "{{STATE}}", state, 1)
+    html = strings.Replace(html, "{{SERVICE_ID}}", svcID, 1)
+    html = strings.Replace(html, "{{IS_MCP}}", fmt.Sprintf("%v", isMCP), 1)
+    w.Write([]byte(html))
+
+  case http.MethodPost:
+    var req struct {
+      State    string `json:"state"`
+      APIKey   string `json:"api_key"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+      http.Error(w, "Invalid JSON", http.StatusBadRequest)
+      return
+    }
+    if req.State == "" || req.APIKey == "" {
+      http.Error(w, "state and api_key required", http.StatusBadRequest)
+      return
+    }
+
+    s.pendingMu.Lock()
+    pending, ok := s.pending[req.State]
+    if ok && pending.serviceType == "apikey" {
+      delete(s.pending, req.State)
+    } else {
+      ok = false
+    }
+    s.pendingMu.Unlock()
+
+    if !ok {
+      http.Error(w, "Unknown or expired auth state", http.StatusBadRequest)
+      return
+    }
+
+    // MCP auth flow — complete via the MCP path
+    if strings.HasPrefix(pending.appNonce, "mcp:") {
+      mcpKey := strings.TrimPrefix(pending.appNonce, "mcp:")
+      mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(mcpKey)
+      if !ok {
+        http.Error(w, "MCP auth session expired", http.StatusBadRequest)
+        return
+      }
+      mcpPending := mcpPendingVal.(*mcpPendingAuth)
+
+      mcpPending.upstreamToken = req.APIKey
+      mcpPending.userEmail = "api-key-user"
+      mcpPending.upstreamExpiry = time.Now().Add(24 * time.Hour * 365) // long-lived
+      mcpPending.upstreamScopes = ""
+
+      fbCode := rand.Text()
+      s.oauthSrv.codesMu.Lock()
+      s.oauthSrv.codes[fbCode] = &mcpAuthCode{
+        pending: mcpPending,
+        issued:  time.Now(),
+      }
+      s.oauthSrv.codesMu.Unlock()
+
+      redirectURL := fmt.Sprintf("%s?code=%s&state=%s", mcpPending.redirectURI, fbCode, mcpPending.state)
+      w.Header().Set("Content-Type", "application/json")
+      json.NewEncoder(w).Encode(map[string]interface{}{
+        "redirect": redirectURL,
+      })
+      return
+    }
+
+    // Browser (non-MCP) flow — return a fabricated token
+    now := time.Now()
+    svc, err := s.store.GetService(pending.serviceID)
+    if err != nil {
+      http.Error(w, "Service not found", http.StatusInternalServerError)
+      return
+    }
+
+    _ = s.store.LinkAppService(pending.appNonce, pending.serviceID)
+
+    // Fabricate a simple token wrapping the API key
+    s.completeAuth(w, pending, &OAuthData{
+      AccessToken: req.APIKey,
+      TokenType:   "Bearer",
+      ExpiresAt:   now.Add(24 * time.Hour * 365), // long-lived
+      Claims: map[string]interface{}{
+        "sub": "api-key-user",
+        "iss": "freshbreath",
+      },
+      Proxied: svc.Descriptor.Proxied,
+    })
+
+  default:
+    http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+  }
+}
+
+const apiKeyAuthFormHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>API Key — Fresh Breath</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f11;color:#e4e4e7;display:grid;place-items:center;min-height:100vh}
+  .card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:32px;width:100%;max-width:380px}
+  h1{font-size:18px;font-weight:600;margin-bottom:4px}
+  p.lead{color:#71717a;font-size:14px;margin-bottom:24px}
+  label{display:block;font-size:13px;color:#a1a1aa;margin-bottom:6px;font-weight:500}
+  input{width:100%;padding:10px 12px;border:1px solid #27272a;border-radius:8px;background:#0f0f11;color:#e4e4e7;font-size:14px;margin-bottom:16px;outline:none}
+  input:focus{border-color:#6366f1}
+  button{width:100%;padding:10px;border:none;border-radius:8px;background:#6366f1;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+  button:hover{background:#4f46e5}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .err{color:#f87171;font-size:13px;margin-bottom:12px;display:none}
+  .err.show{display:block}
+</style></head><body>
+<div class="card">
+  <h1>API Key Authentication</h1>
+  <p class="lead">Enter your API key or access token.</p>
+  <div class="err" id="err"></div>
+  <form id="f">
+    <label for="k">API Key</label>
+    <input id="k" type="password" required autofocus/>
+    <button type="submit" id="btn">Submit</button>
+  </form>
+</div>
+<script>
+(function(){
+  var state="{{STATE}}";
+  var serviceId="{{SERVICE_ID}}";
+  var isMCP="{{IS_MCP}}"==="true";
+  document.getElementById('f').onsubmit=function(ev){
+    ev.preventDefault();
+    var btn=document.getElementById('btn');
+    var errEl=document.getElementById('err');
+    errEl.className='err';
+    errEl.textContent='';
+    btn.disabled=true;btn.textContent='Submitting…';
+    fetch('/service/apikey-auth',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state:state,api_key:document.getElementById('k').value})
+    }).then(function(r){
+      if(!r.ok){
+        r.text().then(function(t){errEl.textContent=t||'Submission failed';errEl.className='err show'});
+        btn.disabled=false;btn.textContent='Submit';
+        return;
+      }
+      if(isMCP){
+        r.json().then(function(d){
+          if(d.redirect){window.location.href=d.redirect;}
+        });
+      } else {
+        r.text().then(function(html){document.open();document.write(html);document.close()});
+      }
+    }).catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Submit'});
   };
 })();
 </script></body></html>`
