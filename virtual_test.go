@@ -215,6 +215,47 @@ HTTP 200
   }
 }
 
+func TestParseBadButWorkable(t *testing.T) {
+  input := `---
+[fetch-and-update] --- Fetch then update
+$hostname = unknown($url)
+  GET https://api.example.com/data/$id
+Authorization: Bearer $token
+
+HTTP 200
+$next_url = $['links']['next']
+GET $next_url
+Authorization: Bearer $token
+
+HTTP 200
+---
+---
+[nawwwwww Broken test
+# Will need to fix this
+ldskjasdjflksda
+sddslkfj;;;
+`
+  tools, err := parseVirtualFile([]byte(input))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(tools) != 1 {
+    t.Fatalf("expected 1 tool, got %d", len(tools))
+  }
+  if len(tools[0].Steps) != 2 {
+    t.Fatalf("expected 2 steps, got %d", len(tools[0].Steps))
+  }
+  if tools[0].Steps[0].Method != "GET" {
+    t.Errorf("step[0] method = %q", tools[0].Steps[0].Method)
+  }
+  if tools[0].Steps[1].Method != "GET" {
+    t.Errorf("step[1] method = %q", tools[0].Steps[1].Method)
+  }
+  if len(tools[0].Steps[1].Assignments) != 1 || tools[0].Steps[1].Assignments[0].VarName != "next_url" {
+    t.Errorf("step[1] assignments = %v", tools[0].Steps[1].Assignments)
+  }
+}
+
 func TestParseDollarDollarInURL(t *testing.T) {
   input := `[list-items] List items
 GET https://graph.microsoft.com/v1.0/items?$$select=id,name&$$top=10
