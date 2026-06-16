@@ -331,12 +331,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  // MCP auth flows must go through /oauth/authorize, not /service/login.
-  if strings.HasPrefix(nonce, "mcp:") {
-    http.Error(w, "MCP auth flows must use /oauth/authorize", http.StatusBadRequest)
-    return
-  }
-
   // Admin nonce is ephemeral (not in the apps table).
   // Regular app nonces must resolve to a registered app.
   isAdmin := nonce == s.adminNonce
@@ -350,6 +344,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
   serviceURL := r.URL.Query().Get("url")
   if serviceURL == "" {
     http.Error(w, "Missing url parameter", http.StatusBadRequest)
+    return
+  }
+
+  // MCP auth flows must go through /oauth/authorize, not /service/login.
+  if strings.HasPrefix(serviceURL, "/mcp/") {
+    http.Error(w, "MCP auth flows must use /oauth/authorize", http.StatusBadRequest)
     return
   }
 
@@ -420,27 +420,26 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  // API-key auth for non-virtual services — no OAuth flow, just return service info as JSON
-  if svc.Descriptor.Auth == "key" && svc.Descriptor.Type != "virtual" {
-    _ = s.store.LinkAppService(nonce, svc.ID)
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]interface{}{
-      "type":       "key-auth-complete",
-      "state":      appState,
-      "appNonce":   nonce,
-      "apiKey":     svc.Descriptor.APIKey,
-      "apiHeader":  svc.Descriptor.Header,
-      "serviceID":  svc.ID,
-      "serviceURL": svc.URL,
-      "auth":       "key",
-      "proxied":    svc.Descriptor.Proxied,
-      "hasKey":     svc.Descriptor.APIKey != "",
-    })
-    return
-  }
+  // API-key auth — no OAuth flow, just return service info as JSON
+  if svc.Descriptor.Auth == "key" {
+    if svc.Descriptor.APIKey != "" {
+      _ = s.store.LinkAppService(nonce, svc.ID)
+      w.Header().Set("Content-Type", "application/json")
+      json.NewEncoder(w).Encode(map[string]interface{}{
+        "type":       "key-auth-complete",
+        "state":      appState,
+        "appNonce":   nonce,
+        "apiKey":     svc.Descriptor.APIKey,
+        "apiHeader":  svc.Descriptor.Header,
+        "serviceID":  svc.ID,
+        "serviceURL": svc.URL,
+        "auth":       "key",
+        "proxied":    svc.Descriptor.Proxied,
+      })
+      return
+    }
 
-  // Virtual services with API-key auth — redirect to key entry form
-  if svc.Descriptor.Auth == "key" && svc.Descriptor.Type == "virtual" {
+    // Services with no default API-key — redirect to key entry form
     state := genNonce()
     s.pendingMu.Lock()
     s.pending[state] = &pendingAuth{
@@ -512,9 +511,7 @@ func (s *Server) completeAuth(w http.ResponseWriter, pending *pendingAuth, oauth
 // Exchanges the upstream code, stores the upstream token in the mcpPendingAuth,
 // generates a Freshbreath auth code, and redirects to the MCP client's redirect_uri.
 func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, code string) {
-  // The appNonce is "mcp:<key>" — extract the key to find our mcpPendingAuth.
-  mcpKey := strings.TrimPrefix(pending.appNonce, "mcp:")
-  mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(mcpKey)
+  mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(pending.appNonce)
   if !ok {
     http.Error(w, "MCP auth session expired", http.StatusBadRequest)
     return
@@ -2850,9 +2847,8 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
     }
 
     // MCP auth flow — complete via the MCP path
-    if strings.HasPrefix(pending.appNonce, "mcp:") {
-      mcpKey := strings.TrimPrefix(pending.appNonce, "mcp:")
-      mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(mcpKey)
+    if strings.HasPrefix(pending.serviceURL, "/mcp/") {
+      mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(pending.appNonce)
       if !ok {
         http.Error(w, "MCP auth session expired", http.StatusBadRequest)
         return

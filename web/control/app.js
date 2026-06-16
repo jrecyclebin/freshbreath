@@ -232,6 +232,7 @@ function AuthProvider({ children }) {
 
     const result = await window.FreshBreath.login({ appNonce, serviceURL });
     if (result.appNonce !== appNonce) return;
+    setSessionExpired(false);
     localStorage.setItem('frebre_admin', result.toJSON());
     setToken(result);
 

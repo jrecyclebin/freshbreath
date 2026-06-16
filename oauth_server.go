@@ -273,7 +273,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
     os.server.pending[stateKey] = &pendingAuth{
       serviceID:   svc.ID,
       serviceURL:  svc.URL,
-      appNonce:    "mcp:" + mcpPendingKey,
+      appNonce:    mcpPendingKey,
       appState:    mcpPendingKey,
       serviceType: "apikey",
     }
@@ -287,14 +287,13 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
   // Begin the upstream OAuth flow.
   // We create a regular pendingAuth for the callback, using the MCP
-  // pending key as the app_nonce (prefixed with "mcp:") so we can
-  // detect and complete the MCP flow in handleCallback.
+  // pending key as the app_nonce.
   callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
 
   pa := &pendingAuth{
     serviceID:   svc.ID,
     serviceURL:  svc.URL,
-    appNonce:    "mcp:" + mcpPendingKey,
+    appNonce:    mcpPendingKey,
     appState:    mcpPendingKey,
     scopes:      svc.Descriptor.Scopes,
     proxied:     svc.Descriptor.Proxied,
