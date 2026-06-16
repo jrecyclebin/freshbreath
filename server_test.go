@@ -487,17 +487,13 @@ func TestLoginWithAPIKey(t *testing.T) {
 
   var resp map[string]interface{}
   json.Unmarshal(rr.Body.Bytes(), &resp)
-  if resp["type"] != "key-auth-complete" {
-    t.Errorf("type = %v, want key-auth-complete", resp["type"])
+  // No admin key set → redirect to key entry form
+  if resp["type"] != "redirect" {
+    t.Errorf("type = %v, want redirect", resp["type"])
   }
-  if resp["auth"] != "key" {
-    t.Errorf("auth = %v, want key", resp["auth"])
-  }
-  if resp["serviceID"] == nil {
-    t.Error("expected serviceID")
-  }
-  if resp["hasKey"] != false {
-    t.Errorf("hasKey = %v, want false (no admin key set)", resp["hasKey"])
+  url, _ := resp["url"].(string)
+  if !strings.Contains(url, "/service/apikey-auth") {
+    t.Errorf("url = %q, want apikey-auth URL", url)
   }
 }
 
@@ -518,10 +514,10 @@ func TestLoginWithAPIKeyAdminSet(t *testing.T) {
 
   var resp map[string]interface{}
   json.Unmarshal(rr.Body.Bytes(), &resp)
-  if resp["hasKey"] != true {
-    t.Errorf("hasKey = %v, want true (admin key set)", resp["hasKey"])
+  if resp["type"] != "key-auth-complete" {
+    t.Errorf("type = %v, want key-auth-complete", resp["type"])
   }
-  // Admin key is available in the response (auth is coming later)
+  // Admin key is available in the response
   if resp["apiKey"] != "admin-secret-key" {
     t.Errorf("apiKey = %v, want admin-secret-key", resp["apiKey"])
   }

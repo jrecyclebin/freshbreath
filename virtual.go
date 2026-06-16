@@ -20,12 +20,35 @@ import (
 
 // ── Data Structures ──────────────────────────────────────────────────
 
+// ParamType describes the JSON Schema type of a tool parameter.
+type ParamType string
+
+const (
+  ParamString ParamType = "string"
+  ParamObject ParamType = "object"
+  ParamNumber ParamType = "number"
+  ParamBool   ParamType = "boolean"
+  ParamArray  ParamType = "array"
+)
+
+// ToolParam describes an input parameter for a virtual tool.
+type ToolParam struct {
+  Name string
+  Type ParamType
+}
+
 // VirtualTool defines a single tool in a virtual service description.
 type VirtualTool struct {
-  Name        string
-  Description string
-  Params      []string // input parameter names inferred from template references
-  Steps       []VirtualStep
+  Name           string
+  Description    string
+  Params         []ToolParam      // input parameters inferred from template references
+  Steps          []VirtualStep
+  typeAnnotations []typeAnnotation // parsed from "$name is type" lines, unexported
+}
+
+type typeAnnotation struct {
+  name string
+  typ  ParamType
 }
 
 // VirtualStep is one HTTP request step within a tool's script.
@@ -105,7 +128,15 @@ func parseVirtualFile(data []byte) ([]VirtualTool, error) {
 // toolParams scans all template strings and expressions in a tool's steps and
 // returns the variable names that are referenced but not locally assigned — i.e.
 // the parameters the caller must supply. $token is excluded (it's the auth token).
-func toolParams(tool VirtualTool) []string {
+//
+// Types are inferred:
+//   - Variables used in spread syntax (e.g. ...$fields) are typed as "object".
+//   - Explicit type annotations (e.g. "$fields is object") override inference.
+//   - All other parameters default to "string".
+var spreadVarRe = regexp.MustCompile(`\.\.\.\$([a-zA-Z_]\w*)`)
+var typeAnnotationRe = regexp.MustCompile(`^\$([a-zA-Z_]\w*)\s+is\s+(string|object|number|boolean|array)$`)
+
+func toolParams(tool VirtualTool) []ToolParam {
   defined := map[string]bool{"token": true}
   for _, step := range tool.Steps {
     for _, a := range step.Assignments {
@@ -114,10 +145,19 @@ func toolParams(tool VirtualTool) []string {
   }
 
   seen := map[string]bool{}
+  types := map[string]ParamType{} // name → inferred type
+
   scan := func(s string) {
     for _, m := range plainVarRe.FindAllStringSubmatch(s, -1) {
       if name := m[1]; !defined[name] {
         seen[name] = true
+      }
+    }
+    // Spread syntax: ...$var implies object type
+    for _, m := range spreadVarRe.FindAllStringSubmatch(s, -1) {
+      if name := m[1]; !defined[name] {
+        seen[name] = true
+        types[name] = ParamObject
       }
     }
   }
@@ -139,11 +179,22 @@ func toolParams(tool VirtualTool) []string {
     }
   }
 
-  params := make([]string, 0, len(seen))
-  for name := range seen {
-    params = append(params, name)
+  // Apply explicit type annotations
+  for _, ann := range tool.typeAnnotations {
+    if _, ok := seen[ann.name]; ok {
+      types[ann.name] = ann.typ
+    }
   }
-  sort.Strings(params)
+
+  params := make([]ToolParam, 0, len(seen))
+  for name := range seen {
+    t := ParamString
+    if pt, ok := types[name]; ok {
+      t = pt
+    }
+    params = append(params, ToolParam{Name: name, Type: t})
+  }
+  sort.Slice(params, func(i, j int) bool { return params[i].Name < params[j].Name })
   return params
 }
 
@@ -215,6 +266,8 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) {
         step.Assignments = append(step.Assignments, VirtualAssignment{VarName: vn, Expr: ex})
       } else if ok, ex, msg := tryParseAssertion(line); ok {
         step.Assertions = append(step.Assertions, VirtualAssertion{Expr: ex, Msg: msg})
+      } else if m := typeAnnotationRe.FindStringSubmatch(line); m != nil {
+        tool.typeAnnotations = append(tool.typeAnnotations, typeAnnotation{name: m[1], typ: ParamType(m[2])})
       } else if ok, m, u := tryParseRequest(line); ok {
         step.Method = m
         step.URL = u

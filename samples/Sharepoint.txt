@@ -76,6 +76,7 @@ HTTP 200
 [add-list-item] Add a new item to a list.
 # Adjust the fields object to match your list's actual columns.
 
+$fields is object
 POST https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items
 Authorization: Bearer $token
 Content-Type: application/json

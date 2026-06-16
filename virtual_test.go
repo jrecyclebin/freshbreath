@@ -1019,3 +1019,79 @@ func TestExecuteVirtualToolNotFound(t *testing.T) {
     t.Errorf("error = %v", err)
   }
 }
+
+func TestToolParamsTypeAnnotation(t *testing.T) {
+  data := []byte(`[add-item] Add an item.
+$fields is object
+$name is string
+POST /items
+Authorization: Bearer $token
+Content-Type: application/json
+{"name": $name, ...$fields}
+
+HTTP 201
+---
+[search] Search items.
+GET /items?q=$query
+Authorization: Bearer $token
+
+HTTP 200
+`)
+  tools, err := parseVirtualFile(data)
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(tools) != 2 {
+    t.Fatalf("got %d tools", len(tools))
+  }
+
+  // add-item: $fields is object (from annotation), $name is string (from annotation),
+  // spread also infers object for $fields but annotation already covers it
+  addParams := tools[0].Params
+  paramMap := map[string]ParamType{}
+  for _, p := range addParams {
+    paramMap[p.Name] = p.Type
+  }
+  if paramMap["fields"] != ParamObject {
+    t.Errorf("fields type = %v, want object", paramMap["fields"])
+  }
+  if paramMap["name"] != ParamString {
+    t.Errorf("name type = %v, want string", paramMap["name"])
+  }
+
+  // search: $query defaults to string
+  searchParams := tools[1].Params
+  if len(searchParams) != 1 || searchParams[0].Name != "query" {
+    t.Fatalf("search params = %v", searchParams)
+  }
+  if searchParams[0].Type != ParamString {
+    t.Errorf("query type = %v, want string", searchParams[0].Type)
+  }
+}
+
+func TestToolParamsSpreadInference(t *testing.T) {
+  data := []byte(`[update] Update an item.
+PATCH /items/$id
+Authorization: Bearer $token
+Content-Type: application/json
+{...$fields}
+
+HTTP 200
+`)
+  tools, err := parseVirtualFile(data)
+  if err != nil {
+    t.Fatal(err)
+  }
+  paramMap := map[string]ParamType{}
+  for _, p := range tools[0].Params {
+    paramMap[p.Name] = p.Type
+  }
+  // $fields used with spread → inferred as object
+  if paramMap["fields"] != ParamObject {
+    t.Errorf("fields type = %v, want object", paramMap["fields"])
+  }
+  // $id is just a plain reference → default string
+  if paramMap["id"] != ParamString {
+    t.Errorf("id type = %v, want string", paramMap["id"])
+  }
+}

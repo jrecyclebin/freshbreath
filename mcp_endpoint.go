@@ -167,7 +167,7 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
 func virtualToolInputSchema(vt VirtualTool) map[string]interface{} {
   props := map[string]interface{}{}
   for _, p := range vt.Params {
-    props[p] = map[string]interface{}{"type": "string"}
+    props[p.Name] = map[string]interface{}{"type": string(p.Type)}
   }
   return map[string]interface{}{
     "type":       "object",
