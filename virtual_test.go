@@ -26,8 +26,8 @@ func TestParseSharepoint(t *testing.T) {
   if len(tools) == 0 {
     t.Fatal("expected tools to be parsed")
   }
-  if len(tools) != 11 {
-    t.Errorf("expected 11 tools, got %d", len(tools))
+  if len(tools) != 13 {
+    t.Errorf("expected 13 tools, got %d", len(tools))
   }
 
   // ── [get-site] ───────────────────────────────────────────────────

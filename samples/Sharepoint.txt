@@ -102,3 +102,17 @@ DELETE https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items/$ite
 Authorization: Bearer $token
 
 HTTP 204
+---
+[list-followed-sites] List all SharePoint sites you follow.
+
+GET https://graph.microsoft.com/v1.0/me/followedSites
+Authorization: Bearer $token
+
+HTTP 200
+---
+[search-sites] Search for SharePoint sites by keyword.
+
+GET https://graph.microsoft.com/v1.0/sites?search=$query&$$select=id,displayName,webUrl,description&$$top=50
+Authorization: Bearer $token
+
+HTTP 200
