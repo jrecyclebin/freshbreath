@@ -11,13 +11,20 @@ import EventEmitter from 'https://esm.sh/eventemitter3';
 
 const API = window.__HOMESLICE_CONFIG?.apiBase ?? "";
 
+function uuidv4() {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40; // version 4
+  b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+  return [...b].map((x, i) => (i === 4 || i === 6 || i === 8 || i === 10 ? "-" : "") + x.toString(16).padStart(2, "0")).join("");
+}
+
 // ── static login flow ──
 /**
   * Open an OAuth popup for the given service URL.
   * On success returns a ServiceProxy instance with token data loaded.
   */
 export function login({ appNonce, serviceURL, state, apiKey }) {
-  const actualState = state || crypto.randomUUID();
+  const actualState = state || crypto.randomUUID?.() ?? uuidv4();
   return new Promise(async (resolve, reject) => {
     // If we already know it's key-auth (have an apiKey), skip the popup
     const url = `${API}/service/login?url=${encodeURIComponent(serviceURL)}&state=${encodeURIComponent(actualState)}`;
