@@ -191,8 +191,8 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 // ── Authorization Endpoint ──────────────────────────────────────────
 //
 // The MCP client sends the user here. We store their request,
-// begin the upstream OAuth flow, and redirect the user's browser
-// directly to the upstream provider's login page.
+// begin the upstream auth flow, and redirect the user's browser
+// to the appropriate login page (upstream provider, SSH form, or API key form).
 
 func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   if r.Method != http.MethodGet {
@@ -236,15 +236,13 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   }
   _ = clientSecret
 
-  // Resolve the virtual service from the resource parameter.
+  // Resolve slug from resource parameter.
   // resource is like "/mcp/sharepoint" or a full URL like "https://host/mcp/sharepoint".
-  // The special resource "/mcp" (no slug) routes to the central MCP server,
-  // which authenticates against the admin auth service.
+  // The special resource "/mcp" (no slug) routes to the central MCP server.
   slug := resource
   if strings.HasPrefix(slug, "http") {
     parts := strings.SplitN(slug, "/mcp", 2)
     if len(parts) == 2 {
-      // Extract the /mcp portion (and any trailing slug)
       rest := parts[1]
       if rest == "" || rest == "/" {
         slug = "/mcp"
@@ -254,34 +252,72 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
     }
   }
 
-  // Central MCP: authenticate against the admin auth service.
-  if slug == "/mcp" {
-    os.handleAuthorizeCentral(w, r, clientID, redirectURI, state, codeChallenge, codeChallengeMethod, resource)
-    return
-  }
+  // Resolve the service to authenticate against.
+  // Central (/mcp) uses the admin auth service; virtual (/mcp/{slug}) uses the named service.
+  var svc *Service
+  var mcpServiceURL, serviceType string
 
-  svc, err := os.server.store.GetServiceByURL(slug)
-  if err != nil {
-    oauthWriteError(w, http.StatusNotFound, "invalid_scope", "virtual service not found for resource")
-    return
+  if slug == "/mcp" {
+    svcIDStr, err := os.server.store.GetSetting("admin_auth_service")
+    if err != nil || svcIDStr == "" {
+      oauthWriteError(w, http.StatusForbidden, "invalid_scope", "admin auth not configured — log in to the control panel first")
+      return
+    }
+    svcID, err := parseID(svcIDStr)
+    if err != nil {
+      oauthWriteError(w, http.StatusInternalServerError, "server_error", "invalid admin auth service ID")
+      return
+    }
+    svc, err = os.server.store.GetService(svcID)
+    if err != nil {
+      oauthWriteError(w, http.StatusInternalServerError, "server_error", "admin auth service not found")
+      return
+    }
+    mcpServiceURL = "/mcp"
+    serviceType = "mcp-central"
+  } else {
+    svc, err = os.server.store.GetServiceByURL(slug)
+    if err != nil {
+      oauthWriteError(w, http.StatusNotFound, "invalid_scope", "virtual service not found for resource")
+      return
+    }
+    mcpServiceURL = svc.URL
+    serviceType = "mcp"
   }
 
   // Store the MCP client's pending auth request.
   mcpPendingKey := rand.Text()
-  mcpPending := &mcpPendingAuth{
+  os.server.mcpAuthPending.Store(mcpPendingKey, &mcpPendingAuth{
     clientID:            clientID,
-    redirectURI:        redirectURI,
-    state:              state,
-    codeChallenge:      codeChallenge,
+    redirectURI:         redirectURI,
+    state:               state,
+    codeChallenge:       codeChallenge,
     codeChallengeMethod: codeChallengeMethod,
-    resource:           resource,
-    serviceID:          svc.ID,
-    serviceURL:        svc.URL,
-  }
-  os.server.mcpAuthPending.Store(mcpPendingKey, mcpPending)
+    resource:            resource,
+    serviceID:           svc.ID,
+    serviceURL:          mcpServiceURL,
+  })
 
-  // For virtual services with API-key auth, skip the upstream OAuth flow.
-  // Redirect the user to a key-entry form instead.
+  callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
+
+  // SSH — redirect to passphrase form.
+  if svc.Descriptor.Type == "ssh" {
+    stateKey := rand.Text()
+    os.server.pendingMu.Lock()
+    os.server.pending[stateKey] = &pendingAuth{
+      serviceID:   svc.ID,
+      serviceURL:  svc.URL,
+      appNonce:    mcpPendingKey,
+      appState:    mcpPendingKey,
+      serviceType: "ssh",
+    }
+    os.server.pendingMu.Unlock()
+    http.Redirect(w, r, fmt.Sprintf("%s/service/ssh-auth?state=%s&service_id=%d&mcp=1",
+      os.server.config.PublicBaseURL, stateKey, svc.ID), http.StatusFound)
+    return
+  }
+
+  // API key — redirect to key entry form.
   if svc.Descriptor.Auth == "key" {
     stateKey := rand.Text()
     os.server.pendingMu.Lock()
@@ -293,18 +329,12 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
       serviceType: "apikey",
     }
     os.server.pendingMu.Unlock()
-
-    keyAuthURL := fmt.Sprintf("%s/service/apikey-auth?state=%s&service_id=%d&mcp=1",
-      os.server.config.PublicBaseURL, stateKey, svc.ID)
-    http.Redirect(w, r, keyAuthURL, http.StatusFound)
+    http.Redirect(w, r, fmt.Sprintf("%s/service/apikey-auth?state=%s&service_id=%d&mcp=1",
+      os.server.config.PublicBaseURL, stateKey, svc.ID), http.StatusFound)
     return
   }
 
-  // Begin the upstream OAuth flow.
-  // We create a regular pendingAuth for the callback, using the MCP
-  // pending key as the app_nonce.
-  callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
-
+  // OIDC or generic OAuth — begin upstream auth flow.
   pa := &pendingAuth{
     serviceID:   svc.ID,
     serviceURL:  svc.URL,
@@ -312,7 +342,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
     appState:    mcpPendingKey,
     scopes:      svc.Descriptor.Scopes,
     proxied:     svc.Descriptor.Proxied,
-    serviceType: "mcp",
+    serviceType: serviceType,
   }
 
   var authURL, oauthState string
@@ -324,12 +354,12 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
       return
     }
     authURL, oauthState = au, st
-    pa.verifier = vf
-    pa.clientID = svc.Descriptor.ClientID
-    pa.clientSecret = svc.Descriptor.ClientSecret
+    pa.verifier      = vf
+    pa.clientID      = svc.Descriptor.ClientID
+    pa.clientSecret  = svc.Descriptor.ClientSecret
     pa.tokenEndpoint = tu
-    pa.oidcNonce = nc
-    pa.oidcIssuer = svc.URL
+    pa.oidcNonce     = nc
+    pa.oidcIssuer    = svc.URL
   } else {
     au, ci, cs, tu, st, vf, err := os.server.serviceBeginAuth(r.Context(), svc, callbackRedirectURI)
     if err != nil {
@@ -337,9 +367,9 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
       return
     }
     authURL, oauthState = au, st
-    pa.verifier = vf
-    pa.clientID = ci
-    pa.clientSecret = cs
+    pa.verifier      = vf
+    pa.clientID      = ci
+    pa.clientSecret  = cs
     pa.tokenEndpoint = tu
   }
 
@@ -347,75 +377,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   os.server.pending[oauthState] = pa
   os.server.pendingMu.Unlock()
 
-  // Redirect the user's browser directly to the upstream provider.
   http.Redirect(w, r, authURL, http.StatusFound)
-}
-
-// handleAuthorizeCentral handles the OAuth authorize request for the central MCP
-// server at /mcp. Instead of connecting to a virtual service's upstream,
-// it authenticates against the admin auth service (OIDC).
-func (os *oauthServer) handleAuthorizeCentral(w http.ResponseWriter, r *http.Request,
-  clientID, redirectURI, state, codeChallenge, codeChallengeMethod, resource string) {
-
-  svcIDStr, err := os.server.store.GetSetting("admin_auth_service")
-  if err != nil || svcIDStr == "" {
-    oauthWriteError(w, http.StatusForbidden, "invalid_scope", "admin auth not configured — log in to the control panel first")
-    return
-  }
-  svcID, err := parseID(svcIDStr)
-  if err != nil {
-    oauthWriteError(w, http.StatusInternalServerError, "server_error", "invalid admin auth service ID")
-    return
-  }
-  svc, err := os.server.store.GetService(svcID)
-  if err != nil {
-    oauthWriteError(w, http.StatusInternalServerError, "server_error", "admin auth service not found")
-    return
-  }
-
-  // Store the MCP client's pending auth request.
-  mcpPendingKey := rand.Text()
-  mcpPending := &mcpPendingAuth{
-    clientID:            clientID,
-    redirectURI:        redirectURI,
-    state:              state,
-    codeChallenge:      codeChallenge,
-    codeChallengeMethod: codeChallengeMethod,
-    resource:           resource,
-    serviceID:          svc.ID,
-    serviceURL:        "/mcp",
-  }
-  os.server.mcpAuthPending.Store(mcpPendingKey, mcpPending)
-
-  // Begin the OIDC flow against the admin auth service.
-  callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
-
-  au, st, vf, nc, tu, err := os.server.oidcBeginAuth(r.Context(), svc, callbackRedirectURI)
-  if err != nil {
-    oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("admin auth failed: %v", err))
-    return
-  }
-
-  pa := &pendingAuth{
-    serviceID:   svc.ID,
-    serviceURL:  svc.URL,
-    appNonce:    mcpPendingKey,
-    appState:    mcpPendingKey,
-    scopes:      svc.Descriptor.Scopes,
-    serviceType: "mcp-central", // distinguishes this from virtual service MCP flows
-    verifier:    vf,
-    clientID:    svc.Descriptor.ClientID,
-    clientSecret: svc.Descriptor.ClientSecret,
-    tokenEndpoint: tu,
-    oidcNonce:   nc,
-    oidcIssuer:  svc.URL,
-  }
-
-  os.server.pendingMu.Lock()
-  os.server.pending[st] = pa
-  os.server.pendingMu.Unlock()
-
-  http.Redirect(w, r, au, http.StatusFound)
 }
 
 func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -493,21 +455,26 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  // Mint a Freshbreath JWT wrapping the upstream token
-  jwt, err := os.mintWrappedToken(pending)
-  if err != nil {
-    oauthWriteError(w, http.StatusInternalServerError, "server_error", "token issuance failed")
-    return
-  }
-
   expiresIn := int(time.Until(pending.upstreamExpiry).Seconds())
   if expiresIn < 0 {
     expiresIn = 0
   }
 
+  // Freshbreath-issued upstream tokens (SSH auth, central JWT) don't need wrapping —
+  // the central MCP verifier accepts them directly. External OAuth tokens get wrapped.
+  accessToken := pending.upstreamToken
+  if !isFreshbreathToken(pending.upstreamToken) {
+    jwt, err := os.mintWrappedToken(pending)
+    if err != nil {
+      oauthWriteError(w, http.StatusInternalServerError, "server_error", "token issuance failed")
+      return
+    }
+    accessToken = jwt
+  }
+
   w.Header().Set("Content-Type", "application/json")
   json.NewEncoder(w).Encode(map[string]interface{}{
-    "access_token": jwt,
+    "access_token": accessToken,
     "token_type":   "Bearer",
     "expires_in":   expiresIn,
     "scope":        pending.upstreamScopes,

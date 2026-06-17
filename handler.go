@@ -624,6 +624,29 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
   http.Redirect(w, r, redirectURL, http.StatusFound)
 }
 
+// completeMCPDirectAuth finalises an MCP flow for credential types that skip upstream OAuth
+// (SSH, API key). Returns the redirect URL the browser should navigate to, or writes an
+// error response and returns ("", false).
+func (s *Server) completeMCPDirectAuth(w http.ResponseWriter, appNonce, token, email, scopes string, expiry time.Time) (string, bool) {
+  v, ok := s.mcpAuthPending.LoadAndDelete(appNonce)
+  if !ok {
+    http.Error(w, "MCP auth session expired", http.StatusBadRequest)
+    return "", false
+  }
+  mcp := v.(*mcpPendingAuth)
+  mcp.upstreamToken  = token
+  mcp.userEmail      = email
+  mcp.upstreamExpiry = expiry
+  mcp.upstreamScopes = scopes
+
+  code := rand.Text()
+  s.oauthSrv.codesMu.Lock()
+  s.oauthSrv.codes[code] = &mcpAuthCode{pending: mcp, issued: time.Now()}
+  s.oauthSrv.codesMu.Unlock()
+
+  return fmt.Sprintf("%s?code=%s&state=%s", mcp.redirectURI, code, mcp.state), true
+}
+
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
   code := r.URL.Query().Get("code")
   state := r.URL.Query().Get("state")
@@ -2684,8 +2707,10 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Missing state parameter", http.StatusBadRequest)
       return
     }
+    isMCP := r.URL.Query().Get("mcp") == "1"
     w.Header().Set("Content-Type", "text/html; charset=utf-8")
     html := strings.Replace(sshAuthFormHTML, "{{STATE}}", state, 1)
+    html = strings.Replace(html, "{{IS_MCP}}", fmt.Sprintf("%v", isMCP), 1)
     w.Write([]byte(html))
 
   case http.MethodPost:
@@ -2754,6 +2779,16 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
     }
 
     now := time.Now()
+
+    // MCP flow — return redirect URL for the form's JS to navigate to
+    if _, hasMCP := s.mcpAuthPending.Load(pending.appNonce); hasMCP {
+      redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, idToken, user.Email, "", now.Add(24*time.Hour))
+      if !ok { return }
+      w.Header().Set("Content-Type", "application/json")
+      json.NewEncoder(w).Encode(map[string]interface{}{"redirect": redirectURL})
+      return
+    }
+
     s.completeAuth(w, pending, &OAuthData{
       AccessToken: idToken,
       TokenType:   "Bearer",
@@ -2805,6 +2840,7 @@ const sshAuthFormHTML = `<!doctype html>
 <script>
 (function(){
   var state="{{STATE}}";
+  var isMCP="{{IS_MCP}}"==="true";
   document.getElementById('f').onsubmit=function(ev){
     ev.preventDefault();
     var btn=document.getElementById('btn');
@@ -2820,7 +2856,11 @@ const sshAuthFormHTML = `<!doctype html>
         btn.disabled=false;btn.textContent='Sign in';
         return;
       }
-      r.text().then(function(html){document.open();document.write(html);document.close()});
+      if(isMCP){
+        r.json().then(function(d){if(d.redirect){window.location.href=d.redirect;}});
+      } else {
+        r.text().then(function(html){document.open();document.write(html);document.close()});
+      }
     }).catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Sign in'});
   };
 })();
@@ -2873,33 +2913,12 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
       return
     }
 
-    // MCP auth flow — complete via the MCP path
-    if strings.HasPrefix(pending.serviceURL, "/mcp/") {
-      mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(pending.appNonce)
-      if !ok {
-        http.Error(w, "MCP auth session expired", http.StatusBadRequest)
-        return
-      }
-      mcpPending := mcpPendingVal.(*mcpPendingAuth)
-
-      mcpPending.upstreamToken = req.APIKey
-      mcpPending.userEmail = "api-key-user"
-      mcpPending.upstreamExpiry = time.Now().Add(24 * time.Hour * 365) // long-lived
-      mcpPending.upstreamScopes = ""
-
-      fbCode := rand.Text()
-      s.oauthSrv.codesMu.Lock()
-      s.oauthSrv.codes[fbCode] = &mcpAuthCode{
-        pending: mcpPending,
-        issued:  time.Now(),
-      }
-      s.oauthSrv.codesMu.Unlock()
-
-      redirectURL := fmt.Sprintf("%s?code=%s&state=%s", mcpPending.redirectURI, fbCode, mcpPending.state)
+    // MCP flow — complete via redirect to the MCP client's redirect_uri
+    if _, hasMCP := s.mcpAuthPending.Load(pending.appNonce); hasMCP {
+      redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, req.APIKey, "api-key-user", "", time.Now().Add(365*24*time.Hour))
+      if !ok { return }
       w.Header().Set("Content-Type", "application/json")
-      json.NewEncoder(w).Encode(map[string]interface{}{
-        "redirect": redirectURL,
-      })
+      json.NewEncoder(w).Encode(map[string]interface{}{"redirect": redirectURL})
       return
     }
 
