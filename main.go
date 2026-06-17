@@ -15,6 +15,8 @@ import (
   "github.com/coreos/go-oidc/v3/oidc"
   _ "github.com/mattn/go-sqlite3"
   "github.com/joho/godotenv"
+  "github.com/modelcontextprotocol/go-sdk/mcp"
+  "github.com/modelcontextprotocol/go-sdk/oauthex"
 )
 
 type Config struct {
@@ -46,6 +48,10 @@ type Server struct {
   virtualMCPs      *virtualMCPRegistry // slug → MCP server entries
   mcpAuthPending   *sync.Map          // key → *mcpPendingAuth (MCP OAuth flow state)
   oauthSrv         *oauthServer        // Freshbreath OAuth authorization server
+  centralMCPHandler  http.Handler                       // central MCP at /mcp
+  centralMCPPRMVal   *oauthex.ProtectedResourceMetadata  // PRM for central MCP
+  centralMCPServers  map[string]*mcp.Server              // role → lazily-built central MCP server
+  centralMCPSrvMu    sync.Mutex                          // guards centralMCPServers
 }
 
 type pendingAuth struct {

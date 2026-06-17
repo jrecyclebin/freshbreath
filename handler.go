@@ -102,6 +102,11 @@ func (s *Server) SetupRoutes() {
   s.mux.HandleFunc("/mcp/{name}", s.handleMCP)
   s.mux.HandleFunc("/.well-known/oauth-protected-resource/mcp/{name}", s.handleMCPPRM)
 
+  // Central MCP server — exposes admin API as MCP tools
+  s.setupCentralMCP()
+  s.mux.HandleFunc("/mcp", s.handleCentralMCP)
+  s.mux.HandleFunc("/.well-known/oauth-protected-resource/mcp", s.handleCentralMCPPRM)
+
   // OAuth authorization server endpoints (Freshbreath acts as auth server for MCP clients)
   s.mux.HandleFunc("/.well-known/oauth-authorization-server", s.oauthSrv.handleMetadata)
   s.mux.HandleFunc("/.well-known/oauth-authorization-server/", s.oauthSrv.handleMetadata) // resource-specific path
@@ -575,13 +580,35 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
     userEmail = "mcp-user"
   }
 
-  // Populate the MCP pending auth with the upstream token
-  mcpPending.upstreamToken = upstreamToken
-  mcpPending.upstreamRefresh = upstreamRefresh
-  mcpPending.upstreamTokenURL = upstreamTokenURL
-  mcpPending.upstreamExpiry = upstreamExpiry
-  mcpPending.userEmail = userEmail
-  mcpPending.upstreamScopes = upstreamScopes
+  // For the central MCP, mint a central JWT that carries the user's role.
+  if pending.serviceType == "mcp-central" {
+    user, err := s.store.GetUserByEmail(userEmail)
+    if err != nil {
+      http.Error(w, fmt.Sprintf("User not found: %s", userEmail), http.StatusForbidden)
+      return
+    }
+    centralJWT, err := s.mintCentralMCPToken(user.Email, user.Role, upstreamExpiry)
+    if err != nil {
+      http.Error(w, "Token generation failed", http.StatusInternalServerError)
+      return
+    }
+    // Generate a Freshbreath auth code that maps to a pending auth
+    // where the upstream token IS the central JWT.
+    mcpPending.upstreamToken = centralJWT
+    mcpPending.upstreamRefresh = ""
+    mcpPending.upstreamTokenURL = ""
+    mcpPending.upstreamExpiry = upstreamExpiry
+    mcpPending.userEmail = userEmail
+    mcpPending.upstreamScopes = ""
+  } else {
+    // Populate the MCP pending auth with the upstream token
+    mcpPending.upstreamToken = upstreamToken
+    mcpPending.upstreamRefresh = upstreamRefresh
+    mcpPending.upstreamTokenURL = upstreamTokenURL
+    mcpPending.upstreamExpiry = upstreamExpiry
+    mcpPending.userEmail = userEmail
+    mcpPending.upstreamScopes = upstreamScopes
+  }
 
   // Generate a Freshbreath auth code and store it
   fbCode := rand.Text()
@@ -624,7 +651,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
   }
 
   // MCP auth flows — after upstream exchange, redirect to the MCP client's redirect_uri
-  if pending.serviceType == "mcp" {
+  if pending.serviceType == "mcp" || pending.serviceType == "mcp-central" {
     s.completeMCPAuth(w, r, pending, code)
     return
   }

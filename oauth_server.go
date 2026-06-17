@@ -238,13 +238,28 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
   // Resolve the virtual service from the resource parameter.
   // resource is like "/mcp/sharepoint" or a full URL like "https://host/mcp/sharepoint".
+  // The special resource "/mcp" (no slug) routes to the central MCP server,
+  // which authenticates against the admin auth service.
   slug := resource
   if strings.HasPrefix(slug, "http") {
-    parts := strings.SplitN(slug, "/mcp/", 2)
+    parts := strings.SplitN(slug, "/mcp", 2)
     if len(parts) == 2 {
-      slug = "/mcp/" + parts[1]
+      // Extract the /mcp portion (and any trailing slug)
+      rest := parts[1]
+      if rest == "" || rest == "/" {
+        slug = "/mcp"
+      } else {
+        slug = "/mcp" + rest
+      }
     }
   }
+
+  // Central MCP: authenticate against the admin auth service.
+  if slug == "/mcp" {
+    os.handleAuthorizeCentral(w, r, clientID, redirectURI, state, codeChallenge, codeChallengeMethod, resource)
+    return
+  }
+
   svc, err := os.server.store.GetServiceByURL(slug)
   if err != nil {
     oauthWriteError(w, http.StatusNotFound, "invalid_scope", "virtual service not found for resource")
@@ -336,10 +351,72 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
   http.Redirect(w, r, authURL, http.StatusFound)
 }
 
-// ── Token Endpoint ──────────────────────────────────────────────────
-//
-// The MCP client exchanges their auth code for a Freshbreath JWT
-// that wraps the upstream access token.
+// handleAuthorizeCentral handles the OAuth authorize request for the central MCP
+// server at /mcp. Instead of connecting to a virtual service's upstream,
+// it authenticates against the admin auth service (OIDC).
+func (os *oauthServer) handleAuthorizeCentral(w http.ResponseWriter, r *http.Request,
+  clientID, redirectURI, state, codeChallenge, codeChallengeMethod, resource string) {
+
+  svcIDStr, err := os.server.store.GetSetting("admin_auth_service")
+  if err != nil || svcIDStr == "" {
+    oauthWriteError(w, http.StatusForbidden, "invalid_scope", "admin auth not configured — log in to the control panel first")
+    return
+  }
+  svcID, err := parseID(svcIDStr)
+  if err != nil {
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "invalid admin auth service ID")
+    return
+  }
+  svc, err := os.server.store.GetService(svcID)
+  if err != nil {
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "admin auth service not found")
+    return
+  }
+
+  // Store the MCP client's pending auth request.
+  mcpPendingKey := rand.Text()
+  mcpPending := &mcpPendingAuth{
+    clientID:            clientID,
+    redirectURI:        redirectURI,
+    state:              state,
+    codeChallenge:      codeChallenge,
+    codeChallengeMethod: codeChallengeMethod,
+    resource:           resource,
+    serviceID:          svc.ID,
+    serviceURL:        "/mcp",
+  }
+  os.server.mcpAuthPending.Store(mcpPendingKey, mcpPending)
+
+  // Begin the OIDC flow against the admin auth service.
+  callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
+
+  au, st, vf, nc, tu, err := os.server.oidcBeginAuth(r.Context(), svc, callbackRedirectURI)
+  if err != nil {
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("admin auth failed: %v", err))
+    return
+  }
+
+  pa := &pendingAuth{
+    serviceID:   svc.ID,
+    serviceURL:  svc.URL,
+    appNonce:    mcpPendingKey,
+    appState:    mcpPendingKey,
+    scopes:      svc.Descriptor.Scopes,
+    serviceType: "mcp-central", // distinguishes this from virtual service MCP flows
+    verifier:    vf,
+    clientID:    svc.Descriptor.ClientID,
+    clientSecret: svc.Descriptor.ClientSecret,
+    tokenEndpoint: tu,
+    oidcNonce:   nc,
+    oidcIssuer:  svc.URL,
+  }
+
+  os.server.pendingMu.Lock()
+  os.server.pending[st] = pa
+  os.server.pendingMu.Unlock()
+
+  http.Redirect(w, r, au, http.StatusFound)
+}
 
 func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
   if r.Method != http.MethodPost {
