@@ -91,7 +91,7 @@ mise run release "$VERSION"
 
 [tasks.test]
 description = "Run all tests"
-run = "go test ./... -v"
+run = "go test -cover ./... -v"
 
 [tasks.test-race]
 description = "Run all tests with race detector"
@@ -100,6 +100,14 @@ run = "go test ./... -race"
 [tasks.lint]
 description = "Run go vet"
 run = "go vet ./..."
+
+[tasks.coverage]
+description = "Get a coverage report"
+run = """
+mkdir -p tmp
+go test -coverprofile=tmp/coverage.out ./... -v
+go tool cover -func=tmp/coverage.out
+"""
 
 [tasks.check]
 description = "Run lint and tests"
