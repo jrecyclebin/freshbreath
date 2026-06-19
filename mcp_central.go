@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
-	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
@@ -40,68 +38,6 @@ func parseID(s string) (int64, error) {
 
 const centralMCPResource = "/mcp"
 
-// centralMCPClaims are embedded in the Freshbreath JWT for the central MCP.
-// Distinguished from virtual-service wrapped tokens by Central=true.
-type centralMCPClaims struct {
-	josejwt.Claims
-	Central   bool   `json:"central"`
-	UserEmail string `json:"user_email"`
-	UserRole  string `json:"user_role"`
-}
-
-// mintCentralMCPToken creates a Freshbreath JWT that carries the user's
-// identity after they authenticate against the admin auth service.
-func (s *Server) mintCentralMCPToken(email, role string, expiry time.Time) (string, error) {
-	sig, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.HS256, Key: s.localKey},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		return "", err
-	}
-	claims := centralMCPClaims{
-		Claims: josejwt.Claims{
-			Issuer:   "freshbreath",
-			Subject:  email,
-			Audience: josejwt.Audience{"freshbreath"},
-			IssuedAt: josejwt.NewNumericDate(time.Now()),
-			Expiry:   josejwt.NewNumericDate(expiry),
-		},
-		Central:   true,
-		UserEmail: email,
-		UserRole:  role,
-	}
-	return josejwt.Signed(sig).Claims(claims).Serialize()
-}
-
-// verifyCentralMCPToken checks if a Bearer token is a Freshbreath JWT
-// for the central MCP and returns the claims. Returns nil if the token
-// is not a central MCP token (caller should try other verification).
-func (s *Server) verifyCentralMCPToken(raw string) (*centralMCPClaims, error) {
-	if !isFreshbreathToken(raw) {
-		return nil, nil
-	}
-	tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
-	if err != nil {
-		return nil, fmt.Errorf("parse central token: %w", err)
-	}
-	var claims centralMCPClaims
-	if err := tok.Claims(s.localKey, &claims); err != nil {
-		return nil, fmt.Errorf("verify central token: %w", err)
-	}
-	if !claims.Central {
-		return nil, nil // not a central MCP token
-	}
-	if err := claims.Claims.Validate(josejwt.Expected{
-		Issuer:      "freshbreath",
-		AnyAudience: josejwt.Audience{"freshbreath"},
-		Time:        time.Now(),
-	}); err != nil {
-		return nil, fmt.Errorf("central token invalid: %w", err)
-	}
-	return &claims, nil
-}
-
 // ── Central MCP Token Verifier ──────────────────────────────────────
 //
 // Validates Bearer tokens for the central /mcp endpoint.
@@ -111,12 +47,12 @@ func (s *Server) verifyCentralMCPToken(raw string) (*centralMCPClaims, error) {
 
 func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 	return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
-		// Try central MCP JWT first.
-		claims, err := s.verifyCentralMCPToken(token)
+		// Try Freshbreath JWT (central or panel kind).
+		claims, err := s.verifyFreshbreathToken(token)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
 		}
-		if claims != nil {
+		if claims != nil && (claims.Kind == "central" || claims.Kind == "panel") {
 			return &auth.TokenInfo{
 				UserID:     claims.UserEmail,
 				Scopes:     []string{"openid", "email", "profile"},
@@ -296,12 +232,12 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*User, error) {
 		return nil, fmt.Errorf("missing bearer token")
 	}
 
-	// Try central MCP JWT.
-	claims, err := s.verifyCentralMCPToken(token)
+	// Try Freshbreath JWT (central or panel kind).
+	claims, err := s.verifyFreshbreathToken(token)
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-	if claims != nil {
+	if claims != nil && (claims.Kind == "central" || claims.Kind == "panel") {
 		user, err := s.store.GetUserByEmail(claims.UserEmail)
 		if err != nil {
 			return nil, fmt.Errorf("user not found: %s", claims.UserEmail)

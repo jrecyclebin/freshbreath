@@ -587,7 +587,7 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
       http.Error(w, fmt.Sprintf("User not found: %s", userEmail), http.StatusForbidden)
       return
     }
-    centralJWT, err := s.mintCentralMCPToken(user.Email, user.Role, upstreamExpiry)
+    centralJWT, err := s.mintFreshbreathToken("central", user.Email, user.Role, "", 0, nil)
     if err != nil {
       http.Error(w, "Token generation failed", http.StatusInternalServerError)
       return
@@ -2322,7 +2322,14 @@ func isFreshbreathToken(raw string) bool {
 
 func (s *Server) verifyIDToken(ctx context.Context, svc *Service, raw string) (string, error) {
   if isFreshbreathToken(raw) {
-    return s.verifyFreshbreathToken(raw)
+    claims, err := s.verifyFreshbreathToken(raw)
+    if err != nil {
+      return "", err
+    }
+    if claims == nil {
+      return "", fmt.Errorf("not a freshbreath token")
+    }
+    return claims.UserEmail, nil
   }
   provider, err := s.getOIDCProvider(ctx, svc.ID, svc.URL)
   if err != nil {
@@ -2771,8 +2778,8 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 
     _ = s.store.LogAudit(req.Email, "login", "admin panel (SSH)")
 
-    // Fabricate a JWT for this user
-    idToken, err := s.fabricateIDToken(user.Email, user.Name, fmt.Sprintf("user:%d", user.ID))
+    // Mint a panel JWT for this user
+    idToken, err := s.mintFreshbreathToken("panel", user.Email, user.Role, user.Name, 0, nil)
     if err != nil {
       http.Error(w, "Token generation failed", http.StatusInternalServerError)
       return
@@ -2782,7 +2789,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 
     // MCP flow — return redirect URL for the form's JS to navigate to
     if _, hasMCP := s.mcpAuthPending.Load(pending.appNonce); hasMCP {
-      redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, idToken, user.Email, "", now.Add(24*time.Hour))
+      redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, idToken, user.Email, "", now.Add(accessTokenTTL))
       if !ok { return }
       w.Header().Set("Content-Type", "application/json")
       json.NewEncoder(w).Encode(map[string]interface{}{"redirect": redirectURL})
@@ -2792,7 +2799,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
     s.completeAuth(w, pending, &OAuthData{
       AccessToken: idToken,
       TokenType:   "Bearer",
-      ExpiresAt:   now.Add(24 * time.Hour),
+      ExpiresAt:   now.Add(accessTokenTTL),
       Claims: map[string]interface{}{
         "email": user.Email,
         "name":  user.Name,

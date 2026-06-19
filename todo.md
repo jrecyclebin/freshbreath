@@ -1,167 +1,102 @@
-# Virtual Service Type — Declarative HTTP-to-MCP Bridge
+# Unified Token Refresh
 
-Add a `virtual` service type to Freshbreath that wraps API calls in an MCP tool interface. A virtual service reads a description file (like `Sharepoint.txt`) that defines tools with a declarative HTTP request script syntax — no shell scripts, no code execution. The server interprets the scripts, makes the HTTP calls, and returns MCP-format responses.
-
-## Key Design Decisions
-
-- **Go MCP SDK**: Use `github.com/modelcontextprotocol/go-sdk` for the MCP endpoint — handles JSON-RPC, sessions, StreamableHTTP transport, tool registration, and auth middleware
-- **Auto-discovery via RFC 9728**: Unauthenticated requests to `/mcp/{name}` get a 401 with `WWW-Authenticate` header pointing to Protected Resource Metadata. The PRM's `authorization_servers` field points to the OIDC service's issuer. External MCP clients can discover auth requirements and complete the OAuth flow automatically — no manual configuration needed.
-- **Two access patterns**: (1) Full MCP server at `/mcp/{name}` for external tools/agents, (2) Simple GET/POST at `/service/call/{name}` for frbr.js
-- **Service URL**: `/mcp/{slug}` (absolute path, not `virtual://`) — resilient to domain changes
-- **Generalized call route**: `/service/task/{name}` → `/service/call/{name}` (shared by tasks + virtual)
-- **Auth via SDK middleware**: `auth.RequireBearerToken` wraps the MCP handler with a custom `TokenVerifier`; verified token available from context as `$token` in scripts
-- **Inline OIDC config**: Virtual services carry their own OAuth fields (issuer URL, client ID, client secret, scopes) directly — no separate auth service reference needed. The PRM document is built from these fields, pointing external MCP clients at the issuer for auto-discovery.
-- **frbr.js detection**: URL prefix `/mcp/` → route through `/service/call/` (like `tasks://` for tasks)
+Unify Freshbreath's three JWT families (wrapped virtual-service, central MCP, control-panel) into a single `freshbreathClaims` type with 15-min access TTL, 2-week encrypted refresh tokens, and encrypted sensitive claims for wrapped tokens. All refresh goes through `/oauth/token`.
 
 ## Relevant Files
 
-- `handler.go:626-860` — Task parsing/execution. Virtual follows same pattern with HTTP interpreter.
-- `handler.go:87-97` — Route registration. Need `/mcp/{name}` and rename task route.
-- `handler.go:687-746` — `handleTaskCall`. Generalize to `handleServiceCall` dispatching by type.
-- `handler.go:1414-1435` — `handleCreateService`. Add `virtual` type with `/mcp/` URL scheme.
-- `handler.go:1464-1510` — `handleServiceDetail`. Same URL auto-generation for virtual.
-- `handler.go:283-327` — `handleLogin`. Virtual services don't login (like tasks).
-- `types.go:89` — `ServiceDescriptor.Type`. Add "virtual" type.
-- `web/frbr.js:251-295` — `listTools`/`callTool`. Add `/mcp/` routing.
-- `web/frbr.js:313-350` — `#callTask`. Generalize for both tasks and virtual.
-- `web/control/app.js:1263-1317` — ServiceDrawer with type dropdown + virtual-specific fields.
-- `web/control/app.js:486-489` — `serviceInstructions` helper.
-- `Sharepoint.txt` — Sample virtual service description file.
+- `handler.go` - Auth middleware (`authWrap`, `verifyAdminToken`), callback/login handlers, route setup, `isFreshbreathToken`
+- `oauth_server.go` - `mintWrappedToken`, `wrappedTokenClaims`, `verifyAndUnwrapToken`, `handleToken` (needs refresh grant)
+- `mcp_central.go` - `centralMCPClaims`, `mintCentralMCPToken`, `verifyCentralMCPToken`, central MCP token verifier
+- `services.go` - `fabricateIDToken`, `verifyFreshbreathToken`, `OIDCClaims`
+- `mcp_endpoint.go` - `verifyAndUnwrapToken` callers (virtual MCP endpoint auth)
+- `main.go` - Server struct (2-space, never gofmt)
+- `web/frbr.js` - `ServiceProxy.refresh()` — needs to hit `/oauth/token` for refresh
+- `web/control/app.js` - Admin UI token handling, `api()` function Bearer header
 
 ## Quality Check
 
-- `go build ./...` compiles cleanly
-- Manual test: create virtual service, list tools, call a tool
-- Manual test: external MCP client connects to `/mcp/{name}`
+After each phase: `go build ./...`, `go vet ./...`, `go test ./...`
 
-## Phase 1: Backend — Parser & Data Model ✅
+## Phase 1: Foundation
 
-- [x] Design VirtualTool and VirtualScript data structures
-  - [x] VirtualStep: method, URL template, headers, body template, response assertions, variable assignments, response shaping
-  - [x] VirtualTool: name, description, list of steps
-- [x] Implement the virtual file parser
-  - [x] Reuse `parseTaskHeader` for `[tool-name]` headers
-  - [x] Require `---` separators between tool sections
-  - [x] Parse HTTP request lines: `GET/POST/PATCH/PUT/DELETE url`
-  - [x] Parse header lines (e.g. `Authorization: Bearer $token`)
-  - [x] Parse JSON body blocks (with variable interpolation points)
-  - [x] Parse `HTTP nnn` response assertions
-  - [x] Parse response shaping JSON blocks (after `HTTP nnn`)
-  - [x] Parse variable assignments: `$var = expression`
-  - [x] Parse comment lines (`#`)
-  - [x] Parse `assert()` expressions
-  - [x] Handle `$$` escaping (literal `$` for query params)
-- [x] Implement built-in functions: `host()`, `path()`, `assert()`
-- [x] Implement JSON path query evaluation: `$.field`, `$['key']['subkey']`
-- [x] Implement variable resolution: plain variables ($name) and JSON path queries ($[...])
-- [x] URL-encode variables in URL positions; JSON-encode variables in JSON body positions
-  - URL mode splits at '?': path portion stays raw, query values pass through
-    url.QueryEscape; JSON-encode in body mode works correctly via json.Marshal
-  - Uses gjson library for JSON path queries
+- [ ] Add `seal(localKey, plaintext []byte) (string, error)` and `open(localKey, ciphertext string) ([]byte, error)` — AES-256-GCM, keyed from localKey (32 bytes), prior art in `ssh_keys.go`
+- [ ] Define `freshbreathClaims` struct (unified: Kind, UserEmail, UserRole, UserName, ServiceID, Sealed)
+- [ ] Define `sealedUpstreamData` struct (UpstreamToken, UpstreamRefresh, UpstreamTokenURL, UpstreamScopes)
+- [ ] Define `freshbreathRefreshData` struct (Kind, ServiceID, UserEmail, UserRole, UpstreamRefresh, UpstreamTokenURL, UpstreamScopes — the sealed payload for refresh tokens)
 
-## Phase 2: Backend — HTTP Executor & Route Generalization ✅
+## Phase 2: Unified Access Tokens
 
-- [x] Implement the virtual HTTP executor
-  - [x] Execute variable assignments as they occur
-  - [x] Prior to requests, JSON path queries access the incoming arguments
-     (i.e. `$.token` and `$.arg_name` both work and are useful for complex
-     object arguments.)
-  - [x] Step execution: resolve variables in URL/headers/body, make HTTP request
-  - [x] Check response status against assertion (e.g. `HTTP 200`)
-  - [x] Support multiple response code blocks after a request (branching)
-  - [x] Bring response body into scope for JSON path queries
-  - [x] Apply response shaping (if present) to produce tool output
-  - [x] If no shaping, return raw response body
-- [x] Rename `/service/task/{name}` → `/service/call/{name}`
-- [x] Generalize `handleTaskCall` → `handleServiceCall` dispatching by service type
-  - [x] Tasks → shell executor (existing)
-  - [x] Virtual → HTTP executor (new)
-- [x] Update `handleCreateService` / `handleServiceDetail` for virtual type with `/mcp/` URLs
-- [x] Virtual services use login (same as API type — they need $token for upstream auth)
+- [ ] Write `mintFreshbreathToken(opts)` — single mint function replacing `mintWrappedToken`, `mintCentralMCPToken`, `fabricateIDToken`
+  - For Kind="wrapped": seal upstream data into Sealed field
+  - For Kind="central": set UserEmail + UserRole
+  - For Kind="panel": set UserEmail + UserName
+- [ ] Write `verifyFreshbreathToken(raw) (*freshbreathClaims, error)` — single verify function
+  - If Sealed != "": decrypt and populate Upstream* fields on the struct (json:"-" tags)
+  - Returns nil, nil if not a Freshbreath JWT (callers try other verification)
+- [ ] Replace `mintWrappedToken` callers → `mintFreshbreathToken`
+- [ ] Replace `mintCentralMCPToken` callers → `mintFreshbreathToken`
+- [ ] Replace `fabricateIDToken` callers → `mintFreshbreathToken`
+- [ ] Replace `verifyAndUnwrapToken` callers → `verifyFreshbreathToken`
+- [ ] Replace `verifyCentralMCPToken` callers → `verifyFreshbreathToken`
+- [ ] Replace old `verifyFreshbreathToken` callers → new unified version
+- [ ] Remove old claim structs and mint/verify functions (`wrappedTokenClaims`, `centralMCPClaims`, inline panel struct)
 
-## Phase 3: Backend — MCP Server Endpoint (Go MCP SDK) ✅
+## Phase 3: 15-min TTL + Encrypted Sealed Claims
 
-- [x] Add `github.com/modelcontextprotocol/go-sdk` dependency
-- [x] Create MCP server factory for virtual services
-  - [x] `newVirtualMCPServer(svc *Service) *mcp.Server` — creates an `mcp.Server` with tools from the parsed virtual file
-  - [x] For each VirtualTool: `mcp.Server.AddTool(tool, handler)` where handler executes the virtual HTTP script
-  - [x] Tool handler extracts `$token` from request header via `req.Extra.Header`
-  - [x] Tool handler executes virtual script steps and returns `*mcp.CallToolResult`
-- [x] Mount MCP endpoint at `/mcp/{name}`
-  - [x] Use `mcp.NewStreamableHTTPHandler` to wrap the server into an `http.Handler` (stateless mode)
-  - [x] Wrap with `auth.RequireBearerToken` middleware using a custom `TokenVerifier`
-  - [x] `TokenVerifier` validates Bearer token using the service's inline OIDC config (JWT validation against the issuer, or freshbreath-issued token from login flow)
-  - [x] When no OIDC fields are configured (public virtual service), skip the `RequireBearerToken` middleware
-- [x] Serve Protected Resource Metadata (RFC 9728)
-  - [x] `auth.ProtectedResourceMetadataHandler` served at `/.well-known/oauth-protected-resource/mcp/{name}`
-  - [x] Build `oauthex.ProtectedResourceMetadata` from the service's inline OIDC config
-  - [x] `AuthorizationServers` points to the issuer URL from the service's OIDC fields
-  - [x] `ScopesSupported` from the service's OIDC fields
-  - [x] `BearerMethodsSupported: ["header"]`
-  - [x] `RequireBearerTokenOptions.ResourceMetadataURL` points to the PRM endpoint
-  - [x] When no OIDC fields are configured, no PRM endpoint served (returns 404)
-- [x] Wire it all together in route registration
-  - [x] Single `/mcp/{name}` route dispatches by slug via `virtualMCPRegistry`
-  - [x] Single `/.well-known/oauth-protected-resource/mcp/{name}` route for PRM
-  - [x] Dynamic registration: services added/updated/deleted at runtime via registry
-  - [x] Startup: `mountAllVirtualMCP()` loads all existing virtual services
+- [ ] Set access token TTL to 15 minutes in `mintFreshbreathToken`
+- [ ] Update `handleToken` `expires_in` to use 15-min window
+- [ ] Update control-panel `OAuthData.ExpiresAt` to 15 min
+- [ ] Verify seal/open works end-to-end for Kind="wrapped" tokens
 
-## Phase 4: Frontend — frbr.js & Control Panel
+## Phase 4: Refresh Tokens
 
-- [ ] Add `/mcp/` URL detection to `listTools` and `callTool` in frbr.js
-  - [ ] Route to `/service/call/{slug}` (same as tasks but extracting slug from `/mcp/slug`)
-- [ ] Generalize `#callTask` → works for both tasks and virtual
-- [ ] Update `connect()` to throw for virtual services
-- [ ] Add "Virtual" option to ServiceDrawer type dropdown
-- [ ] Show inline OIDC fields for virtual services (issuer URL, client ID, client secret, scopes) — same pattern as `api` type services
-- [ ] Hide URL field for virtual services (auto-generated as `/mcp/{slug}`)
-- [ ] Update `serviceInstructions` for virtual type — mention auto-discovery URL (`/mcp/{slug}`) and that external tools can connect directly
-- [ ] Show the PRM URL in service instructions when OIDC fields are configured
+- [ ] Write `mintRefreshToken(localKey, data freshbreathRefreshData) (string, error)` — signed JWT, 14-day TTL, encrypted sealed payload
+- [ ] Write `verifyRefreshToken(localKey, raw string) (*freshbreathRefreshData, error)` — verify + decrypt
+- [ ] Extend `handleToken` to accept `grant_type=refresh_token`
+  - Read refresh token from cookie or request body
+  - Decrypt and dispatch on Kind
+  - Kind="wrapped": upstream refresh → re-wrap → new access + refresh tokens
+  - Kind="central": look up user → re-mint central access token → new refresh
+  - Kind="panel": look up user → re-mint panel access token → new refresh
+- [ ] Set refresh cookie on all token issuance (access token response + initial login)
+  - HttpOnly, Secure (if TLS), Path=/oauth/token, SameSite=Lax
+- [ ] Also return `refresh_token` in JSON body for programmatic clients
+- [ ] Update control-panel login flow (`completeAuth` / `writeCallbackPage`) to set refresh cookie
+- [ ] Update `handleToken` `authorization_code` flow to set refresh cookie + return refresh_token in body
 
-## Phase 5: Task File `---` Separator Requirement
+## Phase 5: Control Panel Integration
 
-- [ ] Update `parseTasksFile` to require `---` between task sections
-- [ ] Update any existing task files to use `---` separators
+- [ ] Update `web/frbr.js` `ServiceProxy.refresh()` to POST to `/oauth/token` with `grant_type=refresh_token`
+- [ ] Update `web/control/app.js` `api()` to handle 401 → refresh via `/oauth/token` (cookie auto-attaches)
+- [ ] Admin UI should use access_token (not id_token) as Bearer after unification
 
-## Phase 6: Testing & Polish
+## Phase 6: Tests + Cleanup
 
-- [ ] Create sample virtual description file (e.g. `virtual/Sharepoint.txt`)
-- [ ] End-to-end test: create virtual service, list tools, call a tool via frbr.js
-- [ ] End-to-end test: external MCP client connects to `/mcp/{name}`
-- [ ] End-to-end test: unauthenticated request to `/mcp/{name}` returns 401 with `WWW-Authenticate` header pointing to PRM
-- [ ] End-to-end test: PRM endpoint returns valid metadata with `authorization_servers` pointing to OIDC issuer
-- [ ] End-to-end test: full auto-discovery flow — external client discovers auth, completes OAuth, calls tools
-- [ ] End-to-end test: public virtual service (no OIDC fields) — no 401, no PRM endpoint, tools work directly
-- [ ] Error handling: non-matching HTTP status, missing tools, assertion failures
+- [ ] Add unit tests for seal/open helpers
+- [ ] Add tests for mintFreshbreathToken / verifyFreshbreathToken per Kind
+- [ ] Add tests for mintRefreshToken / verifyRefreshToken per Kind
+- [ ] Add test for handleToken refresh grant
+- [ ] Update existing tests that reference old claim structs
+- [ ] Verify `isFreshbreathToken` still works with unified claims
 
 ## Legend
 
-- 🔧 Backend Go code
-- 🌐 Frontend JS code
-- 📡 MCP protocol
-- ⚠️ Breaking change (task route rename, `---` requirement)
+- 🔒 — Security-sensitive change (review carefully)
+- 🍪 — Cookie-related (HttpOnly, Secure, Path, SameSite flags)
+- ⚠️ — main.go: 2-space indent, never gofmt
+- 🔑 — Encryption (AES-256-GCM, key from localKey)
 
 ## Notes
 
-- Virtual services are like tasks but with an **interpreted HTTP script** instead of shell execution
-- **Go MCP SDK** (`github.com/modelcontextprotocol/go-sdk`) handles all MCP protocol concerns — JSON-RPC, sessions, StreamableHTTP transport, tool registration
-- **Auth auto-discovery** via RFC 9728: the `auth.RequireBearerToken` middleware + `auth.ProtectedResourceMetadataHandler` make the MCP endpoint self-describing. An external MCP client hitting `/mcp/{name}` without a token gets a 401 with `WWW-Authenticate: Bearer resource_metadata="<PRM-URL>"`. The PRM document tells the client where to authenticate. Zero manual config for the client.
-- `$token` is extracted from the auth middleware's context (`auth.TokenInfoFromContext`) and injected into the virtual script, so virtual scripts can use it for upstream API auth
-- Variables in URLs → URL-escaped; variables in JSON bodies → JSON-encoded
-- `$$` in URLs → literal `$` (for Graph API's `$select`, `$top`, etc.)
-- Response shaping: JSON block after `HTTP nnn` maps raw response → clean output
-- Multiple response code blocks allowed after a request (branching on status)
-- Variable assignment (`$var = expr`) can happen at any point in the script
-- `assert()` for safety checks (e.g. validating nextLink host)
-- MCP endpoint makes virtual services first-class — any agent can discover and use them
-- The `TokenVerifier` validates tokens using the virtual service's own OIDC config — no separate auth service reference needed. The virtual service is the protected resource and carries its auth coordinates inline.
+- All three token families now share `/oauth/token` for refresh — no separate `/api/refresh` endpoint
+- The `Sealed` field in access tokens is only populated for Kind="wrapped" (virtual services)
+- ALL refresh tokens have their sensitive data encrypted (sealed), not just wrapped ones
+- The `isFreshbreathToken` helper still works because `iss=freshbreath` remains in the visible JWT payload
+- Control panel admin UI uses `id_token` as Bearer today — after unification, the access token IS the Freshbreath JWT (no separate id_token needed)
+- MCP clients get refresh_token in JSON body; browser clients get it via HttpOnly cookie
+- `/service/refresh` (existing) is for UPSTREAM provider tokens — leave it alone, don't conflate
 
 ## Online References
 
-- MCP Specification: https://spec.modelcontextprotocol.io/
-- Go MCP SDK: https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp
-- Go MCP SDK Auth: https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/auth
-- Go MCP SDK OAuth Extensions: https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/oauthex
-- RFC 9728 (Protected Resource Metadata): https://www.rfc-editor.org/rfc/rfc9728.html
-- SEP-985 (MCP alignment with RFC 9728): https://github.com/modelcontextprotocol/modelcontextprotocol/issues/985
-- Microsoft Graph API: the primary use case driving the design
+- go-jose/go-jose v4: https://github.com/go-jose/go-jose — JWT signing (HS256) already in use
+- AES-256-GCM in stdlib: `crypto/aes` + `crypto/cipher` — prior art in `ssh_keys.go`

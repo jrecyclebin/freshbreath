@@ -2,10 +2,13 @@ package main
 
 import (
   "context"
+  "crypto/aes"
+  "crypto/cipher"
   "crypto/rand"
   "encoding/base64"
   "encoding/json"
   "fmt"
+  "io"
   "net/http"
   "net/url"
   "strings"
@@ -373,7 +376,7 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
   if sub == "" {
     sub = email
   }
-  idTokenRaw, err := s.fabricateIDToken(email, name, sub)
+  idTokenRaw, err := s.mintFreshbreathToken("panel", email, "", name, 0, nil)
   if err != nil {
     return nil, "", "", "", fmt.Errorf("fabricate token: %w", err)
   }
@@ -386,7 +389,108 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
   return claims, tok.AccessToken, tok.RefreshToken, idTokenRaw, nil
 }
 
-func (s *Server) fabricateIDToken(email, name, sub string) (string, error) {
+// ── Unified Freshbreath JWT ─────────────────────────────────────────
+//
+// All Freshbreath-issued tokens share a single claims type, distinguished
+// by Kind: "wrapped" (virtual-service upstream token), "central" (admin
+// MCP), or "panel" (control-panel login). Sensitive upstream credentials
+// in wrapped tokens are AES-256-GCM encrypted into the Sealed field;
+// verifyFreshbreathToken decrypts them into the Upstream* fields (json:"-").
+
+const (
+  accessTokenTTL  = 15 * time.Minute
+  refreshTokenTTL = 14 * 24 * time.Hour
+)
+
+// freshbreathClaims is the single claim type for all Freshbreath JWTs.
+type freshbreathClaims struct {
+  josejwt.Claims
+  Kind      string `json:"kind"`                // "wrapped", "central", or "panel"
+  UserEmail string `json:"user_email"`           // present for all kinds
+  UserRole  string `json:"user_role,omitempty"`  // central + panel
+  UserName  string `json:"user_name,omitempty"`  // panel
+  ServiceID int64  `json:"service_id,omitempty"` // wrapped
+  Sealed    string `json:"sealed,omitempty"`     // wrapped: encrypted upstream data
+
+  // Unsealed upstream data — populated by verifyFreshbreathToken, never serialized.
+  UpstreamToken    string `json:"-"`
+  UpstreamRefresh  string `json:"-"`
+  UpstreamTokenURL string `json:"-"`
+  UpstreamScopes   string `json:"-"`
+}
+
+// sealedUpstreamData is the plaintext encrypted into Sealed for Kind="wrapped".
+type sealedUpstreamData struct {
+  UpstreamToken    string `json:"upstream_token"`
+  UpstreamRefresh  string `json:"upstream_refresh,omitempty"`
+  UpstreamTokenURL string `json:"upstream_token_url,omitempty"`
+  UpstreamScopes   string `json:"upstream_scopes,omitempty"`
+}
+
+// freshbreathRefreshData is the payload sealed inside a refresh token.
+// It carries everything needed to re-mint an access token.
+type freshbreathRefreshData struct {
+  Kind             string `json:"kind"`
+  ServiceID        int64  `json:"service_id,omitempty"`  // wrapped
+  UserEmail        string `json:"user_email"`
+  UserRole         string `json:"user_role,omitempty"`   // central
+  UserName         string `json:"user_name,omitempty"`   // panel
+  UpstreamRefresh  string `json:"upstream_refresh,omitempty"`  // wrapped
+  UpstreamTokenURL string `json:"upstream_token_url,omitempty"` // wrapped
+  UpstreamScopes   string `json:"upstream_scopes,omitempty"`    // wrapped
+}
+
+// ── AES-256-GCM seal/open ───────────────────────────────────────────
+//
+// seal encrypts plaintext with AES-256-GCM using the given 32-byte key.
+// Output: base64(nonce[12] || ciphertext || tag[16]).
+// open decrypts the sealed string back to plaintext.
+
+func seal(key, plaintext []byte) (string, error) {
+  block, err := aes.NewCipher(key)
+  if err != nil {
+    return "", fmt.Errorf("aes cipher: %w", err)
+  }
+  aesgcm, err := cipher.NewGCM(block)
+  if err != nil {
+    return "", fmt.Errorf("gcm: %w", err)
+  }
+  nonce := make([]byte, aesgcm.NonceSize())
+  if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+    return "", fmt.Errorf("nonce: %w", err)
+  }
+  ciphertext := aesgcm.Seal(nonce, nonce, plaintext, nil) // prepends nonce
+  return base64.RawURLEncoding.EncodeToString(ciphertext), nil
+}
+
+func open(key []byte, sealed string) ([]byte, error) {
+  raw, err := base64.RawURLEncoding.DecodeString(sealed)
+  if err != nil {
+    return nil, fmt.Errorf("decode: %w", err)
+  }
+  block, err := aes.NewCipher(key)
+  if err != nil {
+    return nil, fmt.Errorf("aes cipher: %w", err)
+  }
+  aesgcm, err := cipher.NewGCM(block)
+  if err != nil {
+    return nil, fmt.Errorf("gcm: %w", err)
+  }
+  nonceSize := aesgcm.NonceSize()
+  if len(raw) < nonceSize+aesgcm.Overhead() {
+    return nil, fmt.Errorf("sealed data too short")
+  }
+  nonce, ciphertext := raw[:nonceSize], raw[nonceSize:]
+  plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
+  if err != nil {
+    return nil, fmt.Errorf("decrypt: %w", err)
+  }
+  return plaintext, nil
+}
+
+// ── Unified access token mint/verify ────────────────────────────────
+
+func (s *Server) mintFreshbreathToken(kind, email, role, name string, serviceID int64, upstream *sealedUpstreamData) (string, error) {
   sig, err := jose.NewSigner(
     jose.SigningKey{Algorithm: jose.HS256, Key: s.localKey},
     (&jose.SignerOptions{}).WithType("JWT"),
@@ -395,45 +499,138 @@ func (s *Server) fabricateIDToken(email, name, sub string) (string, error) {
     return "", err
   }
   now := time.Now()
-  claims := struct {
-    josejwt.Claims
-    Email string `json:"email"`
-    Name  string `json:"name,omitempty"`
-  }{
+  claims := freshbreathClaims{
     Claims: josejwt.Claims{
       Issuer:   "freshbreath",
-      Subject:  sub,
+      Subject:  email,
       Audience: josejwt.Audience{"freshbreath"},
       IssuedAt: josejwt.NewNumericDate(now),
-      Expiry:   josejwt.NewNumericDate(now.Add(24 * time.Hour)),
+      Expiry:   josejwt.NewNumericDate(now.Add(accessTokenTTL)),
     },
-    Email: email,
-    Name:  name,
+    Kind:      kind,
+    UserEmail: email,
+    UserRole:  role,
+    UserName:  name,
+    ServiceID: serviceID,
+  }
+  // Seal upstream data for wrapped tokens.
+  if upstream != nil {
+    plain, err := json.Marshal(upstream)
+    if err != nil {
+      return "", fmt.Errorf("marshal upstream: %w", err)
+    }
+    claims.Sealed, err = seal(s.localKey, plain)
+    if err != nil {
+      return "", fmt.Errorf("seal upstream: %w", err)
+    }
   }
   return josejwt.Signed(sig).Claims(claims).Serialize()
 }
 
-func (s *Server) verifyFreshbreathToken(raw string) (string, error) {
+// verifyFreshbreathToken verifies a Freshbreath-issued JWT and returns the
+// claims. For wrapped tokens, the Sealed field is decrypted and the
+// Upstream* fields are populated. Returns (nil, nil) if the token is not
+// a Freshbreath JWT — the caller should try other verification paths.
+func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) {
+  if !isFreshbreathToken(raw) {
+    return nil, nil
+  }
   tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
   if err != nil {
-    return "", fmt.Errorf("parse: %w", err)
+    return nil, fmt.Errorf("parse: %w", err)
   }
-  var claims struct {
-    josejwt.Claims
-    Email string `json:"email"`
-  }
+  var claims freshbreathClaims
   if err := tok.Claims(s.localKey, &claims); err != nil {
-    return "", fmt.Errorf("verify: %w", err)
+    return nil, fmt.Errorf("verify: %w", err)
   }
-  if err := claims.ValidateWithLeeway(josejwt.Expected{
+  if err := claims.Claims.Validate(josejwt.Expected{
     Issuer:      "freshbreath",
     AnyAudience: josejwt.Audience{"freshbreath"},
     Time:        time.Now(),
-  }, time.Minute); err != nil {
-    return "", fmt.Errorf("invalid: %w", err)
+  }); err != nil {
+    return nil, fmt.Errorf("invalid: %w", err)
   }
-  if claims.Email == "" {
-    return "", fmt.Errorf("no email in token")
+  // Decrypt sealed upstream data for wrapped tokens.
+  if claims.Sealed != "" {
+    plain, err := open(s.localKey, claims.Sealed)
+    if err != nil {
+      return nil, fmt.Errorf("unseal upstream: %w", err)
+    }
+    var ud sealedUpstreamData
+    if err := json.Unmarshal(plain, &ud); err != nil {
+      return nil, fmt.Errorf("unmarshal upstream: %w", err)
+    }
+    claims.UpstreamToken = ud.UpstreamToken
+    claims.UpstreamRefresh = ud.UpstreamRefresh
+    claims.UpstreamTokenURL = ud.UpstreamTokenURL
+    claims.UpstreamScopes = ud.UpstreamScopes
   }
-  return claims.Email, nil
+  return &claims, nil
+}
+
+// ── Refresh token mint/verify ───────────────────────────────────────
+
+func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
+  sig, err := jose.NewSigner(
+    jose.SigningKey{Algorithm: jose.HS256, Key: s.localKey},
+    (&jose.SignerOptions{}).WithType("JWT"),
+  )
+  if err != nil {
+    return "", err
+  }
+  // Encrypt the entire refresh payload.
+  plain, err := json.Marshal(data)
+  if err != nil {
+    return "", fmt.Errorf("marshal refresh data: %w", err)
+  }
+  sealed, err := seal(s.localKey, plain)
+  if err != nil {
+    return "", fmt.Errorf("seal refresh data: %w", err)
+  }
+  now := time.Now()
+  claims := struct {
+    josejwt.Claims
+    Sealed string `json:"sealed"`
+  }{
+    Claims: josejwt.Claims{
+      Issuer:   "freshbreath",
+      Subject:  data.UserEmail,
+      Audience: josejwt.Audience{"freshbreath"},
+      IssuedAt: josejwt.NewNumericDate(now),
+      Expiry:   josejwt.NewNumericDate(now.Add(refreshTokenTTL)),
+    },
+    Sealed: sealed,
+  }
+  return josejwt.Signed(sig).Claims(claims).Serialize()
+}
+
+// verifyRefreshToken decrypts a refresh token and returns its payload.
+func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error) {
+  tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
+  if err != nil {
+    return nil, fmt.Errorf("parse refresh: %w", err)
+  }
+  var outer struct {
+    josejwt.Claims
+    Sealed string `json:"sealed"`
+  }
+  if err := tok.Claims(s.localKey, &outer); err != nil {
+    return nil, fmt.Errorf("verify refresh: %w", err)
+  }
+  if err := outer.Claims.Validate(josejwt.Expected{
+    Issuer:      "freshbreath",
+    AnyAudience: josejwt.Audience{"freshbreath"},
+    Time:        time.Now(),
+  }); err != nil {
+    return nil, fmt.Errorf("refresh token invalid: %w", err)
+  }
+  plain, err := open(s.localKey, outer.Sealed)
+  if err != nil {
+    return nil, fmt.Errorf("unseal refresh: %w", err)
+  }
+  var data freshbreathRefreshData
+  if err := json.Unmarshal(plain, &data); err != nil {
+    return nil, fmt.Errorf("unmarshal refresh: %w", err)
+  }
+  return &data, nil
 }

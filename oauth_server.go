@@ -11,8 +11,6 @@ import (
   "sync"
   "time"
 
-  jose "github.com/go-jose/go-jose/v4"
-  josejwt "github.com/go-jose/go-jose/v4/jwt"
   "github.com/modelcontextprotocol/go-sdk/oauthex"
 )
 
@@ -455,29 +453,82 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  expiresIn := int(time.Until(pending.upstreamExpiry).Seconds())
-  if expiresIn < 0 {
-    expiresIn = 0
-  }
+  expiresIn := int(accessTokenTTL.Seconds())
 
-  // Freshbreath-issued upstream tokens (SSH auth, central JWT) don't need wrapping —
-  // the central MCP verifier accepts them directly. External OAuth tokens get wrapped.
-  accessToken := pending.upstreamToken
-  if !isFreshbreathToken(pending.upstreamToken) {
-    jwt, err := os.mintWrappedToken(pending)
+  // Mint a Freshbreath access token for all cases.
+  // External OAuth tokens get wrapped (Kind="wrapped" with sealed upstream data);
+  // Freshbreath-issued tokens (SSH auth, central JWT) pass through as-is.
+  var accessToken string
+  var refreshTokenStr string
+  var refreshData freshbreathRefreshData
+  if isFreshbreathToken(pending.upstreamToken) {
+    // Token already issued by Freshbreath — pass it through.
+    // Determine kind by inspecting the token's claims.
+    accessToken = pending.upstreamToken
+    existing, _ := os.server.verifyFreshbreathToken(pending.upstreamToken)
+    if existing != nil && existing.Kind == "central" {
+      refreshData = freshbreathRefreshData{
+        Kind:      "central",
+        UserEmail: pending.userEmail,
+        UserRole:  existing.UserRole,
+      }
+    } else {
+      refreshData = freshbreathRefreshData{
+        Kind:      "panel",
+        UserEmail: pending.userEmail,
+        UserName:  existing.UserName,
+      }
+    }
+  } else {
+    // External OAuth — wrap with sealed upstream data.
+    upstream := &sealedUpstreamData{
+      UpstreamToken:    pending.upstreamToken,
+      UpstreamRefresh:  pending.upstreamRefresh,
+      UpstreamTokenURL: pending.upstreamTokenURL,
+      UpstreamScopes:   pending.upstreamScopes,
+    }
+    jwt, err := os.server.mintFreshbreathToken("wrapped", pending.userEmail, "", "", pending.serviceID, upstream)
     if err != nil {
       oauthWriteError(w, http.StatusInternalServerError, "server_error", "token issuance failed")
       return
     }
     accessToken = jwt
+    refreshData = freshbreathRefreshData{
+      Kind:             "wrapped",
+      ServiceID:        pending.serviceID,
+      UserEmail:        pending.userEmail,
+      UpstreamRefresh:  pending.upstreamRefresh,
+      UpstreamTokenURL: pending.upstreamTokenURL,
+      UpstreamScopes:   pending.upstreamScopes,
+    }
   }
+
+  // Mint a refresh token (always encrypted, 2-week TTL).
+  rt, err := os.server.mintRefreshToken(refreshData)
+  if err != nil {
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "refresh token issuance failed")
+    return
+  }
+  refreshTokenStr = rt
+
+  // Set refresh token as HttpOnly cookie scoped to /oauth/token.
+  http.SetCookie(w, &http.Cookie{
+    Name:     "refresh_token",
+    Value:    refreshTokenStr,
+    Path:     "/oauth/token",
+    MaxAge:   int(refreshTokenTTL.Seconds()),
+    HttpOnly: true,
+    Secure:   os.server.config.TLSCertFile != "",
+    SameSite: http.SameSiteLaxMode,
+  })
 
   w.Header().Set("Content-Type", "application/json")
   json.NewEncoder(w).Encode(map[string]interface{}{
-    "access_token": accessToken,
-    "token_type":   "Bearer",
-    "expires_in":   expiresIn,
-    "scope":        pending.upstreamScopes,
+    "access_token":  accessToken,
+    "token_type":    "Bearer",
+    "expires_in":    expiresIn,
+    "refresh_token": refreshTokenStr,
+    "scope":         pending.upstreamScopes,
   })
 }
 
@@ -495,79 +546,31 @@ func (os *oauthServer) handleJWKS(w http.ResponseWriter, r *http.Request) {
   })
 }
 
-// ── JWT Minting ─────────────────────────────────────────────────────
+// ── Token Issuance ────────────────────────────────────────────────
 //
-// Mint a Freshbreath JWT that wraps the upstream access token as claims.
-// The MCP client holds this as an opaque Bearer token. When it comes
-// back to /mcp/{name}, we crack it open to get the real upstream token.
-
-func (os *oauthServer) mintWrappedToken(pending *mcpPendingAuth) (string, error) {
-  sig, err := jose.NewSigner(
-    jose.SigningKey{Algorithm: jose.HS256, Key: os.server.localKey},
-    (&jose.SignerOptions{}).WithType("JWT"),
-  )
-  if err != nil {
-    return "", err
-  }
-
-  claims := wrappedTokenClaims{
-    Claims: josejwt.Claims{
-      Issuer:   "freshbreath",
-      Subject:  pending.userEmail,
-      Audience: josejwt.Audience{"freshbreath"},
-      IssuedAt: josejwt.NewNumericDate(time.Now()),
-      Expiry:   josejwt.NewNumericDate(pending.upstreamExpiry),
-    },
-    ServiceID:        pending.serviceID,
-    UpstreamToken:    pending.upstreamToken,
-    UpstreamRefresh:  pending.upstreamRefresh,
-    UpstreamTokenURL: pending.upstreamTokenURL,
-    UpstreamScopes:   pending.upstreamScopes,
-  }
-
-  return josejwt.Signed(sig).Claims(claims).Serialize()
-}
-
-type wrappedTokenClaims struct {
-  josejwt.Claims
-  ServiceID        int64  `json:"service_id"`
-  UpstreamToken    string `json:"upstream_token"`
-  UpstreamRefresh  string `json:"upstream_refresh,omitempty"`
-  UpstreamTokenURL string `json:"upstream_token_url,omitempty"`
-  UpstreamScopes   string `json:"upstream_scopes,omitempty"`
-}
+// handleToken issues access + refresh tokens for both authorization_code
+// and refresh_token grants. All Freshbreath tokens are unified under
+// freshbreathClaims, minted by mintFreshbreathToken.
 
 // verifyAndUnwrapToken checks if a Bearer token is a Freshbreath-wrapped JWT
-// and returns the full claims if so. Returns (nil, nil) if the token is not
+// for a specific virtual service. Returns the full claims (with Upstream*
+// fields populated) on success. Returns (nil, nil) if the token is not
 // a Freshbreath JWT — the caller should use the raw token as-is.
-func (s *Server) verifyAndUnwrapToken(raw string, expectedServiceID int64) (*wrappedTokenClaims, error) {
-  if !isFreshbreathToken(raw) {
+func (s *Server) verifyAndUnwrapToken(raw string, expectedServiceID int64) (*freshbreathClaims, error) {
+  claims, err := s.verifyFreshbreathToken(raw)
+  if err != nil {
+    return nil, err
+  }
+  if claims == nil {
     return nil, nil
   }
-
-  tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
-  if err != nil {
-    return nil, fmt.Errorf("parse wrapped token: %w", err)
+  if claims.Kind != "wrapped" {
+    return nil, fmt.Errorf("expected wrapped token, got kind=%s", claims.Kind)
   }
-
-  var claims wrappedTokenClaims
-  if err := tok.Claims(s.localKey, &claims); err != nil {
-    return nil, fmt.Errorf("verify wrapped token: %w", err)
-  }
-
-  if err := claims.Claims.Validate(josejwt.Expected{
-    Issuer:      "freshbreath",
-    AnyAudience: josejwt.Audience{"freshbreath"},
-    Time:        time.Now(),
-  }); err != nil {
-    return nil, fmt.Errorf("wrapped token invalid: %w", err)
-  }
-
   if claims.ServiceID != expectedServiceID {
     return nil, fmt.Errorf("wrapped token service_id mismatch")
   }
-
-  return &claims, nil
+  return claims, nil
 }
 
 // ── PKCE Verification ───────────────────────────────────────────────
