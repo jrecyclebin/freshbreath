@@ -9,7 +9,6 @@ import (
   "net/http"
   "os"
   "path"
-  "path/filepath"
   "sort"
   "strings"
   "time"
@@ -340,14 +339,4 @@ func walkRemote(client *sftp.Client, root string) (map[string]string, error) {
   }
 
   return result, nil
-}
-
-// pathSafe checks that a path doesn't escape its intended root.
-// Used as an extra guard alongside sanitizePath.
-func pathSafe(p, root string) bool {
-  rel, err := filepath.Rel(root, p)
-  if err != nil {
-    return false
-  }
-  return !strings.HasPrefix(rel, "..")
 }

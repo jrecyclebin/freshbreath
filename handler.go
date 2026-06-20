@@ -1029,14 +1029,6 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
   json.NewEncoder(w).Encode(result)
 }
 
-func mustJSON(v interface{}) string {
-  b, err := json.Marshal(v)
-  if err != nil {
-    return fmt.Sprintf("%v", v)
-  }
-  return string(b)
-}
-
 func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Service) {
   tasks, err := s.loadTasksForService(svc)
   if err != nil {
@@ -2323,19 +2315,7 @@ func (s *Server) setRefreshCookie(w http.ResponseWriter, claims *freshbreathClai
     refreshData.UpstreamTokenURL = claims.UpstreamTokenURL
     refreshData.UpstreamScopes = claims.UpstreamScopes
   }
-  rt, err := s.mintRefreshToken(refreshData)
-  if err != nil {
-    return
-  }
-  http.SetCookie(w, &http.Cookie{
-    Name:     "refresh_token",
-    Value:    rt,
-    Path:     "/oauth/token",
-    MaxAge:   int(refreshTokenTTL.Seconds()),
-    HttpOnly: true,
-    Secure:   s.config.TLSCertFile != "",
-    SameSite: http.SameSiteLaxMode,
-  })
+  s.makeRefreshCookie(w, refreshData)
 }
 
 func (s *Server) verifyIDToken(ctx context.Context, svc *Service, raw string) (string, error) {

@@ -669,21 +669,11 @@ func (os *oauthServer) refreshAdmin(data *freshbreathRefreshData) (string, fresh
 func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, accessToken string, refreshData freshbreathRefreshData, scope string) {
   expiresIn := int(accessTokenTTL.Seconds())
 
-  rt, err := os.server.mintRefreshToken(refreshData)
+  rt, err := os.server.makeRefreshCookie(w, refreshData)
   if err != nil {
     oauthWriteError(w, http.StatusInternalServerError, "server_error", "refresh token issuance failed")
     return
   }
-
-  http.SetCookie(w, &http.Cookie{
-    Name:     "refresh_token",
-    Value:    rt,
-    Path:     "/oauth/token",
-    MaxAge:   int(refreshTokenTTL.Seconds()),
-    HttpOnly: true,
-    Secure:   os.server.config.TLSCertFile != "",
-    SameSite: http.SameSiteLaxMode,
-  })
 
   w.Header().Set("Content-Type", "application/json")
   json.NewEncoder(w).Encode(map[string]interface{}{

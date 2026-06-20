@@ -604,6 +604,23 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
   return josejwt.Signed(sig).Claims(claims).Serialize()
 }
 
+func (s *Server) makeRefreshCookie(w http.ResponseWriter, data freshbreathRefreshData) (string, error) {
+  rt, err := s.mintRefreshToken(data)
+  if err != nil {
+    return "", err
+  }
+  http.SetCookie(w, &http.Cookie{
+    Name:     "refresh_token",
+    Value:    rt,
+    Path:     "/oauth/token",
+    MaxAge:   int(refreshTokenTTL.Seconds()),
+    HttpOnly: true,
+    Secure:   s.config.TLSCertFile != "",
+    SameSite: http.SameSiteLaxMode,
+  })
+  return rt, nil
+}
+
 // verifyRefreshToken decrypts a refresh token and returns its payload.
 func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error) {
   tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})

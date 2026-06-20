@@ -1010,12 +1010,3 @@ func executeVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
   // No shaping on the final step — return raw scope (the last response body).
   return scope, nil
 }
-
-// truncate shortens s to maxRunes, appending "..." if truncated.
-func truncate(s string, maxRunes int) string {
-  runes := []rune(s)
-  if len(runes) <= maxRunes {
-    return s
-  }
-  return string(runes[:maxRunes]) + "..."
-}

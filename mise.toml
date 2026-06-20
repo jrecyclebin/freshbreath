@@ -121,6 +121,18 @@ run = "go run ."
 description = "Run with auto-restart (requires entr or similar)"
 run = "find . -name '*.go' | entr -r go run ."
 
+[tasks.deadcode]
+description = "Find unreachable functions (requires golang.org/x/tools/cmd/deadcode)"
+run = "deadcode ."
+
+[tasks.unused]
+description = "Find unused identifiers (requires honnef.co/go/tools/cmd/staticcheck)"
+run = "staticcheck -checks U1000 ./..."
+
+[tasks.shake]
+description = "Run all dead-code checks"
+depends = ["deadcode", "unused"]
+
 [tasks.outdated]
 description = "View outdated dependencies"
 run = "go list -u -m all 2>/dev/null | grep '\\['"
