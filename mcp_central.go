@@ -52,7 +52,7 @@ func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
 		}
-		if claims != nil && (claims.Kind == "central" || claims.Kind == "panel") {
+		if claims != nil && claims.Kind == "admin" {
 			return &auth.TokenInfo{
 				UserID:     claims.UserEmail,
 				Scopes:     []string{"openid", "email", "profile"},
@@ -237,7 +237,7 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-	if claims != nil && (claims.Kind == "central" || claims.Kind == "panel") {
+	if claims != nil && claims.Kind == "admin" {
 		user, err := s.store.GetUserByEmail(claims.UserEmail)
 		if err != nil {
 			return nil, fmt.Errorf("user not found: %s", claims.UserEmail)

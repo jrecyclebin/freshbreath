@@ -587,7 +587,7 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
       http.Error(w, fmt.Sprintf("User not found: %s", userEmail), http.StatusForbidden)
       return
     }
-    centralJWT, err := s.mintFreshbreathToken("central", user.Email, user.Role, "", 0, nil)
+    centralJWT, err := s.mintFreshbreathToken("admin", user.Email, user.Role, "", 0, nil)
     if err != nil {
       http.Error(w, "Token generation failed", http.StatusInternalServerError)
       return
@@ -2779,7 +2779,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
     _ = s.store.LogAudit(req.Email, "login", "admin panel (SSH)")
 
     // Mint a panel JWT for this user
-    idToken, err := s.mintFreshbreathToken("panel", user.Email, user.Role, user.Name, 0, nil)
+    idToken, err := s.mintFreshbreathToken("admin", user.Email, user.Role, user.Name, 0, nil)
     if err != nil {
       http.Error(w, "Token generation failed", http.StatusInternalServerError)
       return

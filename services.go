@@ -376,7 +376,7 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
   if sub == "" {
     sub = email
   }
-  idTokenRaw, err := s.mintFreshbreathToken("panel", email, "", name, 0, nil)
+  idTokenRaw, err := s.mintFreshbreathToken("admin", email, "", name, 0, nil)
   if err != nil {
     return nil, "", "", "", fmt.Errorf("fabricate token: %w", err)
   }
@@ -392,8 +392,8 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
 // ── Unified Freshbreath JWT ─────────────────────────────────────────
 //
 // All Freshbreath-issued tokens share a single claims type, distinguished
-// by Kind: "wrapped" (virtual-service upstream token), "central" (admin
-// MCP), or "panel" (control-panel login). Sensitive upstream credentials
+// by Kind: "wrapped" (virtual-service upstream token) or "admin"
+// (control-panel login / central MCP). Sensitive upstream credentials
 // in wrapped tokens are AES-256-GCM encrypted into the Sealed field;
 // verifyFreshbreathToken decrypts them into the Upstream* fields (json:"-").
 
@@ -405,7 +405,7 @@ const (
 // freshbreathClaims is the single claim type for all Freshbreath JWTs.
 type freshbreathClaims struct {
   josejwt.Claims
-  Kind      string `json:"kind"`                // "wrapped", "central", or "panel"
+  Kind      string `json:"kind"`                // "wrapped" or "admin"
   UserEmail string `json:"user_email"`           // present for all kinds
   UserRole  string `json:"user_role,omitempty"`  // central + panel
   UserName  string `json:"user_name,omitempty"`  // panel
@@ -433,8 +433,8 @@ type freshbreathRefreshData struct {
   Kind             string `json:"kind"`
   ServiceID        int64  `json:"service_id,omitempty"`  // wrapped
   UserEmail        string `json:"user_email"`
-  UserRole         string `json:"user_role,omitempty"`   // central
-  UserName         string `json:"user_name,omitempty"`   // panel
+  UserRole         string `json:"user_role,omitempty"`   // admin
+  UserName         string `json:"user_name,omitempty"`   // admin
   UpstreamRefresh  string `json:"upstream_refresh,omitempty"`  // wrapped
   UpstreamTokenURL string `json:"upstream_token_url,omitempty"` // wrapped
   UpstreamScopes   string `json:"upstream_scopes,omitempty"`    // wrapped

@@ -1,12 +1,15 @@
 package main
 
 import (
+  "context"
   "crypto/rand"
   "crypto/sha256"
   "encoding/base64"
   "encoding/json"
   "fmt"
+  "io"
   "net/http"
+  "net/url"
   "strings"
   "sync"
   "time"
@@ -390,11 +393,19 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
   }
 
   grantType := r.Form.Get("grant_type")
-  if grantType != "authorization_code" {
+  switch grantType {
+  case "authorization_code":
+    os.handleAuthorizationCodeGrant(w, r)
+  case "refresh_token":
+    os.handleRefreshTokenGrant(w, r)
+  default:
     oauthWriteError(w, http.StatusBadRequest, "unsupported_grant_type", "unsupported grant_type")
-    return
   }
+}
 
+// ── Authorization Code Grant ────────────────────────────────────────
+
+func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request) {
   code := r.Form.Get("code")
   verifier := r.Form.Get("code_verifier")
   if code == "" || verifier == "" {
@@ -453,31 +464,18 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  expiresIn := int(accessTokenTTL.Seconds())
-
   // Mint a Freshbreath access token for all cases.
-  // External OAuth tokens get wrapped (Kind="wrapped" with sealed upstream data);
-  // Freshbreath-issued tokens (SSH auth, central JWT) pass through as-is.
   var accessToken string
-  var refreshTokenStr string
   var refreshData freshbreathRefreshData
   if isFreshbreathToken(pending.upstreamToken) {
     // Token already issued by Freshbreath — pass it through.
-    // Determine kind by inspecting the token's claims.
     accessToken = pending.upstreamToken
     existing, _ := os.server.verifyFreshbreathToken(pending.upstreamToken)
-    if existing != nil && existing.Kind == "central" {
-      refreshData = freshbreathRefreshData{
-        Kind:      "central",
-        UserEmail: pending.userEmail,
-        UserRole:  existing.UserRole,
-      }
-    } else {
-      refreshData = freshbreathRefreshData{
-        Kind:      "panel",
-        UserEmail: pending.userEmail,
-        UserName:  existing.UserName,
-      }
+    refreshData = freshbreathRefreshData{
+      Kind:      "admin",
+      UserEmail: pending.userEmail,
+      UserRole:  existing.UserRole,
+      UserName:  existing.UserName,
     }
   } else {
     // External OAuth — wrap with sealed upstream data.
@@ -503,18 +501,183 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     }
   }
 
-  // Mint a refresh token (always encrypted, 2-week TTL).
+  // Mint a refresh token and write the response.
+  os.writeTokenResponse(w, accessToken, refreshData, pending.upstreamScopes)
+}
+
+// ── Refresh Token Grant ─────────────────────────────────────────────
+//
+// Accepts a refresh token (form body or HttpOnly cookie) and issues
+// a new access + refresh token pair. The grant dispatches on the
+// refresh data's Kind to re-mint the right access token:
+//
+//   "wrapped" — refresh upstream, re-wrap, new pair
+//   "admin"   — look up user, re-mint admin token, new pair
+
+func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
+  // Accept refresh token from form body or cookie.
+  rt := r.Form.Get("refresh_token")
+  if rt == "" {
+    if c, err := r.Cookie("refresh_token"); err == nil {
+      rt = c.Value
+    }
+  }
+  if rt == "" {
+    oauthWriteError(w, http.StatusBadRequest, "invalid_request", "missing refresh_token")
+    return
+  }
+
+  data, err := os.server.verifyRefreshToken(rt)
+  if err != nil {
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired refresh token")
+    return
+  }
+
+  var accessToken string
+  var newRefreshData freshbreathRefreshData
+  var scope string
+
+  switch data.Kind {
+  case "wrapped":
+    accessToken, newRefreshData, scope, err = os.refreshWrapped(data)
+  case "admin":
+    accessToken, newRefreshData, err = os.refreshAdmin(data)
+  default:
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", fmt.Sprintf("unknown token kind: %s", data.Kind))
+    return
+  }
+  if err != nil {
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", err.Error())
+    return
+  }
+
+  os.writeTokenResponse(w, accessToken, newRefreshData, scope)
+}
+
+// refreshWrapped refreshes the upstream OAuth token, then re-wraps it
+// into a new Freshbreath access token.
+func (os *oauthServer) refreshWrapped(data *freshbreathRefreshData) (string, freshbreathRefreshData, string, error) {
+  if data.UpstreamRefresh == "" {
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("no upstream refresh token available — re-login required")
+  }
+  svc, err := os.server.store.GetService(data.ServiceID)
+  if err != nil {
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("service not found: %w", err)
+  }
+
+  // Resolve the upstream token endpoint.
+  tokenEndpoint, err := os.server.resolveTokenEndpoint(context.Background(), svc)
+  if err != nil {
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("resolve token endpoint: %w", err)
+  }
+  if data.UpstreamTokenURL != "" {
+    // Validate the stored endpoint matches the service config.
+    clientNorm := strings.TrimSuffix(data.UpstreamTokenURL, "/")
+    serverNorm := strings.TrimSuffix(tokenEndpoint, "/")
+    if clientNorm != serverNorm {
+      tokenEndpoint = data.UpstreamTokenURL
+    }
+  }
+
+  clientID := svc.Descriptor.ClientID
+  if clientID == "" {
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("no client_id for service — re-login required")
+  }
+
+  form := url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {data.UpstreamRefresh},
+    "client_id":     {clientID},
+  }
+  if svc.Descriptor.ClientSecret != "" {
+    form.Set("client_secret", svc.Descriptor.ClientSecret)
+  }
+  if data.UpstreamScopes != "" {
+    form.Set("scope", data.UpstreamScopes)
+  }
+
+  resp, err := os.server.httpClient.PostForm(tokenEndpoint, form)
+  if err != nil {
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("upstream refresh failed: %w", err)
+  }
+  defer resp.Body.Close()
+  if resp.StatusCode != http.StatusOK {
+    body, _ := io.ReadAll(resp.Body)
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("upstream refresh returned %d: %s", resp.StatusCode, string(body))
+  }
+
+  var tok struct {
+    AccessToken  string `json:"access_token"`
+    RefreshToken string `json:"refresh_token"`
+    Scope        string `json:"scope"`
+    ExpiresIn    int    `json:"expires_in"`
+  }
+  if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("decode upstream response: %w", err)
+  }
+
+  // Re-wrap into a Freshbreath access token.
+  upstreamRefresh := tok.RefreshToken
+  if upstreamRefresh == "" {
+    upstreamRefresh = data.UpstreamRefresh
+  }
+  upstream := &sealedUpstreamData{
+    UpstreamToken:    tok.AccessToken,
+    UpstreamRefresh:  upstreamRefresh,
+    UpstreamTokenURL: tokenEndpoint,
+    UpstreamScopes:   tok.Scope,
+  }
+  jwt, err := os.server.mintFreshbreathToken("wrapped", data.UserEmail, "", "", data.ServiceID, upstream)
+  if err != nil {
+    return "", freshbreathRefreshData{}, "", fmt.Errorf("mint wrapped token: %w", err)
+  }
+
+  newRefreshData := freshbreathRefreshData{
+    Kind:             "wrapped",
+    ServiceID:        data.ServiceID,
+    UserEmail:        data.UserEmail,
+    UpstreamRefresh:  upstreamRefresh,
+    UpstreamTokenURL: tokenEndpoint,
+    UpstreamScopes:   tok.Scope,
+  }
+  return jwt, newRefreshData, tok.Scope, nil
+}
+
+// refreshAdmin re-mints an admin access token for the user.
+func (os *oauthServer) refreshAdmin(data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
+  user, err := os.server.store.GetUserByEmail(data.UserEmail)
+  if err != nil {
+    return "", freshbreathRefreshData{}, fmt.Errorf("user not found: %w", err)
+  }
+  jwt, err := os.server.mintFreshbreathToken("admin", user.Email, user.Role, user.Name, 0, nil)
+  if err != nil {
+    return "", freshbreathRefreshData{}, fmt.Errorf("mint admin token: %w", err)
+  }
+  newRefreshData := freshbreathRefreshData{
+    Kind:      "admin",
+    UserEmail: user.Email,
+    UserRole:  user.Role,
+    UserName:  user.Name,
+  }
+  return jwt, newRefreshData, nil
+}
+
+// ── Token Response Helper ───────────────────────────────────────────
+//
+// Mint a refresh token, set the HttpOnly cookie, and write the JSON response.
+
+func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, accessToken string, refreshData freshbreathRefreshData, scope string) {
+  expiresIn := int(accessTokenTTL.Seconds())
+
   rt, err := os.server.mintRefreshToken(refreshData)
   if err != nil {
     oauthWriteError(w, http.StatusInternalServerError, "server_error", "refresh token issuance failed")
     return
   }
-  refreshTokenStr = rt
 
-  // Set refresh token as HttpOnly cookie scoped to /oauth/token.
   http.SetCookie(w, &http.Cookie{
     Name:     "refresh_token",
-    Value:    refreshTokenStr,
+    Value:    rt,
     Path:     "/oauth/token",
     MaxAge:   int(refreshTokenTTL.Seconds()),
     HttpOnly: true,
@@ -527,8 +690,8 @@ func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
     "access_token":  accessToken,
     "token_type":    "Bearer",
     "expires_in":    expiresIn,
-    "refresh_token": refreshTokenStr,
-    "scope":         pending.upstreamScopes,
+    "refresh_token": rt,
+    "scope":         scope,
   })
 }
 
