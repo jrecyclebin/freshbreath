@@ -1,13 +1,18 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
+	"time"
 )
 
 // trimMCPSlug returns the virtual-service slug from a /mcp/<slug> URL.
@@ -434,6 +439,219 @@ func (s *Server) coreUpdateSettings(actor *User, adminAuthService, defaultApp *s
 			return cerr(http.StatusInternalServerError, "%v", err)
 		}
 		s.audit(actor, "updated settings", "default_app")
+	}
+	return nil
+}
+
+// ── App Web operations ─────────────────────────────────────────────
+
+// coreDownloadAppWeb returns the app's web directory as a zip archive.
+func (s *Server) coreDownloadAppWeb(actor *User, nonce string) ([]byte, string, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return nil, "", err
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		return nil, "", cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	webDir := filepath.Join("apps", nonce, "web")
+	if _, err := os.Stat(webDir); os.IsNotExist(err) {
+		return nil, "", cerr(http.StatusNotFound, "no web files uploaded")
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	err = filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+		if err != nil || fi.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(webDir, path)
+		fw, err := zw.Create(filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = io.Copy(fw, f)
+		return err
+	})
+	if err != nil {
+		zw.Close()
+		return nil, "", cerr(http.StatusInternalServerError, "zip failed: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		return nil, "", cerr(http.StatusInternalServerError, "zip close failed: %v", err)
+	}
+	return buf.Bytes(), appSlug(app), nil
+}
+
+// coreUploadAppWeb writes web files for an app from raw content. The
+// filename determines handling: .html is saved as index.html; .zip is
+// extracted via extractZip.
+func (s *Server) coreUploadAppWeb(actor *User, nonce string, data []byte, filename string) (string, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return "", err
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		return "", cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	webDir := filepath.Join("apps", nonce, "web")
+	if err := os.RemoveAll(webDir); err != nil {
+		return "", cerr(http.StatusInternalServerError, "failed to clear web dir")
+	}
+	if err := os.MkdirAll(webDir, 0755); err != nil {
+		return "", cerr(http.StatusInternalServerError, "failed to create web dir")
+	}
+
+	name := strings.ToLower(filename)
+	if strings.HasSuffix(name, ".html") {
+		if err := os.WriteFile(filepath.Join(webDir, "index.html"), data, 0644); err != nil {
+			return "", cerr(http.StatusInternalServerError, "write failed")
+		}
+	} else if strings.HasSuffix(name, ".zip") {
+		if err := extractZip(bytes.NewReader(data), int64(len(data)), webDir); err != nil {
+			return "", cerr(http.StatusBadRequest, "zip error: %v", err)
+		}
+	} else {
+		return "", cerr(http.StatusBadRequest, "unsupported file type (.html or .zip only)")
+	}
+
+	now := time.Now().UTC()
+	details := app.Details
+	if details == nil {
+		details = &AppDetails{}
+	}
+	details.LastUploaded = &now
+	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
+		return "", cerr(http.StatusInternalServerError, "failed to save details")
+	}
+	s.rebuildHostedRoutes()
+	s.audit(actor, "uploaded web files", app.Name)
+	return "/" + appSlug(app), nil
+}
+
+// coreDeleteAppWeb removes an app's web directory and clears its details.
+func (s *Server) coreDeleteAppWeb(actor *User, nonce string) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		return cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	webDir := filepath.Join("apps", nonce, "web")
+	if err := os.RemoveAll(webDir); err != nil {
+		return cerr(http.StatusInternalServerError, "failed to remove web dir")
+	}
+	if err := s.store.UpdateAppDetails(nonce, &AppDetails{}); err != nil {
+		return cerr(http.StatusInternalServerError, "failed to save details")
+	}
+	s.rebuildHostedRoutes()
+	s.audit(actor, "removed web files", app.Name)
+	return nil
+}
+
+// extractZip extracts a zip archive to destDir, auto-detecting the content
+// root (unwrapping a single top-level folder if present) and ensuring an
+// index.html exists (renaming the first .html alphabetically if absent).
+// Accepts a size parameter so it can be called from both multipart (whole
+// stream) and core (known-length buffer) paths.
+func extractZip(r io.ReaderAt, size int64, destDir string) error {
+	zr, err := zip.NewReader(r, size)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+
+	// Determine effective root: if all file entries share a single top-level
+	// directory and there are no files directly at the root, strip that prefix.
+	topDirs := map[string]bool{}
+	hasRootFiles := false
+	for _, f := range zr.File {
+		name := filepath.ToSlash(f.Name)
+		if name == "" || strings.HasSuffix(name, "/") {
+			continue
+		}
+		if idx := strings.Index(name, "/"); idx >= 0 {
+			topDirs[name[:idx]] = true
+		} else {
+			hasRootFiles = true
+		}
+	}
+	root := ""
+	if !hasRootFiles && len(topDirs) == 1 {
+		for dir := range topDirs {
+			root = dir + "/"
+		}
+	}
+
+	// Find the entry point HTML: prefer index.html, else first .html alphabetically.
+	var htmlFiles []string
+	hasIndex := false
+	for _, f := range zr.File {
+		name := filepath.ToSlash(f.Name)
+		if !strings.HasPrefix(name, root) || strings.HasSuffix(name, "/") {
+			continue
+		}
+		rel := strings.TrimPrefix(name, root)
+		if rel == "index.html" {
+			hasIndex = true
+			break
+		}
+		if strings.HasSuffix(rel, ".html") {
+			htmlFiles = append(htmlFiles, rel)
+		}
+	}
+	var entryPoint string
+	if !hasIndex {
+		if len(htmlFiles) == 0 {
+			return fmt.Errorf("no HTML file found in zip")
+		}
+		sort.Strings(htmlFiles)
+		entryPoint = htmlFiles[0]
+	}
+
+	// Extract files.
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		name := filepath.ToSlash(f.Name)
+		if !strings.HasPrefix(name, root) {
+			continue
+		}
+		rel := strings.TrimPrefix(name, root)
+		if rel == "" {
+			continue
+		}
+		if entryPoint != "" && rel == entryPoint {
+			rel = "index.html"
+		}
+		clean := filepath.Clean(rel)
+		if strings.HasPrefix(clean, "..") {
+			continue
+		}
+		destPath := filepath.Join(destDir, clean)
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return fmt.Errorf("mkdir: %w", err)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return fmt.Errorf("open entry: %w", err)
+		}
+		out, err := os.Create(destPath)
+		if err != nil {
+			rc.Close()
+			return fmt.Errorf("create: %w", err)
+		}
+		_, copyErr := io.Copy(out, rc)
+		out.Close()
+		rc.Close()
+		if copyErr != nil {
+			return fmt.Errorf("extract: %w", copyErr)
+		}
 	}
 	return nil
 }

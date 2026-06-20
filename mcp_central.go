@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -607,6 +608,118 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		}
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
+
+	// download_app_file
+	if roleIn(role, rolesAdminPlus) {
+		mcps.AddTool(&mcp.Tool{
+			Name:        "download_app_files",
+			Description: "Download an app's web files as a base64-encoded zip archive.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+				},
+				"required": []string{"nonce"},
+			},
+		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			user, err := s.mcpUser(req)
+			if err != nil {
+				return mcpToolError("auth: %v", err), nil
+			}
+			args := make(map[string]interface{})
+			json.Unmarshal(req.Params.Arguments, &args)
+			nonce, _ := args["nonce"].(string)
+			if nonce == "" {
+				return mcpToolError("nonce is required"), nil
+			}
+
+			data, slug, err := s.coreDownloadAppWeb(user, nonce)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]interface{}{
+				"filename": slug + ".zip",
+				"content":  base64.StdEncoding.EncodeToString(data),
+			})
+		})
+	}
+
+	// publish_app_files
+	if roleIn(role, rolesAdminPlus) {
+		mcps.AddTool(&mcp.Tool{
+			Name:        "publish_app_files",
+			Description: "Upload web files for an app. Provide a base64-encoded .html or .zip file.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"nonce":    map[string]interface{}{"type": "string", "description": "App nonce"},
+					"filename": map[string]interface{}{"type": "string", "description": "Filename with .html or .zip extension"},
+					"content":  map[string]interface{}{"type": "string", "description": "Base64-encoded file content"},
+				},
+				"required": []string{"nonce", "filename", "content"},
+			},
+		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			user, err := s.mcpUser(req)
+			if err != nil {
+				return mcpToolError("auth: %v", err), nil
+			}
+			args := make(map[string]interface{})
+			json.Unmarshal(req.Params.Arguments, &args)
+			nonce, _ := args["nonce"].(string)
+			filename, _ := args["filename"].(string)
+			content, _ := args["content"].(string)
+			if nonce == "" {
+				return mcpToolError("nonce is required"), nil
+			}
+			if filename == "" {
+				return mcpToolError("filename is required"), nil
+			}
+			if content == "" {
+				return mcpToolError("content is required"), nil
+			}
+			data, err := base64.StdEncoding.DecodeString(content)
+			if err != nil {
+				return mcpToolError("invalid base64: %v", err), nil
+			}
+
+			route, err := s.coreUploadAppWeb(user, nonce, data, filename)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"route": route})
+		})
+	}
+
+	// delete_app_files
+	if roleIn(role, rolesAdminPlus) {
+		mcps.AddTool(&mcp.Tool{
+			Name:        "delete_app_files",
+			Description: "Remove an app's web files.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+				},
+				"required": []string{"nonce"},
+			},
+		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			user, err := s.mcpUser(req)
+			if err != nil {
+				return mcpToolError("auth: %v", err), nil
+			}
+			args := make(map[string]interface{})
+			json.Unmarshal(req.Params.Arguments, &args)
+			nonce, _ := args["nonce"].(string)
+			if nonce == "" {
+				return mcpToolError("nonce is required"), nil
+			}
+
+			if err := s.coreDeleteAppWeb(user, nonce); err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"status": "deleted"})
+		})
+	}
 }
 
 // ── Service Tools ───────────────────────────────────────────────────
