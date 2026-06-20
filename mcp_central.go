@@ -272,20 +272,6 @@ func mcpToolResult(v interface{}) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
-// mcpAuditLog logs an audit entry for an MCP tool call using the user's email.
-func (s *Server) mcpAuditLog(user *User, action, target string) {
-	actor := "unknown"
-	if user != nil {
-		if user.Email != "" {
-			actor = user.Email
-		} else if user.Name != "" {
-			actor = user.Name
-		} else {
-			actor = fmt.Sprintf("user:%d", user.ID)
-		}
-	}
-	_ = s.store.LogAudit(actor, action, target)
-}
 func roleGate(user *User, allowed ...string) error {
 	for _, r := range allowed {
 		if user.Role == r {
@@ -411,11 +397,10 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			ownerID = &id
 		}
 
-		nonce, err := s.store.CreateApp(name, env, appURL, ownerID)
+		nonce, err := s.coreCreateApp(user, name, env, appURL, ownerID)
 		if err != nil {
-			return mcpToolError("db error: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
-		s.mcpAuditLog(user, "created app", name)
 		return mcpToolResult(map[string]string{"nonce": nonce, "name": name})
 	})
 
@@ -458,11 +443,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			ownerID = &id
 		}
 
-		if err := s.store.UpdateApp(nonce, name, env, appURL, ownerID); err != nil {
-			return mcpToolError("db error: %v", err), nil
+		if err := s.coreUpdateApp(user, nonce, name, env, appURL, ownerID); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		s.rebuildHostedRoutes()
-		s.mcpAuditLog(user, "updated app", name)
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 
@@ -493,16 +476,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			return mcpToolError("nonce is required"), nil
 		}
 
-		app, err := s.store.GetApp(nonce)
-		if err != nil {
-			return mcpToolError("app not found: %v", err), nil
+		if err := s.coreDeleteApp(user, nonce); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		if err := s.store.DeleteApp(nonce); err != nil {
-			return mcpToolError("db error: %v", err), nil
-		}
-		_ = app
-		s.rebuildHostedRoutes()
-		s.mcpAuditLog(user, "deleted app", nonce)
 		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
 
@@ -582,10 +558,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			}
 		}
 
-		if err := s.store.SetAppMembers(nonce, members); err != nil {
-			return mcpToolError("db error: %v", err), nil
+		if err := s.coreSetAppMembers(user, nonce, members); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		s.mcpAuditLog(user, "updated app members", nonce)
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 
@@ -665,10 +640,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			}
 		}
 
-		if err := s.store.SetAppServiceLinks(nonce, services); err != nil {
-			return mcpToolError("db error: %v", err), nil
+		if err := s.coreSetAppServices(user, nonce, services); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		s.mcpAuditLog(user, "updated app services", nonce)
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 }
@@ -784,27 +758,12 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			json.Unmarshal(descBytes, &desc)
 		}
 
-		if svcURL == "" && desc.Type != "tasks" && desc.Type != "virtual" {
-			return mcpToolError("url is required for this service type"), nil
-		}
-		if svcURL == "" && desc.Type == "tasks" {
-			svcURL = "tasks://" + slugify(name)
-		}
-		if svcURL == "" && desc.Type == "virtual" {
-			svcURL = "/mcp/" + slugify(name)
-		}
-
-		id, err := s.store.RegisterService(name, svcURL, desc)
+		svc, err := s.coreCreateService(user, name, svcURL, desc)
 		if err != nil {
-			return mcpToolError("db error: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
-		if desc.Type == "virtual" {
-			svc := &Service{ID: id, Name: name, URL: svcURL, Descriptor: desc}
-			s.virtualMCPs.add(s, svc)
-		}
-		s.mcpAuditLog(user, "created service", name)
 		return mcpToolResult(map[string]interface{}{
-			"id": id, "name": name, "url": svcURL, "descriptor": desc,
+			"id": svc.ID, "name": svc.Name, "url": svc.URL, "descriptor": svc.Descriptor,
 		})
 	})
 
@@ -854,40 +813,25 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		}
 
 		serviceID := int64(id)
+		// MCP update is a patch: fill blanks from the existing record before
+		// handing fully-resolved fields to the (replace-semantics) core.
 		existing, err := s.store.GetService(serviceID)
 		if err != nil {
 			return mcpToolError("service not found: %v", err), nil
 		}
-
 		svcURL, _ := args["url"].(string)
-		var desc ServiceDescriptor
-		if raw, ok := args["descriptor"].(map[string]interface{}); ok {
-			descBytes, _ := json.Marshal(raw)
-			json.Unmarshal(descBytes, &desc)
-		} else {
-			desc = existing.Descriptor
-		}
-
 		if svcURL == "" {
 			svcURL = existing.URL
 		}
-		// Built-in SSH service: preserve name and URL
-		if existing.Descriptor.Type == "ssh" {
-			name = existing.Name
-			svcURL = existing.URL
+		desc := existing.Descriptor
+		if raw, ok := args["descriptor"].(map[string]interface{}); ok {
+			descBytes, _ := json.Marshal(raw)
+			json.Unmarshal(descBytes, &desc)
 		}
 
-		if err := s.store.UpdateService(serviceID, name, svcURL, desc); err != nil {
-			return mcpToolError("db error: %v", err), nil
+		if err := s.coreUpdateService(user, serviceID, name, svcURL, desc); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		if desc.Type == "virtual" {
-			svc := &Service{ID: serviceID, Name: name, URL: svcURL, Descriptor: desc}
-			s.virtualMCPs.add(s, svc)
-		} else {
-			slug := strings.TrimPrefix(existing.URL, "/mcp/")
-			s.virtualMCPs.remove(slug)
-		}
-		s.mcpAuditLog(user, "updated service", name)
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 
@@ -918,22 +862,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			return mcpToolError("id is required"), nil
 		}
 
-		serviceID := int64(id)
-		svc, err := s.store.GetService(serviceID)
-		if err != nil {
-			return mcpToolError("service not found: %v", err), nil
+		if err := s.coreDeleteService(user, int64(id)); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		if svc.Descriptor.Type == "ssh" {
-			return mcpToolError("cannot delete built-in SSH service"), nil
-		}
-		if err := s.store.DeleteService(serviceID); err != nil {
-			return mcpToolError("db error: %v", err), nil
-		}
-		if svc.Descriptor.Type == "virtual" {
-			slug := strings.TrimPrefix(svc.URL, "/mcp/")
-			s.virtualMCPs.remove(slug)
-		}
-		s.mcpAuditLog(user, "deleted service", svc.Name)
 		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
 
@@ -1070,11 +1001,10 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		role, _ := args["role"].(string)
 		status, _ := args["status"].(string)
 
-		newUser, err := s.store.CreateUser(name, email, role, status)
+		newUser, err := s.coreCreateUser(user, name, email, role, status)
 		if err != nil {
-			return mcpToolError("db error: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
-		s.mcpAuditLog(user, "created user", name)
 		return mcpToolResult(newUser)
 	})
 
@@ -1132,10 +1062,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 			status = existing.Status
 		}
 
-		if err := s.store.UpdateUser(userID, name, email, role, status, existing.Metadata); err != nil {
-			return mcpToolError("db error: %v", err), nil
+		if err := s.coreUpdateUser(user, userID, name, email, role, status, existing.Metadata); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		s.mcpAuditLog(user, "updated user", name)
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 
@@ -1170,10 +1099,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("user not found: %v", err), nil
 		}
-		if err := s.store.DeleteUser(int64(id)); err != nil {
-			return mcpToolError("db error: %v", err), nil
+		if err := s.coreDeleteUser(user, u); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		s.mcpAuditLog(user, "deleted user", u.Name)
 		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
 
@@ -1246,10 +1174,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 			}
 		}
 
-		if err := s.store.SetUserApps(int64(id), apps); err != nil {
-			return mcpToolError("db error: %v", err), nil
+		if err := s.coreSetUserApps(user, int64(id), apps); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		s.mcpAuditLog(user, "updated user apps", fmt.Sprintf("user:%d", int64(id)))
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 
@@ -1284,13 +1211,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("user not found: %v", err), nil
 		}
-		info := (*SSHKeyInfo)(nil)
-		if u.Metadata != nil && u.Metadata.SSHKey != nil {
-			info = &SSHKeyInfo{
-				PublicKey:   u.Metadata.SSHKey.PublicKey,
-				Fingerprint: u.Metadata.SSHKey.Fingerprint,
-				KeyType:     u.Metadata.SSHKey.KeyType,
-			}
+		var info *SSHKeyInfo
+		if u.Metadata != nil {
+			info = publicSSHInfo(u.Metadata.SSHKey)
 		}
 		return mcpToolResult(map[string]interface{}{"ssh_key": info})
 	})
@@ -1331,29 +1254,11 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("user not found: %v", err), nil
 		}
-		if u.Metadata != nil && u.Metadata.SSHKey != nil {
-			return mcpToolError("SSH key already exists — delete it first"), nil
-		}
-
-		keyInfo, err := GenerateSSHKey(passphrase)
+		info, err := s.coreGenerateSSHKey(user, u, passphrase)
 		if err != nil {
-			return mcpToolError("key generation failed: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
-
-		meta := u.Metadata
-		if meta == nil {
-			meta = &UserMetadata{}
-		}
-		meta.SSHKey = keyInfo
-		if err := s.store.UpdateUser(u.ID, u.Name, u.Email, u.Role, u.Status, meta); err != nil {
-			return mcpToolError("db error: %v", err), nil
-		}
-		s.mcpAuditLog(user, "generated SSH key for user", u.Email)
-		return mcpToolResult(map[string]interface{}{"ssh_key": &SSHKeyInfo{
-			PublicKey:   keyInfo.PublicKey,
-			Fingerprint: keyInfo.Fingerprint,
-			KeyType:     keyInfo.KeyType,
-		}})
+		return mcpToolResult(map[string]interface{}{"ssh_key": info})
 	})
 
 	// delete_user_ssh_key
@@ -1387,13 +1292,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("user not found: %v", err), nil
 		}
-		if u.Metadata == nil || u.Metadata.SSHKey == nil {
-			return mcpToolError("no SSH key to delete"), nil
+		if err := s.coreDeleteSSHKey(user, u); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		if err := s.store.UpdateUser(u.ID, u.Name, u.Email, u.Role, u.Status, &UserMetadata{}); err != nil {
-			return mcpToolError("db error: %v", err), nil
-		}
-		s.mcpAuditLog(user, "deleted SSH key for user", u.Email)
 		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
 }
@@ -1494,13 +1395,9 @@ func (s *Server) registerMeTools(mcps *mcp.Server) {
 			return mcpToolError("no SSH key for setup account"), nil
 		}
 
-		info := (*SSHKeyInfo)(nil)
-		if user.Metadata != nil && user.Metadata.SSHKey != nil {
-			info = &SSHKeyInfo{
-				PublicKey:   user.Metadata.SSHKey.PublicKey,
-				Fingerprint: user.Metadata.SSHKey.Fingerprint,
-				KeyType:     user.Metadata.SSHKey.KeyType,
-			}
+		var info *SSHKeyInfo
+		if user.Metadata != nil {
+			info = publicSSHInfo(user.Metadata.SSHKey)
 		}
 		return mcpToolResult(map[string]interface{}{"ssh_key": info})
 	})
@@ -1535,29 +1432,11 @@ func (s *Server) registerMeTools(mcps *mcp.Server) {
 			return mcpToolError("passphrase must be at least 8 characters"), nil
 		}
 
-		if user.Metadata != nil && user.Metadata.SSHKey != nil {
-			return mcpToolError("SSH key already exists — delete it first"), nil
-		}
-
-		keyInfo, err := GenerateSSHKey(passphrase)
+		info, err := s.coreGenerateSSHKey(user, user, passphrase)
 		if err != nil {
-			return mcpToolError("key generation failed: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
-
-		meta := user.Metadata
-		if meta == nil {
-			meta = &UserMetadata{}
-		}
-		meta.SSHKey = keyInfo
-		if err := s.store.UpdateUser(user.ID, user.Name, user.Email, user.Role, user.Status, meta); err != nil {
-			return mcpToolError("db error: %v", err), nil
-		}
-		s.mcpAuditLog(user, "generated SSH key for user", user.Email)
-		return mcpToolResult(map[string]interface{}{"ssh_key": &SSHKeyInfo{
-			PublicKey:   keyInfo.PublicKey,
-			Fingerprint: keyInfo.Fingerprint,
-			KeyType:     keyInfo.KeyType,
-		}})
+		return mcpToolResult(map[string]interface{}{"ssh_key": info})
 	})
 
 	// delete_my_ssh_key
@@ -1580,13 +1459,9 @@ func (s *Server) registerMeTools(mcps *mcp.Server) {
 			return mcpToolError("cannot delete SSH key for setup account"), nil
 		}
 
-		if user.Metadata == nil || user.Metadata.SSHKey == nil {
-			return mcpToolError("no SSH key to delete"), nil
+		if err := s.coreDeleteSSHKey(user, user); err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		if err := s.store.UpdateUser(user.ID, user.Name, user.Email, user.Role, user.Status, &UserMetadata{}); err != nil {
-			return mcpToolError("db error: %v", err), nil
-		}
-		s.mcpAuditLog(user, "deleted SSH key for user", user.Email)
 		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
 }
@@ -1644,39 +1519,16 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 
+		var adminAuthService, defaultApp *string
 		if v, ok := args["admin_auth_service"].(string); ok {
-			if v != "" {
-				if _, err := parseID(v); err != nil {
-					return mcpToolError("admin_auth_service must be a numeric service ID"), nil
-				}
-			}
-			if err := s.store.SetSetting("admin_auth_service", v); err != nil {
-				return mcpToolError("db error: %v", err), nil
-			}
-			s.mcpAuditLog(user, "updated settings", "admin_auth_service")
+			adminAuthService = &v
 		}
-
 		if v, ok := args["default_app"].(string); ok {
-			if v != "" && v != "control" {
-				found := false
-				s.hostedMu.RLock()
-				for _, n := range s.hostedRoutes {
-					if n == v {
-						found = true
-						break
-					}
-				}
-				s.hostedMu.RUnlock()
-				if !found {
-					return mcpToolError("default_app must be a hosted app nonce or \"control\""), nil
-				}
-			}
-			if err := s.store.SetSetting("default_app", v); err != nil {
-				return mcpToolError("db error: %v", err), nil
-			}
-			s.mcpAuditLog(user, "updated settings", "default_app")
+			defaultApp = &v
 		}
-
+		if err := s.coreUpdateSettings(user, adminAuthService, defaultApp); err != nil {
+			return mcpToolError("%v", err), nil
+		}
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 }

@@ -1247,19 +1247,14 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
     http.Error(w, "Invalid JSON", http.StatusBadRequest)
     return
   }
-  if req.Name == "" {
-    http.Error(w, "Name required", http.StatusBadRequest)
-    return
-  }
 
-  nonce, err := s.store.CreateApp(req.Name, req.Environment, req.URL, req.OwnerID)
+  nonce, err := s.coreCreateApp(userFromContext(r.Context()), req.Name, req.Environment, req.URL, req.OwnerID)
   if err != nil {
-    http.Error(w, err.Error(), http.StatusInternalServerError)
+    writeErr(w, err)
     return
   }
 
   w.Header().Set("Content-Type", "application/json")
-  s.auditLog(r.Context(), "created app", req.Name)
   json.NewEncoder(w).Encode(map[string]string{"nonce": nonce, "name": req.Name})
 }
 
@@ -1340,25 +1335,20 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if err := s.store.UpdateApp(nonce, req.Name, req.Environment, req.URL, req.OwnerID); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+    if err := s.coreUpdateApp(userFromContext(r.Context()), nonce, req.Name, req.Environment, req.URL, req.OwnerID); err != nil {
+      writeErr(w, err)
       return
     }
-    s.rebuildHostedRoutes()
-    s.auditLog(r.Context(), "updated app", req.Name)
     w.WriteHeader(http.StatusNoContent)
   case http.MethodDelete:
     if !isAdminOrSuperuser(r.Context()) {
       http.Error(w, "Forbidden", http.StatusForbidden)
       return
     }
-    if err := s.store.DeleteApp(nonce); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+    if err := s.coreDeleteApp(userFromContext(r.Context()), nonce); err != nil {
+      writeErr(w, err)
       return
     }
-    os.RemoveAll(filepath.Join("apps", nonce))
-    s.rebuildHostedRoutes()
-    s.auditLog(r.Context(), "deleted app", app.Name)
     w.WriteHeader(http.StatusNoContent)
   default:
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1391,14 +1381,9 @@ func (s *Server) handleAppMembers(w http.ResponseWriter, r *http.Request, nonce 
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if err := s.store.SetAppMembers(nonce, req.Members); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+    if err := s.coreSetAppMembers(userFromContext(r.Context()), nonce, req.Members); err != nil {
+      writeErr(w, err)
       return
-    }
-    if app, err := s.store.GetApp(nonce); err == nil {
-      s.auditLog(r.Context(), "updated app members", app.Name)
-    } else {
-      s.auditLog(r.Context(), "updated app members", nonce)
     }
     w.WriteHeader(http.StatusNoContent)
   default:
@@ -1432,14 +1417,9 @@ func (s *Server) handleAppServices(w http.ResponseWriter, r *http.Request, nonce
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if err := s.store.SetAppServiceLinks(nonce, req.Services); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+    if err := s.coreSetAppServices(userFromContext(r.Context()), nonce, req.Services); err != nil {
+      writeErr(w, err)
       return
-    }
-    if app, err := s.store.GetApp(nonce); err == nil {
-      s.auditLog(r.Context(), "updated app services", app.Name)
-    } else {
-      s.auditLog(r.Context(), "updated app services", nonce)
     }
     w.WriteHeader(http.StatusNoContent)
   default:
@@ -1700,42 +1680,19 @@ func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
     http.Error(w, "Invalid JSON", http.StatusBadRequest)
     return
   }
-  if req.Name == "" {
-    http.Error(w, "name required", http.StatusBadRequest)
-    return
-  }
-  if req.URL == "" && req.Descriptor.Type != "tasks" && req.Descriptor.Type != "virtual" {
-    http.Error(w, "url required", http.StatusBadRequest)
-    return
-  }
-  // Tasks services don't have a remote URL — use a slugified name.
-  if req.URL == "" && req.Descriptor.Type == "tasks" {
-    req.URL = "tasks://" + slugify(req.Name)
-  }
-  // Virtual services get a /mcp/ URL.
-  if req.URL == "" && req.Descriptor.Type == "virtual" {
-    req.URL = "/mcp/" + slugify(req.Name)
-  }
 
-  id, err := s.store.RegisterService(req.Name, req.URL, req.Descriptor)
+  svc, err := s.coreCreateService(userFromContext(r.Context()), req.Name, req.URL, req.Descriptor)
   if err != nil {
-    http.Error(w, err.Error(), http.StatusInternalServerError)
+    writeErr(w, err)
     return
-  }
-
-  // Register MCP endpoint for virtual services.
-  if req.Descriptor.Type == "virtual" {
-    svc := &Service{ID: id, Name: req.Name, URL: req.URL, Descriptor: req.Descriptor}
-    s.virtualMCPs.add(s, svc)
   }
 
   w.Header().Set("Content-Type", "application/json")
-  s.auditLog(r.Context(), "created service", req.Name)
   json.NewEncoder(w).Encode(map[string]interface{}{
-    "id":         id,
-    "name":       req.Name,
-    "url":        req.URL,
-    "descriptor": req.Descriptor,
+    "id":         svc.ID,
+    "name":       svc.Name,
+    "url":        svc.URL,
+    "descriptor": svc.Descriptor,
   })
 }
 
@@ -1785,54 +1742,16 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if req.Name == "" {
-      http.Error(w, "name required", http.StatusBadRequest)
+    if err := s.coreUpdateService(userFromContext(r.Context()), serviceID, req.Name, req.URL, req.Descriptor); err != nil {
+      writeErr(w, err)
       return
     }
-    if req.URL == "" && req.Descriptor.Type != "tasks" && req.Descriptor.Type != "virtual" {
-      http.Error(w, "url required", http.StatusBadRequest)
-      return
-    }
-    if req.URL == "" && req.Descriptor.Type == "tasks" {
-      req.URL = "tasks://" + slugify(req.Name)
-    }
-    if req.URL == "" && req.Descriptor.Type == "virtual" {
-      req.URL = "/mcp/" + slugify(req.Name)
-    }
-    // Built-in SSH service: preserve name and URL
-    if svc.Descriptor.Type == "ssh" {
-      req.Name = svc.Name
-      req.URL = svc.URL
-    }
-    if err := s.store.UpdateService(serviceID, req.Name, req.URL, req.Descriptor); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      return
-    }
-    // Re-register MCP endpoint for virtual services.
-    if req.Descriptor.Type == "virtual" {
-      svc := &Service{ID: serviceID, Name: req.Name, URL: req.URL, Descriptor: req.Descriptor}
-      s.virtualMCPs.add(s, svc)
-    } else {
-      slug := strings.TrimPrefix(svc.URL, "/mcp/")
-      s.virtualMCPs.remove(slug)
-    }
-    s.auditLog(r.Context(), "updated service", req.Name)
     w.WriteHeader(http.StatusNoContent)
   case http.MethodDelete:
-    if svc.Descriptor.Type == "ssh" {
-      http.Error(w, "Cannot delete built-in SSH service", http.StatusForbidden)
+    if err := s.coreDeleteService(userFromContext(r.Context()), serviceID); err != nil {
+      writeErr(w, err)
       return
     }
-    if err := s.store.DeleteService(serviceID); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      return
-    }
-    // Remove MCP endpoint for virtual services.
-    if svc.Descriptor.Type == "virtual" {
-      slug := strings.TrimPrefix(svc.URL, "/mcp/")
-      s.virtualMCPs.remove(slug)
-    }
-    s.auditLog(r.Context(), "deleted service", svc.Name)
     w.WriteHeader(http.StatusNoContent)
   default:
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1868,16 +1787,11 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if req.Name == "" || req.Email == "" {
-      http.Error(w, "name and email required", http.StatusBadRequest)
-      return
-    }
-    user, err := s.store.CreateUser(req.Name, req.Email, req.Role, req.Status)
+    user, err := s.coreCreateUser(userFromContext(r.Context()), req.Name, req.Email, req.Role, req.Status)
     if err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+      writeErr(w, err)
       return
     }
-    s.auditLog(r.Context(), "created user", req.Name)
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(user)
   case http.MethodGet:
@@ -1950,18 +1864,16 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
     }
     // Preserve existing metadata (e.g. SSH key) — the update request
     // only carries name/email/role/status.
-    if err := s.store.UpdateUser(id, req.Name, req.Email, req.Role, req.Status, user.Metadata); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+    if err := s.coreUpdateUser(userFromContext(r.Context()), id, req.Name, req.Email, req.Role, req.Status, user.Metadata); err != nil {
+      writeErr(w, err)
       return
     }
-    s.auditLog(r.Context(), "updated user", req.Name)
     w.WriteHeader(http.StatusNoContent)
   case http.MethodDelete:
-    if err := s.store.DeleteUser(id); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+    if err := s.coreDeleteUser(userFromContext(r.Context()), user); err != nil {
+      writeErr(w, err)
       return
     }
-    s.auditLog(r.Context(), "deleted user", user.Name)
     w.WriteHeader(http.StatusNoContent)
   default:
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1986,11 +1898,10 @@ func (s *Server) handleUserApps(w http.ResponseWriter, r *http.Request, userID i
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if err := s.store.SetUserApps(userID, req.Apps); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
+    if err := s.coreSetUserApps(userFromContext(r.Context()), userID, req.Apps); err != nil {
+      writeErr(w, err)
       return
     }
-    s.auditLog(r.Context(), "updated user apps", fmt.Sprintf("user:%d", userID))
     w.WriteHeader(http.StatusNoContent)
   default:
     http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2022,50 +1933,19 @@ func (s *Server) handleUserSSHKey(w http.ResponseWriter, r *http.Request, userID
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if len(req.Passphrase) < 8 {
-      http.Error(w, "Passphrase must be at least 8 characters", http.StatusBadRequest)
-      return
-    }
-    if user.Metadata != nil && user.Metadata.SSHKey != nil {
-      http.Error(w, "SSH key already exists — delete it first", http.StatusConflict)
-      return
-    }
-
-    keyInfo, err := GenerateSSHKey(req.Passphrase)
+    info, err := s.coreGenerateSSHKey(userFromContext(r.Context()), user, req.Passphrase)
     if err != nil {
-      http.Error(w, fmt.Sprintf("Key generation failed: %v", err), http.StatusInternalServerError)
+      writeErr(w, err)
       return
     }
-
-    meta := user.Metadata
-    if meta == nil {
-      meta = &UserMetadata{}
-    }
-    meta.SSHKey = keyInfo
-    if err := s.store.UpdateUser(user.ID, user.Name, user.Email, user.Role, user.Status, meta); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      return
-    }
-    s.auditLog(r.Context(), "generated SSH key for user", user.Email)
-
     w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(map[string]interface{}{"ssh_key": &SSHKeyInfo{
-      PublicKey:   keyInfo.PublicKey,
-      Fingerprint: keyInfo.Fingerprint,
-      KeyType:     keyInfo.KeyType,
-    }})
+    json.NewEncoder(w).Encode(map[string]interface{}{"ssh_key": info})
 
   case http.MethodDelete:
-    if user.Metadata == nil || user.Metadata.SSHKey == nil {
-      http.Error(w, "No SSH key to delete", http.StatusNotFound)
+    if err := s.coreDeleteSSHKey(userFromContext(r.Context()), user); err != nil {
+      writeErr(w, err)
       return
     }
-    meta := &UserMetadata{}
-    if err := s.store.UpdateUser(user.ID, user.Name, user.Email, user.Role, user.Status, meta); err != nil {
-      http.Error(w, err.Error(), http.StatusInternalServerError)
-      return
-    }
-    s.auditLog(r.Context(), "deleted SSH key for user", user.Email)
     w.WriteHeader(http.StatusNoContent)
 
   default:
@@ -2582,40 +2462,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
       http.Error(w, "Invalid JSON", http.StatusBadRequest)
       return
     }
-    if body.AdminAuthService != nil {
-      if *body.AdminAuthService != "" {
-        if _, err := strconv.ParseInt(*body.AdminAuthService, 10, 64); err != nil {
-          http.Error(w, "admin_auth_service must be a numeric service ID", http.StatusBadRequest)
-          return
-        }
-      }
-      if err := s.store.SetSetting("admin_auth_service", *body.AdminAuthService); err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-      }
-      s.auditLog(r.Context(), "updated settings", "admin_auth_service")
-    }
-    if body.DefaultApp != nil {
-      if *body.DefaultApp != "" && *body.DefaultApp != "control" {
-        found := false
-        s.hostedMu.RLock()
-        for _, n := range s.hostedRoutes {
-          if n == *body.DefaultApp {
-            found = true
-            break
-          }
-        }
-        s.hostedMu.RUnlock()
-        if !found {
-          http.Error(w, "default_app must be a hosted app nonce or \"control\"", http.StatusBadRequest)
-          return
-        }
-      }
-      if err := s.store.SetSetting("default_app", *body.DefaultApp); err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-      }
-      s.auditLog(r.Context(), "updated settings", "default_app")
+    if err := s.coreUpdateSettings(userFromContext(r.Context()), body.AdminAuthService, body.DefaultApp); err != nil {
+      writeErr(w, err)
+      return
     }
     w.WriteHeader(http.StatusNoContent)
   default:
