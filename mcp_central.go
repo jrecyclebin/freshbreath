@@ -131,16 +131,20 @@ func (s *Server) buildCentralMCPServerForRole(role string) *mcp.Server {
 		Instructions: "Freshbreath control panel API. Manage apps, services, users, and settings.",
 	})
 
+	// NOTE: Role access to all of the following tools should match
+	// the `requireAnyRole` handlers in `handler.go`. Specific tool access
+	// is enforced in the tool handlers themselves.
+
 	// ── Apps (mixed: list/get are all-roles; mutate is admin+) ────
 	s.registerAppTools(mcps, role)
 
 	// ── Services (admin+) ─────────────────────────────────────────
-	if isAdminPlus(role) {
+	if roleIn(role, rolesAdminPlus) {
 		s.registerServiceTools(mcps)
 	}
 
 	// ── Users (admin+) ────────────────────────────────────────────
-	if isAdminPlus(role) {
+	if roleIn(role, rolesAdminPlus) {
 		s.registerUserTools(mcps)
 	}
 
@@ -154,7 +158,7 @@ func (s *Server) buildCentralMCPServerForRole(role string) *mcp.Server {
 	s.registerMeTools(mcps)
 
 	// ── Settings (superuser only) ──────────────────────────────────
-	if role == "Superuser" {
+	if roleIn(role, rolesSuperuser) {
 		s.registerSettingsTools(mcps)
 	}
 
@@ -191,12 +195,6 @@ func roleFromRequest(r *http.Request) string {
 		}
 	}
 	return "Read-only"
-}
-
-// isAdminPlus reports whether role may perform admin actions
-// (Superuser or Admin). Mirrors requireAnyRole("Superuser","Admin").
-func isAdminPlus(role string) bool {
-	return role == "Superuser" || role == "Admin"
 }
 
 // addToolIf registers t/h on mcps only when allow is true. Used for
@@ -272,15 +270,6 @@ func mcpToolResult(v interface{}) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
-func roleGate(user *User, allowed ...string) error {
-	for _, r := range allowed {
-		if user.Role == r {
-			return nil
-		}
-	}
-	return fmt.Errorf("forbidden: requires %s", strings.Join(allowed, " or "))
-}
-
 // ── App Tools ───────────────────────────────────────────────────────
 
 func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
@@ -296,9 +285,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		var apps []map[string]interface{}
@@ -329,9 +315,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
@@ -361,7 +344,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	})
 
 	// create_app
-	addToolIf(isAdminPlus(role), mcps, &mcp.Tool{
+	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
 		Name:        "create_app",
 		Description: "Create a new app. Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -378,9 +361,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -405,7 +385,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	})
 
 	// update_app
-	addToolIf(isAdminPlus(role), mcps, &mcp.Tool{
+	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
 		Name:        "update_app",
 		Description: "Update an existing app. Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -423,9 +403,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -450,7 +427,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	})
 
 	// delete_app
-	addToolIf(isAdminPlus(role), mcps, &mcp.Tool{
+	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
 		Name:        "delete_app",
 		Description: "Delete an app. Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -464,9 +441,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -498,9 +472,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
@@ -524,7 +495,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	})
 
 	// set_app_members
-	addToolIf(isAdminPlus(role), mcps, &mcp.Tool{
+	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
 		Name:        "set_app_members",
 		Description: "Set the members for an app. Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -539,9 +510,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -580,9 +548,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
@@ -606,7 +571,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	})
 
 	// set_app_services
-	addToolIf(isAdminPlus(role), mcps, &mcp.Tool{
+	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
 		Name:        "set_app_services",
 		Description: "Set the services linked to an app. Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -621,9 +586,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -659,12 +621,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		services, err := s.store.ListServices()
@@ -686,12 +645,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			"required": []string{"id"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -739,9 +695,6 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -800,9 +753,6 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
@@ -851,9 +801,6 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
@@ -880,12 +827,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			"required": []string{"id"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -915,12 +859,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		users, err := s.store.ListUsers()
@@ -946,12 +887,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 			"required": []string{"id"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -986,9 +924,6 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -1027,9 +962,6 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -1084,9 +1016,6 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
@@ -1117,12 +1046,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 			"required": []string{"id"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -1155,9 +1081,6 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -1192,12 +1115,9 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 			"required": []string{"id"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -1234,9 +1154,6 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})
@@ -1277,9 +1194,6 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
@@ -1310,12 +1224,9 @@ func (s *Server) registerRoleTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		roles, err := s.store.ListRoles()
@@ -1337,12 +1248,9 @@ func (s *Server) registerAuditTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		entries, err := s.store.ListAudit(100)
@@ -1369,9 +1277,6 @@ func (s *Server) registerMeTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 		return mcpToolResult(map[string]interface{}{"user": user})
 	})
 
@@ -1387,9 +1292,6 @@ func (s *Server) registerMeTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 		if user.ID < 0 {
 			return mcpToolError("no SSH key for setup account"), nil
@@ -1417,9 +1319,6 @@ func (s *Server) registerMeTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 		if user.ID < 0 {
 			return mcpToolError("cannot generate SSH key for setup account"), nil
@@ -1452,9 +1351,6 @@ func (s *Server) registerMeTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-		if err := roleGate(user, "Superuser", "Admin", "Member", "Read-only"); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 		if user.ID < 0 {
 			return mcpToolError("cannot delete SSH key for setup account"), nil
 		}
@@ -1478,12 +1374,9 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
+		_, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil}
@@ -1511,9 +1404,6 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
-		}
-		if err := roleGate(user, "Superuser"); err != nil {
-			return mcpToolError("%v", err), nil
 		}
 
 		args := make(map[string]interface{})

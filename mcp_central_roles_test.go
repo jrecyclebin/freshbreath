@@ -118,7 +118,7 @@ func TestCentralMCPServerCaching(t *testing.T) {
 	}
 }
 
-func TestIsAdminPlus(t *testing.T) {
+func TestRoleInAdminPlus(t *testing.T) {
 	cases := map[string]bool{
 		"Superuser": true,
 		"Admin":     true,
@@ -127,8 +127,8 @@ func TestIsAdminPlus(t *testing.T) {
 		"":          false,
 	}
 	for role, want := range cases {
-		if got := isAdminPlus(role); got != want {
-			t.Errorf("isAdminPlus(%q) = %v, want %v", role, got, want)
+		if got := roleIn(role, rolesAdminPlus); got != want {
+			t.Errorf("roleIn(%q, rolesAdminPlus) = %v, want %v", role, got, want)
 		}
 	}
 }
