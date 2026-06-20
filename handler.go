@@ -506,8 +506,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // completeAuth writes the postMessage callback page for a completed auth flow.
-// Used by both OIDC and SSH callback paths.
+// Used by both OIDC and SSH callback paths. If the token is Freshbreath-issued,
+// it also mints a refresh token and sets the HttpOnly cookie.
 func (s *Server) completeAuth(w http.ResponseWriter, pending *pendingAuth, oauth *OAuthData) {
+  // If the access token is Freshbreath-issued, set the refresh cookie.
+  if isFreshbreathToken(oauth.AccessToken) {
+    if claims, _ := s.verifyFreshbreathToken(oauth.AccessToken); claims != nil {
+      s.setRefreshCookie(w, claims)
+    }
+  }
   w.Header().Set("Content-Type", "text/html; charset=utf-8")
   writeCallbackPage(w, pending.appState, pending.appNonce, pending.serviceID, pending.serviceURL, oauth)
 }
@@ -2255,30 +2262,11 @@ func (s *Server) requireAppServiceAccess(serviceType string) func(http.HandlerFu
 }
 
 func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*User, error) {
-  authHeader := r.Header.Get("Authorization")
-  if !strings.HasPrefix(authHeader, "Bearer ") {
-    return nil, fmt.Errorf("missing bearer token")
-  }
-  idTokenRaw := strings.TrimPrefix(authHeader, "Bearer ")
-
   svcID, err := strconv.ParseInt(serviceID, 10, 64)
   if err != nil {
     return nil, fmt.Errorf("invalid service ID in settings")
   }
-  svc, err := s.store.GetService(svcID)
-  if err != nil {
-    return nil, fmt.Errorf("admin auth service not found")
-  }
-
-  email, err := s.verifyIDToken(r.Context(), svc, idTokenRaw)
-  if err != nil {
-    return nil, err
-  }
-  user, err := s.store.GetUserByEmail(email)
-  if err != nil {
-    return nil, fmt.Errorf("user not found for %s", email)
-  }
-  return user, nil
+  return s.verifyTaskToken(r, svcID)
 }
 
 // verifyTaskToken verifies a Bearer token against a referenced auth service.
@@ -2318,6 +2306,36 @@ func isFreshbreathToken(raw string) bool {
   var peek struct{ Iss string `json:"iss"` }
   json.Unmarshal(payload, &peek)
   return peek.Iss == "freshbreath"
+}
+
+// setRefreshCookie mints a refresh token for the given claims and sets it
+// as an HttpOnly cookie on the response.
+func (s *Server) setRefreshCookie(w http.ResponseWriter, claims *freshbreathClaims) {
+  refreshData := freshbreathRefreshData{
+    Kind:      claims.Kind,
+    UserEmail: claims.UserEmail,
+    UserRole:  claims.UserRole,
+    UserName:  claims.UserName,
+    ServiceID: claims.ServiceID,
+  }
+  if claims.Kind == "wrapped" {
+    refreshData.UpstreamRefresh = claims.UpstreamRefresh
+    refreshData.UpstreamTokenURL = claims.UpstreamTokenURL
+    refreshData.UpstreamScopes = claims.UpstreamScopes
+  }
+  rt, err := s.mintRefreshToken(refreshData)
+  if err != nil {
+    return
+  }
+  http.SetCookie(w, &http.Cookie{
+    Name:     "refresh_token",
+    Value:    rt,
+    Path:     "/oauth/token",
+    MaxAge:   int(refreshTokenTTL.Seconds()),
+    HttpOnly: true,
+    Secure:   s.config.TLSCertFile != "",
+    SameSite: http.SameSiteLaxMode,
+  })
 }
 
 func (s *Server) verifyIDToken(ctx context.Context, svc *Service, raw string) (string, error) {

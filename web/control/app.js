@@ -454,16 +454,16 @@ let _onUnauthorized = null;
 
 async function api(token, method, path, body) {
   const opts = { method, headers: {} };
-  if (token?.data?.id_token) opts.headers['Authorization'] = 'Bearer ' + token.data.id_token;
+  if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
   if (body) { opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
 
   let r = await fetch(path, opts);
 
   // Stale token — try refresh once
-  if (r.status === 401 && token?.data?.refresh_token) {
+  if (r.status === 401 && token?.refresh) {
     try {
       await token.refresh();
-      opts.headers['Authorization'] = 'Bearer ' + token.data.id_token;
+      opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
       r = await fetch(path, opts);
     } catch {
       _onUnauthorized?.();
@@ -964,7 +964,7 @@ function HostUpload({ token, app, onRefresh }) {
     try {
       const res = await fetch('/api/apps/' + app.nonce + '/web', {
         method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + token?.data?.id_token },
+        headers: { 'Authorization': 'Bearer ' + token?.data?.access_token },
         body: fd,
       });
       if (!res.ok) throw new Error(await res.text());
@@ -984,7 +984,7 @@ function HostUpload({ token, app, onRefresh }) {
     try {
       const res = await fetch('/api/apps/' + app.nonce + '/web', {
         method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + token?.data?.id_token },
+        headers: { 'Authorization': 'Bearer ' + token?.data?.access_token },
       });
       if (!res.ok) throw new Error(await res.text());
       setHosted(false);

@@ -11,6 +11,17 @@ import EventEmitter from 'https://esm.sh/eventemitter3';
 
 const API = window.__HOMESLICE_CONFIG?.apiBase ?? "";
 
+// Peek at a JWT's iss claim to check if it was issued by Freshbreath.
+function isFreshbreathToken(raw) {
+  if (!raw || typeof raw !== 'string') return false;
+  const parts = raw.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload.iss === 'freshbreath';
+  } catch { return false; }
+}
+
 function uuidv4() {
   if (crypto?.randomUUID) {
     return crypto.randomUUID();
@@ -191,22 +202,27 @@ export class ServiceProxy extends EventEmitter {
   }
 
   async refresh() {
-    if (!this.#data?.refresh_token) {
-      throw new Error("No refresh token available — re-login required");
-    }
-
     let t;
-    if (this.#proxied && this.#serviceID) {
+    if (isFreshbreathToken(this.#data?.access_token)) {
+      // Freshbreath-issued token — refresh through /oauth/token.
+      // The refresh token is in an HttpOnly cookie auto-attached to this path.
+      const body = new URLSearchParams({ grant_type: "refresh_token" });
+      const r = await fetch(`${API}/oauth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+      });
+      if (!r.ok) throw new Error(`Token refresh failed (${r.status})`);
+      t = await r.json();
+    } else if (!this.#data?.refresh_token) {
+      throw new Error("No refresh token available — re-login required");
+    } else if (this.#proxied && this.#serviceID) {
       // Proxied refresh: server-side with stored client_secret
       const body = {
         refresh_token: this.#data.refresh_token,
         service_id: this.#serviceID,
       };
-      // For DCR services, the server never persisted our client_id.
-      // Pre-registered services don't need this (it's in the descriptor).
       if (this.#data.client_id) body.client_id = this.#data.client_id;
-      // token_endpoint is optional — server resolves from OAuthURL or metadata.
-      // Sending it lets the server validate we're not being redirected.
       if (this.#data.token_endpoint) body.token_endpoint = this.#data.token_endpoint;
 
       const r = await fetch(`${API}/service/refresh`, {
@@ -223,8 +239,6 @@ export class ServiceProxy extends EventEmitter {
         refresh_token: this.#data.refresh_token,
         client_id: this.#data.client_id,
       });
-      // Preserve original scopes; if this was an OIDC flow, ensure openid is included
-      // so the provider continues to return an id_token.
       if (this.#data.scopes) {
         const scopes = this.#data.scopes.split(" ");
         if (this.#data.id_token && !scopes.includes("openid")) {
@@ -245,10 +259,10 @@ export class ServiceProxy extends EventEmitter {
 
     this.#data = {
       ...this.#data,
-      access_token:  t.access_token,
+      access_token: t.access_token,
       refresh_token: t.refresh_token ?? this.#data.refresh_token,
-      id_token:      t.id_token ?? this.#data.id_token,
-      expires_at:    t.expires_in ? new Date(Date.now() + (t.expires_in * 1000)) : null,
+      id_token:     t.id_token ?? this.#data.id_token,
+      expires_at:   t.expires_in ? new Date(Date.now() + (t.expires_in * 1000)) : null,
     };
     this.emit("refresh", this);
   }
