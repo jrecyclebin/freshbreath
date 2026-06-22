@@ -84,9 +84,11 @@ func getEnv(key, fallback string) string {
 // resolveConfigDir returns the XDG config directory for freshbreath
 // (or "" if none exists). It does not load any config file.
 func resolveConfigDir() string {
-  p := filepath.Join(xdg.ConfigHome, "freshbreath")
-  if _, err := os.Stat(p); err == nil {
-    return p
+  for _, dir := range append([]string{xdg.ConfigHome}, xdg.ConfigDirs...) {
+    p := filepath.Join(dir, "freshbreath")
+    if _, err := os.Stat(p); err == nil {
+      return p
+    }
   }
   return ""
 }
