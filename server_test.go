@@ -25,6 +25,8 @@ func newTestServer(t *testing.T) *Server {
   }
   srv := &Server{
     config: Config{
+      Dir:           ".",
+      DataDir:       ".",
       PublicBaseURL: "http://localhost:9009",
     },
     store:      store,

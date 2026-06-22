@@ -90,7 +90,7 @@ func (r *virtualMCPRegistry) remove(slug string) {
 // newVirtualMCPServer creates an MCP server that exposes the virtual service's
 // tools via the MCP protocol.
 func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
-  tools, err := loadVirtualTools(s.config.Dir, svc.Name)
+  tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
   if err != nil {
     return nil, fmt.Errorf("load virtual tools: %w", err)
   }

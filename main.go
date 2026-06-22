@@ -12,6 +12,7 @@ import (
   "sync"
   "time"
 
+  "github.com/adrg/xdg"
   "github.com/coreos/go-oidc/v3/oidc"
   _ "github.com/mattn/go-sqlite3"
   "github.com/joho/godotenv"
@@ -20,7 +21,9 @@ import (
 )
 
 type Config struct {
-  Dir           string
+  Dir           string // install directory (web/ control panel)
+  DataDir       string // mutable state directory (apps/, virtual/, tasks/)
+  ConfigDir     string // XDG config directory, empty if none found
   DBPath        string
   PublicBaseURL string
   ListenAddr    string
@@ -78,16 +81,93 @@ func getEnv(key, fallback string) string {
   return fallback
 }
 
+// resolveConfigDir returns the XDG config directory for freshbreath
+// (or "" if none exists). It does not load any config file.
+func resolveConfigDir() string {
+  p := filepath.Join(xdg.ConfigHome, "freshbreath")
+  if _, err := os.Stat(p); err == nil {
+    return p
+  }
+  return ""
+}
+
+// resolveDir searches for a freshbreath install directory containing a
+// web/ subdirectory. Search order: env var, binary's own directory,
+// XDG_DATA_HOME/freshbreath, then each entry in XDG_DATA_DIRS.
+func resolveDir(binDir string) string {
+  if v := os.Getenv("FRBR_DIR"); v != "" {
+    return v
+  }
+  // Binary's own directory
+  if _, err := os.Stat(filepath.Join(binDir, "web")); err == nil {
+    return binDir
+  }
+  // XDG data directories
+  for _, dir := range append([]string{xdg.DataHome}, xdg.DataDirs...) {
+    p := filepath.Join(dir, "freshbreath")
+    if _, err := os.Stat(filepath.Join(p, "web")); err == nil {
+      return p
+    }
+  }
+  return ""
+}
+
+// resolveDataDir determines where mutable state (apps/, virtual/, tasks/,
+// and the database) lives. Returns (dataDir, dbPath).
+func resolveDataDir(binDir string) (string, string) {
+  // Explicit env vars win
+  if v := os.Getenv("FRBR_DATA_DIR"); v != "" {
+    dbPath := os.Getenv("FRBR_DB_PATH")
+    if dbPath == "" {
+      dbPath = filepath.Join(v, "freshbreath.db")
+    }
+    return v, dbPath
+  }
+  if v := os.Getenv("FRBR_DB_PATH"); v != "" {
+    return filepath.Dir(v), v
+  }
+  // Search for an existing database
+  candidates := []string{
+    "./freshbreath.db",
+    filepath.Join(binDir, "freshbreath.db"),
+    filepath.Join(xdg.DataHome, "freshbreath", "freshbreath.db"),
+  }
+  for _, c := range candidates {
+    if _, err := os.Stat(c); err == nil {
+      return filepath.Dir(c), c
+    }
+  }
+  // Default: current working directory
+  return ".", "./freshbreath.db"
+}
+
 func main() {
-  // Load .env file if present; ignore error — env vars may be set directly.
-  _ = godotenv.Load()
+  // Config loading: .env in CWD wins; otherwise try XDG config.
+  cwdEnv := ".env"
+  if _, err := os.Stat(cwdEnv); err == nil {
+    _ = godotenv.Load(cwdEnv)
+  } else {
+    xdgCfgDir := resolveConfigDir()
+    if xdgCfgDir != "" {
+      _ = godotenv.Load(filepath.Join(xdgCfgDir, "config.env"))
+    }
+  }
 
   _, callerFile, _, _ := runtime.Caller(0)
   binDir, _ := filepath.EvalSymlinks(filepath.Dir(callerFile))
 
+  dir := resolveDir(binDir)
+  if dir == "" {
+    log.Fatal("freshbreath: can't find control panel directory (web/). Set FRBR_DIR to the install directory.")
+  }
+
+  dataDir, dbPath := resolveDataDir(binDir)
+
   cfg := Config{
-    Dir:           getEnv("FRBR_DIR", binDir),
-    DBPath:        getEnv("FRBR_DB_PATH", "./freshbreath.db"),
+    Dir:           dir,
+    DataDir:       dataDir,
+    ConfigDir:     resolveConfigDir(),
+    DBPath:        dbPath,
     PublicBaseURL: getEnv("FRBR_BASE_URL", ""),
     ListenAddr:    getEnv("FRBR_LISTEN_ADDR", ":9009"),
     TLSCertFile:   getEnv("FRBR_TLS_CERT", ""),
@@ -169,7 +249,7 @@ func main() {
     }
   }()
 
-  log.Printf("*:・ﾟ✧ freshbreath %s server on %s [db: %s]", version, cfg.PublicBaseURL, cfg.DBPath)
+  log.Printf("*:・ﾟ✧ freshbreath %s server on %s [dir: %s, data: %s, db: %s]", version, cfg.PublicBaseURL, cfg.Dir, cfg.DataDir, cfg.DBPath)
   if tlsEnabled {
     if err := http.ListenAndServeTLS(cfg.ListenAddr, cfg.TLSCertFile, cfg.TLSKeyFile, srv); err != nil {
       log.Fatal(err)

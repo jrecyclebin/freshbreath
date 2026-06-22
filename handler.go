@@ -244,7 +244,7 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webDir := filepath.Join("apps", nonce, "web")
+	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
 
 	if rest != "" {
 		clean := filepath.Clean(rest)
@@ -881,7 +881,7 @@ func parseTasksFile(data []byte) []Task {
 
 // loadTasksForService reads and parses the tasks file for a service.
 func (s *Server) loadTasksForService(svc *Service) ([]Task, error) {
-	path := filepath.Join(s.config.Dir, "tasks", svc.Name+".txt")
+	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("tasks file not found: %s", path)
@@ -973,7 +973,7 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *Service) {
 	switch r.Method {
 	case http.MethodGet:
-		tools, err := loadVirtualTools(s.config.Dir, svc.Name)
+		tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -990,7 +990,7 @@ func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *Service) {
-	tools, err := loadVirtualTools(s.config.Dir, svc.Name)
+	tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return

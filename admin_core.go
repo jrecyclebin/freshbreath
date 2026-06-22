@@ -219,7 +219,7 @@ func (s *Server) coreDeleteApp(actor *User, nonce string) error {
 	if err := s.store.DeleteApp(nonce); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
-	os.RemoveAll(filepath.Join("apps", nonce))
+	os.RemoveAll(filepath.Join(s.config.DataDir, "apps", nonce))
 	s.rebuildHostedRoutes()
 	s.audit(actor, "deleted app", app.Name)
 	return nil
@@ -454,7 +454,7 @@ func (s *Server) coreDownloadAppWeb(actor *User, nonce string) ([]byte, string, 
 	if err != nil {
 		return nil, "", cerr(http.StatusNotFound, "app not found: %v", err)
 	}
-	webDir := filepath.Join("apps", nonce, "web")
+	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
 	if _, err := os.Stat(webDir); os.IsNotExist(err) {
 		return nil, "", cerr(http.StatusNotFound, "no web files uploaded")
 	}
@@ -498,7 +498,7 @@ func (s *Server) coreUploadAppWeb(actor *User, nonce string, data []byte, filena
 	if err != nil {
 		return "", cerr(http.StatusNotFound, "app not found: %v", err)
 	}
-	webDir := filepath.Join("apps", nonce, "web")
+	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
 	if err := os.RemoveAll(webDir); err != nil {
 		return "", cerr(http.StatusInternalServerError, "failed to clear web dir")
 	}
@@ -542,7 +542,7 @@ func (s *Server) coreDeleteAppWeb(actor *User, nonce string) error {
 	if err != nil {
 		return cerr(http.StatusNotFound, "app not found: %v", err)
 	}
-	webDir := filepath.Join("apps", nonce, "web")
+	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
 	if err := os.RemoveAll(webDir); err != nil {
 		return cerr(http.StatusInternalServerError, "failed to remove web dir")
 	}
