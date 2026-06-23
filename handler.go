@@ -27,25 +27,9 @@ import (
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if origin := r.Header.Get("Origin"); origin != "" {
 		if nonce := r.Header.Get("X-App-Nonce"); nonce != "" {
-			// Admin panel nonce — verify origin matches our own base URL
-			if nonce == s.adminNonce {
-				if u, err := url.Parse(s.config.PublicBaseURL); err == nil && u.Scheme+"://"+u.Host != origin {
-					http.Error(w, "Origin not allowed", http.StatusForbidden)
-					return
-				}
-			} else if app, err := s.store.GetApp(nonce); err == nil && app.URL != "" {
-				appURL, _ := url.Parse(app.URL)
-				appOrigin := appURL.Scheme + "://" + appURL.Host
-				if appOrigin == "://" {
-					// Absolute path (e.g. /import) — same-origin as the server
-					if u, err := url.Parse(s.config.PublicBaseURL); err == nil {
-						appOrigin = u.Scheme + "://" + u.Host
-					}
-				}
-				if appOrigin != origin {
-					http.Error(w, "Origin not allowed", http.StatusForbidden)
-					return
-				}
+			if !s.originAllowed(nonce, origin) {
+				http.Error(w, "Origin not allowed", http.StatusForbidden)
+				return
 			}
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -58,6 +42,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mux.ServeHTTP(w, r)
+}
+
+// originAllowed checks whether the given nonce is permitted to make
+// cross-origin requests from the supplied origin.
+func (s *Server) originAllowed(nonce, origin string) bool {
+	// Admin panel — nonce is the auth boundary; origin is irrelevant.
+	if nonce == s.adminNonce {
+		return true
+	}
+	// App nonce — only allowed if the app's registered URL matches the origin.
+	app, err := s.store.GetApp(nonce)
+	if err != nil || app.URL == "" {
+		return false
+	}
+	appURL, _ := url.Parse(app.URL)
+	appOrigin := appURL.Scheme + "://" + appURL.Host
+	// Absolute paths (e.g. /import) are same-origin — Origin header
+	// wouldn't be sent by the browser, so we shouldn't reach here.
+	if appOrigin == "://" {
+		return false
+	}
+	return appOrigin == origin
 }
 
 func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {
@@ -278,7 +284,13 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-func (s *Server) renderEnvJS() []byte {
+func (s *Server) renderEnvJS(r *http.Request) []byte {
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	apiBase := scheme + "://" + r.Host
+
 	authRequired := false
 	authServiceName := ""
 	authServiceURL := ""
@@ -294,12 +306,12 @@ func (s *Server) renderEnvJS() []byte {
 		}
 	}
 	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, authServiceURL: %q, authServiceType: %q, adminNonce: %q, version: %q, commit: %q };\n",
-		s.config.PublicBaseURL, authRequired, authServiceName, authServiceURL, authServiceType, s.adminNonce, version, commit))
+		apiBase, authRequired, authServiceName, authServiceURL, authServiceType, s.adminNonce, version, commit))
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
-	w.Write(s.renderEnvJS())
+	w.Write(s.renderEnvJS(r))
 }
 
 func (s *Server) handleFrbr(w http.ResponseWriter, r *http.Request) {
@@ -309,7 +321,7 @@ func (s *Server) handleFrbr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-	w.Write(s.renderEnvJS())
+	w.Write(s.renderEnvJS(r))
 	w.Write(data)
 }
 
