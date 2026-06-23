@@ -192,6 +192,7 @@ func (s *Server) coreCreateApp(actor *User, name, env, url string, ownerID *int6
 	if err != nil {
 		return "", cerr(http.StatusInternalServerError, "%v", err)
 	}
+	s.rebuildHostedRoutes()
 	s.audit(actor, "created app", name)
 	return nonce, nil
 }

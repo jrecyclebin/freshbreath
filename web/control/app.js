@@ -200,10 +200,10 @@ function AuthProvider({ children }) {
     (async () => {
       try {
         const cfg = window.__HOMESLICE_CONFIG || {};
-        window.FreshBreath.ServiceProxy.on('refresh', rtoken => {
+        window.FrBr.Svc.on('refresh', s => {
           console.log("Access token expired, refreshing...");
-          localStorage.setItem('frebre_admin', rtoken.toJSON());
-          setToken(rtoken);
+          localStorage.setItem('frebre_admin', s.toJSON());
+          setToken(s);
         });
 
         if (!cfg.authRequired) { setReady(true); return; }
@@ -212,8 +212,7 @@ function AuthProvider({ children }) {
 
         const stored = localStorage.getItem('frebre_admin');
         if (stored) {
-          const appNonce = cfg.adminNonce;
-          const result = window.FreshBreath.load(appNonce, stored);
+          const result = window.FrBr.load(stored);
           setToken(result);
 
           const d = await api(result, 'GET','/api/me');
@@ -226,12 +225,10 @@ function AuthProvider({ children }) {
 
   const login = async () => {
     const cfg = window.__HOMESLICE_CONFIG || {};
-    const appNonce = cfg.adminNonce;
     const serviceURL = cfg.authServiceURL;
-    if (!appNonce || !serviceURL) return;
+    if (!serviceURL) return;
 
-    const result = await window.FreshBreath.login({ appNonce, serviceURL });
-    if (result.appNonce !== appNonce) return;
+    const result = await window.FrBr.login(serviceURL);
     setSessionExpired(false);
     localStorage.setItem('frebre_admin', result.toJSON());
     setToken(result);

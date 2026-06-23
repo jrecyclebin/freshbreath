@@ -48,6 +48,8 @@ type Server struct {
   lastSeenMu       sync.Mutex
   hostedRoutes     map[string]string // slug → app nonce
   hostedMu         sync.RWMutex
+  allowedOrigins   map[string]bool   // origins allowed for CORS
+  allowedOriginsMu sync.RWMutex
   virtualMCPs      *virtualMCPRegistry // slug → MCP server entries
   mcpAuthPending   *sync.Map          // key → *mcpPendingAuth (MCP OAuth flow state)
   oauthSrv         *oauthServer        // Freshbreath OAuth authorization server
@@ -229,6 +231,7 @@ func main() {
     pending:       make(map[string]*pendingAuth),
     lastSeenAt:    make(map[int64]time.Time),
     hostedRoutes:  make(map[string]string),
+    allowedOrigins: make(map[string]bool),
     httpClient:    &http.Client{Timeout: 300 * time.Second},
     oidcProviders: make(map[int64]*oidc.Provider),
     localKey:      localKey,

@@ -73,12 +73,9 @@ the normal `login()` flow (see `guides/auth.md`), pointed at your app's **ssh**
 service:
 
 ```js
-import { login } from "https://localhost:9009/frbr.js";
+import { login } from "https://localhost:9009/frbr.js?app-nonce";
 
-const service = await login({
-  appNonce: APP_NONCE,
-  serviceURL: SSH_SERVICE_URL, // the registered ssh service for this app
-});
+const service = await login("ssh://"); // the global ssh service
 ```
 
 This pops a small form asking for the user's **email + passphrase**. On success,
@@ -253,12 +250,11 @@ it skips every byte that's already in place.
 ## 6. Putting It Together
 
 ```js
-import { login } from "https://localhost:9009/frbr.js";
+import { login } from "https://localhost:9009/frbr.js?your-app-nonce";
 
-const APP_NONCE = "your-app-nonce";
-const SSH_SERVICE_URL = "https://localhost:9009/..."; // your ssh service
+const SSH_SERVICE_URL = "ssh://"; // your ssh service
 
-const service = await login({ appNonce: APP_NONCE, serviceURL: SSH_SERVICE_URL });
+const service = await login(SSH_SERVICE_URL);
 const TOKEN = service.data.access_token;
 
 const sshFetch = (path, init = {}) =>

@@ -12,7 +12,7 @@ Every Fresh Breath app starts with a module import:
 
 ```html
 <script type="module">
-  import { login, ServiceProxy } from "[Fresh Breath URL]/frbr.js";
+  import { login, ServiceProxy } from "[Fresh Breath URL]/frbr.js?[Your App Nonce]";
   // ...
 </script>
 ```
@@ -21,7 +21,7 @@ This can also be done as a script tag - for example, if your Fresh Breath server
 is running HTTPS locally on port 9009:
 
 ```html
-  <script type="module" src="https://localhost:9009/frbr.js"></script>
+  <script type="module" src="https://localhost:9009/frbr.js?[Your App Nonce]"></script>
 ```
 
 You can then access `login` and `ServiceProxy` from the global `window.FreshBreath` object:
@@ -40,8 +40,13 @@ For hosted apps on the same origin as the server, `/frbr.js` works fine.
 Opens an OAuth popup (or skips it for API key access) and returns a `ServiceProxy`.
 
 ```js
+const service = await login("https://mcp.example.com/mcp"); // registered service URL
+```
+
+If you need more control, you can pass an options object instead of a string:
+
+```js
 const service = await login({
-  appNonce: "your-app-nonce",   // required — app identifier from /api/apps
   serviceURL: "https://mcp.example.com/mcp",  // required — registered service URL
   state: "optional-custom-state",  // optional — defaults to crypto.randomUUID()
   apiKey: "sk-...",             // optional — only for key-auth services
@@ -60,6 +65,8 @@ const service = await login({
 localStorage.setItem("my-auth-key", service.toJSON());
 ```
 
+If you are storing several services, you can key by service URL.
+
 ---
 
 ## 3. Restore a Session (ServiceProxy from localStorage)
@@ -68,11 +75,11 @@ On page load, restore a prior session without re-prompting:
 
 ```js
 const saved = localStorage.getItem("my-auth-key");
-service = ServiceProxy.fromJSON(APP_NONCE, saved);
+service = ServiceProxy.fromJSON(saved);
 ```
 
 For more custom needs, here's the full `ServiceProxy` constructor:
-`new ServiceProxy({ appNonce, serviceURL, serviceID, data, apiKey, apiHeader, proxied })`
+`new ServiceProxy({ serviceURL, serviceID, data, apiKey, apiHeader, proxied })`
 
 ---
 
@@ -186,9 +193,8 @@ for authentication only, not MCP. Use `.data.claims` to get user info and
   <pre id="out"></pre>
 
   <script type="module">
-    import { login, ServiceProxy } from "https://localhost:9009/frbrjs";
+    import { login, ServiceProxy } from "https://localhost:9009/frbr.js?your-app-nonce-here";
 
-    const APP_NONCE  = "your-app-nonce-here";
     const SERVICE_URL = "https://mcp.example.com/mcp";
     const AUTH_KEY   = "my-app-auth";
 
@@ -199,7 +205,7 @@ for authentication only, not MCP. Use `.data.claims` to get user info and
     });
 
     async function startLogin() {
-      service = await login({ appNonce: APP_NONCE, serviceURL: SERVICE_URL });
+      service = await login(SERVICE_URL);
       localStorage.setItem(AUTH_KEY, service.toJSON());
       showTools();
     }
@@ -214,7 +220,7 @@ for authentication only, not MCP. Use `.data.claims` to get user info and
     const saved = localStorage.getItem(AUTH_KEY);
     if (saved) {
       try {
-        service = new ServiceProxy({ appNonce: APP_NONCE, ...JSON.parse(saved) });
+        service = new ServiceProxy(JSON.parse(saved));
         showTools().catch(() => {
           localStorage.removeItem(AUTH_KEY);
           service = null;
@@ -233,7 +239,7 @@ for authentication only, not MCP. Use `.data.claims` to get user info and
 ## Notes
 
 - **App nonce** comes from the `/api/apps` endpoint on the Fresh Breath server —
-  it's a 48-char hex string. Set it in a constant at the top of your app.
+  it's a 48-char hex string. Use it in the URL for frbr.js.
 - **Service URL** must match a service registered in that app on the server.
   Exact URL match — trailing slashes matter.
 - **`file://` apps**: the server must be running and CORS must allow `null` origin

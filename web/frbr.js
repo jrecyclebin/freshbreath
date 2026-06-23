@@ -10,6 +10,7 @@ import { StreamableHTTPClientTransport } from "https://esm.sh/@modelcontextproto
 import EventEmitter from 'https://esm.sh/eventemitter3';
 
 const API = window.__HOMESLICE_CONFIG?.apiBase ?? "";
+const APP_NONCE = window.__HOMESLICE_CONFIG?.appNonce ?? null;
 
 // Peek at a JWT's iss claim to check if it was issued by Freshbreath.
 function isFreshbreathToken(raw) {
@@ -37,22 +38,22 @@ function uuidv4() {
   * Open an OAuth popup for the given service URL.
   * On success returns a ServiceProxy instance with token data loaded.
   */
-export function login({ appNonce, serviceURL, state, apiKey }) {
-  const actualState = state || uuidv4();
+export function login(svc) {
+  const serviceURL = svc.serviceURL || svc;
+  const actualState = svc.state || uuidv4();
   return new Promise(async (resolve, reject) => {
     // If we already know it's key-auth (have an apiKey), skip the popup
     const url = `${API}/service/login?url=${encodeURIComponent(serviceURL)}&state=${encodeURIComponent(actualState)}`;
-    const res = await fetch(url, { headers: { "X-App-Nonce": appNonce } });
+    const res = await fetch(url, { headers: { "X-App-Nonce": APP_NONCE } });
     const data = await res.json();
 
     if (data.type !== "redirect") {
       try {
         if (data.type === "key-auth-complete") {
           resolve(new ServiceProxy({
-            appNonce: data.appNonce,
             serviceURL: data.serviceURL,
             serviceID: data.serviceID,
-            apiKey: apiKey || data.apiKey,
+            apiKey: svc.apiKey || data.apiKey,
             apiHeader: data.apiHeader,
             proxied: data.proxied,
           }));
@@ -77,7 +78,7 @@ export function login({ appNonce, serviceURL, state, apiKey }) {
 
       if (msg?.type !== "auth-complete") return;
       try {
-        const proxy = new ServiceProxy({ appNonce: msg.appNonce, serviceURL: msg.serviceURL, serviceID: msg.serviceID, data: msg.data, proxied: msg.data?.proxied });
+        const proxy = new ServiceProxy({ serviceURL: msg.serviceURL, serviceID: msg.serviceID, data: msg.data, proxied: msg.data?.proxied });
         resolve(proxy);
       } catch (err) {
         reject(err);
@@ -96,7 +97,6 @@ export function login({ appNonce, serviceURL, state, apiKey }) {
 }
 
 export class ServiceProxy extends EventEmitter {
-  #appNonce;
   #serviceURL;
   #serviceID;
   #data;
@@ -108,7 +108,6 @@ export class ServiceProxy extends EventEmitter {
 
   /**
    * @param {Object} opts
-   * @param {string} opts.appNonce     — app identifier from /api/apps
    * @param {string} opts.serviceURL   — registered service URL
    * @param {number} [opts.serviceID]  — known service id (from prior loginPopup)
    * @param {Object} [opts.data]       — OAuth credentials from callback
@@ -116,12 +115,11 @@ export class ServiceProxy extends EventEmitter {
    * @param {string} [opts.apiHeader]  — header name for the API key (from ServiceDescriptor.Header)
    * @param {boolean} [opts.proxied]   — whether to route through freshbreath proxy
    */
-  constructor({ appNonce, serviceURL, serviceID, data, apiKey, apiHeader, proxied, authService }) {
-    if (!appNonce || !serviceURL) {
-      throw new Error("ServiceProxy requires appNonce and serviceURL");
+  constructor({ serviceURL, serviceID, data, apiKey, apiHeader, proxied, authService }) {
+    if (!serviceURL) {
+      throw new Error("ServiceProxy requires serviceURL");
     }
     super();
-    this.#appNonce = appNonce;
     this.#serviceURL = serviceURL ?? null;
     this.#serviceID = serviceID ?? null;
     this.#data = data ?? null;
@@ -135,7 +133,6 @@ export class ServiceProxy extends EventEmitter {
     }
   }
 
-  get appNonce()   { return this.#appNonce; }
   get serviceURL() { return this.#serviceURL; }
   get serviceID()  { return this.#serviceID; }
   get data()       { return this.#data; }
@@ -144,14 +141,14 @@ export class ServiceProxy extends EventEmitter {
   get proxied()    { return this.#proxied; }
   get authService() { return this.#authService; }
 
-  static fromJSON(appNonce, jsonString) {
+  static fromJSON(jsonString) {
     let data = JSON.parse(jsonString, (key, value) => {
       if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
         return new Date(value);
       }
       return value;
     });
-    return new ServiceProxy({ appNonce, ...data });
+    return new ServiceProxy(data);
   }
 
   toJSON() {
@@ -209,7 +206,10 @@ export class ServiceProxy extends EventEmitter {
       const body = new URLSearchParams({ grant_type: "refresh_token" });
       const r = await fetch(`${API}/oauth/token`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-App-Nonce": APP_NONCE
+        },
         body,
       });
       if (!r.ok) throw new Error(`Token refresh failed (${r.status})`);
@@ -227,7 +227,10 @@ export class ServiceProxy extends EventEmitter {
 
       const r = await fetch(`${API}/service/refresh`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-App-Nonce": APP_NONCE
+        },
         body: JSON.stringify(body),
       });
       if (!r.ok) throw new Error(`Token refresh failed (${r.status})`);
@@ -310,7 +313,7 @@ export class ServiceProxy extends EventEmitter {
   async listTools() {
     const slug = this.#serviceSlug();
     if (slug) {
-      const headers = { 'X-App-Nonce': this.#appNonce };
+      const headers = { 'X-App-Nonce': APP_NONCE };
       this.addAuth(headers);
       const r = await fetch(`${API}/service/call/${slug}`, { headers });
       if (!r.ok) throw new Error(`listTools failed (${r.status})`);
@@ -347,7 +350,7 @@ export class ServiceProxy extends EventEmitter {
    */
   async #callTask(name, args) {
     const hasFiles = Object.values(args).some(v => v instanceof File || v instanceof Blob);
-    const headers = { 'X-App-Nonce': this.#appNonce };
+    const headers = { 'X-App-Nonce': APP_NONCE };
     const slug = this.#serviceSlug();
     const url = `${API}/service/call/${slug}`;
     this.addAuth(headers);
@@ -395,7 +398,7 @@ export class ServiceProxy extends EventEmitter {
 
     if ((this.#proxied || window.location.protocol !== 'file:') && this.#serviceID) {
       // Proxied — nonce required; server handles key injection
-      headers.set("X-App-Nonce", this.#appNonce);
+      headers.set("X-App-Nonce", APP_NONCE);
       if (this.#apiKey) headers.set("X-Api-Key", this.#apiKey);
       const url = `${API}/service/${this.#serviceID}/${path.replace(/^\//, "")}`;
       return fetch(url, { ...init, headers });
@@ -414,8 +417,8 @@ export class ServiceProxy extends EventEmitter {
   }
 }
 
-export function load(appNonce, jsonString) {
-  return ServiceProxy.fromJSON(appNonce, jsonString);
+export function load(jsonString) {
+  return ServiceProxy.fromJSON(jsonString);
 }
 
 export default ServiceProxy;

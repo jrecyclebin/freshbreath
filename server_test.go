@@ -590,7 +590,12 @@ func TestProxyDoesNotOverrideUserAPIKey(t *testing.T) {
 
 func TestCORSWithOrigin(t *testing.T) {
   srv := newTestServer(t)
-  rr := testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "https://example.com"})
+  // Create an app whose URL matches the cross-origin request.
+  rr := testRequest(t, srv, "POST", "/api/apps", strings.NewReader(`{"name": "ext", "url": "https://example.com/app"}`), nil)
+  if rr.Code != 200 {
+    t.Fatalf("create app: %d %s", rr.Code, rr.Body.String())
+  }
+  rr = testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "https://example.com"})
   if rr.Code != 200 {
     t.Fatalf("status = %d", rr.Code)
   }
@@ -616,7 +621,12 @@ func TestCORSMissingOrigin(t *testing.T) {
 
 func TestCORSPreflight(t *testing.T) {
   srv := newTestServer(t)
-  rr := testRequest(t, srv, "OPTIONS", "/api/apps", nil, map[string]string{
+  // Create an app whose URL matches the cross-origin request.
+  rr := testRequest(t, srv, "POST", "/api/apps", strings.NewReader(`{"name": "ext", "url": "https://example.com/app"}`), nil)
+  if rr.Code != 200 {
+    t.Fatalf("create app: %d %s", rr.Code, rr.Body.String())
+  }
+  rr = testRequest(t, srv, "OPTIONS", "/api/apps", nil, map[string]string{
     "Origin":                         "https://example.com",
     "Access-Control-Request-Method":  "POST",
     "Access-Control-Request-Headers": "X-App-Nonce, Content-Type",

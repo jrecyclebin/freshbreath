@@ -170,12 +170,9 @@ The short version: include `frbr.js` from the server, call `login()` with your a
 
 ```html
 <script type="module">
-  import { login, ServiceProxy } from "http://localhost:9009/frbr.js";
+  import { login, ServiceProxy } from "http://localhost:9009/frbr.js?your-app-nonce";
 
-  const service = await login({
-    appNonce: "your-app-nonce",
-    serviceURL: "https://mcp.example.com/mcp",
-  });
+  const service = await login("https://mcp.example.com/mcp");
   const tools = await service.listTools();
   const result = await service.callTool("some_tool", { arg: "value" });
 </script>

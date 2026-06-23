@@ -26,11 +26,9 @@ import (
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if origin := r.Header.Get("Origin"); origin != "" {
-		if nonce := r.Header.Get("X-App-Nonce"); nonce != "" {
-			if !s.originAllowed(nonce, origin) {
-				http.Error(w, "Origin not allowed", http.StatusForbidden)
-				return
-			}
+		if !s.originAllowed(r, origin) {
+			http.Error(w, "Origin not allowed", http.StatusForbidden)
+			return
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -44,26 +42,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// originAllowed checks whether the given nonce is permitted to make
-// cross-origin requests from the supplied origin.
-func (s *Server) originAllowed(nonce, origin string) bool {
-	// Admin panel — nonce is the auth boundary; origin is irrelevant.
-	if nonce == s.adminNonce {
+// originAllowed checks whether the request's Origin should be permitted.
+// Same-origin requests (Origin matches scheme://r.Host) are always allowed.
+// file:// pages (Origin: null) are always allowed.
+// Cross-origin requests are allowed if the origin is in the allowedOrigins map
+// (built from app URLs on startup and after app changes).
+func (s *Server) originAllowed(r *http.Request, origin string) bool {
+	if origin == "null" {
 		return true
 	}
-	// App nonce — only allowed if the app's registered URL matches the origin.
-	app, err := s.store.GetApp(nonce)
-	if err != nil || app.URL == "" {
-		return false
+	// Same-origin — always fine.
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
 	}
-	appURL, _ := url.Parse(app.URL)
-	appOrigin := appURL.Scheme + "://" + appURL.Host
-	// Absolute paths (e.g. /import) are same-origin — Origin header
-	// wouldn't be sent by the browser, so we shouldn't reach here.
-	if appOrigin == "://" {
-		return false
+	if scheme+"://"+r.Host == origin {
+		return true
 	}
-	return appOrigin == origin
+	// Cross-origin — check the allowlist.
+	s.allowedOriginsMu.RLock()
+	allowed := s.allowedOrigins[origin]
+	s.allowedOriginsMu.RUnlock()
+	return allowed
 }
 
 func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +210,32 @@ func (s *Server) rebuildHostedRoutes() {
 	s.hostedMu.Lock()
 	s.hostedRoutes = routes
 	s.hostedMu.Unlock()
+
+	s.rebuildAllowedOrigins()
+}
+
+// rebuildAllowedOrigins rebuilds the CORS origin allowlist from all app URLs.
+func (s *Server) rebuildAllowedOrigins() {
+	apps, err := s.store.ListApps()
+	if err != nil {
+		log.Printf("rebuildAllowedOrigins: %v", err)
+		return
+	}
+	origins := make(map[string]bool)
+	for _, a := range apps {
+		urlStr, _ := a["url"].(string)
+		if urlStr == "" {
+			continue
+		}
+		u, err := url.Parse(urlStr)
+		if err != nil || u.Host == "" {
+			continue // absolute-path apps are same-origin
+		}
+		origins[u.Scheme+"://"+u.Host] = true
+	}
+	s.allowedOriginsMu.Lock()
+	s.allowedOrigins = origins
+	s.allowedOriginsMu.Unlock()
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +317,15 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 	}
 	apiBase := scheme + "://" + r.Host
 
+	// Use the request's nonce (header or query param), falling back to admin.
+	appNonce := r.Header.Get("X-App-Nonce")
+	if appNonce == "" {
+		appNonce = r.URL.RawQuery
+	}
+	if appNonce == "" {
+		appNonce = s.adminNonce
+	}
+
 	authRequired := false
 	authServiceName := ""
 	authServiceURL := ""
@@ -305,8 +340,8 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 			}
 		}
 	}
-	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, authServiceURL: %q, authServiceType: %q, adminNonce: %q, version: %q, commit: %q };\n",
-		apiBase, authRequired, authServiceName, authServiceURL, authServiceType, s.adminNonce, version, commit))
+	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, authServiceURL: %q, authServiceType: %q, appNonce: %q, version: %q, commit: %q };\n",
+		apiBase, authRequired, authServiceName, authServiceURL, authServiceType, appNonce, version, commit))
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
@@ -792,17 +827,15 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-admin apps: only allow proxying services that are approved for this app.
-	if nonce != s.adminNonce {
-		app, err := s.store.GetApp(nonce)
-		if err != nil {
-			http.Error(w, "Unknown app", http.StatusUnauthorized)
-			return
-		}
-		allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, serviceID)
-		if err != nil || !allowed {
-			http.Error(w, "Service not approved for this app", http.StatusForbidden)
-			return
-		}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		http.Error(w, "Unknown app", http.StatusUnauthorized)
+		return
+	}
+	allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, serviceID)
+	if err != nil || !allowed {
+		http.Error(w, "Service not approved for this app", http.StatusForbidden)
+		return
 	}
 
 	svc, err := s.store.GetService(serviceID)
@@ -921,17 +954,15 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if nonce != s.adminNonce {
-		app, err := s.store.GetApp(nonce)
-		if err != nil {
-			http.Error(w, "Unknown app", http.StatusUnauthorized)
-			return
-		}
-		allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, svc.ID)
-		if err != nil || !allowed {
-			http.Error(w, "Service not approved for this app", http.StatusForbidden)
-			return
-		}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		http.Error(w, "Unknown app", http.StatusUnauthorized)
+		return
+	}
+	allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, svc.ID)
+	if err != nil || !allowed {
+		http.Error(w, "Service not approved for this app", http.StatusForbidden)
+		return
 	}
 
 	// ── Optional token auth via a referenced service ──────────────────
@@ -1887,12 +1918,6 @@ func (s *Server) requireAppServiceAccess(serviceType string) func(http.HandlerFu
 			nonce := r.Header.Get("X-App-Nonce")
 			if nonce == "" {
 				http.Error(w, "Missing X-App-Nonce header", http.StatusUnauthorized)
-				return
-			}
-
-			// Admin nonce — skip app membership/service checks (admin panel).
-			if nonce == s.adminNonce {
-				next(w, r.WithContext(context.WithValue(r.Context(), appNonceKey, nonce)))
 				return
 			}
 
