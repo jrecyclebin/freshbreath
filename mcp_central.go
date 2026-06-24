@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -1472,6 +1474,57 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "deleted"})
+	})
+
+	// get_guide
+	mcps.AddTool(&mcp.Tool{
+		Name:        "get_guide",
+		Description: "Load one or more Freshbreath guides by name. Available guides: auth, ssh, publishing. Any authenticated role.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"names": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "Guide names to load (auth, ssh, publishing)",
+				},
+			},
+			"required": []string{"names"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if _, err := s.mcpUser(req); err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		rawNames, _ := args["names"].([]interface{})
+		if len(rawNames) == 0 {
+			return mcpToolError("names is required"), nil
+		}
+
+		guidesDir := filepath.Join(s.config.Dir, "skills", "freshbreath", "guides")
+		var b strings.Builder
+		for _, n := range rawNames {
+			name, ok := n.(string)
+			if !ok || name == "" {
+				continue
+			}
+			clean := filepath.Base(name) // no path traversal
+			path := filepath.Join(guidesDir, clean+".md")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				fmt.Fprintf(&b, "\n# Guide not found: %s\n\n", name)
+				continue
+			}
+			b.Write(data)
+			b.WriteString("\n\n")
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: b.String()},
+			},
+		}, nil
 	})
 }
 
