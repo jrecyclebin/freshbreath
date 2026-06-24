@@ -156,7 +156,7 @@ func (s *Server) buildCentralMCPServerForRole(role string) *mcp.Server {
 	s.registerAuditTools(mcps)
 
 	// ── Me (all) ──────────────────────────────────────────────────
-	s.registerMeTools(mcps)
+	s.registerPersonalTools(mcps)
 
 	// ── Settings (superuser only) ──────────────────────────────────
 	if roleIn(role, rolesSuperuser) {
@@ -1376,7 +1376,7 @@ func (s *Server) registerAuditTools(mcps *mcp.Server) {
 
 // ── Me Tools ────────────────────────────────────────────────────────
 
-func (s *Server) registerMeTools(mcps *mcp.Server) {
+func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 	// get_me
 	mcps.AddTool(&mcp.Tool{
 		Name:        "get_me",

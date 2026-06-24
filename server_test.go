@@ -595,7 +595,9 @@ func TestCORSWithOrigin(t *testing.T) {
   if rr.Code != 200 {
     t.Fatalf("create app: %d %s", rr.Code, rr.Body.String())
   }
-  rr = testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "https://example.com"})
+  var res map[string]string
+  json.Unmarshal(rr.Body.Bytes(), &res)
+  rr = testRequest(t, srv, "GET", "/env.js?" + res["nonce"], nil, map[string]string{"Origin": "https://example.com"})
   if rr.Code != 200 {
     t.Fatalf("status = %d", rr.Code)
   }
