@@ -361,7 +361,6 @@
     const saved = localStorage.getItem(AUTH_KEY);
     if (saved) {
       try {
-        NC
         const parsed = ServiceProxy.fromJSON(saved);
         if (parsed.data?.claims) {
           // OIDC identity session — restore display only

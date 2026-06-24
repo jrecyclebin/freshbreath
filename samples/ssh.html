@@ -356,15 +356,14 @@
   </div>
 
   <script type="module">
-    import { login, ServiceProxy } from "https://localhost:9009/frbr.js";
+    import { login, ServiceProxy } from "https://localhost:9009/frbr.js?59b89b7682d21a4d3512087513b1671fb43a748405da8a4d";
 
     const API = window.__HOMESLICE_CONFIG?.apiBase;
+    const APP_NONCE = window.__HOMESLICE_CONFIG?.appNonce ?? null;
     const AUTH_KEY = "ssh-demo-auth";
     const SESSION_KEY = "ssh-demo-session";
 
     // -- Custom constants
-    // ── App nonce -- replace this with one you create
-    const APP_NONCE = "59b89b7682d21a4d3512087513b1671fb43a748405da8a4d";
     // The SSH service URL — must match a registered service of type "ssh"
     const SSH_SERVICE_URL = "ssh://";
 
@@ -443,7 +442,7 @@
     async function startLogin() {
       setStatus(null, "Opening SSH login…");
       try {
-        const result = await login({ appNonce: APP_NONCE, serviceURL: SSH_SERVICE_URL });
+        const result = await login(SSH_SERVICE_URL);
         localStorage.setItem(AUTH_KEY, result.toJSON());
         authToken = result.data?.id_token || result.data?.access_token;
         const c = result.data?.claims || {};
@@ -465,7 +464,7 @@
     const savedAuth = localStorage.getItem(AUTH_KEY);
     if (savedAuth) {
       try {
-        const parsed = ServiceProxy.fromJSON(APP_NONCE, savedAuth);
+        const parsed = ServiceProxy.fromJSON(savedAuth);
         authToken = parsed.data?.id_token || parsed.data?.access_token;
         if (authToken) {
           const c = parsed.data?.claims || {};
