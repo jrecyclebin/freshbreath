@@ -472,7 +472,8 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
     accessToken = pending.upstreamToken
     existing, _ := os.server.verifyFreshbreathToken(pending.upstreamToken)
     refreshData = freshbreathRefreshData{
-      Kind:      "admin",
+      Kind:      "identity",
+      ServiceID: existing.ServiceID, // auth service the identity is bound to
       UserEmail: pending.userEmail,
       UserRole:  existing.UserRole,
       UserName:  existing.UserName,
@@ -511,8 +512,8 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 // a new access + refresh token pair. The grant dispatches on the
 // refresh data's Kind to re-mint the right access token:
 //
-//   "wrapped" — refresh upstream, re-wrap, new pair
-//   "admin"   — look up user, re-mint admin token, new pair
+//   "wrapped"  — refresh upstream, re-wrap, new pair
+//   "identity" — look up user, re-mint identity token, new pair
 
 func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
   // Accept refresh token from form body or cookie.
@@ -540,8 +541,8 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
   switch data.Kind {
   case "wrapped":
     accessToken, newRefreshData, scope, err = os.refreshWrapped(data)
-  case "admin":
-    accessToken, newRefreshData, err = os.refreshAdmin(data)
+  case "identity":
+    accessToken, newRefreshData, err = os.refreshIdentity(data)
   default:
     oauthWriteError(w, http.StatusBadRequest, "invalid_grant", fmt.Sprintf("unknown token kind: %s", data.Kind))
     return
@@ -643,18 +644,21 @@ func (os *oauthServer) refreshWrapped(data *freshbreathRefreshData) (string, fre
   return jwt, newRefreshData, tok.Scope, nil
 }
 
-// refreshAdmin re-mints an admin access token for the user.
-func (os *oauthServer) refreshAdmin(data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
+// refreshIdentity re-mints an identity access token for the user. The user
+// must still exist — refresh re-resolves them from the DB, so a deleted user
+// can't extend their session, and a role change propagates within one cycle.
+func (os *oauthServer) refreshIdentity(data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
   user, err := os.server.store.GetUserByEmail(data.UserEmail)
   if err != nil {
     return "", freshbreathRefreshData{}, fmt.Errorf("user not found: %w", err)
   }
-  jwt, err := os.server.mintFreshbreathToken("admin", user.Email, user.Role, user.Name, 0, nil)
+  jwt, err := os.server.mintFreshbreathToken("identity", user.Email, user.Role, user.Name, data.ServiceID, nil)
   if err != nil {
-    return "", freshbreathRefreshData{}, fmt.Errorf("mint admin token: %w", err)
+    return "", freshbreathRefreshData{}, fmt.Errorf("mint identity token: %w", err)
   }
   newRefreshData := freshbreathRefreshData{
-    Kind:      "admin",
+    Kind:      "identity",
+    ServiceID: data.ServiceID, // preserve the auth-service binding across refresh
     UserEmail: user.Email,
     UserRole:  user.Role,
     UserName:  user.Name,

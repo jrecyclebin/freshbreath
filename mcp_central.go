@@ -49,25 +49,15 @@ const centralMCPResource = "/mcp"
 
 func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 	return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
-		// Try Fresh Breath JWT (central or panel kind).
-		claims, err := s.verifyFreshbreathToken(token)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
-		}
-		if claims != nil && claims.Kind == "admin" {
-			return &auth.TokenInfo{
-				UserID:     claims.UserEmail,
-				Scopes:     []string{"openid", "email", "profile"},
-				Expiration: claims.Expiry.Time(),
-				Extra:      map[string]any{"role": claims.UserRole},
-			}, nil
-		}
-
-		// Try as an OIDC ID token against the admin auth service.
 		svcIDStr, err := s.store.GetSetting("admin_auth_service")
 		if err != nil || svcIDStr == "" {
 			return nil, fmt.Errorf("%w: no admin auth service configured", auth.ErrInvalidToken)
 		}
+		// Every token — Fresh Breath identity JWTs and raw provider id_tokens
+		// alike — is verified against the admin auth service. verifyIDToken
+		// enforces the service binding (so a token minted by some other OIDC
+		// service can't authenticate here) and the user is re-resolved from
+		// the DB. The token's own role is never trusted.
 		user, err := s.verifyAdminTokenFromBearer(ctx, svcIDStr, token)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
@@ -75,7 +65,7 @@ func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 		return &auth.TokenInfo{
 			UserID:     user.Email,
 			Scopes:     []string{"openid", "email", "profile"},
-			Expiration: time.Now().Add(1 * time.Hour), // OIDC tokens don't carry reliable expiry for us
+			Expiration: time.Now().Add(accessTokenTTL),
 			Extra:      map[string]any{"role": user.Role},
 		}, nil
 	}
@@ -130,7 +120,7 @@ func (s *Server) buildCentralMCPServerForRole(role string) *mcp.Server {
 		Name:    "freshbreath",
 		Version: version,
 	}, &mcp.ServerOptions{
-		Instructions: `Fresh Breath is an app server designed to give flexiblity to standalone HTML
+		Instructions: fmt.Sprintf(`Fresh Breath is an app server designed to give flexiblity to standalone HTML
 apps - or any other app that needs third-party connections, auth or an SSH agent.
 For static HTML apps being developed from file:/// URLs, Fresh Breath can give
 you quick access to third-party services and logins that it is proxying and
@@ -141,7 +131,9 @@ for an app.
 Fresh Breath can also host apps the user is creating for long-term hosting and
 sharing with other users. If you follow the services guide, users will get
 prompted for their credentials. See the publishing guide if the app proceeds
-to that point.`,
+to that point.
+
+Fresh Breath server URL: %q`, s.config.PublicBaseURL),
 	})
 
 	// NOTE: Role access to all of the following tools should match
@@ -243,20 +235,10 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*User, error) {
 		return nil, fmt.Errorf("missing bearer token")
 	}
 
-	// Try freshbreath JWT (central or panel kind).
-	claims, err := s.verifyFreshbreathToken(token)
-	if err != nil {
-		return nil, fmt.Errorf("auth: %w", err)
-	}
-	if claims != nil && claims.Kind == "admin" {
-		user, err := s.store.GetUserByEmail(claims.UserEmail)
-		if err != nil {
-			return nil, fmt.Errorf("user not found: %s", claims.UserEmail)
-		}
-		return user, nil
-	}
-
-	// Try OIDC ID token against admin auth service.
+	// Verify against the admin auth service. Both Fresh Breath identity JWTs
+	// and raw provider id_tokens funnel through verifyIDToken, which enforces
+	// the service binding; the user (existence + role) is re-resolved from
+	// the DB.
 	user, err := s.verifyAdminTokenFromBearer(context.Background(), svcIDStr, token)
 	if err != nil {
 		return nil, err

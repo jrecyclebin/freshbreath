@@ -235,12 +235,12 @@ type OIDCClaims struct {
   Raw     map[string]interface{} `json:"-"`
 }
 
-func (s *Server) oidcExchangeCode(ctx context.Context, svc *Service, code, verifier, oidcNonce, redirectURI string) (*OIDCClaims, string, string, string, error) {
+func (s *Server) oidcExchangeCode(ctx context.Context, svc *Service, code, verifier, oidcNonce, redirectURI string) (*OIDCClaims, string, string, error) {
   issuer := svc.URL
 
   provider, err := oidc.NewProvider(ctx, issuer)
   if err != nil {
-    return nil, "", "", "", fmt.Errorf("OIDC discovery: %w", err)
+    return nil, "", "", fmt.Errorf("OIDC discovery: %w", err)
   }
 
   cfg := &oauth2.Config{
@@ -254,7 +254,7 @@ func (s *Server) oidcExchangeCode(ctx context.Context, svc *Service, code, verif
   clientCtx := context.WithValue(ctx, oauth2.HTTPClient, s.httpClient)
   tok, err := cfg.Exchange(clientCtx, code, oauth2.VerifierOption(verifier))
   if err != nil {
-    return nil, "", "", "", fmt.Errorf("token exchange: %w", err)
+    return nil, "", "", fmt.Errorf("token exchange: %w", err)
   }
 
   idTokenRaw, ok := tok.Extra("id_token").(string)
@@ -268,46 +268,47 @@ func (s *Server) oidcExchangeCode(ctx context.Context, svc *Service, code, verif
   }
   idToken, err := provider.Verifier(verifierConfig).Verify(ctx, idTokenRaw)
   if err != nil {
-    return nil, "", "", "", fmt.Errorf("id token verification: %w", err)
+    return nil, "", "", fmt.Errorf("id token verification: %w", err)
   }
 
   claims := &OIDCClaims{Raw: make(map[string]interface{})}
   if err := idToken.Claims(claims); err != nil {
-    return nil, "", "", "", fmt.Errorf("id token claims: %w", err)
+    return nil, "", "", fmt.Errorf("id token claims: %w", err)
   }
 
   if claims.Nonce != oidcNonce {
-    return nil, "", "", "", fmt.Errorf("nonce mismatch")
+    return nil, "", "", fmt.Errorf("nonce mismatch")
   }
 
   // Also grab all claims into Raw for anything we didn't explicitly map
   if err := idToken.Claims(&claims.Raw); err != nil {
-    return nil, "", "", "", fmt.Errorf("id token raw claims: %w", err)
+    return nil, "", "", fmt.Errorf("id token raw claims: %w", err)
   }
 
-  return claims, tok.AccessToken, tok.RefreshToken, idTokenRaw, nil
+  return claims, tok.AccessToken, tok.RefreshToken, nil
 }
 
 // exchangeViaUserInfo is the fallback path for providers (e.g. GitHub) that complete
 // OAuth2 successfully but don't return an id_token. We verify identity by calling the
-// userinfo endpoint, then mint a freshbreath token signed with our local key.
-func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider *oidc.Provider, tok *oauth2.Token) (*OIDCClaims, string, string, string, error) {
+// userinfo endpoint and return the resolved claims; the caller mints the
+// Fresh Breath identity token (bound to the right service).
+func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider *oidc.Provider, tok *oauth2.Token) (*OIDCClaims, string, string, error) {
   var email, name, sub string
 
   if svc.Descriptor.UserInfoURL != "" {
     req, err := http.NewRequestWithContext(ctx, http.MethodGet, svc.Descriptor.UserInfoURL, nil)
     if err != nil {
-      return nil, "", "", "", fmt.Errorf("userinfo request: %w", err)
+      return nil, "", "", fmt.Errorf("userinfo request: %w", err)
     }
     req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
     req.Header.Set("Accept", "application/json")
     resp, err := s.httpClient.Do(req)
     if err != nil {
-      return nil, "", "", "", fmt.Errorf("userinfo fetch: %w", err)
+      return nil, "", "", fmt.Errorf("userinfo fetch: %w", err)
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-      return nil, "", "", "", fmt.Errorf("userinfo returned %d", resp.StatusCode)
+      return nil, "", "", fmt.Errorf("userinfo returned %d", resp.StatusCode)
     }
     var ui struct {
       Email string `json:"email"`
@@ -316,7 +317,7 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
       Sub   string `json:"sub"`
     }
     if err := json.NewDecoder(resp.Body).Decode(&ui); err != nil {
-      return nil, "", "", "", fmt.Errorf("userinfo decode: %w", err)
+      return nil, "", "", fmt.Errorf("userinfo decode: %w", err)
     }
     email, name = ui.Email, ui.Name
     sub = ui.Sub
@@ -326,14 +327,14 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
   } else {
     userInfo, err := provider.UserInfo(ctx, oauth2.StaticTokenSource(tok))
     if err != nil {
-      return nil, "", "", "", fmt.Errorf("userinfo: %w", err)
+      return nil, "", "", fmt.Errorf("userinfo: %w", err)
     }
     var ui struct {
       Email string `json:"email"`
       Name  string `json:"name"`
     }
     if err := userInfo.Claims(&ui); err != nil {
-      return nil, "", "", "", fmt.Errorf("userinfo claims: %w", err)
+      return nil, "", "", fmt.Errorf("userinfo claims: %w", err)
     }
     email, name, sub = ui.Email, ui.Name, userInfo.Subject
   }
@@ -342,17 +343,17 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
   if email == "" && svc.Descriptor.UserEmailsURL != "" {
     req, err := http.NewRequestWithContext(ctx, http.MethodGet, svc.Descriptor.UserEmailsURL, nil)
     if err != nil {
-      return nil, "", "", "", fmt.Errorf("emails request: %w", err)
+      return nil, "", "", fmt.Errorf("emails request: %w", err)
     }
     req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
     req.Header.Set("Accept", "application/json")
     resp, err := s.httpClient.Do(req)
     if err != nil {
-      return nil, "", "", "", fmt.Errorf("emails fetch: %w", err)
+      return nil, "", "", fmt.Errorf("emails fetch: %w", err)
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-      return nil, "", "", "", fmt.Errorf("emails returned %d", resp.StatusCode)
+      return nil, "", "", fmt.Errorf("emails returned %d", resp.StatusCode)
     }
     var entries []struct {
       Email    string `json:"email"`
@@ -360,7 +361,7 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
       Verified bool   `json:"verified"`
     }
     if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-      return nil, "", "", "", fmt.Errorf("emails decode: %w", err)
+      return nil, "", "", fmt.Errorf("emails decode: %w", err)
     }
     for _, e := range entries {
       if e.Primary && e.Verified {
@@ -371,14 +372,10 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
   }
 
   if email == "" {
-    return nil, "", "", "", fmt.Errorf("no email in userinfo")
+    return nil, "", "", fmt.Errorf("no email in userinfo")
   }
   if sub == "" {
     sub = email
-  }
-  idTokenRaw, err := s.mintFreshbreathToken("admin", email, "", name, 0, nil)
-  if err != nil {
-    return nil, "", "", "", fmt.Errorf("fabricate token: %w", err)
   }
   claims := &OIDCClaims{
     Email:   email,
@@ -386,16 +383,17 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
     Subject: sub,
     Raw:     map[string]interface{}{},
   }
-  return claims, tok.AccessToken, tok.RefreshToken, idTokenRaw, nil
+  return claims, tok.AccessToken, tok.RefreshToken, nil
 }
 
 // ── Unified Freshbreath JWT ─────────────────────────────────────────
 //
 // All Freshbreath-issued tokens share a single claims type, distinguished
-// by Kind: "wrapped" (virtual-service upstream token) or "admin"
-// (control-panel login / central MCP). Sensitive upstream credentials
-// in wrapped tokens are AES-256-GCM encrypted into the Sealed field;
-// verifyFreshbreathToken decrypts them into the Upstream* fields (json:"-").
+// by Kind: "wrapped" (virtual-service upstream token) or "identity"
+// (control-panel login, SSH, OIDC, and central MCP — the central Fresh
+// Breath identity token). Sensitive upstream credentials in wrapped tokens
+// are AES-256-GCM encrypted into the Sealed field; verifyFreshbreathToken
+// decrypts them into the Upstream* fields (json:"-").
 
 const (
   accessTokenTTL  = 15 * time.Minute
@@ -405,10 +403,10 @@ const (
 // freshbreathClaims is the single claim type for all Freshbreath JWTs.
 type freshbreathClaims struct {
   josejwt.Claims
-  Kind      string `json:"kind"`                // "wrapped" or "admin"
+  Kind      string `json:"kind"`                // "wrapped" or "identity"
   UserEmail string `json:"user_email"`           // present for all kinds
-  UserRole  string `json:"user_role,omitempty"`  // central + panel
-  UserName  string `json:"user_name,omitempty"`  // panel
+  UserRole  string `json:"user_role,omitempty"`  // identity (advisory; gates re-resolve from DB)
+  UserName  string `json:"user_name,omitempty"`  // identity
   ServiceID int64  `json:"service_id,omitempty"` // wrapped
   Sealed    string `json:"sealed,omitempty"`     // wrapped: encrypted upstream data
 
@@ -431,10 +429,10 @@ type sealedUpstreamData struct {
 // It carries everything needed to re-mint an access token.
 type freshbreathRefreshData struct {
   Kind             string `json:"kind"`
-  ServiceID        int64  `json:"service_id,omitempty"`  // wrapped
+  ServiceID        int64  `json:"service_id,omitempty"`  // wrapped: virtual service; identity: auth-service binding
   UserEmail        string `json:"user_email"`
-  UserRole         string `json:"user_role,omitempty"`   // admin
-  UserName         string `json:"user_name,omitempty"`   // admin
+  UserRole         string `json:"user_role,omitempty"`   // identity
+  UserName         string `json:"user_name,omitempty"`   // identity
   UpstreamRefresh  string `json:"upstream_refresh,omitempty"`  // wrapped
   UpstreamTokenURL string `json:"upstream_token_url,omitempty"` // wrapped
   UpstreamScopes   string `json:"upstream_scopes,omitempty"`    // wrapped
