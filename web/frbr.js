@@ -78,6 +78,7 @@ export function login(svc) {
 
       if (msg?.type !== "auth-complete") return;
       try {
+        delete msg?.data?.refresh_token; // Kept in an HttpOnly cookie
         const proxy = new ServiceProxy({ serviceURL: msg.serviceURL, serviceID: msg.serviceID, data: msg.data, proxied: msg.data?.proxied });
         resolve(proxy);
       } catch (err) {
@@ -189,18 +190,31 @@ export class ServiceProxy extends EventEmitter {
     }
   }
 
+  // Returns true if we're maintaining the auth and can refresh.
   addAuth(headers) {
     if (this.#authService) {
       return this.#authService.addAuth(headers);
     }
-    if (this.#data) {
+    if (this.#apiKey) {
+      if (this.#apiHeader) {
+        headers[this.#apiHeader] = this.#apiKey;
+      } else {
+        headers['Authorization'] = `Bearer ${this.#apiKey}`;
+      }
+      return false
+    } else if (this.#data) {
       headers['Authorization'] = `${this.#data.token_type || "Bearer"} ${this.#data.access_token}`;
+      return true
     }
+    return false
   }
 
   async refresh() {
     let t;
-    if (isFreshbreathToken(this.#data?.access_token)) {
+    if (this.#authService) {
+      // Delegate refresh to the authService (e.g. OIDC identity)
+      return await this.#authService.refresh();
+    } else if (isFreshbreathToken(this.#data?.access_token)) {
       // Freshbreath-issued token — refresh through /oauth/token.
       // The refresh token is in an HttpOnly cookie auto-attached to this path.
       const body = new URLSearchParams({ grant_type: "refresh_token" });
@@ -210,10 +224,12 @@ export class ServiceProxy extends EventEmitter {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-App-Nonce": APP_NONCE
         },
+        credentials: "include",
         body,
       });
       if (!r.ok) throw new Error(`Token refresh failed (${r.status})`);
       t = await r.json();
+      delete t?.refresh_token; // Kept in an HttpOnly cookie
     } else if (!this.#data?.refresh_token) {
       throw new Error("No refresh token available — re-login required");
     } else if (this.#proxied && this.#serviceID) {
@@ -278,14 +294,16 @@ export class ServiceProxy extends EventEmitter {
       throw new Error("Tasks services don't use MCP connect. Use listTools/callTool directly.");
     }
     await this.checkToken();
+    const headers = {};
+    this.addAuth(headers);
     const transport = new StreamableHTTPClientTransport(new URL(this.#serviceURL), {
-      requestInit: { headers: { Authorization: `${this.#data.token_type || "Bearer"} ${this.#data.access_token}` } },
+      requestInit: { headers },
     });
     this.#client = new McpClient({ name: "mcp-client", version: "1.0.0" });
     await this.#client.connect(transport);
   }
 
-  async #withRetry(fn) {
+  async #withReconnect(fn) {
     try {
       if (!this.#client) {
         await this.connect();
@@ -297,6 +315,23 @@ export class ServiceProxy extends EventEmitter {
       await this.connect();
       return await fn();
     }
+  }
+
+  async #fetch(url, opts) {
+    let canRefresh = false
+    if (opts.headers) {
+      opts.headers['X-App-Nonce'] = APP_NONCE;
+      canRefresh = this.addAuth(opts.headers);
+    }
+    let res = await fetch(url, opts);
+    if (canRefresh && res.status === 401) {
+      await this.refresh();
+      if (opts.headers) {
+        this.addAuth(opts.headers);
+      }
+      res = await fetch(url, opts);
+    }
+    return res;
   }
 
   // Returns the slug for task or virtual services, or null.
@@ -313,14 +348,12 @@ export class ServiceProxy extends EventEmitter {
   async listTools() {
     const slug = this.#serviceSlug();
     if (slug) {
-      const headers = { 'X-App-Nonce': APP_NONCE };
-      this.addAuth(headers);
-      const r = await fetch(`${API}/service/call/${slug}`, { headers });
+      const r = await this.#fetch(`${API}/service/call/${slug}`, {headers: {}});
       if (!r.ok) throw new Error(`listTools failed (${r.status})`);
       const { tools } = await r.json();
       return tools;
     }
-    return this.#withRetry(async () => {
+    return this.#withReconnect(async () => {
       const { tools } = await this.#client.listTools();
       return tools;
     });
@@ -330,7 +363,7 @@ export class ServiceProxy extends EventEmitter {
     if (this.#serviceSlug()) {
       return this.#callTask(name, args);
     }
-    const result = await this.#withRetry(() => this.#client.callTool({ name, arguments: args }));
+    const result = await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
     const text = result.content
       .filter(c => c.type === 'text')
       .map(c => c.text)
@@ -350,10 +383,8 @@ export class ServiceProxy extends EventEmitter {
    */
   async #callTask(name, args) {
     const hasFiles = Object.values(args).some(v => v instanceof File || v instanceof Blob);
-    const headers = { 'X-App-Nonce': APP_NONCE };
     const slug = this.#serviceSlug();
     const url = `${API}/service/call/${slug}`;
-    this.addAuth(headers);
 
     if (hasFiles) {
       const fd = new FormData();
@@ -365,7 +396,7 @@ export class ServiceProxy extends EventEmitter {
           fd.append(k, JSON.stringify(v));
         }
       }
-      const r = await fetch(url, { method: 'POST', headers, body: fd });
+      const r = await this.#fetch(url, { method: 'POST', headers: {}, body: fd });
       if (!r.ok) {
         const text = await r.text();
         throw new Error(`Task call failed (${r.status}): ${text}`);
@@ -373,8 +404,8 @@ export class ServiceProxy extends EventEmitter {
       return r.json();
     }
 
-    headers['Content-Type'] = 'application/json';
-    const r = await fetch(url, {
+    const headers = {'Content-Type': 'application/json'};
+    const r = await this.#fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({ task: name, args }),
@@ -395,25 +426,13 @@ export class ServiceProxy extends EventEmitter {
    */
   async fetch(path, init = {}) {
     const headers = new Headers(init.headers || {});
+    let url = `${this.#serviceURL}${path}`;
 
     if ((this.#proxied || window.location.protocol !== 'file:') && this.#serviceID) {
-      // Proxied — nonce required; server handles key injection
-      headers.set("X-App-Nonce", APP_NONCE);
-      if (this.#apiKey) headers.set("X-Api-Key", this.#apiKey);
-      const url = `${API}/service/${this.#serviceID}/${path.replace(/^\//, "")}`;
-      return fetch(url, { ...init, headers });
+      url = `${API}/service/${this.#serviceID}/${path.replace(/^\//, "")}`;
     }
 
-    // Non-proxied — call the service directly; apply the configured auth header
-    if (this.#apiKey) {
-      if (this.#apiHeader) {
-        headers.set(this.#apiHeader, this.#apiKey);
-      } else {
-        headers.set("Authorization", "Bearer " + this.#apiKey);
-      }
-    }
-    const url = `${this.#serviceURL}${path}`;
-    return fetch(url, { ...init, headers });
+    return this.#fetch(url, { ...init, headers });
   }
 }
 

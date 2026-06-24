@@ -48,6 +48,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Cross-origin requests are allowed if the origin is in the allowedOrigins map
 // (built from app URLs on startup and after app changes).
 func (s *Server) originAllowed(r *http.Request, origin string) bool {
+	// Always allow the OPTIONS call to go through, we gate everything else
+	if r.Method == http.MethodOptions {
+		return true
+	}
+	// Local file:/// always allowed
 	if origin == "null" {
 		return true
 	}
@@ -59,11 +64,21 @@ func (s *Server) originAllowed(r *http.Request, origin string) bool {
 	if scheme+"://"+r.Host == origin {
 		return true
 	}
-	// Cross-origin — check the allowlist.
-	s.allowedOriginsMu.RLock()
-	allowed := s.allowedOrigins[origin]
-	s.allowedOriginsMu.RUnlock()
-	return allowed
+	// For everything else, expect an app nonce and ensure only the
+	// app's registered URL is allowed.
+	appNonce := r.Header.Get("X-App-Nonce")
+	if appNonce == "" {
+		appNonce = r.URL.RawQuery
+	}
+	if appNonce == "" {
+		appNonce = s.adminNonce
+	}
+	if app, err := s.store.GetApp(appNonce); err == nil && app.URL != "" {
+		appURL, _ := url.Parse(app.URL)
+		appOrigin := appURL.Scheme + "://" + appURL.Host
+		return appOrigin == origin
+	}
+	return false
 }
 
 func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {
@@ -210,32 +225,6 @@ func (s *Server) rebuildHostedRoutes() {
 	s.hostedMu.Lock()
 	s.hostedRoutes = routes
 	s.hostedMu.Unlock()
-
-	s.rebuildAllowedOrigins()
-}
-
-// rebuildAllowedOrigins rebuilds the CORS origin allowlist from all app URLs.
-func (s *Server) rebuildAllowedOrigins() {
-	apps, err := s.store.ListApps()
-	if err != nil {
-		log.Printf("rebuildAllowedOrigins: %v", err)
-		return
-	}
-	origins := make(map[string]bool)
-	for _, a := range apps {
-		urlStr, _ := a["url"].(string)
-		if urlStr == "" {
-			continue
-		}
-		u, err := url.Parse(urlStr)
-		if err != nil || u.Host == "" {
-			continue // absolute-path apps are same-origin
-		}
-		origins[u.Scheme+"://"+u.Host] = true
-	}
-	s.allowedOriginsMu.Lock()
-	s.allowedOrigins = origins
-	s.allowedOriginsMu.Unlock()
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {

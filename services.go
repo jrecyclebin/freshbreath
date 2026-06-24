@@ -616,7 +616,7 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, data freshbreathRefres
     MaxAge:   int(refreshTokenTTL.Seconds()),
     HttpOnly: true,
     Secure:   s.config.TLSCertFile != "",
-    SameSite: http.SameSiteLaxMode,
+    SameSite: http.SameSiteNoneMode,
   })
   return rt, nil
 }
