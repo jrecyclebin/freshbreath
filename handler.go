@@ -715,7 +715,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// MCP auth flows — after upstream exchange, redirect to the MCP client's redirect_uri
-	if pending.serviceType == "mcp" || pending.serviceType == "mcp-central" {
+	if pending.serviceType == "mcp-endpoint" || pending.serviceType == "mcp-central" {
 		s.completeMCPAuth(w, r, pending, code)
 		return
 	}

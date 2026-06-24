@@ -264,11 +264,10 @@
   </div>
 
   <script type="module">
-    import { login, ServiceProxy } from "https://localhost:9009/frbr.js";
+    import { login, ServiceProxy } from "https://localhost:9009/frbr.js?209ad8c02d2998a7f9f10b8329a45756528d70f15873ab2f";
 
     const API_BASE = window.__HOMESLICE_CONFIG?.apiBase;
     const AUTH_KEY = "test-auth";
-    const APP_NONCE = "209ad8c02d2998a7f9f10b8329a45756528d70f15873ab2f";
     const SERVICE_URL = "https://mcp.notion.com/mcp"; // "https://api.dropboxapi.com/2/";
 
     const connChip   = document.getElementById("conn-chip");
@@ -331,7 +330,7 @@
     async function startLogin() {
       setStatus(null, "Opening authorization…");
       try {
-        const result = await login({ appNonce: APP_NONCE, serviceURL: SERVICE_URL });
+        const result = await login(SERVICE_URL);
         localStorage.setItem(AUTH_KEY, result.toJSON());
 
         // OIDC identity service — just display the auth status
@@ -362,7 +361,8 @@
     const saved = localStorage.getItem(AUTH_KEY);
     if (saved) {
       try {
-        const parsed = ServiceProxy.fromJSON(APP_NONCE, saved);
+        NC
+        const parsed = ServiceProxy.fromJSON(saved);
         if (parsed.data?.claims) {
           // OIDC identity session — restore display only
           const c = parsed.data.claims;

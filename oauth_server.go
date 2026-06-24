@@ -283,7 +283,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
       return
     }
     mcpServiceURL = svc.URL
-    serviceType = "mcp"
+    serviceType = "mcp-endpoint"
   }
 
   // Store the MCP client's pending auth request.

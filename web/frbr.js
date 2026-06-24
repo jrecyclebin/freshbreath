@@ -79,6 +79,9 @@ export function login(svc) {
       if (msg?.type !== "auth-complete") return;
       try {
         delete msg?.data?.refresh_token; // Kept in an HttpOnly cookie
+        if (msg?.data?.expires_at) {
+          msg.data.expires_at = new Date(msg.data.expires_at);
+        }
         const proxy = new ServiceProxy({ serviceURL: msg.serviceURL, serviceID: msg.serviceID, data: msg.data, proxied: msg.data?.proxied });
         resolve(proxy);
       } catch (err) {
