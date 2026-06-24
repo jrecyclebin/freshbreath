@@ -35,6 +35,7 @@ func TestCoreAuthority(t *testing.T) {
 		"coreUpdateUser":     func() error { return srv.coreUpdateUser(member, 1, "n", "e@x", "Member", "Active", nil) },
 		"coreDeleteUser":     func() error { return srv.coreDeleteUser(member, other) },
 		"coreSetUserApps":    func() error { return srv.coreSetUserApps(member, 1, nil) },
+		"coreListAppWeb":     func() error { _, e := srv.coreListAppWeb(member, "n"); return e },
 	}
 	for name, op := range adminPlusOps {
 		if err := op(); !forbidden(err) {

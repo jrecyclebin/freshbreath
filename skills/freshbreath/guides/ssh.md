@@ -12,7 +12,8 @@ The shape of it:
 1. A Fresh Breath **user** generates an Ed25519 key (passphrase-protected).
 2. You install that **public** key on the remote host's `authorized_keys`.
 3. The user **logs in** with their passphrase — this loads the decrypted key into
-   the server's in-memory agent *and* hands your app an access token.
+   the server's in-memory agent *and* hands your app an access token. (Same auth
+   flow described in the auth guide.)
 4. Your app **opens a session** to a host and gets a `sessionId`.
 5. You use that `sessionId` to **sync files** (list / diff / upload / download /
    delete) over SFTP.

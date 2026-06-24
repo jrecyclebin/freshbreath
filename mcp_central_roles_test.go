@@ -44,26 +44,23 @@ func toolNamesViaInMemory(t *testing.T, mcps *mcp.Server) []string {
 func TestCentralMCPToolsPerRole(t *testing.T) {
 	srv := newTestServer(t)
 
-	// The full admin-API tool surface (36 tools) bucketed by minimum role.
+	// The full admin-API tool surface (38 tools) bucketed by minimum role.
 	// Mirrors the HTTP routes in handler.go's requireAnyRole groups.
 	allAppTools := []string{
 		"list_apps", "get_app", "get_app_members", "get_app_services", // all-roles
-		"create_app", "update_app", "delete_app", "set_app_members", "set_app_services", // admin+
-		"download_app_files", "publish_app_files", "delete_app_files", // admin+
+		"list_app_files", "download_app_files", "publish_app_files", "delete_app_files", // all-roles
 	}
+	allAppManageTools := []string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services"}
 	allServiceTools := []string{"list_services", "get_service", "create_service", "update_service", "delete_service", "get_service_apps"}
 	allUserTools := []string{"list_users", "get_user", "create_user", "update_user", "delete_user", "get_user_apps", "set_user_apps", "get_user_ssh_key", "generate_user_ssh_key", "delete_user_ssh_key"}
 	allRoleTools := []string{"list_roles"}
 	allAuditTools := []string{"list_audit"}
-	allMeTools := []string{"get_me", "get_my_ssh_key", "generate_my_ssh_key", "delete_my_ssh_key"}
+	allPersonalTools := []string{"get_me", "get_my_ssh_key", "generate_my_ssh_key", "delete_my_ssh_key", "get_guide"} // available to every authenticated role
 	allSettingsTools := []string{"get_settings", "update_settings"}
 
-	wantSuperuser := concat(allAppTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allMeTools, allSettingsTools)
-	wantAdmin := concat(allAppTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allMeTools)
-	wantMember := concat(
-		[]string{"list_apps", "get_app", "get_app_members", "get_app_services"},
-		allRoleTools, allAuditTools, allMeTools,
-	)
+	wantSuperuser := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allSettingsTools)
+	wantAdmin := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools)
+	wantMember := concat(allAppTools, allRoleTools, allAuditTools, allPersonalTools)
 
 	cases := []struct {
 		role     string

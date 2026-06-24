@@ -150,6 +150,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/me", s.authWrap(pipeline(s.handleMe, anyRole)))
 	s.mux.HandleFunc("/api/me/ssh-key", s.authWrap(pipeline(s.handleSSHKey, anyRole)))
 	s.mux.HandleFunc("/api/settings", s.authWrap(pipeline(s.handleSettings, superuser)))
+	s.mux.HandleFunc("/api/xfer/{token}", s.handleXfer)
 
 	// SSH host keys (TOFU) — same access gate as SSH sessions
 	s.mux.HandleFunc("/ssh/known-hosts", s.authWrap(pipeline(s.handleSSHHostKeys, s.requireAppServiceAccess("ssh"))))

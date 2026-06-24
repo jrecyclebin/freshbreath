@@ -1,8 +1,39 @@
-# Authentication Guide for Fresh Breath Apps
+# Services Guide for Fresh Breath Apps
 
 Fresh Breath provides simple JavaScript calls for authenticating users and
-calling third-party APIs from your HTML/JS apps. This guide covers the main
-authentication flows and API calls you'll use in a Fresh Breath app.
+calling third-party APIs from your HTML/JS apps.
+
+In order to use these calls, you must have an app setup:
+
+- If the app doesn't exist in your list, create one - an admin will need to do this.
+  Hang on to the *nonce* - it's used throughout this guide.
+- Add the necessary services to the app - if it needs storage providers, OIDC,
+  SSH access, or any other third-party integrations (MCPs or APIs), they can
+  be added from the control panel or MCP. The important thing to hang on to
+  here is the *service URL*.
+
+The following service types are available:
+
+- api: URL to an API service, along with some hints about how to log-in.
+  Use the `fetch` call (#6 below) to access these.
+- mcp: URL to a public MCP server. Use `callTool` and `listTools` from JS.
+- oidc: URL to a public OIDC server. No additional functionality beyond `login`.
+- tasks: A set of custom tools (use `callTool` and `listTools` from JavaScript)
+  that can be called and are wrappers for shell scripts that perform system
+  functions. (For instance, you could upload a file to a tool that can move
+  the file onto a network share for processing.) One key note about tasks:
+  they have no auth of their own, so the `login` function shouldn't be used -
+  instead, the `authService` property to the `ServiceProxy` constructor can
+  receive another `ServiceProxy` object for any service that it depends on.
+- virtual: These are custom MCP endpoints that can be used to provide tools
+  (also available through `callTool` and `listTools`) that wrap API calls -
+  to give a nice MCP interface with discoverable auth.
+- ssh: Every Fresh Breath server has a single SSH service (URL: `ssh://`)
+  that can be used for general authentication or for connecting to remote
+  machines.
+
+If you aren't an admin, you also must be listed as the owner or member of the
+app. (You don't have to be a member to use the app, just to maintain it.)
 
 ---
 
@@ -30,7 +61,7 @@ You can then access `login` and `ServiceProxy` from the global `window.FreshBrea
 const { login, ServiceProxy } = window.FreshBreath;
 ```
 
-For `file://` apps, use the full server URL (`http://localhost:9009/...`).
+For `file://` apps, use the full server URL (e.g. `https://localhost:9009/...`).
 For hosted apps on the same origin as the server, `/frbr.js` works fine.
 
 ---
@@ -56,8 +87,8 @@ const service = await login({
 **Returns:** `Promise<ServiceProxy>`
 
 **Flow:**
-- For OAuth/OIDC/SSH services: opens a popup, waits for `postMessage` with `type: "auth-complete"`
-- For key-auth services: no popup, resolves immediately
+- For most services: opens a popup, returns when the user has logged in.
+- If a default API key is set: no popup, resolves immediately
 - Throws `"Popup closed"` if the user closes the window early
 
 **After login**, persist the session:
@@ -147,7 +178,7 @@ const res = await service.fetch("/v1/items", {
 
 **What it does automatically:**
 - Sets `X-App-Nonce` header
-- Sets `Authorization: Bearer <apiKey>` for key-auth services
+- Sets any auth headers
 - For proxied services (or `file://` apps): routes through `/service/{serviceID}/{path}`
 - For non-proxied same-origin calls: hits the service URL directly
 

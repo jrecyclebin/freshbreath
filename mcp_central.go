@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,12 +18,12 @@ import (
 
 // ── Central MCP Server ──────────────────────────────────────────────
 //
-// The central MCP server at /mcp exposes the Freshbreath admin API
+// The central MCP server at /mcp exposes the Fresh Breath admin API
 // as MCP tools. Auth uses the same control panel auth — an MCP client
 // discovers protected resource metadata, initiates the OAuth flow
-// against Freshbreath's authorization server, and Freshbreath
+// against Fresh Breath's authorization server, and Fresh Breath
 // authenticates the user against the admin auth service (OIDC).
-// The resulting Bearer token is a Freshbreath JWT that identifies the
+// The resulting Bearer token is a Fresh Breath JWT that identifies the
 // user and their role, used to gate tool access.
 //
 // Role → tool mapping mirrors the HTTP API:
@@ -44,13 +43,13 @@ const centralMCPResource = "/mcp"
 // ── Central MCP Token Verifier ──────────────────────────────────────
 //
 // Validates Bearer tokens for the central /mcp endpoint.
-// Accepts Freshbreath central JWTs (from MCP OAuth flow) and also
+// Accepts Fresh Breath central JWTs (from MCP OAuth flow) and also
 // direct OIDC ID tokens from the admin auth service (for clients
 // that already have a control panel token).
 
 func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 	return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
-		// Try Freshbreath JWT (central or panel kind).
+		// Try Fresh Breath JWT (central or panel kind).
 		claims, err := s.verifyFreshbreathToken(token)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
@@ -114,14 +113,14 @@ func (s *Server) buildCentralMCPPRM() *oauthex.ProtectedResourceMetadata {
 		AuthorizationServers:   []string{s.config.PublicBaseURL},
 		ScopesSupported:        []string{"openid", "email", "profile"},
 		BearerMethodsSupported: []string{"header"},
-		ResourceName:           "Freshbreath",
+		ResourceName:           "Fresh Breath",
 	}
 }
 
 // ── MCP Server Construction ─────────────────────────────────────────
 
 // buildCentralMCPServerForRole constructs the MCP server that exposes the
-// Freshbreath admin API as tools, gated to the given role. Superuser sees
+// Fresh Breath admin API as tools, gated to the given role. Superuser sees
 // everything; Admin excludes settings; Member/Read-only see only their own
 // apps plus self-service tools. Visibility is enforced at registration
 // time, so a Member's tools/list never even advertises admin tools —
@@ -131,7 +130,18 @@ func (s *Server) buildCentralMCPServerForRole(role string) *mcp.Server {
 		Name:    "freshbreath",
 		Version: version,
 	}, &mcp.ServerOptions{
-		Instructions: "Freshbreath control panel API. Manage apps, services, users, and settings.",
+		Instructions: `Fresh Breath is an app server designed to give flexiblity to standalone HTML
+apps - or any other app that needs third-party connections, auth or an SSH agent.
+For static HTML apps being developed from file:/// URLs, Fresh Breath can give
+you quick access to third-party services and logins that it is proxying and
+negotiating auth or CORS issues so you don't have to. Refer to the 'services'
+guide for examples on how to login and use APIs, MCPs, OIDC or virtual services
+for an app.
+
+Fresh Breath can also host apps the user is creating for long-term hosting and
+sharing with other users. If you follow the services guide, users will get
+prompted for their credentials. See the publishing guide if the app proceeds
+to that point.`,
 	})
 
 	// NOTE: Role access to all of the following tools should match
@@ -233,7 +243,7 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*User, error) {
 		return nil, fmt.Errorf("missing bearer token")
 	}
 
-	// Try Freshbreath JWT (central or panel kind).
+	// Try freshbreath JWT (central or panel kind).
 	claims, err := s.verifyFreshbreathToken(token)
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
@@ -252,6 +262,25 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*User, error) {
 		return nil, err
 	}
 	return user, nil
+}
+
+// mcpCanAccessApp has the logic for checking that this user
+// has permissions to the app. This allows us to gate the publishing tools
+// in the same way as the API calls.
+func (s *Server) mcpCanAccessApp(user *User, nonce string) error {
+	if nonce == "" {
+		return fmt.Errorf("nonce is required")
+	}
+
+	// Members can only see apps they belong to.
+	if user.Role != "Superuser" && user.Role != "Admin" {
+		ok, _ := s.store.IsAppMember(nonce, user.ID)
+		if !ok {
+			return fmt.Errorf("forbidden: not a member of this app")
+		}
+	}
+
+	return nil
 }
 
 // mcpToolError returns a tool result with an error message.
@@ -322,21 +351,14 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		if nonce == "" {
-			return mcpToolError("nonce is required"), nil
+		err = s.mcpCanAccessApp(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
 
 		app, err := s.store.GetApp(nonce)
 		if err != nil {
 			return mcpToolError("app not found: %v", err), nil
-		}
-
-		// Members can only see apps they belong to.
-		if user.Role != "Superuser" && user.Role != "Admin" {
-			ok, _ := s.store.IsAppMember(nonce, user.ID)
-			if !ok {
-				return mcpToolError("forbidden: not a member of this app"), nil
-			}
 		}
 
 		return mcpToolResult(map[string]interface{}{
@@ -479,15 +501,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		if nonce == "" {
-			return mcpToolError("nonce is required"), nil
-		}
-
-		if user.Role != "Superuser" && user.Role != "Admin" {
-			ok, _ := s.store.IsAppMember(nonce, user.ID)
-			if !ok {
-				return mcpToolError("forbidden: not a member of this app"), nil
-			}
+		err = s.mcpCanAccessApp(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
 
 		ids, err := s.store.ListAppMembers(nonce)
@@ -555,15 +571,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		if nonce == "" {
-			return mcpToolError("nonce is required"), nil
-		}
-
-		if user.Role != "Superuser" && user.Role != "Admin" {
-			ok, _ := s.store.IsAppMember(nonce, user.ID)
-			if !ok {
-				return mcpToolError("forbidden: not a member of this app"), nil
-			}
+		err = s.mcpCanAccessApp(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
 
 		links, err := s.store.GetAppServiceLinks(nonce)
@@ -611,117 +621,141 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 
-	// download_app_file
-	if roleIn(role, rolesAdminPlus) {
-		mcps.AddTool(&mcp.Tool{
-			Name:        "download_app_files",
-			Description: "Download an app's web files as a base64-encoded zip archive.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
-				},
-				"required": []string{"nonce"},
+	// list_app_files
+	mcps.AddTool(&mcp.Tool{
+		Name:        "list_app_files",
+		Description: "List an app's hosted web files (path + size). Empty if nothing is published. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
 			},
-		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			user, err := s.mcpUser(req)
-			if err != nil {
-				return mcpToolError("auth: %v", err), nil
-			}
-			args := make(map[string]interface{})
-			json.Unmarshal(req.Params.Arguments, &args)
-			nonce, _ := args["nonce"].(string)
-			if nonce == "" {
-				return mcpToolError("nonce is required"), nil
-			}
+			"required": []string{"nonce"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		nonce, _ := args["nonce"].(string)
+		err = s.mcpCanAccessApp(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
 
-			data, slug, err := s.coreDownloadAppWeb(user, nonce)
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]interface{}{
-				"filename": slug + ".zip",
-				"content":  base64.StdEncoding.EncodeToString(data),
-			})
+		files, err := s.coreListAppWeb(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]interface{}{"files": files})
+	})
+
+	// download_app_files
+	mcps.AddTool(&mcp.Tool{
+		Name:        "download_app_files",
+		Description: "Get a single-use URL to download an app's web files as a zip. GET the returned URL within 5 minutes to fetch the archive.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+			},
+			"required": []string{"nonce"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		nonce, _ := args["nonce"].(string)
+		err = s.mcpCanAccessApp(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		app, err := s.store.GetApp(nonce)
+		if err != nil {
+			return mcpToolError("app not found: %v", err), nil
+		}
+
+		url := s.newTransfer("download", nonce, "", user)
+		return mcpToolResult(map[string]interface{}{
+			"url":      url,
+			"filename": appSlug(app) + ".zip",
 		})
-	}
+	})
 
 	// publish_app_files
-	if roleIn(role, rolesAdminPlus) {
-		mcps.AddTool(&mcp.Tool{
-			Name:        "publish_app_files",
-			Description: "Upload web files for an app. Provide a base64-encoded .html or .zip file.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"nonce":    map[string]interface{}{"type": "string", "description": "App nonce"},
-					"filename": map[string]interface{}{"type": "string", "description": "Filename with .html or .zip extension"},
-					"content":  map[string]interface{}{"type": "string", "description": "Base64-encoded file content"},
-				},
-				"required": []string{"nonce", "filename", "content"},
+	mcps.AddTool(&mcp.Tool{
+		Name:        "publish_app_files",
+		Description: "Get a single-use URL to upload web files for an app. POST the raw file bytes (a .html or .zip) to the returned URL within 5 minutes.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"nonce":    map[string]interface{}{"type": "string", "description": "App nonce"},
+				"filename": map[string]interface{}{"type": "string", "description": "Filename with .html or .zip extension"},
 			},
-		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			user, err := s.mcpUser(req)
-			if err != nil {
-				return mcpToolError("auth: %v", err), nil
-			}
-			args := make(map[string]interface{})
-			json.Unmarshal(req.Params.Arguments, &args)
-			nonce, _ := args["nonce"].(string)
-			filename, _ := args["filename"].(string)
-			content, _ := args["content"].(string)
-			if nonce == "" {
-				return mcpToolError("nonce is required"), nil
-			}
-			if filename == "" {
-				return mcpToolError("filename is required"), nil
-			}
-			if content == "" {
-				return mcpToolError("content is required"), nil
-			}
-			data, err := base64.StdEncoding.DecodeString(content)
-			if err != nil {
-				return mcpToolError("invalid base64: %v", err), nil
-			}
+			"required": []string{"nonce", "filename"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		nonce, _ := args["nonce"].(string)
+		filename, _ := args["filename"].(string)
+		err = s.mcpCanAccessApp(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		if filename == "" {
+			return mcpToolError("filename is required"), nil
+		}
+		name := strings.ToLower(filename)
+		if !strings.HasSuffix(name, ".html") && !strings.HasSuffix(name, ".zip") {
+			return mcpToolError("filename must end in .html or .zip"), nil
+		}
+		if _, err := s.store.GetApp(nonce); err != nil {
+			return mcpToolError("app not found: %v", err), nil
+		}
 
-			route, err := s.coreUploadAppWeb(user, nonce, data, filename)
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]string{"route": route})
-		})
-	}
+		url := s.newTransfer("upload", nonce, filename, user)
+		return mcpToolResult(map[string]interface{}{"url": url})
+	})
 
 	// delete_app_files
-	if roleIn(role, rolesAdminPlus) {
-		mcps.AddTool(&mcp.Tool{
-			Name:        "delete_app_files",
-			Description: "Remove an app's web files.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
-				},
-				"required": []string{"nonce"},
+	mcps.AddTool(&mcp.Tool{
+		Name:        "delete_app_files",
+		Description: "Remove an app's web files.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
 			},
-		}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			user, err := s.mcpUser(req)
-			if err != nil {
-				return mcpToolError("auth: %v", err), nil
-			}
-			args := make(map[string]interface{})
-			json.Unmarshal(req.Params.Arguments, &args)
-			nonce, _ := args["nonce"].(string)
-			if nonce == "" {
-				return mcpToolError("nonce is required"), nil
-			}
+			"required": []string{"nonce"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		nonce, _ := args["nonce"].(string)
+		err = s.mcpCanAccessApp(user, nonce)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
 
-			if err := s.coreDeleteAppWeb(user, nonce); err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]string{"status": "deleted"})
-		})
-	}
+		if err := s.coreDeleteAppWeb(user, nonce); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]string{"status": "deleted"})
+	})
 }
 
 // ── Service Tools ───────────────────────────────────────────────────
@@ -1333,7 +1367,7 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 func (s *Server) registerRoleTools(mcps *mcp.Server) {
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_roles",
-		Description: "List all roles. Any authenticated role.",
+		Description: "List all roles.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1357,7 +1391,7 @@ func (s *Server) registerRoleTools(mcps *mcp.Server) {
 func (s *Server) registerAuditTools(mcps *mcp.Server) {
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_audit",
-		Description: "List the last 100 audit log entries. Any authenticated role.",
+		Description: "List the last 100 audit log entries.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1382,7 +1416,7 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 	// get_me
 	mcps.AddTool(&mcp.Tool{
 		Name:        "get_me",
-		Description: "Get the currently authenticated user's profile. Any authenticated role.",
+		Description: "Get the currently authenticated user's profile.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1398,7 +1432,7 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 	// get_my_ssh_key
 	mcps.AddTool(&mcp.Tool{
 		Name:        "get_my_ssh_key",
-		Description: "Get the SSH key info for the currently authenticated user. Any authenticated role.",
+		Description: "Get the SSH key info for the currently authenticated user.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1422,7 +1456,7 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 	// generate_my_ssh_key
 	mcps.AddTool(&mcp.Tool{
 		Name:        "generate_my_ssh_key",
-		Description: "Generate an SSH key for the currently authenticated user. Any authenticated role.",
+		Description: "Generate an SSH key for the currently authenticated user.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1456,7 +1490,7 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 	// delete_my_ssh_key
 	mcps.AddTool(&mcp.Tool{
 		Name:        "delete_my_ssh_key",
-		Description: "Delete the SSH key for the currently authenticated user. Any authenticated role.",
+		Description: "Delete the SSH key for the currently authenticated user.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1479,14 +1513,14 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 	// get_guide
 	mcps.AddTool(&mcp.Tool{
 		Name:        "get_guide",
-		Description: "Load one or more Freshbreath guides by name. Available guides: auth, ssh, publishing. Any authenticated role.",
+		Description: "Load one or more Fresh Breath guides by name. Available guides: publishing, services, ssh.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"names": map[string]interface{}{
 					"type":        "array",
 					"items":       map[string]interface{}{"type": "string"},
-					"description": "Guide names to load (auth, ssh, publishing)",
+					"description": "Guide names to load (most commonly 'services' or 'publishing')",
 				},
 			},
 			"required": []string{"names"},

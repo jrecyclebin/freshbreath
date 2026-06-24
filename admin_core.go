@@ -446,6 +446,41 @@ func (s *Server) coreUpdateSettings(actor *User, adminAuthService, defaultApp *s
 
 // ── App Web operations ─────────────────────────────────────────────
 
+// appFile is one entry in an app's hosted web directory.
+type appFile struct {
+	Path string `json:"path"` // slash-separated path relative to the web dir
+	Size int64  `json:"size"` // bytes
+}
+
+// coreListAppWeb lists the files in an app's web directory, sorted by path.
+// An app with no uploaded files lists empty (not an error).
+func (s *Server) coreListAppWeb(actor *User, nonce string) ([]appFile, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return nil, err
+	}
+	if _, err := s.store.GetApp(nonce); err != nil {
+		return nil, cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
+	if _, err := os.Stat(webDir); os.IsNotExist(err) {
+		return []appFile{}, nil
+	}
+	files := []appFile{}
+	err := filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+		if err != nil || fi.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(webDir, path)
+		files = append(files, appFile{Path: filepath.ToSlash(rel), Size: fi.Size()})
+		return nil
+	})
+	if err != nil {
+		return nil, cerr(http.StatusInternalServerError, "list failed: %v", err)
+	}
+	slices.SortFunc(files, func(a, b appFile) int { return strings.Compare(a.Path, b.Path) })
+	return files, nil
+}
+
 // coreDownloadAppWeb returns the app's web directory as a zip archive.
 func (s *Server) coreDownloadAppWeb(actor *User, nonce string) ([]byte, string, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
