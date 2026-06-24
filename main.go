@@ -94,12 +94,29 @@ func resolveConfigDir() string {
   return ""
 }
 
+// resolveConfigPath resolves a (possibly relative) path against configDir.
+// Empty paths pass through unchanged; absolute paths are returned as-is; a
+// relative path is joined to configDir, but only when configDir is set —
+// otherwise it stays relative to the current working directory.
+func resolveConfigPath(configDir, p string) string {
+  if p == "" || filepath.IsAbs(p) || configDir == "" {
+    return p
+  }
+  return filepath.Join(configDir, p)
+}
+
 // resolveDir searches for a freshbreath install directory containing a
 // web/ subdirectory. Search order: env var, binary's own directory,
 // XDG_DATA_HOME/freshbreath, then each entry in XDG_DATA_DIRS.
 func resolveDir(binDir string) string {
   if v := os.Getenv("FRBR_DIR"); v != "" {
     return v
+  }
+  // Current working directory
+  if _, err := os.Stat("web"); err == nil {
+		if _, err := os.Stat("skills"); err == nil {
+			return "."
+		}
   }
   // Binary's own directory
   if _, err := os.Stat(filepath.Join(binDir, "web")); err == nil {
@@ -182,6 +199,12 @@ func main() {
     TLSCertFile:   getEnv("FRBR_TLS_CERT", ""),
     TLSKeyFile:    getEnv("FRBR_TLS_KEY", ""),
   }
+
+  // TLS cert/key paths resolve relative to ConfigDir; absolute paths are
+  // used as-is. (If no ConfigDir was found, relative paths stay relative
+  // to the current working directory.)
+  cfg.TLSCertFile = resolveConfigPath(cfg.ConfigDir, cfg.TLSCertFile)
+  cfg.TLSKeyFile = resolveConfigPath(cfg.ConfigDir, cfg.TLSKeyFile)
 
   tlsEnabled := cfg.TLSCertFile != "" && cfg.TLSKeyFile != ""
   if cfg.PublicBaseURL == "" {

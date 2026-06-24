@@ -29,6 +29,7 @@ go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/${G
 staging="dist/staging"
 mkdir -p "$staging"
 mv "dist/${GOOS}-${arch}-$binary" "$staging/$binary"
+cp README.md "$staging/README.txt"
 cp -r web skills "$staging/"
 
 if [ "$GOOS" = "windows" ]; then
