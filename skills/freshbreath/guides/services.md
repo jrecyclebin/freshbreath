@@ -7,6 +7,7 @@ In order to use these calls, you must have an app setup:
 
 - If the app doesn't exist in your list, create one - an admin will need to do this.
   Hang on to the *nonce* - it's used throughout this guide.
+
 - Add the necessary services to the app - if it needs storage providers, OIDC,
   SSH access, or any other third-party integrations (MCPs or APIs), they can
   be added from the control panel or MCP. The important thing to hang on to
@@ -16,8 +17,16 @@ The following service types are available:
 
 - api: URL to an API service, along with some hints about how to log-in.
   Use the `fetch` call (#6 below) to access these.
+
 - mcp: URL to a public MCP server. Use `callTool` and `listTools` from JS.
-- oidc: URL to a public OIDC server. No additional functionality beyond `login`.
+
+- oidc: URL to a public OIDC server. Login only — it proves *who* the user is
+  and nothing more. Fresh Breath verifies the provider login, then issues its
+  own identity token (it does **not** hand back the provider's access token, so
+  you can't call the provider's API through an oidc service — use an `api` or
+  `mcp` service for that). Fresh Breath refreshes that identity token locally,
+  so the user doesn't have to keep checking back in with the provider.
+
 - tasks: A set of custom tools (use `callTool` and `listTools` from JavaScript)
   that can be called and are wrappers for shell scripts that perform system
   functions. (For instance, you could upload a file to a tool that can move
@@ -25,12 +34,15 @@ The following service types are available:
   they have no auth of their own, so the `login` function shouldn't be used -
   instead, the `authService` property to the `ServiceProxy` constructor can
   receive another `ServiceProxy` object for any service that it depends on.
+
 - virtual: These are custom MCP endpoints that can be used to provide tools
   (also available through `callTool` and `listTools`) that wrap API calls -
   to give a nice MCP interface with discoverable auth.
+
 - ssh: Every Fresh Breath server has a single SSH service (URL: `ssh://`)
   that can be used for general authentication or for connecting to remote
-  machines.
+  machines. Honestly, this is a great option for managing passwords
+  directly from Fresh Breath.
 
 If you aren't an admin, you also must be listed as the owner or member of the
 app. (You don't have to be a member to use the app, just to maintain it.)
@@ -204,13 +216,21 @@ For OIDC identity services (login via an identity provider like Google):
 
 ```js
 service.isIdentity          // true if this is an IdP login
-service.data.claims         // { sub, email, name, ... } — OIDC user claims
-service.data.id_token       // Raw JWT id_token
+service.data.claims         // { sub, email, name, ... } — provider profile, for display
+service.data.id_token       // Fresh Breath identity token (a JWT issued by Fresh Breath)
+service.data.access_token   // same value as id_token
 ```
 
+Unlike `api`/`mcp` services, an OIDC service does **not** expose the provider's
+own access or refresh token — `access_token` and `id_token` are one and the
+same Fresh Breath-issued identity JWT, and it auto-refreshes locally (no
+`token_endpoint` / `scopes` to manage). So there's no provider token to call
+the provider's API with; an oidc service is purely for login.
+
 Identity proxies cannot use `listTools()` / `callTool()` / `connect()` — they're
-for authentication only, not MCP. Use `.data.claims` to get user info and
-`.data.id_token` to pass to your own backend.
+for authentication only, not MCP. Use `.data.claims` to get user info, and pass
+`.data.id_token` to your own backend (verify it against Fresh Breath, not the
+provider — it's a Fresh Breath JWT).
 
 ---
 

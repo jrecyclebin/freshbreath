@@ -582,7 +582,7 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
 	}
 
 	if svc.Descriptor.Type == "oidc" {
-		claims, accessToken, refreshToken, _, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
+		claims, accessToken, refreshToken, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("OIDC exchange failed: %v", err), http.StatusInternalServerError)
 			return
@@ -629,7 +629,7 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
 			http.Error(w, fmt.Sprintf("User not found: %s", userEmail), http.StatusForbidden)
 			return
 		}
-		centralJWT, err := s.mintFreshbreathToken("admin", user.Email, user.Role, "", 0, nil)
+		centralJWT, err := s.mintFreshbreathToken("identity", user.Email, user.Role, "", svc.ID, nil)
 		if err != nil {
 			http.Error(w, "Token generation failed", http.StatusInternalServerError)
 			return
@@ -729,12 +729,35 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Service not found", http.StatusInternalServerError)
 			return
 		}
-		claims, accessToken, refreshToken, idToken, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
+		// OIDC is an identity proof: exchange the code to learn who the user
+		// is, then mint a Fresh Breath identity token. The provider's
+		// access/refresh tokens are deliberately discarded — the identity
+		// token refreshes locally and never calls the provider again.
+		//
+		// We mint even when there's no matching Fresh Breath user yet: the
+		// token is a usable identity (apps read .data.claims) but bounces off
+		// the admin gates, which re-resolve the user from the DB. Role/name
+		// come from the user record when it exists — never from the provider's
+		// claims, which must not be trusted for authorization.
+		claims, _, _, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("OIDC exchange failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 
+		userEmail := firstNonEmpty(claims.Email, claims.Subject)
+		role, name := "", claims.Name
+		if user, err := s.store.GetUserByEmail(userEmail); err == nil {
+			role, name = user.Role, firstNonEmpty(user.Name, claims.Name)
+		}
+
+		idToken, err := s.mintFreshbreathToken("identity", userEmail, role, name, pending.serviceID, nil)
+		if err != nil {
+			http.Error(w, "Token generation failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Provider profile claims remain handy for display.
 		mergedClaims := make(map[string]interface{})
 		for k, v := range claims.Raw {
 			mergedClaims[k] = v
@@ -752,16 +775,12 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.completeAuth(w, pending, &OAuthData{
-			ClientID:      pending.clientID,
-			AccessToken:   accessToken,
-			RefreshToken:  refreshToken,
-			TokenType:     "Bearer",
-			TokenEndpoint: pending.tokenEndpoint,
-			ExpiresAt:     time.Unix(claims.Expiry, 0),
-			Claims:        mergedClaims,
-			IDToken:       idToken,
-			Proxied:       pending.proxied,
-			Scopes:        pending.scopes,
+			ClientID:    pending.clientID,
+			AccessToken: idToken,
+			TokenType:   "Bearer",
+			ExpiresAt:   time.Now().Add(accessTokenTTL),
+			Claims:      mergedClaims,
+			IDToken:     idToken,
 		})
 		return
 	}
@@ -1228,11 +1247,6 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 func userFromContext(ctx context.Context) *User {
 	u, _ := ctx.Value(userKey).(*User)
 	return u
-}
-
-func isAdminOrSuperuser(ctx context.Context) bool {
-	u := userFromContext(ctx)
-	return u != nil && (u.Role == "Superuser" || u.Role == "Admin")
 }
 
 func auditActorName(ctx context.Context) string {
@@ -2039,6 +2053,14 @@ func (s *Server) verifyIDToken(ctx context.Context, svc *Service, raw string) (s
 		if claims == nil {
 			return "", fmt.Errorf("not a freshbreath token")
 		}
+		// Service binding: an identity token is only valid against the service
+		// that minted it. Without this, a token issued by *any* OIDC service
+		// would authenticate against *this* one — letting an attacker who can
+		// register an account at some other service under a victim's email
+		// impersonate that victim here (e.g. log into the admin MCP).
+		if claims.Kind != "identity" || claims.ServiceID != svc.ID {
+			return "", fmt.Errorf("token was not issued by this auth service")
+		}
 		return claims.UserEmail, nil
 	}
 	provider, err := s.getOIDCProvider(ctx, svc.ID, svc.URL)
@@ -2460,7 +2482,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.LogAudit(req.Email, "login", "admin panel (SSH)")
 
 		// Mint a panel JWT for this user
-		idToken, err := s.mintFreshbreathToken("admin", user.Email, user.Role, user.Name, 0, nil)
+		idToken, err := s.mintFreshbreathToken("identity", user.Email, user.Role, user.Name, pending.serviceID, nil)
 		if err != nil {
 			http.Error(w, "Token generation failed", http.StatusInternalServerError)
 			return
