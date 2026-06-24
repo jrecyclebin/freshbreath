@@ -6,7 +6,6 @@ import (
   "log"
   "net/http"
   "os"
-  "runtime"
   "strings"
   "path/filepath"
   "sync"
@@ -157,8 +156,14 @@ func main() {
     }
   }
 
-  _, callerFile, _, _ := runtime.Caller(0)
-  binDir, _ := filepath.EvalSymlinks(filepath.Dir(callerFile))
+  exePath, err := os.Executable()
+  if err != nil {
+    log.Fatalf("freshbreath: can't locate own executable: %v", err)
+  }
+  if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
+    exePath = resolved
+  }
+  binDir := filepath.Dir(exePath)
 
   dir := resolveDir(binDir)
   if dir == "" {
