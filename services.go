@@ -4,7 +4,9 @@ import (
   "context"
   "crypto/aes"
   "crypto/cipher"
+  "crypto/hkdf"
   "crypto/rand"
+  "crypto/sha256"
   "encoding/base64"
   "encoding/json"
   "fmt"
@@ -486,11 +488,32 @@ func open(key []byte, sealed string) ([]byte, error) {
   return plaintext, nil
 }
 
+// ── Key derivation ──────────────────────────────────────────────────
+//
+// localKey is the single master secret (random, or derived from the TLS key).
+// It's never used directly for crypto: deriveSubkey splits it into independent
+// subkeys per purpose via HKDF-SHA256, so the JWT-signing (HMAC) key and the
+// AES-GCM sealing key can't interact even though they share one master.
+
+const (
+  jwtSignLabel = "freshbreath/jwt-sign"
+  sealLabel    = "freshbreath/seal"
+)
+
+func (s *Server) deriveSubkey(label string) []byte {
+  k, err := hkdf.Key(sha256.New, s.localKey, nil, label, 32)
+  if err != nil {
+    // HKDF-SHA256 only errors on absurd output lengths; 32 bytes never does.
+    panic(fmt.Sprintf("hkdf derive %q: %v", label, err))
+  }
+  return k
+}
+
 // ── Unified access token mint/verify ────────────────────────────────
 
 func (s *Server) mintFreshbreathToken(kind, email, role, name string, serviceID int64, upstream *sealedUpstreamData) (string, error) {
   sig, err := jose.NewSigner(
-    jose.SigningKey{Algorithm: jose.HS256, Key: s.localKey},
+    jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
     (&jose.SignerOptions{}).WithType("JWT"),
   )
   if err != nil {
@@ -517,7 +540,7 @@ func (s *Server) mintFreshbreathToken(kind, email, role, name string, serviceID 
     if err != nil {
       return "", fmt.Errorf("marshal upstream: %w", err)
     }
-    claims.Sealed, err = seal(s.localKey, plain)
+    claims.Sealed, err = seal(s.deriveSubkey(sealLabel), plain)
     if err != nil {
       return "", fmt.Errorf("seal upstream: %w", err)
     }
@@ -538,7 +561,7 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
     return nil, fmt.Errorf("parse: %w", err)
   }
   var claims freshbreathClaims
-  if err := tok.Claims(s.localKey, &claims); err != nil {
+  if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &claims); err != nil {
     return nil, fmt.Errorf("verify: %w", err)
   }
   if err := claims.Claims.Validate(josejwt.Expected{
@@ -550,7 +573,7 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
   }
   // Decrypt sealed upstream data for wrapped tokens.
   if claims.Sealed != "" {
-    plain, err := open(s.localKey, claims.Sealed)
+    plain, err := open(s.deriveSubkey(sealLabel), claims.Sealed)
     if err != nil {
       return nil, fmt.Errorf("unseal upstream: %w", err)
     }
@@ -570,7 +593,7 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
 
 func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
   sig, err := jose.NewSigner(
-    jose.SigningKey{Algorithm: jose.HS256, Key: s.localKey},
+    jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
     (&jose.SignerOptions{}).WithType("JWT"),
   )
   if err != nil {
@@ -581,7 +604,7 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
   if err != nil {
     return "", fmt.Errorf("marshal refresh data: %w", err)
   }
-  sealed, err := seal(s.localKey, plain)
+  sealed, err := seal(s.deriveSubkey(sealLabel), plain)
   if err != nil {
     return "", fmt.Errorf("seal refresh data: %w", err)
   }
@@ -629,7 +652,7 @@ func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error)
     josejwt.Claims
     Sealed string `json:"sealed"`
   }
-  if err := tok.Claims(s.localKey, &outer); err != nil {
+  if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &outer); err != nil {
     return nil, fmt.Errorf("verify refresh: %w", err)
   }
   if err := outer.Claims.Validate(josejwt.Expected{
@@ -639,7 +662,7 @@ func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error)
   }); err != nil {
     return nil, fmt.Errorf("refresh token invalid: %w", err)
   }
-  plain, err := open(s.localKey, outer.Sealed)
+  plain, err := open(s.deriveSubkey(sealLabel), outer.Sealed)
   if err != nil {
     return nil, fmt.Errorf("unseal refresh: %w", err)
   }
