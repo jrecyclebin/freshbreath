@@ -100,6 +100,22 @@ func (s *Store) Migrate() error {
     CREATE INDEX IF NOT EXISTS idx_app_service_app ON app_service_links(app_nonce);
     CREATE INDEX IF NOT EXISTS idx_app_service_svc ON app_service_links(service_id);
     CREATE INDEX IF NOT EXISTS idx_oauth_clients_id ON oauth_clients(client_id);
+
+    CREATE TABLE IF NOT EXISTS refresh_families (
+      id           TEXT PRIMARY KEY,
+      user_email   TEXT NOT NULL,
+      service_id   INTEGER NOT NULL,
+      device_label TEXT,
+      current_jti  TEXT NOT NULL,
+      prev_jti     TEXT,
+      created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      expires_at   TEXT NOT NULL,
+      rotated_at   TEXT,
+      last_used_at TEXT,
+      revoked      INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_refresh_families_user_email ON refresh_families(user_email);
+    CREATE INDEX IF NOT EXISTS idx_refresh_families_expires_at ON refresh_families(expires_at);
   `)
   if err != nil {
     return err
@@ -988,4 +1004,148 @@ func (s *Store) GetOAuthClient(clientID string) (clientSecret string, redirectUR
     return "", nil, false, err
   }
   return secretStr, uris, true, nil
+}
+
+// ── Refresh Token Families ──
+
+type RefreshFamily struct {
+  ID          string
+  UserEmail   string
+  ServiceID   int64
+  DeviceLabel string
+  CurrentJTI  string
+  PrevJTI     string
+  CreatedAt   time.Time
+  ExpiresAt   time.Time
+  RotatedAt   time.Time
+  LastUsedAt  time.Time
+  Revoked     bool
+}
+
+func parseTime(s string) time.Time {
+  t, _ := time.Parse(time.RFC3339, s)
+  return t
+}
+
+func (s *Store) CreateRefreshFamily(fam *RefreshFamily) error {
+  _, err := s.db.Exec(
+    `INSERT INTO refresh_families
+      (id, user_email, service_id, device_label, current_jti, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?)`,
+    fam.ID, fam.UserEmail, fam.ServiceID, fam.DeviceLabel, fam.CurrentJTI, fam.ExpiresAt.Format(time.RFC3339),
+  )
+  return err
+}
+
+func (s *Store) GetRefreshFamily(id string) (*RefreshFamily, bool, error) {
+  row := s.db.QueryRow(
+    `SELECT id, user_email, service_id, device_label, current_jti, prev_jti,
+            created_at, expires_at, rotated_at, last_used_at, revoked
+     FROM refresh_families WHERE id = ?`, id,
+  )
+  var f RefreshFamily
+  var r int
+  var c, e string
+  var prev sql.NullString
+  var rot, lu sql.NullString
+  err := row.Scan(&f.ID, &f.UserEmail, &f.ServiceID, &f.DeviceLabel, &f.CurrentJTI, &prev, &c, &e, &rot, &lu, &r)
+  if err == sql.ErrNoRows {
+    return nil, false, nil
+  }
+  if err != nil {
+    return nil, false, err
+  }
+  if prev.Valid {
+    f.PrevJTI = prev.String
+  }
+  if rot.Valid {
+    f.RotatedAt = parseTime(rot.String)
+  }
+  if lu.Valid {
+    f.LastUsedAt = parseTime(lu.String)
+  }
+  f.CreatedAt = parseTime(c)
+  f.ExpiresAt = parseTime(e)
+  f.Revoked = r != 0
+  return &f, true, nil
+}
+
+func (s *Store) RotateRefreshFamily(id, fromJTI, toJTI string, now time.Time) (ok bool, err error) {
+  res, err := s.db.Exec(
+    `UPDATE refresh_families
+     SET prev_jti = current_jti, current_jti = ?, rotated_at = ?, last_used_at = ?
+     WHERE id = ? AND current_jti = ? AND revoked = 0`,
+    toJTI, now.Format(time.RFC3339), now.Format(time.RFC3339), id, fromJTI,
+  )
+  if err != nil {
+    return false, err
+  }
+  n, _ := res.RowsAffected()
+  return n == 1, nil
+}
+
+func (s *Store) RevokeRefreshFamily(id string) error {
+  _, err := s.db.Exec(
+    "UPDATE refresh_families SET revoked = 1 WHERE id = ?", id,
+  )
+  return err
+}
+
+func (s *Store) RevokeUserRefreshFamilies(email string) error {
+  _, err := s.db.Exec(
+    "UPDATE refresh_families SET revoked = 1 WHERE user_email = ?", email,
+  )
+  return err
+}
+
+func (s *Store) ListRefreshFamilies(email string) ([]RefreshFamily, error) {
+  rows, err := s.db.Query(
+    `SELECT id, user_email, service_id, device_label, current_jti, prev_jti,
+            created_at, expires_at, rotated_at, last_used_at, revoked
+     FROM refresh_families
+     WHERE user_email = ? AND revoked = 0 AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+     ORDER BY created_at DESC`,
+    email,
+  )
+  if err != nil {
+    return nil, err
+  }
+  defer rows.Close()
+
+  var out []RefreshFamily
+  for rows.Next() {
+    var f RefreshFamily
+    var r int
+    var c, e string
+    var prev sql.NullString
+    var rot, lu sql.NullString
+    if err := rows.Scan(&f.ID, &f.UserEmail, &f.ServiceID, &f.DeviceLabel, &f.CurrentJTI, &prev, &c, &e, &rot, &lu, &r); err != nil {
+      return nil, err
+    }
+    if prev.Valid {
+      f.PrevJTI = prev.String
+    }
+    if rot.Valid {
+      f.RotatedAt = parseTime(rot.String)
+    }
+    if lu.Valid {
+      f.LastUsedAt = parseTime(lu.String)
+    }
+    f.CreatedAt = parseTime(c)
+    f.ExpiresAt = parseTime(e)
+    f.Revoked = r != 0
+    out = append(out, f)
+  }
+  return out, rows.Err()
+}
+
+func (s *Store) DeleteExpiredRefreshFamilies(now time.Time) (int64, error) {
+  res, err := s.db.Exec(
+    "DELETE FROM refresh_families WHERE expires_at < ?",
+    now.Format(time.RFC3339),
+  )
+  if err != nil {
+    return 0, err
+  }
+  return res.RowsAffected()
 }

@@ -3,12 +3,14 @@ package main
 import (
   "database/sql"
   "encoding/json"
+  "sync"
   "testing"
+  "time"
 )
 
 func newTestStore(t *testing.T) *Store {
   t.Helper()
-  db, err := sql.Open("sqlite3", ":memory:")
+  db, err := sql.Open("sqlite3", "file::memory:?cache=shared")
   if err != nil {
     t.Fatalf("open db: %v", err)
   }
@@ -306,4 +308,255 @@ func containsHelper(s, substr string) bool {
     }
   }
   return false
+}
+
+// ── Refresh Families ──
+
+func TestRefreshFamilyCreateAndGet(t *testing.T) {
+  store := newTestStore(t)
+  fam := &RefreshFamily{
+    ID:          genNonce(),
+    UserEmail:   "test@example.com",
+    ServiceID:   1,
+    DeviceLabel: "test-device",
+    CurrentJTI:  "jti-initial",
+    ExpiresAt:   time.Now().Add(24 * time.Hour),
+  }
+  if err := store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create: %v", err)
+  }
+
+  got, ok, err := store.GetRefreshFamily(fam.ID)
+  if err != nil {
+    t.Fatalf("get: %v", err)
+  }
+  if !ok {
+    t.Fatal("expected family to exist")
+  }
+  if got.UserEmail != fam.UserEmail {
+    t.Errorf("email = %q, want %q", got.UserEmail, fam.UserEmail)
+  }
+  if got.CurrentJTI != fam.CurrentJTI {
+    t.Errorf("current_jti = %q, want %q", got.CurrentJTI, fam.CurrentJTI)
+  }
+  if got.Revoked {
+    t.Error("expected not revoked")
+  }
+}
+
+func TestRefreshFamilyGetNotFound(t *testing.T) {
+  store := newTestStore(t)
+  _, ok, err := store.GetRefreshFamily("nonexistent")
+  if err != nil {
+    t.Fatalf("get: %v", err)
+  }
+  if ok {
+    t.Fatal("expected not found")
+  }
+}
+
+func TestRefreshFamilyRotate(t *testing.T) {
+  store := newTestStore(t)
+  fam := &RefreshFamily{
+    ID:         genNonce(),
+    UserEmail:  "a@x.co",
+    ServiceID:  1,
+    CurrentJTI: "old-jti",
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  }
+  if err := store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create: %v", err)
+  }
+
+  ok, err := store.RotateRefreshFamily(fam.ID, "old-jti", "new-jti", time.Now())
+  if err != nil {
+    t.Fatalf("rotate: %v", err)
+  }
+  if !ok {
+    t.Fatal("expected rotate to succeed")
+  }
+
+  got, _, _ := store.GetRefreshFamily(fam.ID)
+  if got.CurrentJTI != "new-jti" {
+    t.Errorf("current_jti = %q, want new-jti", got.CurrentJTI)
+  }
+  if got.PrevJTI != "old-jti" {
+    t.Errorf("prev_jti = %q, want old-jti", got.PrevJTI)
+  }
+  if got.LastUsedAt.IsZero() {
+    t.Error("expected last_used_at set")
+  }
+}
+
+func TestRefreshFamilyRotateCAS(t *testing.T) {
+  store := newTestStore(t)
+  fam := &RefreshFamily{
+    ID:         genNonce(),
+    UserEmail:  "a@x.co",
+    ServiceID:  1,
+    CurrentJTI: "jti-1",
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  }
+  if err := store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create: %v", err)
+  }
+
+  ok, err := store.RotateRefreshFamily(fam.ID, "wrong-jti", "new-jti", time.Now())
+  if err != nil {
+    t.Fatalf("rotate: %v", err)
+  }
+  if ok {
+    t.Fatal("expected rotate to fail with wrong fromJTI")
+  }
+
+  got, _, _ := store.GetRefreshFamily(fam.ID)
+  if got.CurrentJTI != "jti-1" {
+    t.Errorf("current_jti = %q, want jti-1", got.CurrentJTI)
+  }
+}
+
+func TestRefreshFamilyRotateConcurrent(t *testing.T) {
+  store := newTestStore(t)
+  fam := &RefreshFamily{
+    ID:         genNonce(),
+    UserEmail:  "a@x.co",
+    ServiceID:  1,
+    CurrentJTI: "jti-1",
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  }
+  if err := store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create: %v", err)
+  }
+
+  var wg sync.WaitGroup
+  successes := make(chan bool, 10)
+  for i := 0; i < 10; i++ {
+    wg.Add(1)
+    go func() {
+      defer wg.Done()
+      ok, _ := store.RotateRefreshFamily(fam.ID, "jti-1", "jti-winner", time.Now())
+      successes <- ok
+    }()
+  }
+  wg.Wait()
+  close(successes)
+
+  count := 0
+  for ok := range successes {
+    if ok {
+      count++
+    }
+  }
+  if count != 1 {
+    t.Errorf("concurrent rotations: %d succeeded, want 1", count)
+  }
+
+  got, _, _ := store.GetRefreshFamily(fam.ID)
+  if got.CurrentJTI != "jti-winner" {
+    t.Errorf("current_jti = %q, want jti-winner", got.CurrentJTI)
+  }
+}
+
+func TestRefreshFamilyRevoke(t *testing.T) {
+  store := newTestStore(t)
+  fam := &RefreshFamily{
+    ID:         genNonce(),
+    UserEmail:  "a@x.co",
+    ServiceID:  1,
+    CurrentJTI: "jti-1",
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  }
+  if err := store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create: %v", err)
+  }
+
+  if err := store.RevokeRefreshFamily(fam.ID); err != nil {
+    t.Fatalf("revoke: %v", err)
+  }
+
+  got, _, _ := store.GetRefreshFamily(fam.ID)
+  if !got.Revoked {
+    t.Error("expected revoked")
+  }
+
+  ok, err := store.RotateRefreshFamily(fam.ID, got.CurrentJTI, "new-jti", time.Now())
+  if err != nil {
+    t.Fatalf("rotate after revoke: %v", err)
+  }
+  if ok {
+    t.Fatal("expected rotate to fail on revoked family")
+  }
+}
+
+func TestRefreshFamilyRevokeUser(t *testing.T) {
+  store := newTestStore(t)
+  f1 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: time.Now().Add(24 * time.Hour)}
+  f2 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: time.Now().Add(24 * time.Hour)}
+  f3 := &RefreshFamily{ID: genNonce(), UserEmail: "b@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: time.Now().Add(24 * time.Hour)}
+  store.CreateRefreshFamily(f1)
+  store.CreateRefreshFamily(f2)
+  store.CreateRefreshFamily(f3)
+
+  if err := store.RevokeUserRefreshFamilies("a@x.co"); err != nil {
+    t.Fatalf("revoke user: %v", err)
+  }
+
+  g1, _, _ := store.GetRefreshFamily(f1.ID)
+  g2, _, _ := store.GetRefreshFamily(f2.ID)
+  g3, _, _ := store.GetRefreshFamily(f3.ID)
+  if !g1.Revoked || !g2.Revoked {
+    t.Error("expected a@x.co families revoked")
+  }
+  if g3.Revoked {
+    t.Error("expected b@x.co family not revoked")
+  }
+}
+
+func TestRefreshFamilyList(t *testing.T) {
+  store := newTestStore(t)
+  now := time.Now()
+  f1 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(24 * time.Hour)}
+  f2 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(-1 * time.Hour)}
+  f3 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: now.Add(24 * time.Hour)}
+  store.CreateRefreshFamily(f1)
+  store.CreateRefreshFamily(f2)
+  store.CreateRefreshFamily(f3)
+  store.RevokeRefreshFamily(f3.ID)
+
+  list, err := store.ListRefreshFamilies("a@x.co")
+  if err != nil {
+    t.Fatalf("list: %v", err)
+  }
+  if len(list) != 1 {
+    t.Fatalf("len(list) = %d, want 1", len(list))
+  }
+  if list[0].ID != f1.ID {
+    t.Errorf("got id %q, want %q", list[0].ID, f1.ID)
+  }
+}
+
+func TestRefreshFamilyDeleteExpired(t *testing.T) {
+  store := newTestStore(t)
+  now := time.Now()
+  f1 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(-1 * time.Hour)}
+  f2 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(24 * time.Hour)}
+  store.CreateRefreshFamily(f1)
+  store.CreateRefreshFamily(f2)
+
+  n, err := store.DeleteExpiredRefreshFamilies(now)
+  if err != nil {
+    t.Fatalf("delete: %v", err)
+  }
+  if n != 1 {
+    t.Errorf("deleted = %d, want 1", n)
+  }
+
+  _, ok, _ := store.GetRefreshFamily(f1.ID)
+  if ok {
+    t.Error("expected expired family deleted")
+  }
+  _, ok, _ = store.GetRefreshFamily(f2.ID)
+  if !ok {
+    t.Error("expected unexpired family to remain")
+  }
 }
