@@ -53,13 +53,13 @@ After each phase: `mise coverage` to confirm the new code is actually exercised.
 
 ## Phase 3: Rotation policy in the refresh grant
 
-- [ ] Rewrite `handleRefreshTokenGrant`:
-  - [ ] Look up family; missing / revoked / expired → `invalid_grant`.
-  - [ ] Enforce `family.ServiceID` matches the token's bound service (binding invariant).
-  - [ ] `jti == current_jti` → CAS-rotate to new jti → mint + issue.
-  - [ ] `jti == prev_jti` within grace window (≈30s) → idempotent re-issue, **no second rotate**, no revoke.
-  - [ ] otherwise (stale jti) → **reuse detected** → revoke family → `invalid_grant`.
-- [ ] Tests: happy rotation invalidates old; grace-window retry succeeds; replay outside grace revokes family; revoked family rejects.
+- [x] Rewrite `handleRefreshTokenGrant`:
+  - [x] Look up family; missing / revoked / expired → `invalid_grant`.
+  - [x] Enforce `family.ServiceID` matches the token's bound service (binding invariant).
+  - [x] `jti == current_jti` → CAS-rotate to new jti → mint + issue.
+  - [x] `jti == prev_jti` within grace window (≈30s) → idempotent re-issue, **no second rotate**, no revoke.
+  - [x] otherwise (stale jti) → **reuse detected** → revoke family → `invalid_grant`.
+- [x] Tests: happy rotation invalidates old; grace-window retry succeeds; replay outside grace revokes family; revoked family rejects.
 
 ## Phase 4: Family creation on login
 

@@ -5,6 +5,7 @@ import (
   "crypto/rand"
   "crypto/sha256"
   "encoding/base64"
+  "encoding/hex"
   "encoding/json"
   "fmt"
   "io"
@@ -523,6 +524,14 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 //   "wrapped"  — refresh upstream, re-wrap, new pair
 //   "identity" — look up user, re-mint identity token, new pair
 
+func newJTI() string {
+  b := make([]byte, 16)
+  if _, err := rand.Read(b); err != nil {
+    panic(err)
+  }
+  return hex.EncodeToString(b)
+}
+
 func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
   // Accept refresh token from form body or cookie. The source tells us the
   // client kind: a form body means a CLI/MCP client (no cookie jar, reads the
@@ -546,6 +555,71 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
     return
   }
 
+  // Token-family rotation. Legacy stateless tokens (no family_id) fail
+  // gracefully → re-login required.
+  if data.FamilyID == "" {
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token has no family — re-login required")
+    return
+  }
+  fam, ok, err := os.server.store.GetRefreshFamily(data.FamilyID)
+  if err != nil {
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "family lookup failed")
+    return
+  }
+  if !ok || fam.Revoked {
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh family revoked or not found")
+    return
+  }
+  if fam.ExpiresAt.Before(time.Now()) {
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh family expired")
+    return
+  }
+  // 🔒 Binding invariant: the family must match the token's bound service.
+  if fam.ServiceID != data.ServiceID {
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token service mismatch")
+    return
+  }
+
+  var nextJTI string
+  switch {
+  case data.JTI == fam.CurrentJTI:
+    // Happy path: rotate the family atomically.
+    nextJTI = newJTI()
+    if ok, err := os.server.store.RotateRefreshFamily(fam.ID, fam.CurrentJTI, nextJTI, time.Now()); err != nil {
+      oauthWriteError(w, http.StatusInternalServerError, "server_error", "rotation failed")
+      return
+    } else if !ok {
+      // Lost the race; someone else rotated. Re-read and retry.
+      fam2, ok2, err2 := os.server.store.GetRefreshFamily(data.FamilyID)
+      if err2 != nil || !ok2 {
+        oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "family concurrent update")
+        return
+      }
+      if data.JTI == fam2.PrevJTI && !fam2.RotatedAt.IsZero() && time.Since(fam2.RotatedAt) <= refreshGraceWindow {
+        // Grace-window: accept without a second rotate.
+        nextJTI = fam2.CurrentJTI
+      } else {
+        oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token rotated elsewhere")
+        return
+      }
+    }
+  case data.JTI == fam.PrevJTI && !fam.RotatedAt.IsZero() && time.Since(fam.RotatedAt) <= refreshGraceWindow:
+    // Grace-window retry: the client sent the previous token within the
+    // grace period. Re-issue the current pair without rotating again.
+    nextJTI = fam.CurrentJTI
+  case data.JTI == fam.PrevJTI:
+    // Reuse detected: the previous token is outside the grace window.
+    // Revoke the family and reject.
+    _ = os.server.store.RevokeRefreshFamily(fam.ID)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token reuse detected")
+    return
+  default:
+    // Stale or unknown jti — possible theft.
+    _ = os.server.store.RevokeRefreshFamily(fam.ID)
+    oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token reuse detected")
+    return
+  }
+
   var accessToken string
   var newRefreshData freshbreathRefreshData
   var scope string
@@ -563,6 +637,10 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
     oauthWriteError(w, http.StatusInternalServerError, "server_error", err.Error())
     return
   }
+
+  // Stamp the new family state into the refresh token.
+  newRefreshData.FamilyID = fam.ID
+  newRefreshData.JTI = nextJTI
 
   os.writeTokenResponse(w, accessToken, newRefreshData, scope, fromForm)
 }

@@ -20,6 +20,25 @@ import (
 
 // ── helpers ─────────────────────────────────────────────────────────
 
+// createRefreshFamily creates a RefreshFamily in the store and returns
+// its id. Useful when setting up refresh-token tests that now require a
+// backing family record.
+func createRefreshFamily(t *testing.T, store *Store, email string, svcID int64, currentJTI string) string {
+  t.Helper()
+  famID := genNonce()
+  fam := &RefreshFamily{
+    ID:         famID,
+    UserEmail:  email,
+    ServiceID:  svcID,
+    CurrentJTI: currentJTI,
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  }
+  if err := store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create refresh family: %v", err)
+  }
+  return famID
+}
+
 // pkcePair returns a (verifier, S256 challenge) pair suitable for the
 // OAuth authorization_code grant.
 func pkcePair() (verifier, challenge string) {
@@ -507,12 +526,16 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
     t.Fatalf("create user: %v", err)
   }
 
+  jti := genNonce()
+  famID := createRefreshFamily(t, srv.store, "ada@example.com", svcID, jti)
   rt, err := srv.mintRefreshToken(freshbreathRefreshData{
     Kind:      "identity",
     ServiceID: svcID,
     UserEmail: "ada@example.com",
     UserRole:  "Admin",
     UserName:  "Ada Lovelace",
+    FamilyID:  famID,
+    JTI:       jti,
   })
   if err != nil {
     t.Fatalf("mint refresh token: %v", err)
@@ -551,10 +574,14 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 func TestOAuthRefreshIdentityDeletedUser(t *testing.T) {
   srv := newTestServer(t)
   svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", ServiceDescriptor{Type: "oidc"})
+  jti := genNonce()
+  famID := createRefreshFamily(t, srv.store, "ghost@example.com", svcID, jti)
   rt, err := srv.mintRefreshToken(freshbreathRefreshData{
     Kind:      "identity",
     ServiceID: svcID,
     UserEmail: "ghost@example.com",
+    FamilyID:  famID,
+    JTI:       jti,
   })
   if err != nil {
     t.Fatalf("mint refresh token: %v", err)
@@ -601,6 +628,8 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
     t.Fatalf("register service: %v", err)
   }
 
+  jti := genNonce()
+  famID := createRefreshFamily(t, srv.store, "user@example.com", svcID, jti)
   rt, err := srv.mintRefreshToken(freshbreathRefreshData{
     Kind:             "wrapped",
     ServiceID:        svcID,
@@ -608,6 +637,8 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
     UpstreamRefresh:  "old-upstream-refresh",
     UpstreamTokenURL: "https://up.example/token",
     UpstreamScopes:   "openid email",
+    FamilyID:         famID,
+    JTI:              jti,
   })
   if err != nil {
     t.Fatalf("mint refresh token: %v", err)
@@ -644,8 +675,11 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
   if _, err := srv.store.CreateUser("Web User", "web@example.com", "Member", "Active"); err != nil {
     t.Fatalf("create user: %v", err)
   }
+  jti := genNonce()
+  famID := createRefreshFamily(t, srv.store, "web@example.com", svcID, jti)
   rt, err := srv.mintRefreshToken(freshbreathRefreshData{
     Kind: "identity", ServiceID: svcID, UserEmail: "web@example.com",
+    FamilyID: famID, JTI: jti,
   })
   if err != nil {
     t.Fatalf("mint refresh token: %v", err)
@@ -684,8 +718,11 @@ func TestRefreshGrantFormKeepsBodyToken(t *testing.T) {
   if _, err := srv.store.CreateUser("CLI User", "cli@example.com", "Member", "Active"); err != nil {
     t.Fatalf("create user: %v", err)
   }
+  jti := genNonce()
+  famID := createRefreshFamily(t, srv.store, "cli@example.com", svcID, jti)
   rt, _ := srv.mintRefreshToken(freshbreathRefreshData{
     Kind: "identity", ServiceID: svcID, UserEmail: "cli@example.com",
+    FamilyID: famID, JTI: jti,
   })
 
   rr := postForm(t, srv, "/oauth/token", url.Values{
@@ -760,6 +797,242 @@ func hasRefreshCookie(rr *httptest.ResponseRecorder) bool {
     }
   }
   return false
+}
+
+// ── Refresh token rotation (token families) ─────────────────────────
+
+// A normal refresh with the current jti rotates the family to a new jti
+// and issues a fresh token pair.
+func TestOAuthRefreshRotationHappyPath(t *testing.T) {
+  srv := newTestServer(t)
+  svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+  if _, err := srv.store.CreateUser("Rot User", "rot@example.com", "Member", "Active"); err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+
+  famID := genNonce()
+  jti1 := genNonce()
+  fam := &RefreshFamily{
+    ID:         famID,
+    UserEmail:  "rot@example.com",
+    ServiceID:  svcID,
+    CurrentJTI: jti1,
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  }
+  if err := srv.store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create family: %v", err)
+  }
+
+  rt, err := srv.mintRefreshToken(freshbreathRefreshData{
+    Kind: "identity", ServiceID: svcID, UserEmail: "rot@example.com",
+    FamilyID: famID, JTI: jti1,
+  })
+  if err != nil {
+    t.Fatalf("mint refresh token: %v", err)
+  }
+
+  rr := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rt},
+  })
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+
+  // Family must have rotated to a new jti.
+  got, _, _ := srv.store.GetRefreshFamily(famID)
+  if got.CurrentJTI == jti1 {
+    t.Error("expected jti to rotate")
+  }
+  if got.PrevJTI != jti1 {
+    t.Errorf("prev_jti = %q, want %q", got.PrevJTI, jti1)
+  }
+}
+
+// A retry with the previous jti within the grace window succeeds
+// idempotently — no second rotate, no revoke.
+func TestOAuthRefreshRotationGraceWindow(t *testing.T) {
+  srv := newTestServer(t)
+  svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+  if _, err := srv.store.CreateUser("Grace User", "grace@example.com", "Member", "Active"); err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+
+  famID := genNonce()
+  jti1 := genNonce()
+  srv.store.CreateRefreshFamily(&RefreshFamily{
+    ID:         famID,
+    UserEmail:  "grace@example.com",
+    ServiceID:  svcID,
+    CurrentJTI: jti1,
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  })
+
+  rt1, _ := srv.mintRefreshToken(freshbreathRefreshData{
+    Kind: "identity", ServiceID: svcID, UserEmail: "grace@example.com",
+    FamilyID: famID, JTI: jti1,
+  })
+
+  // First refresh: normal rotation.
+  rr1 := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rt1},
+  })
+  if rr1.Code != 200 {
+    t.Fatalf("first refresh status = %d, body = %s", rr1.Code, rr1.Body.String())
+  }
+
+  fam, _, _ := srv.store.GetRefreshFamily(famID)
+  jti2 := fam.CurrentJTI
+
+  // Second refresh with the original token (jti1 is now prev_jti).
+  rr2 := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rt1},
+  })
+  if rr2.Code != 200 {
+    t.Fatalf("grace-window retry status = %d, body = %s", rr2.Code, rr2.Body.String())
+  }
+
+  fam, _, _ = srv.store.GetRefreshFamily(famID)
+  if fam.CurrentJTI != jti2 {
+    t.Error("grace-window retry must NOT rotate again")
+  }
+  if fam.Revoked {
+    t.Error("grace-window retry must NOT revoke the family")
+  }
+}
+
+// A replay with the previous jti outside the grace window is a detected
+// reuse → the entire family is revoked and subsequent attempts fail.
+func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
+  srv := newTestServer(t)
+  svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+  if _, err := srv.store.CreateUser("Reuse User", "reuse@example.com", "Member", "Active"); err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+
+  famID := genNonce()
+  jti1 := genNonce()
+  srv.store.CreateRefreshFamily(&RefreshFamily{
+    ID:         famID,
+    UserEmail:  "reuse@example.com",
+    ServiceID:  svcID,
+    CurrentJTI: jti1,
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  })
+
+  rt1, _ := srv.mintRefreshToken(freshbreathRefreshData{
+    Kind: "identity", ServiceID: svcID, UserEmail: "reuse@example.com",
+    FamilyID: famID, JTI: jti1,
+  })
+
+  // First refresh rotates jti-1 → jti-2.
+  rr1 := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rt1},
+  })
+  if rr1.Code != 200 {
+    t.Fatalf("first refresh: %d", rr1.Code)
+  }
+
+  // Advance rotated_at past the grace window by forcing an update.
+  srv.store.db.Exec(
+    "UPDATE refresh_families SET rotated_at = datetime('now', '-60 seconds') WHERE id = ?", famID,
+  )
+
+  // Replay with the old token (jti-1 is now prev_jti, but outside grace).
+  rr2 := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rt1},
+  })
+  if rr2.Code != 400 {
+    t.Fatalf("reuse status = %d, want 400; body=%s", rr2.Code, rr2.Body.String())
+  }
+
+  fam, _, _ := srv.store.GetRefreshFamily(famID)
+  if !fam.Revoked {
+    t.Error("expected family revoked on reuse detection")
+  }
+
+  // Even a correct current-jti refresh must now fail.
+  fam2, _, _ := srv.store.GetRefreshFamily(famID)
+  rtCurrent, _ := srv.mintRefreshToken(freshbreathRefreshData{
+    Kind: "identity", ServiceID: svcID, UserEmail: "reuse@example.com",
+    FamilyID: famID, JTI: fam2.CurrentJTI,
+  })
+  rr3 := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rtCurrent},
+  })
+  if rr3.Code != 400 {
+    t.Errorf("refresh after revoke status = %d, want 400", rr3.Code)
+  }
+}
+
+// A revoked family rejects all refresh attempts immediately.
+func TestOAuthRefreshRotationRevokedFamily(t *testing.T) {
+  srv := newTestServer(t)
+  svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+  if _, err := srv.store.CreateUser("Revoked User", "rev@example.com", "Member", "Active"); err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+
+  famID := genNonce()
+  jti1 := genNonce()
+  srv.store.CreateRefreshFamily(&RefreshFamily{
+    ID:         famID,
+    UserEmail:  "rev@example.com",
+    ServiceID:  svcID,
+    CurrentJTI: jti1,
+    ExpiresAt:  time.Now().Add(24 * time.Hour),
+  })
+  srv.store.RevokeRefreshFamily(famID)
+
+  rt, _ := srv.mintRefreshToken(freshbreathRefreshData{
+    Kind: "identity", ServiceID: svcID, UserEmail: "rev@example.com",
+    FamilyID: famID, JTI: jti1,
+  })
+  rr := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rt},
+  })
+  if rr.Code != 400 {
+    t.Fatalf("status = %d, want 400", rr.Code)
+  }
+  var resp map[string]string
+  json.Unmarshal(rr.Body.Bytes(), &resp)
+  if resp["error"] != "invalid_grant" {
+    t.Errorf("error = %q, want invalid_grant", resp["error"])
+  }
+}
+
+// A token missing family_id (legacy stateless) is treated as having no
+// family and fails gracefully — the client must re-login.
+func TestOAuthRefreshLegacyNoFamily(t *testing.T) {
+  srv := newTestServer(t)
+  svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+  if _, err := srv.store.CreateUser("Legacy User", "leg@example.com", "Member", "Active"); err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+
+  // Mint a refresh token with empty family_id (as legacy tokens have).
+  rt, _ := srv.mintRefreshToken(freshbreathRefreshData{
+    Kind: "identity", ServiceID: svcID, UserEmail: "leg@example.com",
+    // FamilyID and JTI intentionally empty — this is a legacy token.
+  })
+  rr := postForm(t, srv, "/oauth/token", url.Values{
+    "grant_type":    {"refresh_token"},
+    "refresh_token": {rt},
+  })
+  if rr.Code != 400 {
+    t.Fatalf("status = %d, want 400", rr.Code)
+  }
+  var resp map[string]string
+  json.Unmarshal(rr.Body.Bytes(), &resp)
+  if resp["error"] != "invalid_grant" {
+    t.Errorf("error = %q, want invalid_grant", resp["error"])
+  }
 }
 
 // ── Unit: PKCE + verifyAndUnwrapToken ───────────────────────────────
