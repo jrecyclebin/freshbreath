@@ -594,6 +594,27 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
   return &claims, nil
 }
 
+// ── Refresh family creation ────────────────────────────────────────
+
+// newRefreshFamily creates a refresh-family record and returns the family ID
+// and its initial JTI. The caller stamps both into the minted refresh token.
+func (s *Server) newRefreshFamily(email string, serviceID int64, deviceLabel string) (familyID, jti string, err error) {
+	familyID = genNonce()
+	jti = newJTI()
+	fam := &RefreshFamily{
+		ID:          familyID,
+		UserEmail:   email,
+		ServiceID:   serviceID,
+		DeviceLabel: deviceLabel,
+		CurrentJTI:  jti,
+		ExpiresAt:   time.Now().Add(refreshTokenTTL),
+	}
+	if err := s.store.CreateRefreshFamily(fam); err != nil {
+		return "", "", fmt.Errorf("create refresh family: %w", err)
+	}
+	return familyID, jti, nil
+}
+
 // ── Refresh token mint/verify ───────────────────────────────────────
 
 func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
