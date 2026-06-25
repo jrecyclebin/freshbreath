@@ -1252,10 +1252,24 @@ func TestDeviceLabelFromUA(t *testing.T) {
 	if got := deviceLabelFromUA(""); got != "" {
 		t.Errorf("empty UA = %q, want empty", got)
 	}
-	short := "Mozilla/5.0 (Macintosh)"
-	if got := deviceLabelFromUA(short); got != short {
-		t.Errorf("short UA = %q, want %q", got, short)
+
+	// A recognized UA renders as "Browser on OS".
+	chrome := "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+	if got := deviceLabelFromUA(chrome); got != "Chrome on Linux" {
+		t.Errorf("chrome UA = %q, want %q", got, "Chrome on Linux")
 	}
+
+	// Browser unknown but OS recognized — fall back to the OS alone.
+	if got := deviceLabelFromUA("Mozilla/5.0 (Macintosh)"); got != "macOS" {
+		t.Errorf("macintosh UA = %q, want %q", got, "macOS")
+	}
+
+	// A non-browser client with no OS keeps its clean name.
+	if got := deviceLabelFromUA("curl/8.4.0"); got != "curl" {
+		t.Errorf("curl UA = %q, want %q", got, "curl")
+	}
+
+	// Wholly unrecognized UA falls back to a truncated copy of the raw string.
 	long := strings.Repeat("x", 100)
 	if got := deviceLabelFromUA(long); len(got) != 80 {
 		t.Errorf("long UA len = %d, want 80", len(got))

@@ -14,7 +14,9 @@ import (
   "strings"
   "sync"
   "time"
+  "unicode/utf8"
 
+  "github.com/mileusna/useragent"
   "github.com/modelcontextprotocol/go-sdk/oauthex"
 )
 
@@ -542,13 +544,44 @@ func newJTI() string {
   return hex.EncodeToString(b)
 }
 
-// deviceLabelFromUA produces a short device label from a User-Agent string.
-// For v1 this is a simple truncation; a future phase may parse out OS/browser.
+// deviceLabelFromUA renders a User-Agent as a short, human-readable device
+// label like "Chrome on Linux", falling back to whichever half is known, and
+// finally to a truncated copy of the raw UA when the parser can't identify it.
+// Returns "" for an empty UA. We deliberately label by browser/OS only — no IP
+// or other network identifier — to keep this free of casual PII.
 func deviceLabelFromUA(ua string) string {
-  if len(ua) > 80 {
-    return ua[:80]
+  if ua == "" {
+    return ""
   }
-  return ua
+  a := useragent.Parse(ua)
+  browser := a.Name
+  // When the library can't identify the browser it dumps the raw UA into Name;
+  // a clean browser name never contains these characters.
+  if browser == ua || strings.ContainsAny(browser, "/()") {
+    browser = ""
+  }
+  switch {
+  case browser != "" && a.OS != "":
+    return browser + " on " + a.OS
+  case browser != "":
+    return browser
+  case a.OS != "":
+    return a.OS
+  default:
+    return truncateRunes(ua, 80)
+  }
+}
+
+// truncateRunes caps s at max bytes without splitting a multi-byte rune.
+func truncateRunes(s string, max int) string {
+  if len(s) <= max {
+    return s
+  }
+  cut := max
+  for cut > 0 && !utf8.RuneStart(s[cut]) {
+    cut--
+  }
+  return s[:cut]
 }
 
 func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
