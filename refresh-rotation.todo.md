@@ -47,9 +47,9 @@ After each phase: `mise coverage` to confirm the new code is actually exercised.
 
 ## Phase 2: Token claims
 
-- [ ] Add `FamilyID`, `JTI` to the refresh-token JWT (mint side).
-- [ ] `verifyRefreshToken` returns them alongside `freshbreathRefreshData`.
-- [ ] Roundtrip test: mint → verify surfaces the same `family_id`/`jti`.
+- [x] Add `FamilyID`, `JTI` to the refresh-token JWT (mint side).
+- [x] `verifyRefreshToken` returns them alongside `freshbreathRefreshData`.
+- [x] Roundtrip test: mint → verify surfaces the same `family_id`/`jti`.
 
 ## Phase 3: Rotation policy in the refresh grant
 

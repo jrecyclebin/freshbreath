@@ -13,6 +13,9 @@ import (
   "strings"
   "testing"
   "time"
+
+  jose "github.com/go-jose/go-jose/v4"
+  josejwt "github.com/go-jose/go-jose/v4/jwt"
 )
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -696,6 +699,57 @@ func TestRefreshGrantFormKeepsBodyToken(t *testing.T) {
   json.Unmarshal(rr.Body.Bytes(), &resp)
   if resp["refresh_token"] == nil || resp["refresh_token"] == "" {
     t.Error("form-based (CLI) refresh must include refresh_token in the body")
+  }
+}
+
+// A newly-minted refresh token must carry family_id and jti in its JWT
+// claims so the refresh grant can rotate them without decrypting the sealed
+// payload. Those claims must survive verifyRefreshToken.
+func TestRefreshTokenClaimsRoundtrip(t *testing.T) {
+  srv := newTestServer(t)
+  data := freshbreathRefreshData{
+    Kind:      "identity",
+    ServiceID: 99,
+    UserEmail: "claims@example.com",
+    UserRole:  "Member",
+    UserName:  "Claims Tester",
+    FamilyID:  "fam-abc-123",
+    JTI:       "jti-first-xyz",
+  }
+  rt, err := srv.mintRefreshToken(data)
+  if err != nil {
+    t.Fatalf("mint: %v", err)
+  }
+
+  got, err := srv.verifyRefreshToken(rt)
+  if err != nil {
+    t.Fatalf("verify: %v", err)
+  }
+  if got.FamilyID != data.FamilyID {
+    t.Errorf("FamilyID = %q, want %q", got.FamilyID, data.FamilyID)
+  }
+  if got.JTI != data.JTI {
+    t.Errorf("JTI = %q, want %q", got.JTI, data.JTI)
+  }
+
+  // The family_id and jti are also readable directly from the JWT (so the
+  // grant handler can look up the family without asking for the sealed
+  // payload). Parse just the claims layer to confirm.
+  tok, _ := josejwt.ParseSigned(rt, []jose.SignatureAlgorithm{jose.HS256})
+  var outer struct {
+    josejwt.Claims
+    Sealed  string `json:"sealed"`
+    FamilyID string `json:"family_id"`
+    JTI     string `json:"jti"`
+  }
+  if err := tok.Claims(srv.deriveSubkey(jwtSignLabel), &outer); err != nil {
+    t.Fatalf("parse outer claims: %v", err)
+  }
+  if outer.FamilyID != data.FamilyID {
+    t.Errorf("outer FamilyID = %q, want %q", outer.FamilyID, data.FamilyID)
+  }
+  if outer.JTI != data.JTI {
+    t.Errorf("outer JTI = %q, want %q", outer.JTI, data.JTI)
   }
 }
 

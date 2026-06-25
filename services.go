@@ -438,6 +438,10 @@ type freshbreathRefreshData struct {
   UpstreamRefresh  string `json:"upstream_refresh,omitempty"`  // wrapped
   UpstreamTokenURL string `json:"upstream_token_url,omitempty"` // wrapped
   UpstreamScopes   string `json:"upstream_scopes,omitempty"`    // wrapped
+
+  // Token-family fields for rotation (stored in JWT claims, unsealed).
+  FamilyID string `json:"family_id,omitempty"`
+  JTI      string `json:"jti,omitempty"`
 }
 
 // ── AES-256-GCM seal/open ───────────────────────────────────────────
@@ -609,10 +613,13 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
     return "", fmt.Errorf("seal refresh data: %w", err)
   }
   now := time.Now()
-  claims := struct {
+  type refreshClaims struct {
     josejwt.Claims
-    Sealed string `json:"sealed"`
-  }{
+    Sealed   string `json:"sealed"`
+    FamilyID string `json:"family_id"`
+    JTI      string `json:"jti"`
+  }
+  claims := refreshClaims{
     Claims: josejwt.Claims{
       Issuer:   "freshbreath",
       Subject:  data.UserEmail,
@@ -620,7 +627,9 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
       IssuedAt: josejwt.NewNumericDate(now),
       Expiry:   josejwt.NewNumericDate(now.Add(refreshTokenTTL)),
     },
-    Sealed: sealed,
+    Sealed:   sealed,
+    FamilyID: data.FamilyID,
+    JTI:      data.JTI,
   }
   return josejwt.Signed(sig).Claims(claims).Serialize()
 }
@@ -650,7 +659,9 @@ func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error)
   }
   var outer struct {
     josejwt.Claims
-    Sealed string `json:"sealed"`
+    Sealed   string `json:"sealed"`
+    FamilyID string `json:"family_id"`
+    JTI      string `json:"jti"`
   }
   if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &outer); err != nil {
     return nil, fmt.Errorf("verify refresh: %w", err)
@@ -670,5 +681,7 @@ func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error)
   if err := json.Unmarshal(plain, &data); err != nil {
     return nil, fmt.Errorf("unmarshal refresh: %w", err)
   }
+  data.FamilyID = outer.FamilyID
+  data.JTI = outer.JTI
   return &data, nil
 }
