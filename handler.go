@@ -1249,20 +1249,6 @@ func userFromContext(ctx context.Context) *User {
 	return u
 }
 
-func auditActorName(ctx context.Context) string {
-	if u := userFromContext(ctx); u != nil {
-		if u.Name != "" {
-			return u.Name
-		}
-		return fmt.Sprintf("user:%d", u.ID)
-	}
-	return "unknown"
-}
-
-func (s *Server) auditLog(ctx context.Context, action, target string) {
-	_ = s.store.LogAudit(auditActorName(ctx), action, target)
-}
-
 func (s *Server) canAccessApp(ctx context.Context, nonce string) bool {
 	u := userFromContext(ctx)
 	if u == nil {
