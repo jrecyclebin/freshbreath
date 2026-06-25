@@ -398,8 +398,9 @@ func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider
 // decrypts them into the Upstream* fields (json:"-").
 
 const (
-  accessTokenTTL  = 15 * time.Minute
-  refreshTokenTTL = 14 * 24 * time.Hour
+  accessTokenTTL     = 15 * time.Minute
+  refreshTokenTTL    = 14 * 24 * time.Hour
+  refreshGraceWindow = 30 * time.Second
 )
 
 // freshbreathClaims is the single claim type for all Freshbreath JWTs.
