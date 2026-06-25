@@ -9,7 +9,11 @@ import (
   "net/http/httptest"
   "strconv"
   "strings"
+  "sync"
   "testing"
+  "time"
+
+  "github.com/coreos/go-oidc/v3/oidc"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -23,16 +27,28 @@ func newTestServer(t *testing.T) *Server {
   if err := store.Migrate(); err != nil {
     t.Fatalf("migrate: %v", err)
   }
+  localKey, err := store.GetOrCreateLocalSigningKey()
+  if err != nil {
+    t.Fatalf("signing key: %v", err)
+  }
   srv := &Server{
     config: Config{
       Dir:           ".",
       DataDir:       ".",
       PublicBaseURL: "http://localhost:9009",
     },
-    store:      store,
-    pending:    make(map[string]*pendingAuth),
-    httpClient: &http.Client{},
+    store:          store,
+    pending:        make(map[string]*pendingAuth),
+    httpClient:     &http.Client{},
+    oidcProviders:  make(map[int64]*oidc.Provider),
+    hostedRoutes:   make(map[string]string),
+    xfers:          make(map[string]*transferEntry),
+    lastSeenAt:     make(map[int64]time.Time),
+    localKey:       localKey,
+    virtualMCPs:    newVirtualMCPRegistry(),
+    mcpAuthPending: &sync.Map{},
   }
+  srv.oauthSrv = newOAuthServer(srv)
   srv.SetupRoutes()
   return srv
 }

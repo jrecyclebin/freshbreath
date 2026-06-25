@@ -424,6 +424,12 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
     oauthWriteError(w, http.StatusInternalServerError, "server_error", "client lookup error")
     return
   }
+  // An empty secret is accepted intentionally: DCR is open, so client_id/secret
+  // pairs aren't a trust boundary — security rests on mandatory PKCE and the
+  // redirect_uri allowlist. Claude Code and other public PKCE clients omit the
+  // secret. We still reject a *wrong* secret when one is presented. Don't
+  // "harden" this into a required-secret check; it would break those clients
+  // without adding protection PKCE doesn't already provide.
   if !clientOK || (clientSecret != "" && storedSecret != clientSecret) {
     oauthWriteError(w, http.StatusUnauthorized, "invalid_client", "invalid client credentials")
     return
@@ -502,8 +508,10 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
     }
   }
 
-  // Mint a refresh token and write the response.
-  os.writeTokenResponse(w, accessToken, refreshData, pending.upstreamScopes)
+  // Mint a refresh token and write the response. Initial issuance is consumed
+  // by the client exchanging the code (CLI/MCP), so the refresh token goes in
+  // the body.
+  os.writeTokenResponse(w, accessToken, refreshData, pending.upstreamScopes, true)
 }
 
 // ── Refresh Token Grant ─────────────────────────────────────────────
@@ -516,8 +524,12 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 //   "identity" — look up user, re-mint identity token, new pair
 
 func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
-  // Accept refresh token from form body or cookie.
+  // Accept refresh token from form body or cookie. The source tells us the
+  // client kind: a form body means a CLI/MCP client (no cookie jar, reads the
+  // new token from the response body); a cookie means a browser flow (rides
+  // the rotated HttpOnly cookie, must not get a readable body copy).
   rt := r.Form.Get("refresh_token")
+  fromForm := rt != ""
   if rt == "" {
     if c, err := r.Cookie("refresh_token"); err == nil {
       rt = c.Value
@@ -552,7 +564,7 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
     return
   }
 
-  os.writeTokenResponse(w, accessToken, newRefreshData, scope)
+  os.writeTokenResponse(w, accessToken, newRefreshData, scope, fromForm)
 }
 
 // refreshWrapped refreshes the upstream OAuth token, then re-wraps it
@@ -670,7 +682,13 @@ func (os *oauthServer) refreshIdentity(data *freshbreathRefreshData) (string, fr
 //
 // Mint a refresh token, set the HttpOnly cookie, and write the JSON response.
 
-func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, accessToken string, refreshData freshbreathRefreshData, scope string) {
+// writeTokenResponse always rotates the refresh token into a fresh HttpOnly
+// cookie. The body copy is gated on deliverRefreshInBody: CLI/MCP clients have
+// no cookie jar and read it from the body (OAuth's standard contract), but
+// browser flows ride the cookie, so echoing it there would only hand a
+// readable copy to any script on the page — defeating HttpOnly. Callers pass
+// false for cookie-sourced (browser) refreshes.
+func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, accessToken string, refreshData freshbreathRefreshData, scope string, deliverRefreshInBody bool) {
   expiresIn := int(accessTokenTTL.Seconds())
 
   rt, err := os.server.makeRefreshCookie(w, refreshData)
@@ -679,14 +697,18 @@ func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, accessToken str
     return
   }
 
+  resp := map[string]interface{}{
+    "access_token": accessToken,
+    "token_type":   "Bearer",
+    "expires_in":   expiresIn,
+    "scope":        scope,
+  }
+  if deliverRefreshInBody {
+    resp["refresh_token"] = rt
+  }
+
   w.Header().Set("Content-Type", "application/json")
-  json.NewEncoder(w).Encode(map[string]interface{}{
-    "access_token":  accessToken,
-    "token_type":    "Bearer",
-    "expires_in":    expiresIn,
-    "refresh_token": rt,
-    "scope":         scope,
-  })
+  json.NewEncoder(w).Encode(resp)
 }
 
 // ── JWKS Endpoint ───────────────────────────────────────────────────
