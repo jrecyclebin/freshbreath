@@ -453,6 +453,123 @@ func TestOAuthAuthCodeGrantWrappedHappyPath(t *testing.T) {
   }
 }
 
+func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
+	// Authorization code grant must create a refresh family automatically,
+	// and the first refresh must rotate within that family.
+	srv := newTestServer(t)
+	clientID, secret := registerOAuthClient(t, srv)
+	verifier, challenge := pkcePair()
+	svcID := registerService(t, srv, "up", "/mcp/up", ServiceDescriptor{Type: "mcp"})
+	sid, _ := strconv.ParseInt(svcID, 10, 64)
+
+	// Create a user so the identity-refresh path can re-resolve them.
+	if _, err := srv.store.CreateUser("Family User", "family@example.com", "Member", "Active"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// Mint a Freshbreath identity token as the upstream — this makes the
+	// authz_code grant take the identity path (no upstream refresh needed).
+	idToken, err := srv.mintFreshbreathToken("identity", "family@example.com", "Member", "Family User", sid, nil)
+	if err != nil {
+		t.Fatalf("mint identity token: %v", err)
+	}
+
+	code := "fb-auth-code-family-test"
+	srv.oauthSrv.codesMu.Lock()
+	srv.oauthSrv.codes[code] = &mcpAuthCode{
+		issued: time.Now(),
+		pending: &mcpPendingAuth{
+			clientID:            clientID,
+			codeChallenge:       challenge,
+			codeChallengeMethod: "S256",
+			serviceID:           sid,
+			userEmail:           "family@example.com",
+			upstreamToken:       idToken,
+		},
+	}
+	srv.oauthSrv.codesMu.Unlock()
+
+	rr := postForm(t, srv, "/oauth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"code_verifier": {verifier},
+		"client_id":     {clientID},
+		"client_secret": {secret},
+	})
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	rt, _ := resp["refresh_token"].(string)
+	if rt == "" {
+		t.Fatal("expected refresh_token in body")
+	}
+
+	// Decode the refresh token to extract family_id and jti.
+	data, err := srv.verifyRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("verify refresh token: %v", err)
+	}
+	if data.FamilyID == "" {
+		t.Fatal("expected refresh token to have family_id")
+	}
+	if data.JTI == "" {
+		t.Fatal("expected refresh token to have jti")
+	}
+
+	// A family record must exist in the store.
+	fam, ok, err := srv.store.GetRefreshFamily(data.FamilyID)
+	if err != nil {
+		t.Fatalf("get family: %v", err)
+	}
+	if !ok {
+		t.Fatal("family not found in store")
+	}
+	if fam.CurrentJTI != data.JTI {
+		t.Errorf("family current_jti = %q, want %q", fam.CurrentJTI, data.JTI)
+	}
+	if fam.UserEmail != "family@example.com" {
+		t.Errorf("family user_email = %q, want family@example.com", fam.UserEmail)
+	}
+	if fam.ServiceID != sid {
+		t.Errorf("family service_id = %d, want %d", fam.ServiceID, sid)
+	}
+	if fam.Revoked {
+		t.Error("family should not be revoked")
+	}
+
+	// First refresh must rotate within the same family.
+	rr2 := postForm(t, srv, "/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {rt},
+	})
+	if rr2.Code != 200 {
+		t.Fatalf("refresh status = %d, body = %s", rr2.Code, rr2.Body.String())
+	}
+
+	var resp2 map[string]interface{}
+	json.Unmarshal(rr2.Body.Bytes(), &resp2)
+	rt2, _ := resp2["refresh_token"].(string)
+	data2, err := srv.verifyRefreshToken(rt2)
+	if err != nil {
+		t.Fatalf("verify rotated refresh: %v", err)
+	}
+	if data2.FamilyID != data.FamilyID {
+		t.Errorf("rotated family_id = %q, want same family %q", data2.FamilyID, data.FamilyID)
+	}
+	if data2.JTI == data.JTI {
+		t.Error("jti should have rotated")
+	}
+
+	// Family should have rotated in the store.
+	fam2, _, _ := srv.store.GetRefreshFamily(data.FamilyID)
+	if fam2.CurrentJTI != data2.JTI {
+		t.Errorf("family current_jti after rotation = %q, want %q", fam2.CurrentJTI, data2.JTI)
+	}
+}
+
 func TestOAuthAuthCodeGrantPKCEMismatch(t *testing.T) {
   srv := newTestServer(t)
   clientID, secret := registerOAuthClient(t, srv)
@@ -1130,6 +1247,20 @@ func TestVerifyAndUnwrapToken(t *testing.T) {
 }
 
 // ── helper ──────────────────────────────────────────────────────────
+
+func TestDeviceLabelFromUA(t *testing.T) {
+	if got := deviceLabelFromUA(""); got != "" {
+		t.Errorf("empty UA = %q, want empty", got)
+	}
+	short := "Mozilla/5.0 (Macintosh)"
+	if got := deviceLabelFromUA(short); got != short {
+		t.Errorf("short UA = %q, want %q", got, short)
+	}
+	long := strings.Repeat("x", 100)
+	if got := deviceLabelFromUA(long); len(got) != 80 {
+		t.Errorf("long UA len = %d, want 80", len(got))
+	}
+}
 
 func postForm(t *testing.T, srv *Server, path string, form url.Values) *httptest.ResponseRecorder {
   t.Helper()

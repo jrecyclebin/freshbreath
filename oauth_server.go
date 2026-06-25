@@ -509,6 +509,16 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
     }
   }
 
+  // Create a refresh family for this login session.
+  deviceLabel := deviceLabelFromUA(r.UserAgent())
+  familyID, jti, err := os.server.newRefreshFamily(pending.userEmail, pending.serviceID, deviceLabel)
+  if err != nil {
+    oauthWriteError(w, http.StatusInternalServerError, "server_error", "family creation failed")
+    return
+  }
+  refreshData.FamilyID = familyID
+  refreshData.JTI = jti
+
   // Mint a refresh token and write the response. Initial issuance is consumed
   // by the client exchanging the code (CLI/MCP), so the refresh token goes in
   // the body.
@@ -530,6 +540,15 @@ func newJTI() string {
     panic(err)
   }
   return hex.EncodeToString(b)
+}
+
+// deviceLabelFromUA produces a short device label from a User-Agent string.
+// For v1 this is a simple truncation; a future phase may parse out OS/browser.
+func deviceLabelFromUA(ua string) string {
+  if len(ua) > 80 {
+    return ua[:80]
+  }
+  return ua
 }
 
 func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {

@@ -543,11 +543,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // completeAuth writes the postMessage callback page for a completed auth flow.
 // Used by both OIDC and SSH callback paths. If the token is Freshbreath-issued,
 // it also mints a refresh token and sets the HttpOnly cookie.
-func (s *Server) completeAuth(w http.ResponseWriter, pending *pendingAuth, oauth *OAuthData) {
+func (s *Server) completeAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, oauth *OAuthData) {
 	// If the access token is Freshbreath-issued, set the refresh cookie.
 	if isFreshbreathToken(oauth.AccessToken) {
 		if claims, _ := s.verifyFreshbreathToken(oauth.AccessToken); claims != nil {
-			s.setRefreshCookie(w, claims)
+			s.setRefreshCookie(w, r, claims)
 		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -774,7 +774,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			mergedClaims["picture"] = claims.Picture
 		}
 
-		s.completeAuth(w, pending, &OAuthData{
+		s.completeAuth(w, r, pending, &OAuthData{
 			ClientID:    pending.clientID,
 			AccessToken: idToken,
 			TokenType:   "Bearer",
@@ -797,7 +797,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	oauth.Proxied = pending.proxied
 	oauth.Scopes = pending.scopes
 
-	s.completeAuth(w, pending, oauth)
+	s.completeAuth(w, r, pending, oauth)
 }
 
 func writeCallbackPage(w io.Writer, appState, appNonce string, serviceID int64, serviceURL string, oauth *OAuthData) {
@@ -2012,9 +2012,9 @@ func isFreshbreathToken(raw string) bool {
 	return peek.Iss == "freshbreath"
 }
 
-// setRefreshCookie mints a refresh token for the given claims and sets it
-// as an HttpOnly cookie on the response.
-func (s *Server) setRefreshCookie(w http.ResponseWriter, claims *freshbreathClaims) {
+// setRefreshCookie creates a refresh family, mints a refresh token for the
+// given claims, and sets it as an HttpOnly cookie on the response.
+func (s *Server) setRefreshCookie(w http.ResponseWriter, r *http.Request, claims *freshbreathClaims) {
 	refreshData := freshbreathRefreshData{
 		Kind:      claims.Kind,
 		UserEmail: claims.UserEmail,
@@ -2027,6 +2027,18 @@ func (s *Server) setRefreshCookie(w http.ResponseWriter, claims *freshbreathClai
 		refreshData.UpstreamTokenURL = claims.UpstreamTokenURL
 		refreshData.UpstreamScopes = claims.UpstreamScopes
 	}
+
+	deviceLabel := deviceLabelFromUA(r.UserAgent())
+	familyID, jti, err := s.newRefreshFamily(claims.UserEmail, claims.ServiceID, deviceLabel)
+	if err != nil {
+		// Log but don't block the login — the user can still use their
+		// access token. Refresh will fail until they re-login.
+		fmt.Fprintf(os.Stderr, "create refresh family: %v\n", err)
+		s.makeRefreshCookie(w, refreshData)
+		return
+	}
+	refreshData.FamilyID = familyID
+	refreshData.JTI = jti
 	s.makeRefreshCookie(w, refreshData)
 }
 
@@ -2487,7 +2499,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.completeAuth(w, pending, &OAuthData{
+		s.completeAuth(w, r, pending, &OAuthData{
 			AccessToken: idToken,
 			TokenType:   "Bearer",
 			ExpiresAt:   now.Add(accessTokenTTL),
@@ -2633,13 +2645,13 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.LinkAppService(pending.appNonce, pending.serviceID)
 
 		// Fabricate a simple token wrapping the API key
-		s.completeAuth(w, pending, &OAuthData{
+		s.completeAuth(w, r, pending, &OAuthData{
 			AccessToken: req.APIKey,
 			TokenType:   "Bearer",
 			ExpiresAt:   now.Add(24 * time.Hour * 365), // long-lived
 			Claims: map[string]interface{}{
 				"sub": "api-key-user",
-				"iss": "freshbreath",
+				"iss":   "freshbreath",
 			},
 			Proxied: svc.Descriptor.Proxied,
 		})
