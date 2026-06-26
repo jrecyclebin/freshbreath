@@ -744,14 +744,30 @@ func formatInt(n int64) string {
 
 // ── Session Management API Tests ──
 
+// authTokenForUser mints a real Freshbreath identity token for the given
+// user by creating a synthetic auth service, wiring it as admin_auth_service,
+// and signing a JWT. The caller must have already created the user in s.store.
+func authTokenForUser(t *testing.T, srv *Server, email, name, role string) string {
+  t.Helper()
+  svcID := registerService(t, srv, "test-auth", "http://localhost/mcp", ServiceDescriptor{Type: "mcp"})
+  sid, _ := strconv.ParseInt(svcID, 10, 64)
+  if err := srv.store.SetSetting("admin_auth_service", svcID); err != nil {
+    t.Fatalf("set admin_auth_service: %v", err)
+  }
+  token, err := srv.mintFreshbreathToken("identity", email, role, name, sid, nil)
+  if err != nil {
+    t.Fatalf("mint identity token: %v", err)
+  }
+  return token
+}
+
 func TestGetMySessions(t *testing.T) {
   srv := newTestServer(t)
-  // Create a user and some refresh families for testing
   _, err := srv.store.CreateUser("Session User", "session@example.com", "Member", "Active")
   if err != nil {
     t.Fatalf("create user: %v", err)
   }
-  // Create a refresh family directly in the store
+  token := authTokenForUser(t, srv, "session@example.com", "Session User", "Member")
   fam := &RefreshFamily{
     ID:          "test-session-id",
     UserEmail:   "session@example.com",
@@ -765,7 +781,9 @@ func TestGetMySessions(t *testing.T) {
     t.Fatalf("create refresh family: %v", err)
   }
 
-  rr := testRequest(t, srv, "GET", "/api/me/sessions", nil, nil)
+  rr := testRequest(t, srv, "GET", "/api/me/sessions", nil, map[string]string{
+    "Authorization": "Bearer " + token,
+  })
   if rr.Code != 200 {
     t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
   }
@@ -786,6 +804,7 @@ func TestRevokeAllSessions(t *testing.T) {
   if err != nil {
     t.Fatalf("create user: %v", err)
   }
+  token := authTokenForUser(t, srv, "revoke@example.com", "Revoke User", "Member")
   fam := &RefreshFamily{
     ID:          "revoke-session-id",
     UserEmail:   "revoke@example.com",
@@ -799,12 +818,13 @@ func TestRevokeAllSessions(t *testing.T) {
     t.Fatalf("create refresh family: %v", err)
   }
 
-  rr := testRequest(t, srv, "DELETE", "/api/me/sessions", nil, nil)
+  rr := testRequest(t, srv, "DELETE", "/api/me/sessions", nil, map[string]string{
+    "Authorization": "Bearer " + token,
+  })
   if rr.Code != 204 {
     t.Fatalf("status = %d, want 204, body = %s", rr.Code, rr.Body.String())
   }
 
-  // Verify the family is now revoked
   got, _, _ := srv.store.GetRefreshFamily("revoke-session-id")
   if !got.Revoked {
     t.Error("expected session to be revoked")
@@ -817,6 +837,7 @@ func TestRevokeSpecificSession(t *testing.T) {
   if err != nil {
     t.Fatalf("create user: %v", err)
   }
+  token := authTokenForUser(t, srv, "single@example.com", "Revoke Single User", "Member")
   fam := &RefreshFamily{
     ID:          "single-session-id",
     UserEmail:   "single@example.com",
@@ -830,7 +851,9 @@ func TestRevokeSpecificSession(t *testing.T) {
     t.Fatalf("create refresh family: %v", err)
   }
 
-  rr := testRequest(t, srv, "DELETE", "/api/me/sessions/single-session-id", nil, nil)
+  rr := testRequest(t, srv, "DELETE", "/api/me/sessions/single-session-id", nil, map[string]string{
+    "Authorization": "Bearer " + token,
+  })
   if rr.Code != 204 {
     t.Fatalf("status = %d, want 204, body = %s", rr.Code, rr.Body.String())
   }
@@ -843,7 +866,15 @@ func TestRevokeSpecificSession(t *testing.T) {
 
 func TestRevokeSessionNotFound(t *testing.T) {
   srv := newTestServer(t)
-  rr := testRequest(t, srv, "DELETE", "/api/me/sessions/nonexistent-id", nil, nil)
+  _, err := srv.store.CreateUser("Not Found User", "notfound@example.com", "Member", "Active")
+  if err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+  token := authTokenForUser(t, srv, "notfound@example.com", "Not Found User", "Member")
+
+  rr := testRequest(t, srv, "DELETE", "/api/me/sessions/nonexistent-id", nil, map[string]string{
+    "Authorization": "Bearer " + token,
+  })
   if rr.Code != 404 {
     t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
   }

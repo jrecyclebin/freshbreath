@@ -279,6 +279,7 @@ func main() {
     for range t.C {
       agentMgr.ExpireKeys()
       sessionMgr.ExpireSessions()
+      store.DeleteExpiredRefreshFamilies(time.Now())
     }
   }()
 
