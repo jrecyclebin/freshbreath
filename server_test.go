@@ -741,3 +741,110 @@ func formatInt(n int64) string {
   }
   return string(buf[:i])
 }
+
+// ── Session Management API Tests ──
+
+func TestGetMySessions(t *testing.T) {
+  srv := newTestServer(t)
+  // Create a user and some refresh families for testing
+  _, err := srv.store.CreateUser("Session User", "session@example.com", "Member", "Active")
+  if err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+  // Create a refresh family directly in the store
+  fam := &RefreshFamily{
+    ID:          "test-session-id",
+    UserEmail:   "session@example.com",
+    ServiceID:   1,
+    DeviceLabel: "Test Device",
+    CurrentJTI:  "test-jti",
+    CreatedAt:   time.Now(),
+    ExpiresAt:   time.Now().Add(24 * time.Hour),
+  }
+  if err := srv.store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create refresh family: %v", err)
+  }
+
+  rr := testRequest(t, srv, "GET", "/api/me/sessions", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+  }
+
+  var resp map[string]interface{}
+  if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+    t.Fatalf("unmarshal response: %v", err)
+  }
+  sessions := resp["sessions"].([]interface{})
+  if len(sessions) < 1 {
+    t.Errorf("expected at least 1 session, got %d", len(sessions))
+  }
+}
+
+func TestRevokeAllSessions(t *testing.T) {
+  srv := newTestServer(t)
+  _, err := srv.store.CreateUser("Revoke User", "revoke@example.com", "Member", "Active")
+  if err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+  fam := &RefreshFamily{
+    ID:          "revoke-session-id",
+    UserEmail:   "revoke@example.com",
+    ServiceID:   1,
+    DeviceLabel: "Test Device",
+    CurrentJTI:  "test-jti",
+    CreatedAt:   time.Now(),
+    ExpiresAt:   time.Now().Add(24 * time.Hour),
+  }
+  if err := srv.store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create refresh family: %v", err)
+  }
+
+  rr := testRequest(t, srv, "DELETE", "/api/me/sessions", nil, nil)
+  if rr.Code != 204 {
+    t.Fatalf("status = %d, want 204, body = %s", rr.Code, rr.Body.String())
+  }
+
+  // Verify the family is now revoked
+  got, _, _ := srv.store.GetRefreshFamily("revoke-session-id")
+  if !got.Revoked {
+    t.Error("expected session to be revoked")
+  }
+}
+
+func TestRevokeSpecificSession(t *testing.T) {
+  srv := newTestServer(t)
+  _, err := srv.store.CreateUser("Revoke Single User", "single@example.com", "Member", "Active")
+  if err != nil {
+    t.Fatalf("create user: %v", err)
+  }
+  fam := &RefreshFamily{
+    ID:          "single-session-id",
+    UserEmail:   "single@example.com",
+    ServiceID:   1,
+    DeviceLabel: "Test Device",
+    CurrentJTI:  "test-jti",
+    CreatedAt:   time.Now(),
+    ExpiresAt:   time.Now().Add(24 * time.Hour),
+  }
+  if err := srv.store.CreateRefreshFamily(fam); err != nil {
+    t.Fatalf("create refresh family: %v", err)
+  }
+
+  rr := testRequest(t, srv, "DELETE", "/api/me/sessions/single-session-id", nil, nil)
+  if rr.Code != 204 {
+    t.Fatalf("status = %d, want 204, body = %s", rr.Code, rr.Body.String())
+  }
+
+  got, _, _ := srv.store.GetRefreshFamily("single-session-id")
+  if !got.Revoked {
+    t.Error("expected session to be revoked")
+  }
+}
+
+func TestRevokeSessionNotFound(t *testing.T) {
+  srv := newTestServer(t)
+  rr := testRequest(t, srv, "DELETE", "/api/me/sessions/nonexistent-id", nil, nil)
+  if rr.Code != 404 {
+    t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+  }
+}

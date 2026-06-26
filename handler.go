@@ -149,6 +149,8 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/audit", s.authWrap(pipeline(s.handleAudit, anyRole)))
 	s.mux.HandleFunc("/api/me", s.authWrap(pipeline(s.handleMe, anyRole)))
 	s.mux.HandleFunc("/api/me/ssh-key", s.authWrap(pipeline(s.handleSSHKey, anyRole)))
+	s.mux.HandleFunc("/api/me/sessions", s.authWrap(pipeline(s.handleSessions, anyRole)))
+	s.mux.HandleFunc("/api/me/sessions/", s.authWrap(pipeline(s.handleSessionDetail, anyRole)))
 	s.mux.HandleFunc("/api/settings", s.authWrap(pipeline(s.handleSettings, superuser)))
 	s.mux.HandleFunc("/api/xfer/{token}", s.handleXfer)
 
@@ -2118,6 +2120,87 @@ func (s *Server) handleSSHKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.handleUserSSHKey(w, r, user.ID)
+}
+
+// handleSessions handles GET /api/me/sessions (list active sessions) and
+// DELETE /api/me/sessions (revoke all sessions for the current user).
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	user, _ := r.Context().Value(userKey).(*User)
+	if user == nil || user.ID < 0 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		families, err := s.store.ListRefreshFamilies(user.Email)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("list sessions: %v", err), http.StatusInternalServerError)
+			return
+		}
+		// Convert RefreshFamily to a session summary for the API response.
+		sessions := make([]map[string]interface{}, 0, len(families))
+		for _, f := range families {
+			sessions = append(sessions, map[string]interface{}{
+				"id":           f.ID,
+				"service_id":   f.ServiceID,
+				"device_label": f.DeviceLabel,
+				"created_at":   f.CreatedAt,
+				"expires_at":   f.ExpiresAt,
+				"last_used_at": f.LastUsedAt,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"sessions": sessions})
+
+	case http.MethodDelete:
+		if err := s.store.RevokeUserRefreshFamilies(user.Email); err != nil {
+			http.Error(w, fmt.Sprintf("revoke sessions: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSessionDetail handles DELETE /api/me/sessions/{id} — revoke a specific session.
+func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
+	user, _ := r.Context().Value(userKey).(*User)
+	if user == nil || user.ID < 0 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract session ID from path: /api/me/sessions/{id}
+	sessionID := strings.TrimPrefix(r.URL.Path, "/api/me/sessions/")
+	if sessionID == "" {
+		http.Error(w, "session ID required", http.StatusBadRequest)
+		return
+	}
+
+	// Verify the session belongs to this user before revoking.
+	fam, ok, err := s.store.GetRefreshFamily(sessionID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("lookup session: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !ok || fam.UserEmail != user.Email {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.store.RevokeRefreshFamily(sessionID); err != nil {
+		http.Error(w, fmt.Sprintf("revoke session: %v", err), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleSSHSessions handles POST /ssh/sessions — open a new SSH session.
