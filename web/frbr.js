@@ -227,7 +227,14 @@ export class ServiceProxy extends EventEmitter {
     let t;
     if (this.#authService) {
       // Delegate refresh to the authService (e.g. OIDC identity)
-      return await this.#authService.refresh();
+      try {
+        return await this.#authService.refresh();
+      } catch (e) {
+        // Auth service refresh failed — auto re-login
+        const fresh = await login(this);
+        this.#adoptCredentials(fresh);
+        return;
+      }
     } else if (isFreshbreathToken(this.#data?.access_token)) {
       // Freshbreath-issued token — refresh through /oauth/token.
       // The refresh token is in an HttpOnly cookie auto-attached to this path.
@@ -241,11 +248,22 @@ export class ServiceProxy extends EventEmitter {
         credentials: "include",
         body,
       });
-      if (!r.ok) throw new Error(`Token refresh failed (${r.status})`);
+      if (!r.ok) {
+        if (r.status === 400) {
+          // Refresh token expired or invalid — auto re-login
+          const fresh = await login(this);
+          this.#adoptCredentials(fresh);
+          return;
+        }
+        throw new Error(`Token refresh failed (${r.status})`);
+      }
       t = await r.json();
       delete t?.refresh_token; // Kept in an HttpOnly cookie
     } else if (!this.#data?.refresh_token) {
-      throw new Error("No refresh token available — re-login required");
+      // No refresh token — auto re-login
+      const fresh = await login(this);
+      this.#adoptCredentials(fresh);
+      return;
     } else if (this.#proxied && this.#serviceID) {
       // Proxied refresh: server-side with stored client_secret
       const body = {
@@ -263,7 +281,15 @@ export class ServiceProxy extends EventEmitter {
         },
         body: JSON.stringify(body),
       });
-      if (!r.ok) throw new Error(`Token refresh failed (${r.status})`);
+      if (!r.ok) {
+        if (r.status === 400) {
+          // Refresh token expired — auto re-login
+          const fresh = await login(this);
+          this.#adoptCredentials(fresh);
+          return;
+        }
+        throw new Error(`Token refresh failed (${r.status})`);
+      }
       t = await r.json();
     } else {
       // Direct refresh: full OAuth client credentials in body
@@ -286,7 +312,15 @@ export class ServiceProxy extends EventEmitter {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body,
       });
-      if (!r.ok) throw new Error(`Token refresh failed (${r.status})`);
+      if (!r.ok) {
+        if (r.status === 400) {
+          // Refresh token expired — auto re-login
+          const fresh = await login(this);
+          this.#adoptCredentials(fresh);
+          return;
+        }
+        throw new Error(`Token refresh failed (${r.status})`);
+      }
       t = await r.json();
     }
 
@@ -297,6 +331,16 @@ export class ServiceProxy extends EventEmitter {
       id_token:     t.id_token ?? this.#data.id_token,
       expires_at:   t.expires_in ? new Date(Date.now() + (t.expires_in * 1000)) : null,
     };
+    this.emit("refresh", this);
+  }
+
+  // Adopt credentials from a fresh ServiceProxy (after re-login)
+  #adoptCredentials(fresh) {
+    this.#data = fresh.#data;
+    this.#apiKey = fresh.#apiKey;
+    this.#apiHeader = fresh.#apiHeader;
+    this.#serviceID = fresh.#serviceID;
+    this.#proxied = fresh.#proxied;
     this.emit("refresh", this);
   }
 
