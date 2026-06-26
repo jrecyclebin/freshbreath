@@ -109,6 +109,7 @@ export class ServiceProxy extends EventEmitter {
   #proxied;
   #authService;
   #client = null;
+  #refreshPromise = null;
 
   /**
    * @param {Object} opts
@@ -213,6 +214,16 @@ export class ServiceProxy extends EventEmitter {
   }
 
   async refresh() {
+    if (this.#refreshPromise) return this.#refreshPromise;
+    this.#refreshPromise = this.#doRefresh();
+    try {
+      return await this.#refreshPromise;
+    } finally {
+      this.#refreshPromise = null;
+    }
+  }
+
+  async #doRefresh() {
     let t;
     if (this.#authService) {
       // Delegate refresh to the authService (e.g. OIDC identity)
