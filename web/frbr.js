@@ -201,13 +201,13 @@ export class ServiceProxy extends EventEmitter {
     }
     if (this.#apiKey) {
       if (this.#apiHeader) {
-        headers[this.#apiHeader] = this.#apiKey;
+        headers.set(this.#apiHeader, this.#apiKey);
       } else {
-        headers['Authorization'] = `Bearer ${this.#apiKey}`;
+        headers.set('Authorization', `Bearer ${this.#apiKey}`);
       }
       return false
     } else if (this.#data) {
-      headers['Authorization'] = `${this.#data.token_type || "Bearer"} ${this.#data.access_token}`;
+      headers.set('Authorization', `${this.#data.token_type || "Bearer"} ${this.#data.access_token}`);
       return true
     }
     return false
@@ -352,7 +352,7 @@ export class ServiceProxy extends EventEmitter {
       throw new Error("Tasks services don't use MCP connect. Use listTools/callTool directly.");
     }
     await this.checkToken();
-    const headers = {};
+    const headers = new Headers({});
     this.addAuth(headers);
     const transport = new StreamableHTTPClientTransport(new URL(this.#serviceURL), {
       requestInit: { headers },
@@ -375,19 +375,15 @@ export class ServiceProxy extends EventEmitter {
     }
   }
 
-  async #fetch(url, opts) {
-    let canRefresh = false
-    if (opts.headers) {
-      opts.headers['X-App-Nonce'] = APP_NONCE;
-      canRefresh = this.addAuth(opts.headers);
-    }
-    let res = await fetch(url, opts);
+  async #fetch(url, init = {}) {
+    const headers = new Headers(init.headers);
+    headers.set('X-App-Nonce', APP_NONCE);
+    const canRefresh = this.addAuth(headers);
+    let res = await fetch(url, { ...init, headers });
     if (canRefresh && res.status === 401) {
       await this.refresh();
-      if (opts.headers) {
-        this.addAuth(opts.headers);
-      }
-      res = await fetch(url, opts);
+      this.addAuth(headers);
+      res = await fetch(url, { ...init, headers });
     }
     return res;
   }
@@ -406,7 +402,7 @@ export class ServiceProxy extends EventEmitter {
   async listTools() {
     const slug = this.#serviceSlug();
     if (slug) {
-      const r = await this.#fetch(`${API}/service/call/${slug}`, {headers: {}});
+      const r = await this.#fetch(`${API}/service/call/${slug}`);
       if (!r.ok) throw new Error(`listTools failed (${r.status})`);
       const { tools } = await r.json();
       return tools;
@@ -454,7 +450,7 @@ export class ServiceProxy extends EventEmitter {
           fd.append(k, JSON.stringify(v));
         }
       }
-      const r = await this.#fetch(url, { method: 'POST', headers: {}, body: fd });
+      const r = await this.#fetch(url, { method: 'POST', body: fd });
       if (!r.ok) {
         const text = await r.text();
         throw new Error(`Task call failed (${r.status}): ${text}`);
@@ -483,14 +479,13 @@ export class ServiceProxy extends EventEmitter {
    * @param {RequestInit} [init] — fetch options (method, body, headers, etc.)
    */
   async fetch(path, init = {}) {
-    const headers = new Headers(init.headers || {});
     let url = `${this.#serviceURL}${path}`;
 
     if ((this.#proxied || window.location.protocol !== 'file:') && this.#serviceID) {
       url = `${API}/service/${this.#serviceID}/${path.replace(/^\//, "")}`;
     }
 
-    return this.#fetch(url, { ...init, headers });
+    return this.#fetch(url, init);
   }
 }
 
