@@ -246,25 +246,6 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*User, error) {
 	return user, nil
 }
 
-// mcpCanAccessApp has the logic for checking that this user
-// has permissions to the app. This allows us to gate the publishing tools
-// in the same way as the API calls.
-func (s *Server) mcpCanAccessApp(user *User, nonce string) error {
-	if nonce == "" {
-		return fmt.Errorf("nonce is required")
-	}
-
-	// Members can only see apps they belong to.
-	if user.Role != "Superuser" && user.Role != "Admin" {
-		ok, _ := s.store.IsAppMember(nonce, user.ID)
-		if !ok {
-			return fmt.Errorf("forbidden: not a member of this app")
-		}
-	}
-
-	return nil
-}
-
 // mcpToolError returns a tool result with an error message.
 func mcpToolError(format string, args ...interface{}) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
@@ -333,8 +314,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		err = s.mcpCanAccessApp(user, nonce)
-		if err != nil {
+		if err := s.gateApp(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 
@@ -483,8 +463,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		err = s.mcpCanAccessApp(user, nonce)
-		if err != nil {
+		if err := s.gateApp(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 
@@ -553,8 +532,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		err = s.mcpCanAccessApp(user, nonce)
-		if err != nil {
+		if err := s.gateApp(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 
@@ -622,11 +600,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		err = s.mcpCanAccessApp(user, nonce)
-		if err != nil {
-			return mcpToolError("%v", err), nil
-		}
-
 		files, err := s.coreListAppWeb(user, nonce)
 		if err != nil {
 			return mcpToolError("%v", err), nil
@@ -653,8 +626,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		err = s.mcpCanAccessApp(user, nonce)
-		if err != nil {
+		if err := s.gateApp(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		app, err := s.store.GetApp(nonce)
@@ -690,8 +662,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
 		filename, _ := args["filename"].(string)
-		err = s.mcpCanAccessApp(user, nonce)
-		if err != nil {
+		if err := s.gateApp(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		if filename == "" {
@@ -728,11 +699,6 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		err = s.mcpCanAccessApp(user, nonce)
-		if err != nil {
-			return mcpToolError("%v", err), nil
-		}
-
 		if err := s.coreDeleteAppWeb(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
