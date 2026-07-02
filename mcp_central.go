@@ -721,7 +721,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		dataStr, _ := args["data"].(string)
 
 		parsed, err := url.Parse(urlStr)
-		if err != nil || parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/api/xfer/") {
+		if err != nil || parsed.Path == "" || !strings.Contains(parsed.Path, "/api/xfer/") {
 			return mcpToolError("invalid transfer url"), nil
 		}
 		token := path.Base(parsed.Path)
