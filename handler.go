@@ -1168,11 +1168,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
 	env = append(env, "TASK="+taskName)
 	if args != nil {
 		for k, v := range args {
-			jsonVal, err := json.Marshal(v)
-			if err != nil {
-				jsonVal = []byte(fmt.Sprintf("%v", v))
-			}
-			env = append(env, "TASK_"+strings.ToUpper(k)+"="+string(jsonVal))
+			env = append(env, "TASK_"+strings.ToUpper(k)+"="+taskArgValue(v))
 		}
 	}
 
@@ -1227,6 +1223,30 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
+}
+
+// taskArgValue formats a task argument for injection into a shell environment.
+// Strings and numbers pass through as plain text; arrays, maps, and booleans
+// are encoded as JSON so scripts can parse structured values.
+func taskArgValue(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(val)
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case bool:
+		return strconv.FormatBool(val)
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprintf("%v", v)
+		}
+		return string(b)
+	}
 }
 
 // apps
