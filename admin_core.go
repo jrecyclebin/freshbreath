@@ -96,6 +96,26 @@ func (s *Server) gate(actor *User, allowed []string) error {
 	return cerr(http.StatusForbidden, "forbidden: requires %s", strings.Join(allowed, " or "))
 }
 
+// gateApp returns a 403 *coreErr unless the actor is Admin+ or a member of
+// the app identified by nonce. It is the single source of truth for app-level
+// access in both HTTP and MCP paths.
+func (s *Server) gateApp(actor *User, nonce string) error {
+	if actor != nil && roleIn(actor.Role, rolesAdminPlus) {
+		return nil
+	}
+	if actor == nil || nonce == "" {
+		return cerr(http.StatusForbidden, "forbidden: not a member of this app")
+	}
+	ok, err := s.store.IsAppMember(nonce, actor.ID)
+	if err != nil {
+		return cerr(http.StatusInternalServerError, "membership check failed: %v", err)
+	}
+	if !ok {
+		return cerr(http.StatusForbidden, "forbidden: not a member of this app")
+	}
+	return nil
+}
+
 // gateSelfOrAdmin allows the action when actor operates on their own account,
 // or when actor is Admin+. Backs the SSH-key ops that serve both the
 // self-service (generate_my_ssh_key) and admin (generate_user_ssh_key)
@@ -455,7 +475,7 @@ type appFile struct {
 // coreListAppWeb lists the files in an app's web directory, sorted by path.
 // An app with no uploaded files lists empty (not an error).
 func (s *Server) coreListAppWeb(actor *User, nonce string) ([]appFile, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
 	if _, err := s.store.GetApp(nonce); err != nil {
@@ -483,7 +503,7 @@ func (s *Server) coreListAppWeb(actor *User, nonce string) ([]appFile, error) {
 
 // coreDownloadAppWeb returns the app's web directory as a zip archive.
 func (s *Server) coreDownloadAppWeb(actor *User, nonce string) ([]byte, string, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, "", err
 	}
 	app, err := s.store.GetApp(nonce)
@@ -527,7 +547,7 @@ func (s *Server) coreDownloadAppWeb(actor *User, nonce string) ([]byte, string, 
 // filename determines handling: .html is saved as index.html; .zip is
 // extracted via extractZip.
 func (s *Server) coreUploadAppWeb(actor *User, nonce string, data []byte, filename string) (string, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateApp(actor, nonce); err != nil {
 		return "", err
 	}
 	app, err := s.store.GetApp(nonce)
@@ -571,7 +591,7 @@ func (s *Server) coreUploadAppWeb(actor *User, nonce string, data []byte, filena
 
 // coreDeleteAppWeb removes an app's web directory and clears its details.
 func (s *Server) coreDeleteAppWeb(actor *User, nonce string) error {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
 	app, err := s.store.GetApp(nonce)

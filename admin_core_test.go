@@ -35,7 +35,6 @@ func TestCoreAuthority(t *testing.T) {
 		"coreUpdateUser":     func() error { return srv.coreUpdateUser(member, 1, "n", "e@x", "Member", "Active", nil) },
 		"coreDeleteUser":     func() error { return srv.coreDeleteUser(member, other) },
 		"coreSetUserApps":    func() error { return srv.coreSetUserApps(member, 1, nil) },
-		"coreListAppWeb":     func() error { _, e := srv.coreListAppWeb(member, "n"); return e },
 	}
 	for name, op := range adminPlusOps {
 		if err := op(); !forbidden(err) {
@@ -77,5 +76,64 @@ func TestCoreAuthoritySelfOrAdmin(t *testing.T) {
 	// Member acting on another user: forbidden.
 	if err := srv.coreDeleteSSHKey(member, other); !forbidden(err) {
 		t.Errorf("coreDeleteSSHKey(member→other): got %v, want 403", err)
+	}
+}
+
+// TestGateApp verifies that app-level web ops allow Admin+ and app members,
+// but reject non-members.
+func TestGateApp(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Create an app and two users: one member, one not.
+	admin := &User{ID: 1, Role: "Admin"}
+	member := &User{ID: 2, Role: "Member"}
+	outsider := &User{ID: 3, Role: "Member"}
+
+	nonce, err := srv.coreCreateApp(admin, "gate-test", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	member, err = srv.coreCreateUser(admin, "member", "member@x", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	outsider, err = srv.coreCreateUser(admin, "outsider", "outsider@x", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create outsider: %v", err)
+	}
+	if err := srv.coreSetAppMembers(admin, nonce, []int64{member.ID}); err != nil {
+		t.Fatalf("set members: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		actor  *User
+		op     func() error
+		wantOK bool
+	}{
+		{"list: admin", admin, func() error { _, e := srv.coreListAppWeb(admin, nonce); return e }, true},
+		{"list: member", member, func() error { _, e := srv.coreListAppWeb(member, nonce); return e }, true},
+		{"list: outsider", outsider, func() error { _, e := srv.coreListAppWeb(outsider, nonce); return e }, false},
+		{"upload: admin", admin, func() error { _, e := srv.coreUploadAppWeb(admin, nonce, []byte("<h1>x</h1>"), "index.html"); return e }, true},
+		{"upload: member", member, func() error { _, e := srv.coreUploadAppWeb(member, nonce, []byte("<h1>x</h1>"), "index.html"); return e }, true},
+		{"upload: outsider", outsider, func() error { _, e := srv.coreUploadAppWeb(outsider, nonce, []byte("<h1>x</h1>"), "index.html"); return e }, false},
+		{"download: admin", admin, func() error { _, _, e := srv.coreDownloadAppWeb(admin, nonce); return e }, true},
+		{"download: member", member, func() error { _, _, e := srv.coreDownloadAppWeb(member, nonce); return e }, true},
+		{"download: outsider", outsider, func() error { _, _, e := srv.coreDownloadAppWeb(outsider, nonce); return e }, false},
+		{"delete: admin", admin, func() error { return srv.coreDeleteAppWeb(admin, nonce) }, true},
+		{"delete: member", member, func() error { return srv.coreDeleteAppWeb(member, nonce) }, true},
+		{"delete: outsider", outsider, func() error { return srv.coreDeleteAppWeb(outsider, nonce) }, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.op()
+			if tc.wantOK && forbidden(err) {
+				t.Errorf("got 403, want allowed")
+			}
+			if !tc.wantOK && !forbidden(err) {
+				t.Errorf("got %v, want 403 forbidden", err)
+			}
+		})
 	}
 }
