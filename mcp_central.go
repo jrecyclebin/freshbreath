@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -263,6 +266,21 @@ func mcpToolResult(v interface{}) (*mcp.CallToolResult, error) {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(data)}},
 	}, nil
+}
+
+// decodeBase64Transfer tries common base64 variants and returns the decoded
+// bytes. It is liberal so LLM-generated data isn't punished for padding quirks.
+func decodeBase64Transfer(s string) ([]byte, error) {
+	if d, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return d, nil
+	}
+	if d, err := base64.URLEncoding.DecodeString(s); err == nil {
+		return d, nil
+	}
+	if d, err := base64.RawStdEncoding.DecodeString(s); err == nil {
+		return d, nil
+	}
+	return base64.RawURLEncoding.DecodeString(s)
 }
 
 // ── App Tools ───────────────────────────────────────────────────────
@@ -678,6 +696,60 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 
 		url := s.newTransfer("upload", nonce, filename, user)
 		return mcpToolResult(map[string]interface{}{"url": url})
+	})
+
+	// xfer_fallback
+	mcps.AddTool(&mcp.Tool{
+		Name:        "xfer_fallback",
+		Description: "(Legacy) Upload web files directly if making a request to the transfer URL fails. Avoid using this if you have other options, as this method will clutter up the context window. Provide the URL returned by publish_app_files and the base64-encoded file contents.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"url":  map[string]interface{}{"type": "string", "description": "The upload transfer URL from publish_app_files"},
+				"data": map[string]interface{}{"type": "string", "description": "Base64-encoded file bytes (.html or .zip)"},
+			},
+			"required": []string{"url", "data"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		urlStr, _ := args["url"].(string)
+		dataStr, _ := args["data"].(string)
+
+		parsed, err := url.Parse(urlStr)
+		if err != nil || parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/api/xfer/") {
+			return mcpToolError("invalid transfer url"), nil
+		}
+		token := path.Base(parsed.Path)
+
+		e := s.takeTransfer(token)
+		if e == nil {
+			return mcpToolError("invalid or expired transfer url"), nil
+		}
+		if e.Action != "upload" {
+			return mcpToolError("transfer url is not an upload"), nil
+		}
+		if user.ID != e.Actor.ID {
+			return mcpToolError("transfer url was created by a different user"), nil
+		}
+
+		data, err := decodeBase64Transfer(dataStr)
+		if err != nil {
+			return mcpToolError("invalid base64 data: %v", err), nil
+		}
+		if len(data) > xferMaxUpload {
+			return mcpToolError("file too large (50MB max)"), nil
+		}
+
+		route, err := s.coreUploadAppWeb(e.Actor, e.Nonce, data, e.Filename)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]string{"route": route})
 	})
 
 	// delete_app_files
