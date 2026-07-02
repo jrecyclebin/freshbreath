@@ -55,3 +55,7 @@ is extracted, each publish replaces the last.
 - **Same-origin perks** — once hosted, your app can `import` from `/frbr.js`
   (relative) and make non-proxied service calls without CORS headaches. The
   `file://` caveats in the auth guide simply don't apply.
+- **Fallback transfer** — if accessing the transfer URLs fails, try the legacy
+  `xfer_fallback` call. Pass `{ url, data }`: the transfer URL and the `data`
+  as base64-encoded file contents. The URL is consumed and the file is
+  published directly; returns `{ route }` just like the HTTP redemption path.
