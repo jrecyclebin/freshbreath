@@ -7,6 +7,8 @@ import (
   "io"
   "net/http"
   "net/http/httptest"
+  "os"
+  "path/filepath"
   "strconv"
   "strings"
   "sync"
@@ -254,6 +256,96 @@ func TestServiceDetailNotFound(t *testing.T) {
   rr := testRequest(t, srv, "GET", "/api/services/9999", nil, nil)
   if rr.Code != 404 {
     t.Errorf("status = %d, want 404", rr.Code)
+  }
+}
+
+// ── Admin API: Service tools ──
+
+func TestServiceToolsTasks(t *testing.T) {
+  srv := newTestServer(t)
+  id := registerService(t, srv, "mytasks", "", ServiceDescriptor{Type: "tasks"})
+
+  // Missing file returns an empty list for newly-created services.
+  rr := testRequest(t, srv, "GET", "/api/services/"+id+"/tools", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var empty map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &empty)
+  if len(empty["tools"].([]interface{})) != 0 {
+    t.Errorf("expected empty tools, got %v", empty["tools"])
+  }
+
+  // Write a tasks file and verify the endpoint parses it.
+  path := filepath.Join("tasks", "mytasks.txt")
+  if err := os.MkdirAll("tasks", 0755); err != nil {
+    t.Fatalf("mkdir tasks: %v", err)
+  }
+  if err := os.WriteFile(path, []byte("[greet] Say hello\necho hi\n[build] Compile\nmake\n"), 0644); err != nil {
+    t.Fatalf("write tasks file: %v", err)
+  }
+  defer os.Remove(path)
+
+  rr = testRequest(t, srv, "GET", "/api/services/"+id+"/tools", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var res map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &res)
+  tools := res["tools"].([]interface{})
+  if len(tools) != 2 {
+    t.Fatalf("len(tools) = %d, want 2", len(tools))
+  }
+  first := tools[0].(map[string]interface{})
+  if first["name"] != "greet" || first["description"] != "Say hello" {
+    t.Errorf("first tool = %v, want {name:greet description:Say hello}", first)
+  }
+  second := tools[1].(map[string]interface{})
+  if second["name"] != "build" || second["description"] != "Compile" {
+    t.Errorf("second tool = %v, want {name:build description:Compile}", second)
+  }
+}
+
+func TestServiceToolsVirtual(t *testing.T) {
+  srv := newTestServer(t)
+  id := registerService(t, srv, "myvirtual", "", ServiceDescriptor{Type: "virtual"})
+
+  path := filepath.Join("virtual", "myvirtual.txt")
+  if err := os.MkdirAll("virtual", 0755); err != nil {
+    t.Fatalf("mkdir virtual: %v", err)
+  }
+  content := "[get-user] Fetch a user\nGET https://api.example.com/users/$id\n---\n[list-users] List users\nGET https://api.example.com/users\n"
+  if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+    t.Fatalf("write virtual file: %v", err)
+  }
+  defer os.Remove(path)
+
+  rr := testRequest(t, srv, "GET", "/api/services/"+id+"/tools", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var res map[string]interface{}
+  json.Unmarshal(rr.Body.Bytes(), &res)
+  tools := res["tools"].([]interface{})
+  if len(tools) != 2 {
+    t.Fatalf("len(tools) = %d, want 2", len(tools))
+  }
+  names := []string{}
+  for _, t := range tools {
+    names = append(names, t.(map[string]interface{})["name"].(string))
+  }
+  if names[0] != "get-user" || names[1] != "list-users" {
+    t.Errorf("tool names = %v, want [get-user list-users]", names)
+  }
+}
+
+func TestServiceToolsUnsupportedType(t *testing.T) {
+  srv := newTestServer(t)
+  id := registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+
+  rr := testRequest(t, srv, "GET", "/api/services/"+id+"/tools", nil, nil)
+  if rr.Code != 400 {
+    t.Errorf("status = %d, want 400", rr.Code)
   }
 }
 

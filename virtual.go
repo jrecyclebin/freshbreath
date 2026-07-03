@@ -859,7 +859,7 @@ func loadVirtualTools(dir string, svcName string) ([]VirtualTool, error) {
   path := filepath.Join(dir, "virtual", svcName+".txt")
   data, err := os.ReadFile(path)
   if err != nil {
-    return nil, fmt.Errorf("virtual file not found: %s", path)
+    return nil, fmt.Errorf("virtual file not found: %s: %w", path, err)
   }
   return parseVirtualFile(data)
 }
