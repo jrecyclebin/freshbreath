@@ -414,10 +414,9 @@ export class ServiceProxy extends EventEmitter {
   }
 
   async callTool(name, args = {}) {
-    if (this.#serviceSlug()) {
-      return this.#callTask(name, args);
-    }
-    const result = await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
+    const result = this.#serviceSlug() ?
+      await this.#callTask(name, args) :
+      await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
     const text = result.content
       .filter(c => c.type === 'text')
       .map(c => c.text)

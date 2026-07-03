@@ -33,11 +33,14 @@ The following service types are available:
   the file onto a network share for processing.) One key note about tasks:
   they have no auth of their own, so the `login` function shouldn't be used -
   instead, the `authService` property to the `ServiceProxy` constructor can
-  receive another `ServiceProxy` object for any service that it depends on.
+  receive another `ServiceProxy` object for any service that it depends on. (See
+  the 'tasks' guide for details on writing the file content - the tool scripts -
+  and calling the tools from an app.)
 
 - virtual: These are custom MCP endpoints that can be used to provide tools
   (also available through `callTool` and `listTools`) that wrap API calls -
-  to give a nice MCP interface with discoverable auth.
+  to give a nice MCP interface with discoverable auth. (See the 'virtuals'
+  guide for more on how to write these tool scripts.)
 
 - ssh: Every Fresh Breath server has a single SSH service (URL: `ssh://`)
   that can be used for general authentication or for connecting to remote

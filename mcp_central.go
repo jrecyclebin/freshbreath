@@ -1533,7 +1533,7 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 	// get_guide
 	mcps.AddTool(&mcp.Tool{
 		Name:        "get_guide",
-		Description: "Load one or more Fresh Breath guides by name. Available guides: publishing, services, ssh.",
+		Description: "Load one or more Fresh Breath guides by name. Available guides: publishing, services, ssh, tasks, virtuals.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
