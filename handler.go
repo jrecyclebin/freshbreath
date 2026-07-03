@@ -940,9 +940,52 @@ func (s *Server) loadTasksForService(svc *Service) ([]Task, error) {
 	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("tasks file not found: %s", path)
+		return nil, fmt.Errorf("tasks file not found: %s: %w", path, err)
 	}
 	return parseTasksFile(data), nil
+}
+
+// serviceToolSummary is a lightweight, safe-to-expose view of a task or
+// virtual tool: name and description only, no script bodies.
+type serviceToolSummary struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+// loadServiceToolSummaries returns the tool names and descriptions exposed by
+// a tasks or virtual service. Other service types return an error. A missing
+// file returns an empty list so newly-created services don't error in the UI.
+func (s *Server) loadServiceToolSummaries(svc *Service) ([]serviceToolSummary, error) {
+	switch svc.Descriptor.Type {
+	case "tasks":
+		tasks, err := s.loadTasksForService(svc)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return []serviceToolSummary{}, nil
+			}
+			return nil, err
+		}
+		out := make([]serviceToolSummary, len(tasks))
+		for i, t := range tasks {
+			out[i] = serviceToolSummary{Name: t.Name, Description: t.Desc}
+		}
+		return out, nil
+	case "virtual":
+		tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return []serviceToolSummary{}, nil
+			}
+			return nil, err
+		}
+		out := make([]serviceToolSummary, len(tools))
+		for i, t := range tools {
+			out[i] = serviceToolSummary{Name: t.Name, Description: t.Description}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("service type %q has no tool list", svc.Descriptor.Type)
+	}
 }
 
 func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
@@ -1587,6 +1630,12 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/services/{id}/tools
+	if len(parts) >= 4 && parts[3] == "tools" {
+		s.handleServiceTools(w, r, svc)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
@@ -1621,6 +1670,21 @@ func (s *Server) handleServiceApps(w http.ResponseWriter, r *http.Request, servi
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"apps": apps})
+}
+
+func (s *Server) handleServiceTools(w http.ResponseWriter, r *http.Request, svc *Service) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tools, err := s.loadServiceToolSummaries(svc)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
 }
 
 // users

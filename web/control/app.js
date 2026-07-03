@@ -1249,6 +1249,9 @@ function ServicesView({ token, services, onRefresh }) {
 
 function ServiceDrawer({ token, services, service, onClose, onSaved }) {
   const [form,setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false}});
+  const [tools,setTools] = useState([]);
+  const [toolsLoading,setToolsLoading] = useState(false);
+  const [toolsError,setToolsError] = useState('');
   const toast = useToast();
   const isNew = service==='new';
   const isEdit = service && service.id;
@@ -1257,6 +1260,20 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
     if(isEdit) setForm({name:service.name,url:service.url,descriptor:{...service.descriptor}});
     else setForm({name:'',url:'',descriptor:{type:'mcp',proxied:false}});
   },[service]);
+
+  useEffect(()=>{
+    if(!isEdit) { setTools([]); setToolsError(''); return; }
+    const type = service.descriptor?.type;
+    if(type !== 'tasks' && type !== 'virtual') { setTools([]); setToolsError(''); return; }
+    let cancelled = false;
+    setToolsLoading(true);
+    setToolsError('');
+    api(token,'GET','/api/services/'+service.id+'/tools')
+      .then(r => { if(!cancelled){ setTools(r.tools||[]); setToolsError(''); } })
+      .catch(e => { if(!cancelled){ setTools([]); setToolsError(e.message); } })
+      .finally(() => { if(!cancelled) setToolsLoading(false); });
+    return () => { cancelled = true; };
+  },[service,token]);
 
   const updDesc = (k,v) => setForm(f=>({...f,descriptor:{...f.descriptor,[k]:v}}));
 
@@ -1376,6 +1393,26 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
           <div className="field"><label>Userinfo URL</label><input className="input mono" value={form.descriptor.userinfo_url||''} onChange={e=>updDesc('userinfo_url',e.target.value)}/></div>
           <div className="field"><label>User Email URL</label><input className="input mono" value={form.descriptor.userinfo_emails_url||''} onChange={e=>updDesc('userinfo_emails_url',e.target.value)}/></div>
         </>
+      )}
+      {isEdit && (isTasks || isVirtual) && (
+        <div className="field" style={{marginTop:16}}>
+          <label>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
+          {toolsLoading && <span className="muted">Loading…</span>}
+          {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
+          {!toolsLoading && !toolsError && tools.length===0 && (
+            <span className="muted">No tools found. Publish a {isTasks?'tasks':'virtual'} file to define tools.</span>
+          )}
+          {!toolsLoading && !toolsError && tools.length>0 && (
+            <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
+              {tools.map((t,i)=>
+                <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
+                  <b>{t.name}</b>
+                  {t.description && <span className="muted"> — {t.description}</span>}
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
       )}
     </Drawer>
   );
