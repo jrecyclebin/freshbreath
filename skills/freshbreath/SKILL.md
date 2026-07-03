@@ -16,6 +16,8 @@ Here's the toolkit available in this skill:
 - If you are setting up an app to authenticate or use services - an OIDC login,
   an API or MCP - or Fresh Breath's internal SSH key generation and login,
   see the Services Guide at 'guides/services.md' inside of this skill.
+  (For further help with service types, there are 'guides/tasks.md' and
+  'guides/virtuals.md')
 
 - If you want to read more specifically about managing SSH keys and how you can
   use Fresh Breath's API to log-in and start sessions with remote servers,
