@@ -1163,3 +1163,53 @@ select.input {
   color: var(--ink);
 }
 .toast-error .check { background: oklch(from var(--tone-red) 0.70 calc(c * .83) h); color: white; }
+
+/* ── Service tool editor ─────────────────────────────────────────────── */
+
+.editor-page {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 248px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  z-index: 5;
+  padding: 32px 40px 0;
+}
+
+.editor-page .page-head {
+  flex-shrink: 0;
+  margin-bottom: 20px;
+}
+
+.editor-textarea {
+  flex: 1;
+  width: 100%;
+  padding: 24px 40px 64px;
+  border: none;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.65;
+  resize: none;
+  outline: none;
+  border-radius: 0;
+}
+
+.editor-textarea:focus {
+  background: var(--bg);
+}
+
+@media (max-width: 640px) {
+  .editor-page {
+    left: 0;
+    padding: 20px 16px 0;
+  }
+  .editor-textarea {
+    padding: 20px 16px 64px;
+  }
+}

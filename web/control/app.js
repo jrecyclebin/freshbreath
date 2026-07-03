@@ -449,10 +449,18 @@ function Toolbar({ search, onSearch, placeholder, filters=[], activeFilter, onFi
 
 let _onUnauthorized = null;
 
-async function api(token, method, path, body) {
+async function api(token, method, path, body, { rawText = false } = {}) {
   const opts = { method, headers: {} };
   if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
-  if (body) { opts.headers['Content-Type']='application/json'; opts.body=JSON.stringify(body); }
+  if (body) {
+    if (body instanceof FormData) {
+      opts.body = body;
+      // Let the browser set the multipart boundary.
+    } else {
+      opts.headers['Content-Type']='application/json';
+      opts.body=JSON.stringify(body);
+    }
+  }
 
   let r = await fetch(path, opts);
 
@@ -473,7 +481,8 @@ async function api(token, method, path, body) {
     const t = await r.text().catch(()=>'');
     throw new Error(`${r.status}: ${t||r.statusText}`);
   }
-  return r.status===204 ? null : r.json();
+  if (r.status===204) return null;
+  return rawText ? r.text() : r.json();
 }
 
 const copyText = async (text, toast) => {
@@ -1179,7 +1188,7 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
 
 // ── Services ───────────────────────────────────────────────────────────
 
-function ServicesView({ token, services, onRefresh }) {
+function ServicesView({ token, services, onRefresh, onEditTools }) {
   const [q,setQ] = useState('');
   const [editing,setEditing] = useState(null);
   const toast = useToast();
@@ -1242,12 +1251,12 @@ function ServicesView({ token, services, onRefresh }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No services found.</b></div>}
       </div>
-      <ServiceDrawer token={token} services={services} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      <ServiceDrawer token={token} services={services} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh} onEditTools={onEditTools}/>
     </>
   );
 }
 
-function ServiceDrawer({ token, services, service, onClose, onSaved }) {
+function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools }) {
   const [form,setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false}});
   const [tools,setTools] = useState([]);
   const [toolsLoading,setToolsLoading] = useState(false);
@@ -1396,7 +1405,12 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
       )}
       {isEdit && (isTasks || isVirtual) && (
         <div className="field" style={{marginTop:16}}>
-          <label>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+            <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
+            <button className="btn btn-sm btn-primary" onClick={()=>onEditTools?.(service.id)}>
+              <Icon name="edit" size={12}/> Edit
+            </button>
+          </div>
           {toolsLoading && <span className="muted">Loading…</span>}
           {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
           {!toolsLoading && !toolsError && tools.length===0 && (
@@ -1415,6 +1429,106 @@ function ServiceDrawer({ token, services, service, onClose, onSaved }) {
         </div>
       )}
     </Drawer>
+  );
+}
+
+// ── Service tools editor ───────────────────────────────────────────────
+
+function ServiceToolsEditor({ token, services, serviceId, onBack, onSaved }) {
+  const service = services.find(s => String(s.id) === serviceId);
+  const type = service?.descriptor?.type;
+  const isTasks = type === 'tasks';
+  const toast = useToast();
+  const textareaRef = useRef(null);
+
+  const [content,setContent] = useState('');
+  const [loading,setLoading] = useState(true);
+  const [saving,setSaving] = useState(false);
+  const [dirty,setDirty] = useState(false);
+
+  useEffect(() => {
+    if (!service) return;
+    let cancelled = false;
+    setLoading(true);
+    api(token, 'GET', '/api/services/' + serviceId + '/files', null, { rawText: true })
+      .then(text => { if (!cancelled) { setContent(text || ''); setDirty(false); } })
+      .catch(e => {
+        if (cancelled) return;
+        if (e.message.includes('404')) { setContent(''); setDirty(false); }
+        else toast('Failed to load file: ' + e.message, true);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [service, serviceId, token]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        if (!saving) handleSave();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [content, saving]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleSave = async () => {
+    if (!service) return;
+    setSaving(true);
+    try {
+      const blob = new Blob([content], { type: 'text/plain' });
+      const form = new FormData();
+      form.append('file', blob, service.name + '.txt');
+      await api(token, 'POST', '/api/services/' + serviceId + '/files', form, { rawText: true });
+      setDirty(false);
+      toast('File saved');
+      onSaved?.();
+    } catch (e) {
+      toast('Failed to save: ' + e.message, true);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!service) {
+    return (
+      <>
+        <PageHead crumbs={['Workspace','Services']} title="Service not found" actions={<button className="btn btn-ghost" onClick={onBack}>Back</button>}/>
+        <div className="empty"><b>Service not found.</b></div>
+      </>
+    );
+  }
+
+  return (
+    <div className="editor-page">
+      <PageHead
+        crumbs={['Workspace','Services', service.name]}
+        title={`Edit ${isTasks ? 'tasks' : 'virtual'} script`}
+        sub={`Plain-text definition for ${service.name}.`}
+        actions={
+          <>
+            <button className="btn btn-ghost" onClick={onBack} disabled={saving}>Cancel</button>
+            <button className="btn btn-primary" onClick={handleSave} disabled={saving || !dirty}>
+              {saving ? 'Saving…' : 'Save'} <span className="muted" style={{fontSize:11,marginLeft:6}}>⌘S</span>
+            </button>
+          </>
+        }
+      />
+      {loading ? (
+        <div style={{display:'grid',placeItems:'center',padding:48,color:'var(--ink-3)'}}>Loading…</div>
+      ) : (
+        <textarea
+          ref={textareaRef}
+          className="editor-textarea"
+          value={content}
+          onChange={e => { setContent(e.target.value); setDirty(true); }}
+          spellCheck={false}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+        />
+      )}
+    </div>
   );
 }
 
@@ -1708,28 +1822,44 @@ const fmtAuditTime = (iso) => {
 
 // ── Routing ────────────────────────────────────────────────────────────
 
-const getPageFromPath = () => {
-  const seg = window.location.pathname.replace(/^\/control\/?/, '');
-  return (seg && NAV.some(n => n.id === seg)) ? seg : 'home';
+// ── Routing ────────────────────────────────────────────────────────────
+
+// Parses /control and /control/:page/:... into a stable route object.
+// Top-level pages are the NAV ids. Nested routes:
+//   /control/services/:id/edit-tools  -> page='services', params={serviceId, screen:'edit-tools'}
+const parseRoute = () => {
+  const parts = window.location.pathname.replace(/^\/control\/?/, '').split('/').filter(Boolean);
+  const top = parts[0] || 'home';
+  if (!NAV.some(n => n.id === top)) return { page: 'home', params: {} };
+  if (top === 'services' && parts.length === 3 && parts[2] === 'edit-tools') {
+    return { page: 'services', params: { serviceId: parts[1], screen: 'edit-tools' } };
+  }
+  return { page: top, params: {} };
+};
+
+const buildPath = (page, params = {}) => {
+  if (page === 'services' && params.screen === 'edit-tools' && params.serviceId) {
+    return `/control/services/${params.serviceId}/edit-tools`;
+  }
+  return page === 'home' ? '/control' : `/control/${page}`;
 };
 
 // ── App ────────────────────────────────────────────────────────────────
 
 function AppShell() {
   const { user, token, authRequired, serviceName, login, logout, sessionExpired, clearExpired, authError } = useAuth();
-  const [active,setActive] = useState(getPageFromPath);
+  const [route,setRoute] = useState(parseRoute);
   const [sidebarOpen,setSidebarOpen] = useState(false);
 
   useEffect(() => {
-    const onPop = () => setActive(getPageFromPath());
+    const onPop = () => setRoute(parseRoute());
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  const navigate = (id) => {
-    const path = id === 'home' ? '/control' : `/control/${id}`;
-    history.pushState(null, '', path);
-    setActive(id);
+  const navigate = (page, params = {}) => {
+    history.pushState(null, '', buildPath(page, params));
+    setRoute({ page, params });
   };
   const [users,setUsers] = useState([]);
   const [apps,setApps] = useState([]);
@@ -1765,21 +1895,22 @@ function AppShell() {
 
   if(loading) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
-  const activeLabel = NAV.find(n=>n.id===active)?.label;
+  const activeLabel = NAV.find(n=>n.id===route.page)?.label;
   return (
     <div className="app-shell">
       <div className={`sidebar-scrim${sidebarOpen?' open':''}`} onClick={()=>setSidebarOpen(false)}/>
-      <Sidebar active={active} onNav={navigate} counts={counts} user={user} onLogout={user ? logout : null} mobileOpen={sidebarOpen} onMobileClose={()=>setSidebarOpen(false)}/>
+      <Sidebar active={route.page} onNav={(id)=>navigate(id)} counts={counts} user={user} onLogout={user ? logout : null} mobileOpen={sidebarOpen} onMobileClose={()=>setSidebarOpen(false)}/>
       <main className="main" data-screen-label={activeLabel}>
         <MobileTopBar onMenuOpen={()=>setSidebarOpen(true)} pageLabel={activeLabel}/>
         {sessionExpired && <SessionBanner onLogin={login} onDismiss={clearExpired}/>}
-        {active==='home'     && <Overview users={users} apps={apps} services={services} audit={audit}/>}
-        {active==='apps'     && <AppsView token={token} apps={apps} services={services} users={users} onRefresh={load}/>}
-        {active==='services' && <ServicesView token={token} services={services} onRefresh={load}/>}
-        {active==='users'    && <UsersView token={token} users={users} apps={apps} onRefresh={load}/>}
-        {active==='roles'    && <RolesView roles={roles}/>}
-        {active==='audit'    && <AuditView audit={audit}/>}
-        {active==='settings' && <SettingsView token={token} services={services} apps={apps} user={user}/>}
+        {route.page==='home'     && <Overview users={users} apps={apps} services={services} audit={audit}/>}
+        {route.page==='apps'     && <AppsView token={token} apps={apps} services={services} users={users} onRefresh={load}/>}
+        {route.page==='services' && route.params.screen !== 'edit-tools' && <ServicesView token={token} services={services} onRefresh={load} onEditTools={(id)=>navigate('services',{serviceId:String(id),screen:'edit-tools'})}/>}
+        {route.page==='services' && route.params.screen === 'edit-tools' && <ServiceToolsEditor token={token} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('services')} onSaved={load}/>}
+        {route.page==='users'    && <UsersView token={token} users={users} apps={apps} onRefresh={load}/>}
+        {route.page==='roles'    && <RolesView roles={roles}/>}
+        {route.page==='audit'    && <AuditView audit={audit}/>}
+        {route.page==='settings' && <SettingsView token={token} services={services} apps={apps} user={user}/>}
       </main>
     </div>
   );
