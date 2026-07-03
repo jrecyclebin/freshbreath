@@ -5,8 +5,11 @@ import (
   "database/sql"
   "encoding/json"
   "io"
+  "mime/multipart"
   "net/http"
   "net/http/httptest"
+  "os"
+  "path/filepath"
   "strconv"
   "strings"
   "sync"
@@ -59,7 +62,7 @@ func testRequest(t *testing.T, srv *Server, method, path string, body io.Reader,
   for k, v := range headers {
     req.Header.Set(k, v)
   }
-  if body != nil {
+  if body != nil && req.Header.Get("Content-Type") == "" {
     req.Header.Set("Content-Type", "application/json")
   }
   rr := httptest.NewRecorder()
@@ -254,6 +257,112 @@ func TestServiceDetailNotFound(t *testing.T) {
   rr := testRequest(t, srv, "GET", "/api/services/9999", nil, nil)
   if rr.Code != 404 {
     t.Errorf("status = %d, want 404", rr.Code)
+  }
+}
+
+// uploadServiceFile builds a multipart request body for a service file upload.
+func uploadServiceFile(t *testing.T, srv *Server, serviceID int64, filename string, content []byte) *httptest.ResponseRecorder {
+  t.Helper()
+  var body bytes.Buffer
+  mw := multipart.NewWriter(&body)
+  fw, err := mw.CreateFormFile("file", filename)
+  if err != nil {
+    t.Fatalf("create form file: %v", err)
+  }
+  if _, err := fw.Write(content); err != nil {
+    t.Fatalf("write form file: %v", err)
+  }
+  if err := mw.Close(); err != nil {
+    t.Fatalf("close multipart writer: %v", err)
+  }
+  headers := map[string]string{
+    "Content-Type": mw.FormDataContentType(),
+  }
+  return testRequest(t, srv, "POST", "/api/services/"+strconv.FormatInt(serviceID, 10)+"/files", &body, headers)
+}
+
+func TestServiceFilesHTTP(t *testing.T) {
+  srv := newTestServer(t)
+  srv.config.DataDir = t.TempDir()
+
+  idStr := registerService(t, srv, "deploy", "", ServiceDescriptor{Type: "tasks"})
+  id, _ := strconv.ParseInt(idStr, 10, 64)
+  content := []byte("[build]\nmake all\n")
+
+  // Download before upload is 404.
+  rr := testRequest(t, srv, "GET", "/api/services/"+idStr+"/files", nil, nil)
+  if rr.Code != 404 {
+    t.Fatalf("pre-upload download status = %d, want 404", rr.Code)
+  }
+
+  // Upload.
+  rr = uploadServiceFile(t, srv, id, "deploy.txt", content)
+  if rr.Code != 200 {
+    t.Fatalf("upload status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  var upRes map[string]string
+  if err := json.Unmarshal(rr.Body.Bytes(), &upRes); err != nil {
+    t.Fatalf("unmarshal upload response: %v", err)
+  }
+  if upRes["route"] != "tasks://deploy" {
+    t.Errorf("route = %q, want tasks://deploy", upRes["route"])
+  }
+
+  // Legacy file exists.
+  path := filepath.Join(srv.config.DataDir, "tasks", "deploy.txt")
+  got, err := os.ReadFile(path)
+  if err != nil {
+    t.Fatalf("read legacy file: %v", err)
+  }
+  if !bytes.Equal(got, content) {
+    t.Errorf("legacy file = %q, want %q", got, content)
+  }
+
+  // Download returns raw text.
+  rr = testRequest(t, srv, "GET", "/api/services/"+idStr+"/files", nil, nil)
+  if rr.Code != 200 {
+    t.Fatalf("download status = %d, body = %s", rr.Code, rr.Body.String())
+  }
+  if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+    t.Errorf("Content-Type = %q, want text/plain", ct)
+  }
+  cd := rr.Header().Get("Content-Disposition")
+  if !strings.Contains(cd, "deploy.txt") {
+    t.Errorf("Content-Disposition = %q, want deploy.txt", cd)
+  }
+  if !bytes.Equal(rr.Body.Bytes(), content) {
+    t.Errorf("download body = %q, want %q", rr.Body.Bytes(), content)
+  }
+
+  // Delete.
+  rr = testRequest(t, srv, "DELETE", "/api/services/"+idStr+"/files", nil, nil)
+  if rr.Code != 204 {
+    t.Fatalf("delete status = %d, want 204", rr.Code)
+  }
+  if _, err := os.Stat(path); !os.IsNotExist(err) {
+    t.Errorf("expected legacy file to be removed")
+  }
+}
+
+func TestServiceFilesHTTPUnsupportedType(t *testing.T) {
+  srv := newTestServer(t)
+  idStr := registerService(t, srv, "api-svc", "http://example.com", ServiceDescriptor{Type: "api"})
+  id, _ := strconv.ParseInt(idStr, 10, 64)
+
+  rr := uploadServiceFile(t, srv, id, "x.txt", []byte("x"))
+  if rr.Code != 400 {
+    t.Errorf("upload status = %d, want 400", rr.Code)
+  }
+}
+
+func TestServiceFilesHTTPNoZip(t *testing.T) {
+  srv := newTestServer(t)
+  idStr := registerService(t, srv, "deploy", "", ServiceDescriptor{Type: "tasks"})
+  id, _ := strconv.ParseInt(idStr, 10, 64)
+
+  rr := uploadServiceFile(t, srv, id, "site.zip", []byte("PK"))
+  if rr.Code != 400 {
+    t.Errorf("upload status = %d, want 400", rr.Code)
   }
 }
 
