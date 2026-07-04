@@ -473,8 +473,10 @@ type appFile struct {
 }
 
 // coreListAppWeb lists the files in an app's web directory, sorted by path.
-// An app with no uploaded files lists empty (not an error).
-func (s *Server) coreListAppWeb(actor *User, nonce string) ([]appFile, error) {
+// An app with no uploaded files lists empty (not an error). If search is
+// non-empty, only files whose path or content contains the term (case-
+// insensitive) are returned.
+func (s *Server) coreListAppWeb(actor *User, nonce, search string) ([]appFile, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
@@ -491,7 +493,11 @@ func (s *Server) coreListAppWeb(actor *User, nonce string) ([]appFile, error) {
 			return err
 		}
 		rel, _ := filepath.Rel(webDir, path)
-		files = append(files, appFile{Path: filepath.ToSlash(rel), Size: fi.Size()})
+		relSlash := filepath.ToSlash(rel)
+		if search != "" && !fileMatchesSearch(webDir, relSlash, search) {
+			return nil
+		}
+		files = append(files, appFile{Path: relSlash, Size: fi.Size()})
 		return nil
 	})
 	if err != nil {
@@ -610,6 +616,170 @@ func (s *Server) coreDeleteAppWeb(actor *User, nonce string) error {
 	return nil
 }
 
+// cleanAppFilePath validates a path relative to an app's web directory and
+// returns a platform-relative path. It rejects empty, absolute, and upward-
+// traversing paths.
+func cleanAppFilePath(p string) (string, error) {
+	if p == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	rel := filepath.Clean(filepath.FromSlash(p))
+	if filepath.IsAbs(rel) || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("invalid path")
+	}
+	return rel, nil
+}
+
+// sliceBytes returns a slice of data from offset up to offset+limit. A zero
+// or over-large limit reads to the end of the data.
+func sliceBytes(data []byte, offset, limit int64) []byte {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > int64(len(data)) {
+		offset = int64(len(data))
+	}
+	end := int64(len(data))
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	return data[offset:end]
+}
+
+// fileMatchesSearch reports whether a file's path or content contains term
+// (case-insensitive). Read errors are treated as non-matching.
+func fileMatchesSearch(webDir, relPath, term string) bool {
+	lower := strings.ToLower(term)
+	if strings.Contains(strings.ToLower(relPath), lower) {
+		return true
+	}
+	data, err := os.ReadFile(filepath.Join(webDir, relPath))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), lower)
+}
+
+// coreReadAppFile reads all or part of a file from an app's web directory.
+// offset is a zero-based byte position; limit is the maximum bytes to return.
+// A zero limit reads to the end of the file.
+func (s *Server) coreReadAppFile(actor *User, nonce, filePath string, offset, limit int64) ([]byte, error) {
+	if err := s.gateApp(actor, nonce); err != nil {
+		return nil, err
+	}
+	if _, err := s.store.GetApp(nonce); err != nil {
+		return nil, cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	rel, err := cleanAppFilePath(filePath)
+	if err != nil {
+		return nil, cerr(http.StatusBadRequest, "%v", err)
+	}
+	fullPath := filepath.Join(s.config.DataDir, "apps", nonce, "web", rel)
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, cerr(http.StatusNotFound, "file not found")
+		}
+		return nil, cerr(http.StatusInternalServerError, "read failed: %v", err)
+	}
+	return sliceBytes(data, offset, limit), nil
+}
+
+// replaceUniqueText replaces the single occurrence of old in src with repl.
+// It returns an error if old is not found or appears more than once.
+func replaceUniqueText(src, old, repl []byte) ([]byte, error) {
+	count := bytes.Count(src, old)
+	if count == 0 {
+		return nil, fmt.Errorf("old_text not found")
+	}
+	if count > 1 {
+		return nil, fmt.Errorf("old_text is not unique (%d occurrences)", count)
+	}
+	return bytes.Replace(src, old, repl, 1), nil
+}
+
+// coreWriteAppFile writes or patches a file in an app's web directory. If
+// oldText is empty the entire file is replaced. Otherwise the single occurrence
+// of oldText in the existing file is replaced with data.
+func (s *Server) coreWriteAppFile(actor *User, nonce, filePath string, data []byte, oldText string) error {
+	if err := s.gateApp(actor, nonce); err != nil {
+		return err
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		return cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	rel, err := cleanAppFilePath(filePath)
+	if err != nil {
+		return cerr(http.StatusBadRequest, "%v", err)
+	}
+
+	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
+	fullPath := filepath.Join(webDir, rel)
+
+	var newData []byte
+	if oldText == "" {
+		newData = data
+	} else {
+		existing, err := os.ReadFile(fullPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return cerr(http.StatusNotFound, "file not found")
+			}
+			return cerr(http.StatusInternalServerError, "read failed: %v", err)
+		}
+		newData, err = replaceUniqueText(existing, []byte(oldText), data)
+		if err != nil {
+			return cerr(http.StatusBadRequest, "%v", err)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return cerr(http.StatusInternalServerError, "failed to create directory")
+	}
+	if err := os.WriteFile(fullPath, newData, 0644); err != nil {
+		return cerr(http.StatusInternalServerError, "write failed")
+	}
+
+	now := time.Now().UTC()
+	details := app.Details
+	if details == nil {
+		details = &AppDetails{}
+	}
+	details.LastUploaded = &now
+	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
+		return cerr(http.StatusInternalServerError, "failed to save details")
+	}
+	s.rebuildHostedRoutes()
+	s.audit(actor, "wrote app file", app.Name+"/"+rel)
+	return nil
+}
+
+// coreDeleteAppFile removes a single file from an app's web directory.
+func (s *Server) coreDeleteAppFile(actor *User, nonce, filePath string) error {
+	if err := s.gateApp(actor, nonce); err != nil {
+		return err
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		return cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	rel, err := cleanAppFilePath(filePath)
+	if err != nil {
+		return cerr(http.StatusBadRequest, "%v", err)
+	}
+	fullPath := filepath.Join(s.config.DataDir, "apps", nonce, "web", rel)
+	if err := os.Remove(fullPath); err != nil {
+		if os.IsNotExist(err) {
+			return cerr(http.StatusNotFound, "file not found")
+		}
+		return cerr(http.StatusInternalServerError, "delete failed")
+	}
+	s.rebuildHostedRoutes()
+	s.audit(actor, "deleted app file", app.Name+"/"+rel)
+	return nil
+}
+
 // ── Service File operations ─────────────────────────────────────────
 
 // serviceDefinitionPath returns the on-disk definition path for tasks and
@@ -707,6 +877,115 @@ func (s *Server) coreDeleteServiceFiles(actor *User, id int64) error {
 
 	s.audit(actor, "removed service files", svc.Name)
 	return nil
+}
+
+// coreReadServiceFile reads all or part of a tasks/virtual service definition
+// file. offset is a zero-based byte position; limit is the maximum bytes to
+// return. A zero limit reads to the end of the file.
+func (s *Server) coreReadServiceFile(actor *User, id int64, offset, limit int64) ([]byte, string, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return nil, "", err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return nil, "", cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return nil, "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+
+	path := serviceDefinitionPath(s.config.DataDir, svc)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", cerr(http.StatusNotFound, "no service files uploaded")
+		}
+		return nil, "", cerr(http.StatusInternalServerError, "read failed: %v", err)
+	}
+	return sliceBytes(data, offset, limit), filepath.Base(path), nil
+}
+
+// coreWriteServiceFile writes or patches a tasks/virtual service definition
+// file. If oldText is empty the entire file is replaced. Otherwise the single
+// occurrence of oldText in the existing file is replaced with data.
+func (s *Server) coreWriteServiceFile(actor *User, id int64, data []byte, oldText string) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+
+	path := serviceDefinitionPath(s.config.DataDir, svc)
+
+	var newData []byte
+	if oldText == "" {
+		newData = data
+	} else {
+		existing, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return cerr(http.StatusNotFound, "file not found")
+			}
+			return cerr(http.StatusInternalServerError, "read failed: %v", err)
+		}
+		newData, err = replaceUniqueText(existing, []byte(oldText), data)
+		if err != nil {
+			return cerr(http.StatusBadRequest, "%v", err)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return cerr(http.StatusInternalServerError, "failed to create service dir")
+	}
+	if err := os.WriteFile(path, newData, 0644); err != nil {
+		return cerr(http.StatusInternalServerError, "write failed")
+	}
+	if svc.Descriptor.Type == "virtual" {
+		s.virtualMCPs.add(s, svc)
+	}
+
+	s.audit(actor, "wrote service file", svc.Name)
+	return nil
+}
+
+// coreListServiceFiles returns the tasks/virtual service definition file as a
+// single-item listing. If search is non-empty, the file is only returned when
+// its content contains the term (case-insensitive).
+func (s *Server) coreListServiceFiles(actor *User, id int64, search string) ([]appFile, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return nil, err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return nil, cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return nil, cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+
+	path := serviceDefinitionPath(s.config.DataDir, svc)
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []appFile{}, nil
+		}
+		return nil, cerr(http.StatusInternalServerError, "stat failed: %v", err)
+	}
+	if search != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, cerr(http.StatusInternalServerError, "read failed: %v", err)
+		}
+		if !strings.Contains(strings.ToLower(string(data)), strings.ToLower(search)) {
+			return []appFile{}, nil
+		}
+	}
+	return []appFile{{Path: filepath.Base(path), Size: fi.Size()}}, nil
 }
 
 // extractZip extracts a zip archive to destDir, auto-detecting the content

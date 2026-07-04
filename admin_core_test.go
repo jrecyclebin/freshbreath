@@ -266,12 +266,18 @@ func TestGateApp(t *testing.T) {
 		op     func() error
 		wantOK bool
 	}{
-		{"list: admin", admin, func() error { _, e := srv.coreListAppWeb(admin, nonce); return e }, true},
-		{"list: member", member, func() error { _, e := srv.coreListAppWeb(member, nonce); return e }, true},
-		{"list: outsider", outsider, func() error { _, e := srv.coreListAppWeb(outsider, nonce); return e }, false},
+		{"list: admin", admin, func() error { _, e := srv.coreListAppWeb(admin, nonce, ""); return e }, true},
+		{"list: member", member, func() error { _, e := srv.coreListAppWeb(member, nonce, ""); return e }, true},
+		{"list: outsider", outsider, func() error { _, e := srv.coreListAppWeb(outsider, nonce, ""); return e }, false},
 		{"upload: admin", admin, func() error { _, e := srv.coreUploadAppWeb(admin, nonce, []byte("<h1>x</h1>"), "index.html"); return e }, true},
-		{"upload: member", member, func() error { _, e := srv.coreUploadAppWeb(member, nonce, []byte("<h1>x</h1>"), "index.html"); return e }, true},
-		{"upload: outsider", outsider, func() error { _, e := srv.coreUploadAppWeb(outsider, nonce, []byte("<h1>x</h1>"), "index.html"); return e }, false},
+		{"upload: member", member, func() error {
+			_, e := srv.coreUploadAppWeb(member, nonce, []byte("<h1>x</h1>"), "index.html")
+			return e
+		}, true},
+		{"upload: outsider", outsider, func() error {
+			_, e := srv.coreUploadAppWeb(outsider, nonce, []byte("<h1>x</h1>"), "index.html")
+			return e
+		}, false},
 		{"download: admin", admin, func() error { _, _, e := srv.coreDownloadAppWeb(admin, nonce); return e }, true},
 		{"download: member", member, func() error { _, _, e := srv.coreDownloadAppWeb(member, nonce); return e }, true},
 		{"download: outsider", outsider, func() error { _, _, e := srv.coreDownloadAppWeb(outsider, nonce); return e }, false},

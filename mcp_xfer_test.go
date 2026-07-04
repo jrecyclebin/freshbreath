@@ -1,8 +1,6 @@
 package main
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -57,297 +55,387 @@ func toolResultText(t *testing.T, res *mcp.CallToolResult) string {
 	return txt.Text
 }
 
-func createZipWithFile(t *testing.T, name, content string) []byte {
+func createAppFile(t *testing.T, srv *Server, nonce, path string, content []byte) {
 	t.Helper()
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	fw, err := zw.Create(name)
-	if err != nil {
-		t.Fatalf("create zip entry: %v", err)
-	}
-	if _, err := fw.Write([]byte(content)); err != nil {
-		t.Fatalf("write zip entry: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("close zip: %v", err)
-	}
-	return buf.Bytes()
-}
-
-func TestPublishAppFilesReturnsURL(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "app-url", "", "", nil)
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	pub := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
-		"nonce":    nonce,
-		"filename": "index.html",
-	})
-	if pub.IsError {
-		t.Fatalf("publish_app_files failed: %s", toolResultText(t, pub))
-	}
-	var pubRes struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes); err != nil {
-		t.Fatalf("parse publish result: %v", err)
-	}
-	if pubRes.URL == "" {
-		t.Fatal("expected upload URL")
-	}
-}
-
-func TestPublishAppFilesLegacyDataHappy(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-html", "", "", nil)
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
-		"nonce":       nonce,
-		"filename":    "index.html",
-		"legacy_data": "<h1>hello</h1>",
-	})
-	if res.IsError {
-		t.Fatalf("publish_app_files legacy_data failed: %s", toolResultText(t, res))
-	}
-	var upRes struct {
-		Route string `json:"route"`
-	}
-	if err := json.Unmarshal([]byte(toolResultText(t, res)), &upRes); err != nil {
-		t.Fatalf("parse upload result: %v", err)
-	}
-	if upRes.Route != "/legacy-html" {
-		t.Errorf("route = %q, want /legacy-html", upRes.Route)
-	}
-
-	files, err := srv.coreListAppWeb(&User{ID: 1, Role: "Superuser"}, nonce)
-	if err != nil {
-		t.Fatalf("list files: %v", err)
-	}
-	if len(files) != 1 || files[0].Path != "index.html" {
-		t.Errorf("files = %v, want [index.html]", files)
-	}
-}
-
-func TestPublishAppFilesLegacyDataZip(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-zip", "", "", nil)
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	zipData := createZipWithFile(t, "index.html", "<h1>zip</h1>")
-	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
-		"nonce":       nonce,
-		"filename":    "site.zip",
-		"legacy_data": base64.StdEncoding.EncodeToString(zipData),
-	})
-	if res.IsError {
-		t.Fatalf("publish_app_files legacy_data zip failed: %s", toolResultText(t, res))
-	}
-	var upRes struct {
-		Route string `json:"route"`
-	}
-	if err := json.Unmarshal([]byte(toolResultText(t, res)), &upRes); err != nil {
-		t.Fatalf("parse upload result: %v", err)
-	}
-	if upRes.Route != "/legacy-zip" {
-		t.Errorf("route = %q, want /legacy-zip", upRes.Route)
-	}
-
-	files, err := srv.coreListAppWeb(&User{ID: 1, Role: "Superuser"}, nonce)
-	if err != nil {
-		t.Fatalf("list files: %v", err)
-	}
-	if len(files) != 1 || files[0].Path != "index.html" {
-		t.Errorf("files = %v, want [index.html]", files)
-	}
-}
-
-func TestPublishAppFilesLegacyDataBadBase64(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-b64", "", "", nil)
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
-		"nonce":       nonce,
-		"filename":    "site.zip",
-		"legacy_data": "!!!not-base64!!!",
-	})
-	if !res.IsError {
-		t.Fatal("expected error for bad base64")
-	}
-	if !strings.Contains(toolResultText(t, res), "invalid base64") {
-		t.Errorf("error = %q, want invalid base64", toolResultText(t, res))
-	}
-}
-
-func TestPublishAppFilesLegacyDataTooLarge(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-large", "", "", nil)
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
-		"nonce":       nonce,
-		"filename":    "index.html",
-		"legacy_data": string(make([]byte, xferMaxUpload+1)),
-	})
-	if !res.IsError {
-		t.Fatal("expected error for too large")
-	}
-	if !strings.Contains(toolResultText(t, res), "too large") {
-		t.Errorf("error = %q, want too large", toolResultText(t, res))
-	}
-}
-
-func TestDownloadAppFilesLegacyMode(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-dl", "", "", nil)
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-	if _, err := srv.coreUploadAppWeb(&User{ID: 1, Role: "Superuser"}, nonce, []byte("<h1>hello</h1>"), "index.html"); err != nil {
-		t.Fatalf("upload app web: %v", err)
-	}
-
-	dl := callCentralTool(t, srv, "download_app_files", map[string]interface{}{
-		"nonce":       nonce,
-		"legacy_mode": true,
-	})
-	if dl.IsError {
-		t.Fatalf("download_app_files legacy_mode failed: %s", toolResultText(t, dl))
-	}
-	var dlRes struct {
-		Data     string `json:"data"`
-		Filename string `json:"filename"`
-	}
-	if err := json.Unmarshal([]byte(toolResultText(t, dl)), &dlRes); err != nil {
-		t.Fatalf("parse download result: %v", err)
-	}
-	if dlRes.Filename != "legacy-dl.zip" {
-		t.Errorf("filename = %q, want legacy-dl.zip", dlRes.Filename)
-	}
-	data, err := base64.StdEncoding.DecodeString(dlRes.Data)
-	if err != nil {
-		t.Fatalf("decode base64: %v", err)
-	}
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		t.Fatalf("open zip: %v", err)
-	}
-	if len(zr.File) != 1 || zr.File[0].Name != "index.html" {
-		t.Errorf("zip contents = %v, want [index.html]", zr.File)
-	}
-}
-
-func TestServiceFileMCPLegacyDataUpload(t *testing.T) {
-	srv := newTestServer(t)
-	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Superuser"}
-
-	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
-	if err != nil {
-		t.Fatalf("create service: %v", err)
-	}
-
-	content := []byte("[build]\nmake all\n")
-	res := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
-		"id":          float64(svc.ID),
-		"filename":    "deploy.txt",
-		"legacy_data": string(content),
-	})
-	if res.IsError {
-		t.Fatalf("publish_service_files legacy_data failed: %s", toolResultText(t, res))
-	}
-	var upRes struct {
-		Route string `json:"route"`
-	}
-	if err := json.Unmarshal([]byte(toolResultText(t, res)), &upRes); err != nil {
-		t.Fatalf("parse upload result: %v", err)
-	}
-	if upRes.Route != svc.URL {
-		t.Errorf("route = %q, want %q", upRes.Route, svc.URL)
-	}
-
-	path := filepath.Join(srv.config.DataDir, "tasks", svc.Name+".txt")
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read legacy file: %v", err)
-	}
-	if !bytes.Equal(got, content) {
-		t.Errorf("legacy file = %q, want %q", got, content)
-	}
-}
-
-func TestServiceFileMCPLegacyModeDownload(t *testing.T) {
-	srv := newTestServer(t)
-	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Superuser"}
-
-	svc, err := srv.coreCreateService(admin, "deploy-dl", "", ServiceDescriptor{Type: "tasks"})
-	if err != nil {
-		t.Fatalf("create service: %v", err)
-	}
-	content := []byte("[build]\nmake all\n")
-	path := filepath.Join(srv.config.DataDir, "tasks", svc.Name+".txt")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	webDir := filepath.Join(srv.config.DataDir, "apps", nonce, "web")
+	fullPath := filepath.Join(webDir, path)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, content, 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-
-	dl := callCentralTool(t, srv, "download_service_files", map[string]interface{}{
-		"id":          float64(svc.ID),
-		"legacy_mode": true,
-	})
-	if dl.IsError {
-		t.Fatalf("download_service_files legacy_mode failed: %s", toolResultText(t, dl))
-	}
-	var dlRes struct {
-		Data     string `json:"data"`
-		Filename string `json:"filename"`
-	}
-	if err := json.Unmarshal([]byte(toolResultText(t, dl)), &dlRes); err != nil {
-		t.Fatalf("parse download result: %v", err)
-	}
-	if dlRes.Filename != svc.Name+".txt" {
-		t.Errorf("filename = %q, want %q", dlRes.Filename, svc.Name+".txt")
-	}
-	if dlRes.Data != string(content) {
-		t.Errorf("data = %q, want %q", dlRes.Data, content)
+	if err := os.WriteFile(fullPath, content, 0644); err != nil {
+		t.Fatalf("write app file: %v", err)
 	}
 }
 
-func TestServiceFileMCPZipRejected(t *testing.T) {
+func TestMCPListAppFiles(t *testing.T) {
 	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "list-app", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	// Empty initially.
+	res := callCentralTool(t, srv, "list_app_files", map[string]interface{}{"nonce": nonce})
+	if res.IsError {
+		t.Fatalf("list_app_files failed: %s", toolResultText(t, res))
+	}
+	if !strings.Contains(toolResultText(t, res), `"files":[]`) {
+		t.Errorf("expected empty files, got %s", toolResultText(t, res))
+	}
+
+	createAppFile(t, srv, nonce, "index.html", []byte("<h1>hello</h1>"))
+	createAppFile(t, srv, nonce, "styles.css", []byte("body { color: blue; }"))
+
+	res = callCentralTool(t, srv, "list_app_files", map[string]interface{}{"nonce": nonce})
+	if res.IsError {
+		t.Fatalf("list_app_files failed: %s", toolResultText(t, res))
+	}
+	var listRes struct {
+		Files []appFile `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &listRes); err != nil {
+		t.Fatalf("parse list: %v", err)
+	}
+	if len(listRes.Files) != 2 {
+		t.Errorf("files = %v, want 2", listRes.Files)
+	}
+
+	// Search by content.
+	res = callCentralTool(t, srv, "list_app_files", map[string]interface{}{"nonce": nonce, "search": "blue"})
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &listRes); err != nil {
+		t.Fatalf("parse search: %v", err)
+	}
+	if len(listRes.Files) != 1 || listRes.Files[0].Path != "styles.css" {
+		t.Errorf("search result = %v, want [styles.css]", listRes.Files)
+	}
+}
+
+func TestMCPReadAppFile(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "read-app", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	createAppFile(t, srv, nonce, "index.html", []byte("<h1>hello world</h1>"))
+
+	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+		"nonce": nonce,
+		"path":  "index.html",
+	})
+	if res.IsError {
+		t.Fatalf("read_app_file failed: %s", toolResultText(t, res))
+	}
+	var readRes struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &readRes); err != nil {
+		t.Fatalf("parse read: %v", err)
+	}
+	if readRes.Content != "<h1>hello world</h1>" {
+		t.Errorf("content = %q, want <h1>hello world</h1>", readRes.Content)
+	}
+
+	// Chunk read.
+	res = callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+		"nonce":  nonce,
+		"path":   "index.html",
+		"offset": 4,
+		"limit":  5,
+	})
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &readRes); err != nil {
+		t.Fatalf("parse chunk: %v", err)
+	}
+	if readRes.Content != "hello" {
+		t.Errorf("chunk = %q, want hello", readRes.Content)
+	}
+}
+
+func TestMCPReadAppFileBinary(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "read-bin", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	createAppFile(t, srv, nonce, "data.bin", []byte{0xff, 0xfe, 0xfd})
+
+	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+		"nonce": nonce,
+		"path":  "data.bin",
+	})
+	if res.IsError {
+		t.Fatalf("read_app_file failed: %s", toolResultText(t, res))
+	}
+	var readRes struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &readRes); err != nil {
+		t.Fatalf("parse read: %v", err)
+	}
+	if readRes.Encoding != "base64" {
+		t.Errorf("encoding = %q, want base64", readRes.Encoding)
+	}
+	want := base64.StdEncoding.EncodeToString([]byte{0xff, 0xfe, 0xfd})
+	if readRes.Content != want {
+		t.Errorf("content = %q, want %q", readRes.Content, want)
+	}
+}
+
+func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "write-app", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	// Write whole file.
+	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"nonce":   nonce,
+		"path":    "index.html",
+		"content": "<h1>hello</h1>",
+	})
+	if res.IsError {
+		t.Fatalf("write_app_file failed: %s", toolResultText(t, res))
+	}
+
+	// Patch via old_text.
+	res = callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"nonce":    nonce,
+		"path":     "index.html",
+		"content":  "goodbye",
+		"old_text": "hello",
+	})
+	if res.IsError {
+		t.Fatalf("write_app_file patch failed: %s", toolResultText(t, res))
+	}
+
+	data, err := srv.coreReadAppFile(&User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "<h1>goodbye</h1>" {
+		t.Errorf("content = %q, want <h1>goodbye</h1>", data)
+	}
+}
+
+func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "write-missing", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	createAppFile(t, srv, nonce, "index.html", []byte("abc"))
+
+	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"nonce":    nonce,
+		"path":     "index.html",
+		"content":  "x",
+		"old_text": "notfound",
+	})
+	if !res.IsError {
+		t.Fatal("expected error for missing old_text")
+	}
+	if !strings.Contains(toolResultText(t, res), "not found") {
+		t.Errorf("error = %q, want not found", toolResultText(t, res))
+	}
+}
+
+func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "write-dup", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	createAppFile(t, srv, nonce, "index.html", []byte("abc abc"))
+
+	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"nonce":    nonce,
+		"path":     "index.html",
+		"content":  "x",
+		"old_text": "abc",
+	})
+	if !res.IsError {
+		t.Fatal("expected error for non-unique old_text")
+	}
+	if !strings.Contains(toolResultText(t, res), "not unique") {
+		t.Errorf("error = %q, want not unique", toolResultText(t, res))
+	}
+}
+
+func TestMCPDeleteAppFile(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "delete-app", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	createAppFile(t, srv, nonce, "index.html", []byte("bye"))
+
+	res := callCentralTool(t, srv, "delete_app_file", map[string]interface{}{
+		"nonce": nonce,
+		"path":  "index.html",
+	})
+	if res.IsError {
+		t.Fatalf("delete_app_file failed: %s", toolResultText(t, res))
+	}
+
+	_, err = srv.coreReadAppFile(&User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
+	if err == nil {
+		t.Fatal("expected file to be deleted")
+	}
+}
+
+func TestMCPListServiceFiles(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
 	admin := &User{ID: 1, Role: "Superuser"}
 	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
 
-	res := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
-		"id":       float64(svc.ID),
-		"filename": "site.zip",
-	})
-	if !res.IsError {
-		t.Fatal("expected error for zip filename")
+	// Empty initially.
+	res := callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID)})
+	if res.IsError {
+		t.Fatalf("list_service_files failed: %s", toolResultText(t, res))
 	}
-	if !strings.Contains(toolResultText(t, res), "zip") {
-		t.Errorf("error = %q, want zip rejection", toolResultText(t, res))
+	if !strings.Contains(toolResultText(t, res), `"files":[]`) {
+		t.Errorf("expected empty files, got %s", toolResultText(t, res))
+	}
+
+	content := []byte("[build]\nmake all\n")
+	if err := srv.coreWriteServiceFile(admin, svc.ID, content, ""); err != nil {
+		t.Fatalf("write service file: %v", err)
+	}
+
+	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID)})
+	var listRes struct {
+		Files []appFile `json:"files"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &listRes); err != nil {
+		t.Fatalf("parse list: %v", err)
+	}
+	if len(listRes.Files) != 1 || listRes.Files[0].Path != "deploy.txt" {
+		t.Errorf("files = %v, want [deploy.txt]", listRes.Files)
+	}
+
+	// Search by content.
+	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID), "search": "make all"})
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &listRes); err != nil {
+		t.Fatalf("parse search: %v", err)
+	}
+	if len(listRes.Files) != 1 {
+		t.Errorf("search result = %v, want 1 file", listRes.Files)
+	}
+
+	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID), "search": "missing"})
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &listRes); err != nil {
+		t.Fatalf("parse search missing: %v", err)
+	}
+	if len(listRes.Files) != 0 {
+		t.Errorf("search result = %v, want empty", listRes.Files)
 	}
 }
 
-func TestServiceFileMCPUnsupportedType(t *testing.T) {
+func TestMCPReadServiceFile(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	content := []byte("[build]\nmake all\n")
+	if err := srv.coreWriteServiceFile(admin, svc.ID, content, ""); err != nil {
+		t.Fatalf("write service file: %v", err)
+	}
+
+	res := callCentralTool(t, srv, "read_service_file", map[string]interface{}{"id": float64(svc.ID)})
+	if res.IsError {
+		t.Fatalf("read_service_file failed: %s", toolResultText(t, res))
+	}
+	var readRes struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &readRes); err != nil {
+		t.Fatalf("parse read: %v", err)
+	}
+	if readRes.Content != string(content) {
+		t.Errorf("content = %q, want %q", readRes.Content, content)
+	}
+
+	// Chunk read.
+	res = callCentralTool(t, srv, "read_service_file", map[string]interface{}{
+		"id":     float64(svc.ID),
+		"offset": 1,
+		"limit":  5,
+	})
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &readRes); err != nil {
+		t.Fatalf("parse chunk: %v", err)
+	}
+	if readRes.Content != "build" {
+		t.Errorf("chunk = %q, want build", readRes.Content)
+	}
+}
+
+func TestMCPWriteServiceFile(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
+		"id":      float64(svc.ID),
+		"content": "[build]\nmake all\n",
+	})
+	if res.IsError {
+		t.Fatalf("write_service_file failed: %s", toolResultText(t, res))
+	}
+
+	res = callCentralTool(t, srv, "write_service_file", map[string]interface{}{
+		"id":       float64(svc.ID),
+		"content":  "make install",
+		"old_text": "make all",
+	})
+	if res.IsError {
+		t.Fatalf("write_service_file patch failed: %s", toolResultText(t, res))
+	}
+
+	data, _, err := srv.coreReadServiceFile(admin, svc.ID, 0, 0)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != "[build]\nmake install\n" {
+		t.Errorf("content = %q, want [build]\\nmake install\\n", data)
+	}
+}
+
+func TestMCPDeleteServiceFile(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	if err := srv.coreWriteServiceFile(admin, svc.ID, []byte("x"), ""); err != nil {
+		t.Fatalf("write service file: %v", err)
+	}
+
+	res := callCentralTool(t, srv, "delete_service_file", map[string]interface{}{"id": float64(svc.ID)})
+	if res.IsError {
+		t.Fatalf("delete_service_file failed: %s", toolResultText(t, res))
+	}
+
+	_, _, err = srv.coreReadServiceFile(admin, svc.ID, 0, 0)
+	if err == nil {
+		t.Fatal("expected file to be deleted")
+	}
+}
+
+func TestMCPServiceFileUnsupportedType(t *testing.T) {
 	srv := newTestServer(t)
 	admin := &User{ID: 1, Role: "Superuser"}
 	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", ServiceDescriptor{Type: "api"})
@@ -355,9 +443,9 @@ func TestServiceFileMCPUnsupportedType(t *testing.T) {
 		t.Fatalf("create service: %v", err)
 	}
 
-	res := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
-		"id":       float64(svc.ID),
-		"filename": "x.txt",
+	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
+		"id":      float64(svc.ID),
+		"content": "x",
 	})
 	if !res.IsError {
 		t.Fatal("expected error for unsupported service type")

@@ -119,7 +119,7 @@ func TestListAppFiles(t *testing.T) {
 	}
 
 	// Nothing published yet — an empty list, not an error.
-	files, err := srv.coreListAppWeb(admin, nonce)
+	files, err := srv.coreListAppWeb(admin, nonce, "")
 	if err != nil {
 		t.Fatalf("list empty: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestListAppFiles(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 
-	files, err = srv.coreListAppWeb(admin, nonce)
+	files, err = srv.coreListAppWeb(admin, nonce, "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

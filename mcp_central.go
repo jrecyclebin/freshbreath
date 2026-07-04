@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -266,19 +267,24 @@ func mcpToolResult(v interface{}) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
-// decodeBase64Transfer tries common base64 variants and returns the decoded
-// bytes. It is liberal so LLM-generated data isn't punished for padding quirks.
-func decodeBase64Transfer(s string) ([]byte, error) {
-	if d, err := base64.StdEncoding.DecodeString(s); err == nil {
-		return d, nil
+// mcpFileContent builds a result map for file read content. Valid UTF-8 is
+// returned as a plain string; binary data is returned base64-encoded.
+func mcpFileContent(data []byte) map[string]interface{} {
+	if utf8.Valid(data) {
+		return map[string]interface{}{"content": string(data)}
 	}
-	if d, err := base64.URLEncoding.DecodeString(s); err == nil {
-		return d, nil
+	return map[string]interface{}{
+		"content":  base64.StdEncoding.EncodeToString(data),
+		"encoding": "base64",
 	}
-	if d, err := base64.RawStdEncoding.DecodeString(s); err == nil {
-		return d, nil
+}
+
+// int64Arg returns an argument as an int64, defaulting to 0.
+func int64Arg(args map[string]interface{}, key string) int64 {
+	if v, ok := args[key].(float64); ok {
+		return int64(v)
 	}
-	return base64.RawURLEncoding.DecodeString(s)
+	return 0
 }
 
 // ── App Tools ───────────────────────────────────────────────────────
@@ -600,11 +606,12 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// list_app_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_app_files",
-		Description: "List an app's hosted web files (path + size). Empty if nothing is published. Admin+ only.",
+		Description: "List an app's hosted web files (path + size). Empty if nothing is published. Optionally search file paths and contents.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+				"nonce":  map[string]interface{}{"type": "string", "description": "App nonce"},
+				"search": map[string]interface{}{"type": "string", "description": "Optional term to filter by path or content (case-insensitive)"},
 			},
 			"required": []string{"nonce"},
 		},
@@ -616,24 +623,27 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		files, err := s.coreListAppWeb(user, nonce)
+		search, _ := args["search"].(string)
+		files, err := s.coreListAppWeb(user, nonce, search)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]interface{}{"files": files})
 	})
 
-	// download_app_files
+	// read_app_file
 	mcps.AddTool(&mcp.Tool{
-		Name:        "download_app_files",
-		Description: "Get a single-use URL to download an app's web files as a zip. GET the returned URL within 5 minutes to fetch the archive. Set legacy_mode to true to receive the archive as base64 data instead (not recommended).",
+		Name:        "read_app_file",
+		Description: "Read all or part of a file from an app's web directory. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":       map[string]interface{}{"type": "string", "description": "App nonce"},
-				"legacy_mode": map[string]interface{}{"type": "boolean", "description": "Return base64-encoded zip data directly instead of a URL (not recommended)"},
+				"nonce":  map[string]interface{}{"type": "string", "description": "App nonce"},
+				"path":   map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
+				"offset": map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
+				"limit":  map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
 			},
-			"required": []string{"nonce"},
+			"required": []string{"nonce", "path"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -643,45 +653,29 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		legacyMode, _ := args["legacy_mode"].(bool)
-		if err := s.gateApp(user, nonce); err != nil {
+		path, _ := args["path"].(string)
+		offset := int64Arg(args, "offset")
+		limit := int64Arg(args, "limit")
+		data, err := s.coreReadAppFile(user, nonce, path, offset, limit)
+		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		app, err := s.store.GetApp(nonce)
-		if err != nil {
-			return mcpToolError("app not found: %v", err), nil
-		}
-
-		if legacyMode {
-			data, slug, err := s.coreDownloadAppWeb(user, nonce)
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]interface{}{
-				"data":     base64.StdEncoding.EncodeToString(data),
-				"filename": slug + ".zip",
-			})
-		}
-
-		url := s.newTransfer("download", nonce, "", user)
-		return mcpToolResult(map[string]interface{}{
-			"url":      url,
-			"filename": appSlug(app) + ".zip",
-		})
+		return mcpToolResult(mcpFileContent(data))
 	})
 
-	// publish_app_files
+	// write_app_file
 	mcps.AddTool(&mcp.Tool{
-		Name:        "publish_app_files",
-		Description: "Get a single-use URL to upload web files for an app. POST the raw file bytes (a .html or .zip) to the returned URL within 5 minutes. Alternatively, set legacy_data to pass the file contents directly: base64 for .zip uploads or plain text for .html uploads (not recommended; clutters the context window).",
+		Name:        "write_app_file",
+		Description: "Write or patch a file in an app's web directory. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":       map[string]interface{}{"type": "string", "description": "App nonce"},
-				"filename":    map[string]interface{}{"type": "string", "description": "Filename with .html or .zip extension"},
-				"legacy_data": map[string]interface{}{"type": "string", "description": "File contents passed directly: base64 for .zip or plain text for .html (not recommended)"},
+				"nonce":    map[string]interface{}{"type": "string", "description": "App nonce"},
+				"path":     map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
+				"content":  map[string]interface{}{"type": "string", "description": "New file content"},
+				"old_text": map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
 			},
-			"required": []string{"nonce", "filename"},
+			"required": []string{"nonce", "path", "content"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -691,57 +685,26 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		filename, _ := args["filename"].(string)
-		legacyData, _ := args["legacy_data"].(string)
-		if err := s.gateApp(user, nonce); err != nil {
+		path, _ := args["path"].(string)
+		content, _ := args["content"].(string)
+		oldText, _ := args["old_text"].(string)
+		if err := s.coreWriteAppFile(user, nonce, path, []byte(content), oldText); err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		if filename == "" {
-			return mcpToolError("filename is required"), nil
-		}
-		name := strings.ToLower(filename)
-		if !strings.HasSuffix(name, ".html") && !strings.HasSuffix(name, ".zip") {
-			return mcpToolError("filename must end in .html or .zip"), nil
-		}
-		if _, err := s.store.GetApp(nonce); err != nil {
-			return mcpToolError("app not found: %v", err), nil
-		}
-
-		if legacyData != "" {
-			var data []byte
-			if strings.HasSuffix(name, ".zip") {
-				var err error
-				data, err = decodeBase64Transfer(legacyData)
-				if err != nil {
-					return mcpToolError("invalid base64 data: %v", err), nil
-				}
-			} else {
-				data = []byte(legacyData)
-			}
-			if len(data) > xferMaxUpload {
-				return mcpToolError("file too large (50MB max)"), nil
-			}
-			route, err := s.coreUploadAppWeb(user, nonce, data, filename)
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]string{"route": route})
-		}
-
-		url := s.newTransfer("upload", nonce, filename, user)
-		return mcpToolResult(map[string]interface{}{"url": url})
+		return mcpToolResult(map[string]string{"status": "written"})
 	})
 
-	// delete_app_files
+	// delete_app_file
 	mcps.AddTool(&mcp.Tool{
-		Name:        "delete_app_files",
-		Description: "Remove an app's web files.",
+		Name:        "delete_app_file",
+		Description: "Delete a file from an app's web directory.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+				"path":  map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
 			},
-			"required": []string{"nonce"},
+			"required": []string{"nonce", "path"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -751,7 +714,8 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		if err := s.coreDeleteAppWeb(user, nonce); err != nil {
+		path, _ := args["path"].(string)
+		if err := s.coreDeleteAppFile(user, nonce, path); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "deleted"})
@@ -761,15 +725,15 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 // ── Service Tools ───────────────────────────────────────────────────
 
 func (s *Server) registerServiceTools(mcps *mcp.Server) {
-	// download_service_files
+	// list_service_files
 	mcps.AddTool(&mcp.Tool{
-		Name:        "download_service_files",
-		Description: "Get a single-use URL to download a service's definition file as plain text. GET the returned URL within 5 minutes to fetch the .txt file. Set legacy_mode to true to receive the plain-text data directly instead (not recommended). Admin+ only.",
+		Name:        "list_service_files",
+		Description: "List a virtual or task service's definition file. Empty if nothing is published. Optionally search the file's content. Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id":          map[string]interface{}{"type": "number", "description": "Service ID"},
-				"legacy_mode": map[string]interface{}{"type": "boolean", "description": "Return plain-text file data directly instead of a URL (not recommended)"},
+				"id":     map[string]interface{}{"type": "number", "description": "Service ID"},
+				"search": map[string]interface{}{"type": "string", "description": "Optional term to filter by file content (case-insensitive)"},
 			},
 			"required": []string{"id"},
 		},
@@ -781,51 +745,32 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		id, _ := args["id"].(float64)
-		legacyMode, _ := args["legacy_mode"].(bool)
+		search, _ := args["search"].(string)
 		if id == 0 {
 			return mcpToolError("id is required"), nil
 		}
 		if err := s.gate(user, rolesAdminPlus); err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		svc, err := s.store.GetService(int64(id))
+		files, err := s.coreListServiceFiles(user, int64(id), search)
 		if err != nil {
-			return mcpToolError("service not found: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
-		if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-			return mcpToolError("service type %q does not support file publishing", svc.Descriptor.Type), nil
-		}
-
-		if legacyMode {
-			data, filename, err := s.coreDownloadServiceFiles(user, int64(id))
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]interface{}{
-				"data":     string(data),
-				"filename": filename,
-			})
-		}
-
-		url := s.newServiceTransfer("download", int64(id), "", user)
-		return mcpToolResult(map[string]interface{}{
-			"url":      url,
-			"filename": svc.Name + ".txt",
-		})
+		return mcpToolResult(map[string]interface{}{"files": files})
 	})
 
-	// publish_service_files
+	// read_service_file
 	mcps.AddTool(&mcp.Tool{
-		Name:        "publish_service_files",
-		Description: "Get a single-use URL to upload a plain-text tool script file for a virtual or task service. The format of tool scripts can be found using the `get_guide` tool for 'tasks' or 'virtuals'. POST the raw file bytes to the returned URL within 5 minutes. Alternatively, set legacy_data to pass the plain-text contents directly (not recommended; clutters the context window). Admin+ only.",
+		Name:        "read_service_file",
+		Description: "Read all or part of a virtual or task service's definition file. Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id":          map[string]interface{}{"type": "number", "description": "Service ID"},
-				"filename":    map[string]interface{}{"type": "string", "description": "Filename (any plain-text name; .zip is rejected)"},
-				"legacy_data": map[string]interface{}{"type": "string", "description": "Plain-text file contents passed directly (not recommended)"},
+				"id":     map[string]interface{}{"type": "number", "description": "Service ID"},
+				"offset": map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
+				"limit":  map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
 			},
-			"required": []string{"id", "filename"},
+			"required": []string{"id"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -835,48 +780,60 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		id, _ := args["id"].(float64)
-		filename, _ := args["filename"].(string)
-		legacyData, _ := args["legacy_data"].(string)
+		offset := int64Arg(args, "offset")
+		limit := int64Arg(args, "limit")
 		if id == 0 {
 			return mcpToolError("id is required"), nil
 		}
 		if err := s.gate(user, rolesAdminPlus); err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		if filename == "" {
-			return mcpToolError("filename is required"), nil
-		}
-		if strings.HasSuffix(strings.ToLower(filename), ".zip") {
-			return mcpToolError("zip uploads are not supported for service files"), nil
-		}
-		svc, err := s.store.GetService(int64(id))
+		data, _, err := s.coreReadServiceFile(user, int64(id), offset, limit)
 		if err != nil {
-			return mcpToolError("service not found: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
-		if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-			return mcpToolError("service type %q does not support file publishing", svc.Descriptor.Type), nil
-		}
-
-		if legacyData != "" {
-			data := []byte(legacyData)
-			if len(data) > xferMaxUpload {
-				return mcpToolError("file too large (50MB max)"), nil
-			}
-			route, err := s.coreUploadServiceFiles(user, int64(id), data, filename)
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]string{"route": route})
-		}
-
-		url := s.newServiceTransfer("upload", int64(id), filename, user)
-		return mcpToolResult(map[string]interface{}{"url": url})
+		return mcpToolResult(mcpFileContent(data))
 	})
 
-	// delete_service_files
+	// write_service_file
 	mcps.AddTool(&mcp.Tool{
-		Name:        "delete_service_files",
-		Description: "Remove a service's published definition file. Admin+ only.",
+		Name:        "write_service_file",
+		Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":       map[string]interface{}{"type": "number", "description": "Service ID"},
+				"content":  map[string]interface{}{"type": "string", "description": "New file content"},
+				"old_text": map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
+			},
+			"required": []string{"id", "content"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		id, _ := args["id"].(float64)
+		content, _ := args["content"].(string)
+		oldText, _ := args["old_text"].(string)
+		if id == 0 {
+			return mcpToolError("id is required"), nil
+		}
+		if err := s.gate(user, rolesAdminPlus); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		if err := s.coreWriteServiceFile(user, int64(id), []byte(content), oldText); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]string{"status": "written"})
+	})
+
+	// delete_service_file
+	mcps.AddTool(&mcp.Tool{
+		Name:        "delete_service_file",
+		Description: "Delete a virtual or task service's definition file. Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

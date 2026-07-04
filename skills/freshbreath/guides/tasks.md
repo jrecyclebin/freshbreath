@@ -8,7 +8,7 @@ Input to each of these tools happens through environment variables. Output from
 these scripts happens on stdout. (Or stderr in the case of errors.)
 
 The tool scripts for a task service are contained in a single text file which
-can be uploaded using the `publish_service_files` MCP tool. A sample tool script
+can be uploaded using the `write_service_file` MCP tool. A sample tool script
 looks like this:
 
 ```
