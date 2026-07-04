@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -628,11 +626,12 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// download_app_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "download_app_files",
-		Description: "Get a single-use URL to download an app's web files as a zip. GET the returned URL within 5 minutes to fetch the archive.",
+		Description: "Get a single-use URL to download an app's web files as a zip. GET the returned URL within 5 minutes to fetch the archive. Set legacy_mode to true to receive the archive as base64 data instead (not recommended).",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+				"nonce":       map[string]interface{}{"type": "string", "description": "App nonce"},
+				"legacy_mode": map[string]interface{}{"type": "boolean", "description": "Return base64-encoded zip data directly instead of a URL (not recommended)"},
 			},
 			"required": []string{"nonce"},
 		},
@@ -644,12 +643,24 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
+		legacyMode, _ := args["legacy_mode"].(bool)
 		if err := s.gateApp(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		app, err := s.store.GetApp(nonce)
 		if err != nil {
 			return mcpToolError("app not found: %v", err), nil
+		}
+
+		if legacyMode {
+			data, slug, err := s.coreDownloadAppWeb(user, nonce)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]interface{}{
+				"data":     base64.StdEncoding.EncodeToString(data),
+				"filename": slug + ".zip",
+			})
 		}
 
 		url := s.newTransfer("download", nonce, "", user)
@@ -662,12 +673,13 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// publish_app_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "publish_app_files",
-		Description: "Get a single-use URL to upload web files for an app. POST the raw file bytes (a .html or .zip) to the returned URL within 5 minutes.",
+		Description: "Get a single-use URL to upload web files for an app. POST the raw file bytes (a .html or .zip) to the returned URL within 5 minutes. Alternatively, set legacy_data to pass the file contents directly: base64 for .zip uploads or plain text for .html uploads (not recommended; clutters the context window).",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":    map[string]interface{}{"type": "string", "description": "App nonce"},
-				"filename": map[string]interface{}{"type": "string", "description": "Filename with .html or .zip extension"},
+				"nonce":       map[string]interface{}{"type": "string", "description": "App nonce"},
+				"filename":    map[string]interface{}{"type": "string", "description": "Filename with .html or .zip extension"},
+				"legacy_data": map[string]interface{}{"type": "string", "description": "File contents passed directly: base64 for .zip or plain text for .html (not recommended)"},
 			},
 			"required": []string{"nonce", "filename"},
 		},
@@ -680,6 +692,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
 		filename, _ := args["filename"].(string)
+		legacyData, _ := args["legacy_data"].(string)
 		if err := s.gateApp(user, nonce); err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -694,67 +707,29 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			return mcpToolError("app not found: %v", err), nil
 		}
 
+		if legacyData != "" {
+			var data []byte
+			if strings.HasSuffix(name, ".zip") {
+				var err error
+				data, err = decodeBase64Transfer(legacyData)
+				if err != nil {
+					return mcpToolError("invalid base64 data: %v", err), nil
+				}
+			} else {
+				data = []byte(legacyData)
+			}
+			if len(data) > xferMaxUpload {
+				return mcpToolError("file too large (50MB max)"), nil
+			}
+			route, err := s.coreUploadAppWeb(user, nonce, data, filename)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"route": route})
+		}
+
 		url := s.newTransfer("upload", nonce, filename, user)
 		return mcpToolResult(map[string]interface{}{"url": url})
-	})
-
-	// xfer_fallback
-	mcps.AddTool(&mcp.Tool{
-		Name:        "xfer_fallback",
-		Description: "(Legacy) Upload web files directly if making a request to the transfer URL fails. Avoid using this if you have other options, as this method will clutter up the context window. Provide the URL returned by publish_app_files and the base64-encoded file contents.",
-		InputSchema: map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"url":  map[string]interface{}{"type": "string", "description": "The upload transfer URL from publish_app_files"},
-				"data": map[string]interface{}{"type": "string", "description": "Base64-encoded file bytes (.html or .zip)"},
-			},
-			"required": []string{"url", "data"},
-		},
-	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
-		if err != nil {
-			return mcpToolError("auth: %v", err), nil
-		}
-		args := make(map[string]interface{})
-		json.Unmarshal(req.Params.Arguments, &args)
-		urlStr, _ := args["url"].(string)
-		dataStr, _ := args["data"].(string)
-
-		parsed, err := url.Parse(urlStr)
-		if err != nil || parsed.Path == "" || !strings.Contains(parsed.Path, "/api/xfer/") {
-			return mcpToolError("invalid transfer url"), nil
-		}
-		token := path.Base(parsed.Path)
-
-		e := s.takeTransfer(token)
-		if e == nil {
-			return mcpToolError("invalid or expired transfer url"), nil
-		}
-		if e.Action != "upload" {
-			return mcpToolError("transfer url is not an upload"), nil
-		}
-		if user.ID != e.Actor.ID {
-			return mcpToolError("transfer url was created by a different user"), nil
-		}
-
-		data, err := decodeBase64Transfer(dataStr)
-		if err != nil {
-			return mcpToolError("invalid base64 data: %v", err), nil
-		}
-		if len(data) > xferMaxUpload {
-			return mcpToolError("file too large (50MB max)"), nil
-		}
-
-		var route string
-		if e.appTarget() {
-			route, err = s.coreUploadAppWeb(e.Actor, e.Nonce, data, e.Filename)
-		} else {
-			route, err = s.coreUploadServiceFiles(e.Actor, e.ServiceID, data, e.Filename)
-		}
-		if err != nil {
-			return mcpToolError("%v", err), nil
-		}
-		return mcpToolResult(map[string]string{"route": route})
 	})
 
 	// delete_app_files
@@ -789,11 +764,12 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 	// download_service_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "download_service_files",
-		Description: "Get a single-use URL to download a service's definition file as plain text. GET the returned URL within 5 minutes to fetch the .txt file. Admin+ only.",
+		Description: "Get a single-use URL to download a service's definition file as plain text. GET the returned URL within 5 minutes to fetch the .txt file. Set legacy_mode to true to receive the plain-text data directly instead (not recommended). Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id": map[string]interface{}{"type": "number", "description": "Service ID"},
+				"id":          map[string]interface{}{"type": "number", "description": "Service ID"},
+				"legacy_mode": map[string]interface{}{"type": "boolean", "description": "Return plain-text file data directly instead of a URL (not recommended)"},
 			},
 			"required": []string{"id"},
 		},
@@ -805,6 +781,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		id, _ := args["id"].(float64)
+		legacyMode, _ := args["legacy_mode"].(bool)
 		if id == 0 {
 			return mcpToolError("id is required"), nil
 		}
@@ -819,6 +796,17 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			return mcpToolError("service type %q does not support file publishing", svc.Descriptor.Type), nil
 		}
 
+		if legacyMode {
+			data, filename, err := s.coreDownloadServiceFiles(user, int64(id))
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]interface{}{
+				"data":     string(data),
+				"filename": filename,
+			})
+		}
+
 		url := s.newServiceTransfer("download", int64(id), "", user)
 		return mcpToolResult(map[string]interface{}{
 			"url":      url,
@@ -829,12 +817,13 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 	// publish_service_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "publish_service_files",
-		Description: "Get a single-use URL to upload a plain-text definition file for a service. POST the raw file bytes to the returned URL within 5 minutes. Admin+ only.",
+		Description: "Get a single-use URL to upload a plain-text tool script file for a virtual or task service. The format of tool scripts can be found using the `get_guide` tool for 'tasks' or 'virtuals'. POST the raw file bytes to the returned URL within 5 minutes. Alternatively, set legacy_data to pass the plain-text contents directly (not recommended; clutters the context window). Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id":       map[string]interface{}{"type": "number", "description": "Service ID"},
-				"filename": map[string]interface{}{"type": "string", "description": "Filename (any plain-text name; .zip is rejected)"},
+				"id":          map[string]interface{}{"type": "number", "description": "Service ID"},
+				"filename":    map[string]interface{}{"type": "string", "description": "Filename (any plain-text name; .zip is rejected)"},
+				"legacy_data": map[string]interface{}{"type": "string", "description": "Plain-text file contents passed directly (not recommended)"},
 			},
 			"required": []string{"id", "filename"},
 		},
@@ -847,6 +836,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		id, _ := args["id"].(float64)
 		filename, _ := args["filename"].(string)
+		legacyData, _ := args["legacy_data"].(string)
 		if id == 0 {
 			return mcpToolError("id is required"), nil
 		}
@@ -865,6 +855,18 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		}
 		if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
 			return mcpToolError("service type %q does not support file publishing", svc.Descriptor.Type), nil
+		}
+
+		if legacyData != "" {
+			data := []byte(legacyData)
+			if len(data) > xferMaxUpload {
+				return mcpToolError("file too large (50MB max)"), nil
+			}
+			route, err := s.coreUploadServiceFiles(user, int64(id), data, filename)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"route": route})
 		}
 
 		url := s.newServiceTransfer("upload", int64(id), filename, user)

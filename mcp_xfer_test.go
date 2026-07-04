@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -9,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -57,9 +57,26 @@ func toolResultText(t *testing.T, res *mcp.CallToolResult) string {
 	return txt.Text
 }
 
-func TestXferFallbackHappy(t *testing.T) {
+func createZipWithFile(t *testing.T, name, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	fw, err := zw.Create(name)
+	if err != nil {
+		t.Fatalf("create zip entry: %v", err)
+	}
+	if _, err := fw.Write([]byte(content)); err != nil {
+		t.Fatalf("write zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestPublishAppFilesReturnsURL(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "xfer-fallback", "", "", nil)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "app-url", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -77,14 +94,25 @@ func TestXferFallbackHappy(t *testing.T) {
 	if err := json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes); err != nil {
 		t.Fatalf("parse publish result: %v", err)
 	}
+	if pubRes.URL == "" {
+		t.Fatal("expected upload URL")
+	}
+}
 
-	data := base64.StdEncoding.EncodeToString([]byte("<h1>hello</h1>"))
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  pubRes.URL,
-		"data": data,
+func TestPublishAppFilesLegacyDataHappy(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-html", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
+		"nonce":       nonce,
+		"filename":    "index.html",
+		"legacy_data": "<h1>hello</h1>",
 	})
 	if res.IsError {
-		t.Fatalf("xfer_fallback failed: %s", toolResultText(t, res))
+		t.Fatalf("publish_app_files legacy_data failed: %s", toolResultText(t, res))
 	}
 	var upRes struct {
 		Route string `json:"route"`
@@ -92,8 +120,8 @@ func TestXferFallbackHappy(t *testing.T) {
 	if err := json.Unmarshal([]byte(toolResultText(t, res)), &upRes); err != nil {
 		t.Fatalf("parse upload result: %v", err)
 	}
-	if upRes.Route != "/xfer-fallback" {
-		t.Errorf("route = %q, want /xfer-fallback", upRes.Route)
+	if upRes.Route != "/legacy-html" {
+		t.Errorf("route = %q, want /legacy-html", upRes.Route)
 	}
 
 	files, err := srv.coreListAppWeb(&User{ID: 1, Role: "Superuser"}, nonce)
@@ -105,117 +133,52 @@ func TestXferFallbackHappy(t *testing.T) {
 	}
 }
 
-func TestXferFallbackInvalidURL(t *testing.T) {
+func TestPublishAppFilesLegacyDataZip(t *testing.T) {
 	srv := newTestServer(t)
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  "not-a-url",
-		"data": base64.StdEncoding.EncodeToString([]byte("x")),
-	})
-	if !res.IsError {
-		t.Fatal("expected error for invalid url")
-	}
-	if !strings.Contains(toolResultText(t, res), "invalid transfer url") {
-		t.Errorf("error = %q, want invalid transfer url", toolResultText(t, res))
-	}
-}
-
-func TestXferFallbackExpiredToken(t *testing.T) {
-	srv := newTestServer(t)
-	tok := "expired-token"
-	srv.xfers[tok] = &transferEntry{
-		Action:    "upload",
-		Nonce:     "n",
-		Filename:  "index.html",
-		Actor:     &User{ID: -1, Role: "Superuser"},
-		ExpiresAt: time.Now().Add(-time.Minute),
-	}
-	url := srv.config.PublicBaseURL + "/api/xfer/" + tok
-
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  url,
-		"data": base64.StdEncoding.EncodeToString([]byte("x")),
-	})
-	if !res.IsError {
-		t.Fatal("expected error for expired token")
-	}
-	if !strings.Contains(toolResultText(t, res), "invalid or expired") {
-		t.Errorf("error = %q, want invalid or expired", toolResultText(t, res))
-	}
-}
-
-func TestXferFallbackDownloadURL(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "xfer-dl", "", "", nil)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-zip", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 
-	dl := callCentralTool(t, srv, "download_app_files", map[string]interface{}{"nonce": nonce})
-	if dl.IsError {
-		t.Fatalf("download_app_files failed: %s", toolResultText(t, dl))
+	zipData := createZipWithFile(t, "index.html", "<h1>zip</h1>")
+	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
+		"nonce":       nonce,
+		"filename":    "site.zip",
+		"legacy_data": base64.StdEncoding.EncodeToString(zipData),
+	})
+	if res.IsError {
+		t.Fatalf("publish_app_files legacy_data zip failed: %s", toolResultText(t, res))
 	}
-	var dlRes struct {
-		URL string `json:"url"`
+	var upRes struct {
+		Route string `json:"route"`
 	}
-	if err := json.Unmarshal([]byte(toolResultText(t, dl)), &dlRes); err != nil {
-		t.Fatalf("parse download result: %v", err)
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &upRes); err != nil {
+		t.Fatalf("parse upload result: %v", err)
+	}
+	if upRes.Route != "/legacy-zip" {
+		t.Errorf("route = %q, want /legacy-zip", upRes.Route)
 	}
 
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  dlRes.URL,
-		"data": base64.StdEncoding.EncodeToString([]byte("x")),
-	})
-	if !res.IsError {
-		t.Fatal("expected error for download url")
+	files, err := srv.coreListAppWeb(&User{ID: 1, Role: "Superuser"}, nonce)
+	if err != nil {
+		t.Fatalf("list files: %v", err)
 	}
-	if !strings.Contains(toolResultText(t, res), "not an upload") {
-		t.Errorf("error = %q, want not an upload", toolResultText(t, res))
+	if len(files) != 1 || files[0].Path != "index.html" {
+		t.Errorf("files = %v, want [index.html]", files)
 	}
 }
 
-func TestXferFallbackWrongUser(t *testing.T) {
+func TestPublishAppFilesLegacyDataBadBase64(t *testing.T) {
 	srv := newTestServer(t)
-	tok := "wrong-user-token"
-	srv.xfers[tok] = &transferEntry{
-		Action:    "upload",
-		Nonce:     "n",
-		Filename:  "index.html",
-		Actor:     &User{ID: 999, Role: "Member"},
-		ExpiresAt: time.Now().Add(time.Minute),
-	}
-	url := srv.config.PublicBaseURL + "/api/xfer/" + tok
-
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  url,
-		"data": base64.StdEncoding.EncodeToString([]byte("x")),
-	})
-	if !res.IsError {
-		t.Fatal("expected error for wrong user")
-	}
-	if !strings.Contains(toolResultText(t, res), "different user") {
-		t.Errorf("error = %q, want different user", toolResultText(t, res))
-	}
-}
-
-func TestXferFallbackBadBase64(t *testing.T) {
-	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "xfer-b64", "", "", nil)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-b64", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 
-	pub := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
-		"nonce":    nonce,
-		"filename": "index.html",
-	})
-	var pubRes struct {
-		URL string `json:"url"`
-	}
-	json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes)
-
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  pubRes.URL,
-		"data": "!!!not-base64!!!",
+	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
+		"nonce":       nonce,
+		"filename":    "site.zip",
+		"legacy_data": "!!!not-base64!!!",
 	})
 	if !res.IsError {
 		t.Fatal("expected error for bad base64")
@@ -225,26 +188,17 @@ func TestXferFallbackBadBase64(t *testing.T) {
 	}
 }
 
-func TestXferFallbackTooLarge(t *testing.T) {
+func TestPublishAppFilesLegacyDataTooLarge(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "xfer-large", "", "", nil)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-large", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
 
-	pub := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
-		"nonce":    nonce,
-		"filename": "index.html",
-	})
-	var pubRes struct {
-		URL string `json:"url"`
-	}
-	json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes)
-
-	data := base64.StdEncoding.EncodeToString(make([]byte, xferMaxUpload+1))
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  pubRes.URL,
-		"data": data,
+	res := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
+		"nonce":       nonce,
+		"filename":    "index.html",
+		"legacy_data": string(make([]byte, xferMaxUpload+1)),
 	})
 	if !res.IsError {
 		t.Fatal("expected error for too large")
@@ -254,7 +208,47 @@ func TestXferFallbackTooLarge(t *testing.T) {
 	}
 }
 
-func TestServiceFileMCPDownloadUpload(t *testing.T) {
+func TestDownloadAppFilesLegacyMode(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "legacy-dl", "", "", nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if _, err := srv.coreUploadAppWeb(&User{ID: 1, Role: "Superuser"}, nonce, []byte("<h1>hello</h1>"), "index.html"); err != nil {
+		t.Fatalf("upload app web: %v", err)
+	}
+
+	dl := callCentralTool(t, srv, "download_app_files", map[string]interface{}{
+		"nonce":       nonce,
+		"legacy_mode": true,
+	})
+	if dl.IsError {
+		t.Fatalf("download_app_files legacy_mode failed: %s", toolResultText(t, dl))
+	}
+	var dlRes struct {
+		Data     string `json:"data"`
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, dl)), &dlRes); err != nil {
+		t.Fatalf("parse download result: %v", err)
+	}
+	if dlRes.Filename != "legacy-dl.zip" {
+		t.Errorf("filename = %q, want legacy-dl.zip", dlRes.Filename)
+	}
+	data, err := base64.StdEncoding.DecodeString(dlRes.Data)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	if len(zr.File) != 1 || zr.File[0].Name != "index.html" {
+		t.Errorf("zip contents = %v, want [index.html]", zr.File)
+	}
+}
+
+func TestServiceFileMCPLegacyDataUpload(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
 	admin := &User{ID: 1, Role: "Superuser"}
@@ -264,29 +258,14 @@ func TestServiceFileMCPDownloadUpload(t *testing.T) {
 		t.Fatalf("create service: %v", err)
 	}
 
-	// Publish via MCP.
-	pub := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
-		"id":       float64(svc.ID),
-		"filename": "deploy.txt",
-	})
-	if pub.IsError {
-		t.Fatalf("publish_service_files failed: %s", toolResultText(t, pub))
-	}
-	var pubRes struct {
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes); err != nil {
-		t.Fatalf("parse publish result: %v", err)
-	}
-
-	// Redeem with xfer_fallback.
 	content := []byte("[build]\nmake all\n")
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
-		"url":  pubRes.URL,
-		"data": base64.StdEncoding.EncodeToString(content),
+	res := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
+		"id":          float64(svc.ID),
+		"filename":    "deploy.txt",
+		"legacy_data": string(content),
 	})
 	if res.IsError {
-		t.Fatalf("xfer_fallback failed: %s", toolResultText(t, res))
+		t.Fatalf("publish_service_files legacy_data failed: %s", toolResultText(t, res))
 	}
 	var upRes struct {
 		Route string `json:"route"`
@@ -298,7 +277,6 @@ func TestServiceFileMCPDownloadUpload(t *testing.T) {
 		t.Errorf("route = %q, want %q", upRes.Route, svc.URL)
 	}
 
-	// Verify file written.
 	path := filepath.Join(srv.config.DataDir, "tasks", svc.Name+".txt")
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -307,16 +285,35 @@ func TestServiceFileMCPDownloadUpload(t *testing.T) {
 	if !bytes.Equal(got, content) {
 		t.Errorf("legacy file = %q, want %q", got, content)
 	}
+}
 
-	// Download via MCP.
+func TestServiceFileMCPLegacyModeDownload(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &User{ID: 1, Role: "Superuser"}
+
+	svc, err := srv.coreCreateService(admin, "deploy-dl", "", ServiceDescriptor{Type: "tasks"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	content := []byte("[build]\nmake all\n")
+	path := filepath.Join(srv.config.DataDir, "tasks", svc.Name+".txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, content, 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
 	dl := callCentralTool(t, srv, "download_service_files", map[string]interface{}{
-		"id": float64(svc.ID),
+		"id":          float64(svc.ID),
+		"legacy_mode": true,
 	})
 	if dl.IsError {
-		t.Fatalf("download_service_files failed: %s", toolResultText(t, dl))
+		t.Fatalf("download_service_files legacy_mode failed: %s", toolResultText(t, dl))
 	}
 	var dlRes struct {
-		URL      string `json:"url"`
+		Data     string `json:"data"`
 		Filename string `json:"filename"`
 	}
 	if err := json.Unmarshal([]byte(toolResultText(t, dl)), &dlRes); err != nil {
@@ -325,22 +322,8 @@ func TestServiceFileMCPDownloadUpload(t *testing.T) {
 	if dlRes.Filename != svc.Name+".txt" {
 		t.Errorf("filename = %q, want %q", dlRes.Filename, svc.Name+".txt")
 	}
-
-	tok := strings.TrimPrefix(dlRes.URL, srv.config.PublicBaseURL+"/api/xfer/")
-	e := srv.takeTransfer(tok)
-	if e == nil || e.ServiceID != svc.ID || e.Action != "download" {
-		t.Fatalf("download transfer entry mismatch")
-	}
-
-	// Delete via MCP.
-	del := callCentralTool(t, srv, "delete_service_files", map[string]interface{}{
-		"id": float64(svc.ID),
-	})
-	if del.IsError {
-		t.Fatalf("delete_service_files failed: %s", toolResultText(t, del))
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("expected file to be removed")
+	if dlRes.Data != string(content) {
+		t.Errorf("data = %q, want %q", dlRes.Data, content)
 	}
 }
 
