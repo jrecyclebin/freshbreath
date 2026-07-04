@@ -1,65 +1,55 @@
 # How to Publish Apps to Fresh Breath
 
 Fresh Breath can *host* your static app as well as connecting it to services. You
-hand it a single `.html` file or a `.zip` of a whole site, and it serves the
-result at a tidy URL on the same origin as the server. Same origin means
-`/frbr.js` and relative service calls Just Work — no CORS dance, no `file://`
-quirks.
+hand it files — a single `index.html`, a stylesheet, a script bundle, whatever —
+and it serves the result at a tidy URL on the same origin as the server. Same
+origin means `/frbr.js` and relative service calls Just Work — no CORS dance, no
+`file://` quirks.
 
 ---
 
 ## 1. What You Can Upload
 
-Every hosted app lives under an existing app's nonce. You publish one of two
-things:
+Every hosted app lives under an existing app's nonce. You can manage individual
+files in the app's web directory:
 
-- **A single `.html` file** — saved as `index.html`. Perfect for the classic
-  one-file Fresh Breath app.
-- **A `.zip` archive** — extracted into the app's web directory. The entry point
-  is `index.html`; if there isn't one, the first `.html` file alphabetically is
-  renamed to `index.html`. Bring along your CSS, JS, images, whatever.
+- **`index.html`** — the entry point. Required for the app to be served.
+- **Any other files** — CSS, JS, images, JSON, etc. They keep their relative
+  paths.
 
-Each publish **replaces** the previous contents — the web directory is wiped and
-rewritten, not merged. Treat it like a deploy, not a sync.
+Treat writes like a deploy: you can replace a whole file or patch a single chunk
+of text, but there is no automatic merge of directories.
 
 ---
 
 ## 2. Publish over MCP
 
-The tools:
+The MCP tools work like the file tools LLMs are used to:
 
-- **`publish_app_files`** — `{ nonce, filename }` where `filename` carries the
-  `.html` or `.zip` extension so the server knows how to handle it. Returns
-  `{ url }`. **POST the raw file bytes** to that URL (e.g. `curl -X POST
-  --data-binary @site.zip <url>`) to publish; it returns the route.
-- **`download_app_files`** — `{ nonce }` → `{ url, filename }`. **GET the url**
-  to stream back the `.zip`.
-- **`list_app_files`** — `{ nonce }` → `{ files }`, each `{ path, size }`,
-  sorted by path. Empty when nothing's published. A quick peek at what's hosted
-  without pulling the whole zip.
+- **`list_app_files`** — `{ nonce, search? }` → `{ files }`, each
+  `{ path, size }`, sorted by path. Empty when nothing's published. If `search`
+  is provided, only files whose path or content contains the term are returned.
+- **`read_app_file`** — `{ nonce, path, offset?, limit? }` → `{ content }`,
+  optionally with `{ encoding: "base64" }` for binary files. `offset` and
+  `limit` are zero-based byte bounds for reading chunks.
+- **`write_app_file`** — `{ nonce, path, content, old_text? }` →
+  `{ status: "written" }`. Without `old_text` the entire file is replaced.
+  With `old_text`, the single occurrence of `old_text` is replaced with
+  `content`. An error is returned if `old_text` is not found or appears more
+  than once.
+- **`delete_app_file`** — `{ nonce, path }` → `{ status: "deleted" }`.
 
-Transfer URLs are single-use and expire after **5 minutes** — mint one right
-before you move the bytes. Under the hood it's the same core code as the HTTP
-handlers, so behavior is identical: single `.html` becomes `index.html`, `.zip`
-is extracted, each publish replaces the last.
+These tools read and write file data directly — no transfer URLs or base64
+round-trips.
 
 ---
 
 ## Notes
 
-- **App nonce** is the 48-char hex id from the Apps list (or `/api/apps`). It's
-  the `{nonce}` in every URL above.
-- **Replace, not merge** — re-uploading wipes the old web dir first. If you want
-  incremental file-level updates to a *remote* host instead, that's the SSH file
-  sync API, not this. See `guides/ssh.md`.
+- **App nonce** is the 48-char hex id from the Apps list (or `/api/apps`).
+- **Replace, not merge** — writing a file replaces it; writing `index.html`
+  replaces the previous entry point. If you want incremental file-level updates
+  to a *remote* host instead, that's the SSH file sync API. See `guides/ssh.md`.
 - **Same-origin perks** — once hosted, your app can `import` from `/frbr.js`
   (relative) and make non-proxied service calls without CORS headaches. The
   `file://` caveats in the auth guide simply don't apply.
-- **Legacy inline data** — if you cannot POST bytes to the transfer URL, the
-  `publish_app_files` tool accepts an optional `legacy_data` field. For `.zip`
-  uploads this must be base64-encoded; for `.html` uploads it is plain text.
-  When `legacy_data` is provided the file is published directly and the tool
-  returns `{ route }` with no transfer URL. This is discouraged because it
-  clutters the context window. `download_app_files` has a matching
-  `legacy_mode: true` option that returns the zip as base64 `data` instead of
-  a URL.
