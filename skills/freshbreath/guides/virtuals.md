@@ -182,3 +182,57 @@ The tool script can access the `items` array using `$.data.items`.
 Alternatively, the bracket notation can be used: `$['data']['items']`. Both
 notations are equivalent. (Both of these syntaxes are supported thanks to the
 `gson` library used in Fresh Breath.)
+
+## String Bodies
+
+Sometimes the body you want to send isn't JSON at all — a text file, a CSV, an
+image. The spread operator gets a second life here: a body line of the form
+`...$expr` sends the expression's **string** value as the raw request body,
+verbatim. No JSON encoding, no `$`-interpolation (so dollar signs in the file
+data sail through untouched), and no automatic `Content-Type`.
+
+```
+[upload-file] Upload a file's contents to a path.
+
+PUT https://api.example.com/files/$path
+Authorization: Bearer $token
+Content-Type: text/plain
+...$content
+
+HTTP 200
+```
+
+A few rules:
+
+- The expression must resolve to a **string**. Anything else errors with
+  `...$var requires a string` — the string-spread analogue of the object-spread
+  `spread requires an object` guard.
+- You **must** set a `Content-Type` header. String-spread bodies don't pick a
+  default for you; you know what your bytes are. Missing it is an error.
+- The `...` body and `{...$fields}` are told apart by the braces:
+  `{...$fields}` spreads an object's entries into a JSON object; `...$content`
+  spreads a string's bytes onto the wire.
+
+### Binary data via `base64()`
+
+JSON strings can't carry arbitrary bytes, so binary arrives base64-encoded.
+The `base64()` expression function decodes its argument before the bytes go
+out — handy for images and other non-text uploads:
+
+```
+[upload-image] Upload an image to a path.
+
+PUT https://api.example.com/images/$path
+Authorization: Bearer $token
+Content-Type: image/png
+...base64($content)
+
+HTTP 200
+```
+
+Here `$content` is the base64 text of the PNG; `base64($content)` decodes it
+and the raw PNG bytes are what hits the wire.
+
+Like `host()` and `path()`, `base64()` is a general expression — you can also
+use it in assignments (`$raw = base64($content)`) if you want to inspect or
+re-shape the bytes before sending.
