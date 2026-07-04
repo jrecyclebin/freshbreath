@@ -55,7 +55,11 @@ is extracted, each publish replaces the last.
 - **Same-origin perks** — once hosted, your app can `import` from `/frbr.js`
   (relative) and make non-proxied service calls without CORS headaches. The
   `file://` caveats in the auth guide simply don't apply.
-- **Fallback transfer** — if accessing the transfer URLs fails, try the legacy
-  `xfer_fallback` call. Pass `{ url, data }`: the transfer URL and the `data`
-  as base64-encoded file contents. The URL is consumed and the file is
-  published directly; returns `{ route }` just like the HTTP redemption path.
+- **Legacy inline data** — if you cannot POST bytes to the transfer URL, the
+  `publish_app_files` tool accepts an optional `legacy_data` field. For `.zip`
+  uploads this must be base64-encoded; for `.html` uploads it is plain text.
+  When `legacy_data` is provided the file is published directly and the tool
+  returns `{ route }` with no transfer URL. This is discouraged because it
+  clutters the context window. `download_app_files` has a matching
+  `legacy_mode: true` option that returns the zip as base64 `data` instead of
+  a URL.
