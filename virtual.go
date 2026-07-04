@@ -2,6 +2,7 @@ package main
 
 import (
   "context"
+  "encoding/base64"
   "encoding/json"
   "fmt"
   "io"
@@ -59,6 +60,7 @@ type VirtualStep struct {
   URL         string // URL template with $variable interpolation
   Headers     map[string]string
   Body        string                   // Raw JSON body template
+  BodyRaw     string                   // String-spread body expression, e.g. "$content" or "base64($content)"
   Responses   map[int]*VirtualResponse // Expected status → response handling
 }
 
@@ -168,6 +170,7 @@ func toolParams(tool VirtualTool) []ToolParam {
       scan(v)
     }
     scan(step.Body)
+    scan(step.BodyRaw)
     for _, a := range step.Assignments {
       scan(a.Expr)
     }
@@ -275,7 +278,13 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) {
       }
 
     case sHeaders:
-      if strings.HasPrefix(line, "{") {
+      if strings.HasPrefix(line, "...") {
+        // String-spread body: ...$expr sends the expr's string value
+        // verbatim (no JSON). Discriminated from object-spread
+        // {...$fields} by the lack of braces.
+        step.BodyRaw = strings.TrimSpace(line[3:])
+        state = sResp
+      } else if strings.HasPrefix(line, "{") {
         bodyLines = []string{lines[i]}
         braceDepth = countBraces(line)
         if braceDepth <= 0 {
@@ -770,6 +779,19 @@ func evalFunction(name, argsStr string, vars map[string]interface{}, scope inter
       return nil, fmt.Errorf("path(): %w", err)
     }
     return u.Path, nil
+  case "base64":
+    if len(resolved) != 1 {
+      return nil, fmt.Errorf("base64() takes 1 argument, got %d", len(resolved))
+    }
+    s, ok := resolved[0].(string)
+    if !ok {
+      return nil, fmt.Errorf("base64() requires a string argument, got %T", resolved[0])
+    }
+    decoded, err := base64.StdEncoding.DecodeString(s)
+    if err != nil {
+      return nil, fmt.Errorf("base64(): %w", err)
+    }
+    return string(decoded), nil
   default:
     return nil, fmt.Errorf("unknown function: %s", name)
   }
@@ -854,6 +876,18 @@ func evalComparison(leftExpr, rightExpr, msg string, vars map[string]interface{}
 
 // ── Executor ─────────────────────────────────────────────────────────
 
+// hasContentType reports whether the headers contain a Content-Type entry
+// (case-insensitive). Used to enforce that string-spread bodies declare their
+// content type explicitly.
+func hasContentType(headers map[string]string) bool {
+  for k := range headers {
+    if strings.EqualFold(k, "Content-Type") {
+      return true
+    }
+  }
+  return false
+}
+
 // loadVirtualTools reads and parses the virtual description file for a service.
 func loadVirtualTools(dir string, svcName string) ([]VirtualTool, error) {
   path := filepath.Join(dir, "virtual", svcName+".txt")
@@ -931,7 +965,23 @@ func executeVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
     }
 
     var bodyReader io.Reader
-    if step.Body != "" {
+    if step.BodyRaw != "" {
+      // String-spread body: evaluate the expression and send the
+      // resulting string's bytes verbatim (no JSON encoding, no
+      // $-interpolation, so $ in file data survives intact).
+      val, err := evalExpr(step.BodyRaw, vars, scope, token)
+      if err != nil {
+        return nil, fmt.Errorf("step %d, raw body: %w", stepIdx, err)
+      }
+      s, ok := val.(string)
+      if !ok {
+        return nil, fmt.Errorf("step %d, raw body: ...%s requires a string, got %T", stepIdx, step.BodyRaw, val)
+      }
+      if !hasContentType(resolvedHeaders) {
+        return nil, fmt.Errorf("step %d, raw body: ...%s requires a Content-Type header", stepIdx, step.BodyRaw)
+      }
+      bodyReader = strings.NewReader(s)
+    } else if step.Body != "" {
       resolvedBody, err := resolveTemplate(step.Body, vars, scope, token, ResolveBody)
       if err != nil {
         return nil, fmt.Errorf("step %d, body: %w", stepIdx, err)

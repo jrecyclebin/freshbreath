@@ -1,6 +1,8 @@
 package main
 
 import (
+  "bytes"
+  "encoding/base64"
   "fmt"
   "io"
   "net/http"
@@ -1093,5 +1095,237 @@ HTTP 200
   // $id is just a plain reference → default string
   if paramMap["id"] != ParamString {
     t.Errorf("id type = %v, want string", paramMap["id"])
+  }
+}
+
+// ── String-Spread Body Tests ─────────────────────────────────────────
+
+func TestParseRawBody(t *testing.T) {
+  input := `[upload] Upload a file's contents.
+PUT https://example.com/files/$path
+Authorization: Bearer $token
+Content-Type: text/plain
+...$content
+HTTP 200
+`
+  tools, err := parseVirtualFile([]byte(input))
+  if err != nil {
+    t.Fatal(err)
+  }
+  if len(tools) != 1 {
+    t.Fatalf("expected 1 tool, got %d", len(tools))
+  }
+  step := tools[0].Steps[0]
+  if step.BodyRaw != "$content" {
+    t.Errorf("BodyRaw = %q, want $content", step.BodyRaw)
+  }
+  if step.Body != "" {
+    t.Errorf("Body should be empty, got %q", step.Body)
+  }
+  if len(step.Headers) != 2 {
+    t.Errorf("headers = %v", step.Headers)
+  }
+  if _, ok := step.Responses[200]; !ok {
+    t.Error("missing HTTP 200 response")
+  }
+}
+
+func TestParseRawBodyBase64Expr(t *testing.T) {
+  input := `[upload-image] Upload an image.
+PUT https://example.com/images/$path
+Content-Type: image/png
+...base64($content)
+HTTP 200
+`
+  tools, err := parseVirtualFile([]byte(input))
+  if err != nil {
+    t.Fatal(err)
+  }
+  step := tools[0].Steps[0]
+  if step.BodyRaw != "base64($content)" {
+    t.Errorf("BodyRaw = %q, want base64($content)", step.BodyRaw)
+  }
+}
+
+func TestToolParamsRawBodyString(t *testing.T) {
+  data := []byte(`[upload] Upload a file.
+PUT /files/$path
+Content-Type: text/plain
+...$content
+HTTP 200
+`)
+  tools, err := parseVirtualFile(data)
+  if err != nil {
+    t.Fatal(err)
+  }
+  paramMap := map[string]ParamType{}
+  for _, p := range tools[0].Params {
+    paramMap[p.Name] = p.Type
+  }
+  // A string-spread body advertises its var as a string, NOT an object
+  // (unlike the in-JSON {...$fields} spread).
+  if paramMap["content"] != ParamString {
+    t.Errorf("content type = %v, want string", paramMap["content"])
+  }
+  if paramMap["path"] != ParamString {
+    t.Errorf("path type = %v, want string", paramMap["path"])
+  }
+}
+
+func TestEvalExprBase64(t *testing.T) {
+  val, err := evalExpr(`base64("aGVsbG8=")`, nil, nil, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if val != "hello" {
+    t.Errorf("base64() = %v, want hello", val)
+  }
+}
+
+func TestEvalExprBase64Invalid(t *testing.T) {
+  _, err := evalExpr(`base64("not valid b64!!!")`, nil, nil, "")
+  if err == nil {
+    t.Fatal("expected error for invalid base64")
+  }
+  if !strings.Contains(err.Error(), "base64()") {
+    t.Errorf("error = %v", err)
+  }
+}
+
+func TestExecuteVirtualToolRawBody(t *testing.T) {
+  var gotBody string
+  var gotCT string
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    b, _ := io.ReadAll(r.Body)
+    gotBody = string(b)
+    gotCT = r.Header.Get("Content-Type")
+    w.WriteHeader(200)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
+PUT %s/files
+Content-Type: text/plain
+...$content
+HTTP 200
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  // "hello $world" proves the body goes through verbatim: a $ in the
+  // file data must NOT be interpreted as a variable reference.
+  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if gotBody != "hello $world" {
+    t.Errorf("body = %q, want verbatim \"hello $world\"", gotBody)
+  }
+  if gotCT != "text/plain" {
+    t.Errorf("Content-Type = %q, want text/plain", gotCT)
+  }
+}
+
+func TestExecuteVirtualToolRawBodyBase64(t *testing.T) {
+  var gotBody []byte
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    gotBody, _ = io.ReadAll(r.Body)
+    w.WriteHeader(200)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload-image] Upload image.
+PUT %s/files
+Content-Type: image/png
+...base64($content)
+HTTP 200
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  // A PNG signature — bytes that aren't legal inside a JSON string.
+  want := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+  encoded := base64.StdEncoding.EncodeToString(want)
+  _, err = executeVirtualTool(http.DefaultClient, tools, "upload-image", map[string]interface{}{"content": encoded}, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if !bytes.Equal(gotBody, want) {
+    t.Errorf("body = %v, want %v", gotBody, want)
+  }
+}
+
+func TestExecuteVirtualToolRawBodyAssignment(t *testing.T) {
+  var gotBody string
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    b, _ := io.ReadAll(r.Body)
+    gotBody = string(b)
+    w.WriteHeader(200)
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
+$payload = $content
+PUT %s/files
+Content-Type: text/plain
+...$payload
+HTTP 200
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "raw bytes here"}, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if gotBody != "raw bytes here" {
+    t.Errorf("body = %q, want \"raw bytes here\"", gotBody)
+  }
+}
+
+func TestExecuteVirtualToolRawBodyMissingContentType(t *testing.T) {
+  srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    t.Error("server should not be called when Content-Type is missing")
+  }))
+  defer srv.Close()
+
+  tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
+PUT %s/files
+...$content
+HTTP 200
+`, srv.URL)))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hi"}, "")
+  if err == nil {
+    t.Fatal("expected error for missing Content-Type")
+  }
+  if !strings.Contains(err.Error(), "Content-Type") {
+    t.Errorf("error = %v, want mention of Content-Type", err)
+  }
+}
+
+func TestExecuteVirtualToolRawBodyNonStringFails(t *testing.T) {
+  tools, err := parseVirtualFile([]byte(`[upload] Upload.
+PUT https://example.invalid/files
+Content-Type: text/plain
+...$fields
+HTTP 200
+`))
+  if err != nil {
+    t.Fatal(err)
+  }
+
+  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, "")
+  if err == nil {
+    t.Fatal("expected error for non-string raw body")
+  }
+  if !strings.Contains(err.Error(), "requires a string") {
+    t.Errorf("error = %v, want 'requires a string'", err)
   }
 }
