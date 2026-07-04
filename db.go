@@ -26,7 +26,7 @@ func (s *Store) Migrate() error {
 
     CREATE TABLE IF NOT EXISTS services (
       id             INTEGER PRIMARY KEY,
-      name           TEXT NOT NULL,
+      name           TEXT NOT NULL UNIQUE,
       url            TEXT NOT NULL UNIQUE,
       descriptor     TEXT NOT NULL DEFAULT '{}',
       created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -34,7 +34,7 @@ func (s *Store) Migrate() error {
 
     CREATE TABLE IF NOT EXISTS users (
       id         INTEGER PRIMARY KEY,
-      name       TEXT NOT NULL,
+      name       TEXT NOT NULL UNIQUE,
       email      TEXT NOT NULL UNIQUE,
       role       TEXT NOT NULL DEFAULT 'Member',
       status     TEXT NOT NULL DEFAULT 'Active',
@@ -93,7 +93,9 @@ func (s *Store) Migrate() error {
     );
 
     CREATE INDEX IF NOT EXISTS idx_services_url ON services(url);
+    CREATE INDEX IF NOT EXISTS idx_services_name ON services(name);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+    CREATE INDEX IF NOT EXISTS idx_users_name ON users(name);
     CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
     CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
     CREATE INDEX IF NOT EXISTS idx_app_members_nonce ON app_members(app_nonce);
@@ -278,15 +280,22 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 }
 
 func (s *Store) GetApp(nonce string) (*App, error) {
-  row := s.db.QueryRow("SELECT id, nonce, name, url, details FROM apps WHERE nonce = ?", nonce)
+  row := s.db.QueryRow(
+    "SELECT id, nonce, name, url, environment, owner_id, details FROM apps WHERE nonce = ?",
+    nonce,
+  )
   a := &App{}
   var detailsStr string
-  err := row.Scan(&a.ID, &a.Nonce, &a.Name, &a.URL, &detailsStr)
+  var ownerID sql.NullInt64
+  err := row.Scan(&a.ID, &a.Nonce, &a.Name, &a.URL, &a.Environment, &ownerID, &detailsStr)
   if err == sql.ErrNoRows {
     return nil, errors.New("app not found")
   }
   if err != nil {
     return nil, err
+  }
+  if ownerID.Valid {
+    a.OwnerID = &ownerID.Int64
   }
   if detailsStr != "" && detailsStr != "{}" {
     a.Details = &AppDetails{}
@@ -599,6 +608,28 @@ func (s *Store) GetServiceByURL(serviceURL string) (*Service, error) {
   row := s.db.QueryRow(
     "SELECT id, name, url, descriptor FROM services WHERE rtrim(url, '/') = rtrim(?, '/')",
     serviceURL,
+  )
+  svc := &Service{}
+  var descStr string
+  err := row.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr)
+  if err == sql.ErrNoRows {
+    return nil, errors.New("service not found")
+  }
+  if err != nil {
+    return nil, err
+  }
+  if err := json.Unmarshal([]byte(descStr), &svc.Descriptor); err != nil {
+    return nil, err
+  }
+  return svc, nil
+}
+
+// GetServiceByName looks up a service by name. It returns an error if no
+// service has the name or if more than one shares it.
+func (s *Store) GetServiceByName(name string) (*Service, error) {
+  row := s.db.QueryRow(
+    "SELECT id, name, url, descriptor FROM services WHERE name = ?",
+    name,
   )
   svc := &Service{}
   var descStr string

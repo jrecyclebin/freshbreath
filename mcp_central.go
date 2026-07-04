@@ -287,6 +287,32 @@ func int64Arg(args map[string]interface{}, key string) int64 {
 	return 0
 }
 
+// resolveOwnerEmail looks up a user by email and returns their ID. An empty
+// email returns nil; a missing user returns an error.
+func (s *Server) resolveOwnerEmail(email string) (*int64, error) {
+	if email == "" {
+		return nil, nil
+	}
+	u, err := s.store.GetUserByEmail(email)
+	if err != nil {
+		return nil, fmt.Errorf("owner not found: %v", err)
+	}
+	return &u.ID, nil
+}
+
+// serviceByName looks up a service by name. It returns an error if the name is
+// missing, ambiguous, or not found. The caller is responsible for role gating.
+func (s *Server) serviceByName(name string) (*Service, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	svc, err := s.store.GetServiceByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("service not found: %v", err)
+	}
+	return svc, nil
+}
+
 // ── App Tools ───────────────────────────────────────────────────────
 
 func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
@@ -362,7 +388,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 				"name":        map[string]interface{}{"type": "string", "description": "App name"},
 				"environment": map[string]interface{}{"type": "string", "description": "Environment (Development, Staging, Production)"},
 				"url":         map[string]interface{}{"type": "string", "description": "App URL"},
-				"owner_id":    map[string]interface{}{"type": "number", "description": "Owner user ID (optional)"},
+				"owner_email": map[string]interface{}{"type": "string", "description": "Owner email address (optional)"},
 			},
 			"required": []string{"name"},
 		},
@@ -380,10 +406,10 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		}
 		env, _ := args["environment"].(string)
 		appURL, _ := args["url"].(string)
-		var ownerID *int64
-		if oid, ok := args["owner_id"].(float64); ok {
-			id := int64(oid)
-			ownerID = &id
+		ownerEmail, _ := args["owner_email"].(string)
+		ownerID, err := s.resolveOwnerEmail(ownerEmail)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
 
 		nonce, err := s.coreCreateApp(user, name, env, appURL, ownerID)
@@ -404,7 +430,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 				"name":        map[string]interface{}{"type": "string", "description": "New name"},
 				"environment": map[string]interface{}{"type": "string", "description": "New environment"},
 				"url":         map[string]interface{}{"type": "string", "description": "New URL"},
-				"owner_id":    map[string]interface{}{"type": "number", "description": "New owner user ID (optional)"},
+				"owner_email": map[string]interface{}{"type": "string", "description": "New owner email address (optional)"},
 			},
 			"required": []string{"nonce", "name"},
 		},
@@ -423,10 +449,10 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		}
 		env, _ := args["environment"].(string)
 		appURL, _ := args["url"].(string)
-		var ownerID *int64
-		if oid, ok := args["owner_id"].(float64); ok {
-			id := int64(oid)
-			ownerID = &id
+		ownerEmail, _ := args["owner_email"].(string)
+		ownerID, err := s.resolveOwnerEmail(ownerEmail)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
 
 		if err := s.coreUpdateApp(user, nonce, name, env, appURL, ownerID); err != nil {
@@ -732,10 +758,10 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id":     map[string]interface{}{"type": "number", "description": "Service ID"},
+				"name":   map[string]interface{}{"type": "string", "description": "Service name"},
 				"search": map[string]interface{}{"type": "string", "description": "Optional term to filter by file content (case-insensitive)"},
 			},
-			"required": []string{"id"},
+			"required": []string{"name"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -744,15 +770,16 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		}
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
+		name, _ := args["name"].(string)
 		search, _ := args["search"].(string)
-		if id == 0 {
-			return mcpToolError("id is required"), nil
-		}
 		if err := s.gate(user, rolesAdminPlus); err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		files, err := s.coreListServiceFiles(user, int64(id), search)
+		svc, err := s.serviceByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		files, err := s.coreListServiceFiles(user, svc.ID, search)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -766,11 +793,11 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id":     map[string]interface{}{"type": "number", "description": "Service ID"},
+				"name":   map[string]interface{}{"type": "string", "description": "Service name"},
 				"offset": map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
 				"limit":  map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
 			},
-			"required": []string{"id"},
+			"required": []string{"name"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -779,16 +806,17 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		}
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
+		name, _ := args["name"].(string)
 		offset := int64Arg(args, "offset")
 		limit := int64Arg(args, "limit")
-		if id == 0 {
-			return mcpToolError("id is required"), nil
-		}
 		if err := s.gate(user, rolesAdminPlus); err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		data, _, err := s.coreReadServiceFile(user, int64(id), offset, limit)
+		svc, err := s.serviceByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		data, _, err := s.coreReadServiceFile(user, svc.ID, offset, limit)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -802,11 +830,11 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id":       map[string]interface{}{"type": "number", "description": "Service ID"},
+				"name":     map[string]interface{}{"type": "string", "description": "Service name"},
 				"content":  map[string]interface{}{"type": "string", "description": "New file content"},
 				"old_text": map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
 			},
-			"required": []string{"id", "content"},
+			"required": []string{"name", "content"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -815,16 +843,17 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		}
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
+		name, _ := args["name"].(string)
 		content, _ := args["content"].(string)
 		oldText, _ := args["old_text"].(string)
-		if id == 0 {
-			return mcpToolError("id is required"), nil
-		}
 		if err := s.gate(user, rolesAdminPlus); err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		if err := s.coreWriteServiceFile(user, int64(id), []byte(content), oldText); err != nil {
+		svc, err := s.serviceByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		if err := s.coreWriteServiceFile(user, svc.ID, []byte(content), oldText); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "written"})
@@ -837,9 +866,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id": map[string]interface{}{"type": "number", "description": "Service ID"},
+				"name": map[string]interface{}{"type": "string", "description": "Service name"},
 			},
-			"required": []string{"id"},
+			"required": []string{"name"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -848,11 +877,12 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		}
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
-		if id == 0 {
-			return mcpToolError("id is required"), nil
+		name, _ := args["name"].(string)
+		svc, err := s.serviceByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		if err := s.coreDeleteServiceFiles(user, int64(id)); err != nil {
+		if err := s.coreDeleteServiceFiles(user, svc.ID); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "deleted"})
@@ -886,9 +916,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id": map[string]interface{}{"type": "number", "description": "Service ID"},
+				"name": map[string]interface{}{"type": "string", "description": "Service name"},
 			},
-			"required": []string{"id"},
+			"required": []string{"name"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		_, err := s.mcpUser(req)
@@ -898,14 +928,11 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
-		if id == 0 {
-			return mcpToolError("id is required"), nil
-		}
+		name, _ := args["name"].(string)
 
-		svc, err := s.store.GetService(int64(id))
+		svc, err := s.serviceByName(name)
 		if err != nil {
-			return mcpToolError("service not found: %v", err), nil
+			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(svc)
 	})
@@ -973,9 +1000,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id":   map[string]interface{}{"type": "number", "description": "Service ID"},
-				"name": map[string]interface{}{"type": "string", "description": "New name"},
-				"url":  map[string]interface{}{"type": "string", "description": "New URL"},
+				"name":       map[string]interface{}{"type": "string", "description": "Current service name"},
+				"new_name":   map[string]interface{}{"type": "string", "description": "New name"},
+				"url":        map[string]interface{}{"type": "string", "description": "New URL"},
 				"descriptor": map[string]interface{}{
 					"type":        "object",
 					"description": "Service descriptor",
@@ -992,7 +1019,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 					},
 				},
 			},
-			"required": []string{"id", "name"},
+			"required": []string{"name"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -1002,18 +1029,20 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
 		name, _ := args["name"].(string)
-		if id == 0 || name == "" {
-			return mcpToolError("id and name are required"), nil
+		if name == "" {
+			return mcpToolError("name is required"), nil
 		}
 
-		serviceID := int64(id)
 		// MCP update is a patch: fill blanks from the existing record before
 		// handing fully-resolved fields to the (replace-semantics) core.
-		existing, err := s.store.GetService(serviceID)
+		existing, err := s.serviceByName(name)
 		if err != nil {
-			return mcpToolError("service not found: %v", err), nil
+			return mcpToolError("%v", err), nil
+		}
+		newName, _ := args["new_name"].(string)
+		if newName == "" {
+			newName = existing.Name
 		}
 		svcURL, _ := args["url"].(string)
 		if svcURL == "" {
@@ -1025,7 +1054,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			json.Unmarshal(descBytes, &desc)
 		}
 
-		if err := s.coreUpdateService(user, serviceID, name, svcURL, desc); err != nil {
+		if err := s.coreUpdateService(user, existing.ID, newName, svcURL, desc); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "updated"})
@@ -1038,9 +1067,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id": map[string]interface{}{"type": "number", "description": "Service ID"},
+				"name": map[string]interface{}{"type": "string", "description": "Service name"},
 			},
-			"required": []string{"id"},
+			"required": []string{"name"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -1050,12 +1079,13 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
-		if id == 0 {
-			return mcpToolError("id is required"), nil
+		name, _ := args["name"].(string)
+		svc, err := s.serviceByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
 
-		if err := s.coreDeleteService(user, int64(id)); err != nil {
+		if err := s.coreDeleteService(user, svc.ID); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "deleted"})
@@ -1068,9 +1098,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"id": map[string]interface{}{"type": "number", "description": "Service ID"},
+				"name": map[string]interface{}{"type": "string", "description": "Service name"},
 			},
-			"required": []string{"id"},
+			"required": []string{"name"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		_, err := s.mcpUser(req)
@@ -1080,12 +1110,13 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		id, _ := args["id"].(float64)
-		if id == 0 {
-			return mcpToolError("id is required"), nil
+		name, _ := args["name"].(string)
+		svc, err := s.serviceByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
 
-		apps, err := s.store.GetAppsUsingService(int64(id))
+		apps, err := s.store.GetAppsUsingService(svc.ID)
 		if err != nil {
 			return mcpToolError("db error: %v", err), nil
 		}
