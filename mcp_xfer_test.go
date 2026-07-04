@@ -294,7 +294,7 @@ func TestMCPListServiceFiles(t *testing.T) {
 	}
 
 	// Empty initially.
-	res := callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID)})
+	res := callCentralTool(t, srv, "list_service_files", map[string]interface{}{"name": svc.Name})
 	if res.IsError {
 		t.Fatalf("list_service_files failed: %s", toolResultText(t, res))
 	}
@@ -307,7 +307,7 @@ func TestMCPListServiceFiles(t *testing.T) {
 		t.Fatalf("write service file: %v", err)
 	}
 
-	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID)})
+	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"name": svc.Name})
 	var listRes struct {
 		Files []appFile `json:"files"`
 	}
@@ -319,7 +319,7 @@ func TestMCPListServiceFiles(t *testing.T) {
 	}
 
 	// Search by content.
-	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID), "search": "make all"})
+	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"name": svc.Name, "search": "make all"})
 	if err := json.Unmarshal([]byte(toolResultText(t, res)), &listRes); err != nil {
 		t.Fatalf("parse search: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestMCPListServiceFiles(t *testing.T) {
 		t.Errorf("search result = %v, want 1 file", listRes.Files)
 	}
 
-	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"id": float64(svc.ID), "search": "missing"})
+	res = callCentralTool(t, srv, "list_service_files", map[string]interface{}{"name": svc.Name, "search": "missing"})
 	if err := json.Unmarshal([]byte(toolResultText(t, res)), &listRes); err != nil {
 		t.Fatalf("parse search missing: %v", err)
 	}
@@ -349,7 +349,7 @@ func TestMCPReadServiceFile(t *testing.T) {
 		t.Fatalf("write service file: %v", err)
 	}
 
-	res := callCentralTool(t, srv, "read_service_file", map[string]interface{}{"id": float64(svc.ID)})
+	res := callCentralTool(t, srv, "read_service_file", map[string]interface{}{"name": svc.Name})
 	if res.IsError {
 		t.Fatalf("read_service_file failed: %s", toolResultText(t, res))
 	}
@@ -365,7 +365,7 @@ func TestMCPReadServiceFile(t *testing.T) {
 
 	// Chunk read.
 	res = callCentralTool(t, srv, "read_service_file", map[string]interface{}{
-		"id":     float64(svc.ID),
+		"name": svc.Name,
 		"offset": 1,
 		"limit":  5,
 	})
@@ -387,7 +387,7 @@ func TestMCPWriteServiceFile(t *testing.T) {
 	}
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"id":      float64(svc.ID),
+		"name": svc.Name,
 		"content": "[build]\nmake all\n",
 	})
 	if res.IsError {
@@ -395,7 +395,7 @@ func TestMCPWriteServiceFile(t *testing.T) {
 	}
 
 	res = callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"id":       float64(svc.ID),
+		"name": svc.Name,
 		"content":  "make install",
 		"old_text": "make all",
 	})
@@ -424,7 +424,7 @@ func TestMCPDeleteServiceFile(t *testing.T) {
 		t.Fatalf("write service file: %v", err)
 	}
 
-	res := callCentralTool(t, srv, "delete_service_file", map[string]interface{}{"id": float64(svc.ID)})
+	res := callCentralTool(t, srv, "delete_service_file", map[string]interface{}{"name": svc.Name})
 	if res.IsError {
 		t.Fatalf("delete_service_file failed: %s", toolResultText(t, res))
 	}
@@ -444,7 +444,7 @@ func TestMCPServiceFileUnsupportedType(t *testing.T) {
 	}
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"id":      float64(svc.ID),
+		"name": svc.Name,
 		"content": "x",
 	})
 	if !res.IsError {
