@@ -1,4 +1,4 @@
-package main
+package formats
 
 import (
   "context"
@@ -204,7 +204,7 @@ func toolParams(tool VirtualTool) []ToolParam {
 // parseVirtualToolHeader validates a [name] header for virtual tools.
 // Names must be valid identifiers (letters, digits, underscores, hyphens).
 func parseVirtualToolHeader(line string) (name, desc string, ok bool) {
-  name, desc, ok = parseTaskHeader(line)
+  name, desc, ok = parseHeader(line)
   if !ok || !toolNameRe.MatchString(name) {
     return "", "", false
   }
@@ -897,8 +897,8 @@ func hasContentType(headers map[string]string) bool {
   return false
 }
 
-// loadVirtualTools reads and parses the virtual description file for a service.
-func loadVirtualTools(dir string, svcName string) ([]VirtualTool, error) {
+// LoadVirtualTools reads and parses the virtual description file for a service.
+func LoadVirtualTools(dir string, svcName string) ([]VirtualTool, error) {
   path := filepath.Join(dir, "virtual", svcName+".txt")
   data, err := os.ReadFile(path)
   if err != nil {
@@ -917,8 +917,8 @@ func findVirtualTool(tools []VirtualTool, name string) *VirtualTool {
   return nil
 }
 
-// virtualToolSummaries returns lightweight tool descriptions for listing.
-func virtualToolSummaries(tools []VirtualTool) []map[string]string {
+// VirtualToolSummaries returns lightweight tool descriptions for listing.
+func VirtualToolSummaries(tools []VirtualTool) []map[string]string {
   out := make([]map[string]string, len(tools))
   for i, t := range tools {
     out[i] = map[string]string{"name": t.Name, "description": t.Description}
@@ -926,9 +926,9 @@ func virtualToolSummaries(tools []VirtualTool) []map[string]string {
   return out
 }
 
-// executeVirtualTool runs a virtual tool's steps and returns the result.
+// ExecuteVirtualTool runs a virtual tool's steps and returns the result.
 // The token comes from auth middleware context (or "" for unauthenticated calls).
-func executeVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, token string) (interface{}, error) {
+func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, token string) (interface{}, error) {
   tool := findVirtualTool(tools, toolName)
   if tool == nil {
     return nil, fmt.Errorf("tool %q not found", toolName)

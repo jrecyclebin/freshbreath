@@ -9,6 +9,8 @@ import (
   "sync"
   "time"
 
+  "poggers.institute/freshbreath/internal/formats"
+
   "github.com/coreos/go-oidc/v3/oidc"
   "github.com/modelcontextprotocol/go-sdk/auth"
   "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -90,7 +92,7 @@ func (r *virtualMCPRegistry) remove(slug string) {
 // newVirtualMCPServer creates an MCP server that exposes the virtual service's
 // tools via the MCP protocol.
 func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
-  tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
+  tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
   if err != nil {
     return nil, fmt.Errorf("load virtual tools: %w", err)
   }
@@ -143,7 +145,7 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
         json.Unmarshal(req.Params.Arguments, &args)
       }
 
-      result, err := executeVirtualTool(s.httpClient, tools, capturedName, args, token)
+      result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, token)
       if err != nil {
         return &mcp.CallToolResult{
           Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
@@ -164,7 +166,7 @@ func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
 // virtualToolInputSchema builds a JSON Schema input object for a virtual tool.
 // Parameters are inferred from $name references in the tool's templates that
 // aren't locally assigned — these are what the caller must supply.
-func virtualToolInputSchema(vt VirtualTool) map[string]interface{} {
+func virtualToolInputSchema(vt formats.VirtualTool) map[string]interface{} {
   props := map[string]interface{}{}
   for _, p := range vt.Params {
     props[p.Name] = map[string]interface{}{"type": string(p.Type)}

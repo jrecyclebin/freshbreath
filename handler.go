@@ -21,6 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"poggers.institute/freshbreath/internal/formats"
+
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
@@ -877,72 +879,14 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 
 // ── Tasks service ───────────────────────────────────────────────────────
 
-// Task represents a single named script parsed from a tasks file.
-type Task struct {
-	Name   string `json:"name"`
-	Desc   string `json:"description"`
-	Script string `json:"-"` // never serialized
-}
-
-// parseTaskHeader checks whether a line is a valid [task-name] header.
-// Returns (name, desc, true) on success, or ("", "", false) otherwise.
-// A valid header must start with '[', contain a ']' on the same line,
-// and have a non-empty name between them.
-func parseTaskHeader(line string) (name, desc string, ok bool) {
-	if !strings.HasPrefix(line, "[") {
-		return "", "", false
-	}
-	closeIdx := strings.Index(line, "]")
-	if closeIdx < 1 { // no ']' or empty name like "[]"
-		return "", "", false
-	}
-	name = line[1:closeIdx]
-	desc = strings.TrimSpace(line[closeIdx+1:])
-	return name, desc, true
-}
-
-// parseTasksFile parses the task definitions from a tasks file.
-//
-// Format: a [task-name] header optionally followed by a description
-// on the same line, then the script body until the next header or EOF.
-//
-//	[greet] Say hello to someone
-//	echo "Hello, $TASK_NAME"
-//	[build] Compile the project
-//	make all
-//
-// Lines starting with '[' that don't parse as a valid header are treated
-// as script body, so bash expressions like ${arr[0]} are safe.
-func parseTasksFile(data []byte) []Task {
-	var tasks []Task
-	var cur *Task
-	for _, line := range strings.Split(string(data), "\n") {
-		if name, desc, ok := parseTaskHeader(line); ok {
-			if cur != nil {
-				tasks = append(tasks, *cur)
-			}
-			cur = &Task{Name: name, Desc: desc}
-		} else if cur != nil {
-			if cur.Script != "" {
-				cur.Script += "\n"
-			}
-			cur.Script += line
-		}
-	}
-	if cur != nil {
-		tasks = append(tasks, *cur)
-	}
-	return tasks
-}
-
 // loadTasksForService reads and parses the tasks file for a service.
-func (s *Server) loadTasksForService(svc *Service) ([]Task, error) {
+func (s *Server) loadTasksForService(svc *Service) ([]formats.Task, error) {
 	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("tasks file not found: %s: %w", path, err)
 	}
-	return parseTasksFile(data), nil
+	return formats.ParseTasksFile(data), nil
 }
 
 // serviceToolSummary is a lightweight, safe-to-expose view of a task or
@@ -971,7 +915,7 @@ func (s *Server) loadServiceToolSummaries(svc *Service) ([]serviceToolSummary, e
 		}
 		return out, nil
 	case "virtual":
-		tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
+		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return []serviceToolSummary{}, nil
@@ -1070,13 +1014,13 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *Service) {
 	switch r.Method {
 	case http.MethodGet:
-		tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
+		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"tools": virtualToolSummaries(tools)})
+		json.NewEncoder(w).Encode(map[string]interface{}{"tools": formats.VirtualToolSummaries(tools)})
 
 	case http.MethodPost:
 		s.handleVirtualExec(w, r, svc)
@@ -1087,7 +1031,7 @@ func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *Service) {
-	tools, err := loadVirtualTools(s.config.DataDir, svc.Name)
+	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -1112,7 +1056,7 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 		token = strings.TrimPrefix(auth, "Bearer ")
 	}
 
-	result, err := executeVirtualTool(s.httpClient, tools, body.Task, body.Args, token)
+	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, token)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1194,7 +1138,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Ser
 	}
 
 	// ── Find the task ────────────────────────────────────────────────────
-	var task *Task
+	var task *formats.Task
 	for i := range tasks {
 		if tasks[i].Name == taskName {
 			task = &tasks[i]
