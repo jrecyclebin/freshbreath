@@ -22,6 +22,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"golang.org/x/oauth2"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // buildOIDCScopes splits the descriptor scopes and ensures "openid" is always present.
@@ -46,7 +48,7 @@ func buildOIDCScopes(descriptorScopes string) []string {
 
 // serviceBeginAuth discovers the service's OAuth config, dynamically registers a client,
 // and returns the authorization URL plus the values needed for the callback.
-func (s *Server) serviceBeginAuth(ctx context.Context, svc *Service, redirectURI string) (authURL, clientID, clientSecret, tokenURL, state, verifier string, err error) {
+func (s *Server) serviceBeginAuth(ctx context.Context, svc *db.Service, redirectURI string) (authURL, clientID, clientSecret, tokenURL, state, verifier string, err error) {
 	svcURL, err := url.Parse(svc.URL)
 	if err != nil {
 		return "", "", "", "", "", "", fmt.Errorf("bad service url: %w", err)
@@ -127,7 +129,7 @@ func (s *Server) serviceBeginAuth(ctx context.Context, svc *Service, redirectURI
 // resolveTokenEndpoint discovers the token endpoint for any service.
 // OIDC services use .well-known/openid-configuration; MCP/API services use
 // OAuth metadata discovery (OAuthURL or derived from svc.URL).
-func (s *Server) resolveTokenEndpoint(ctx context.Context, svc *Service) (string, error) {
+func (s *Server) resolveTokenEndpoint(ctx context.Context, svc *db.Service) (string, error) {
 	if svc.Descriptor.Type == "oidc" {
 		provider, err := s.getOIDCProvider(ctx, svc.ID, svc.URL)
 		if err != nil {
@@ -164,7 +166,7 @@ func (s *Server) resolveTokenEndpoint(ctx context.Context, svc *Service) (string
 	return base + "/token", nil
 }
 
-func (s *Server) serviceExchangeCode(ctx context.Context, tokenEndpoint, code, verifier, clientID, clientSecret, redirectURI string) (*OAuthData, error) {
+func (s *Server) serviceExchangeCode(ctx context.Context, tokenEndpoint, code, verifier, clientID, clientSecret, redirectURI string) (*db.OAuthData, error) {
 	cfg := &oauth2.Config{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -176,7 +178,7 @@ func (s *Server) serviceExchangeCode(ctx context.Context, tokenEndpoint, code, v
 	if err != nil {
 		return nil, fmt.Errorf("token exchange: %w", err)
 	}
-	return &OAuthData{
+	return &db.OAuthData{
 		ClientID:      clientID,
 		AccessToken:   tok.AccessToken,
 		RefreshToken:  tok.RefreshToken,
@@ -194,7 +196,7 @@ func randomNonce() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-func (s *Server) oidcBeginAuth(ctx context.Context, svc *Service, redirectURI string) (authURL, state, verifier, oidcNonce, tokenURL string, err error) {
+func (s *Server) oidcBeginAuth(ctx context.Context, svc *db.Service, redirectURI string) (authURL, state, verifier, oidcNonce, tokenURL string, err error) {
 	issuer := svc.URL
 
 	provider, err := oidc.NewProvider(ctx, issuer)
@@ -237,7 +239,7 @@ type OIDCClaims struct {
 	Raw      map[string]interface{} `json:"-"`
 }
 
-func (s *Server) oidcExchangeCode(ctx context.Context, svc *Service, code, verifier, oidcNonce, redirectURI string) (*OIDCClaims, string, string, error) {
+func (s *Server) oidcExchangeCode(ctx context.Context, svc *db.Service, code, verifier, oidcNonce, redirectURI string) (*OIDCClaims, string, string, error) {
 	issuer := svc.URL
 
 	provider, err := oidc.NewProvider(ctx, issuer)
@@ -294,7 +296,7 @@ func (s *Server) oidcExchangeCode(ctx context.Context, svc *Service, code, verif
 // OAuth2 successfully but don't return an id_token. We verify identity by calling the
 // userinfo endpoint and return the resolved claims; the caller mints the
 // Fresh Breath identity token (bound to the right service).
-func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *Service, provider *oidc.Provider, tok *oauth2.Token) (*OIDCClaims, string, string, error) {
+func (s *Server) exchangeViaUserInfo(ctx context.Context, svc *db.Service, provider *oidc.Provider, tok *oauth2.Token) (*OIDCClaims, string, string, error) {
 	var email, name, sub string
 
 	if svc.Descriptor.UserInfoURL != "" {
@@ -599,9 +601,9 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
 // newRefreshFamily creates a refresh-family record and returns the family ID
 // and its initial JTI. The caller stamps both into the minted refresh token.
 func (s *Server) newRefreshFamily(email string, serviceID int64, deviceLabel string) (familyID, jti string, err error) {
-	familyID = genNonce()
+	familyID = db.GenNonce()
 	jti = newJTI()
-	fam := &RefreshFamily{
+	fam := &db.RefreshFamily{
 		ID:          familyID,
 		UserEmail:   email,
 		ServiceID:   serviceID,

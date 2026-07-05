@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // tokenOf strips the public-base prefix from a minted transfer URL.
@@ -21,7 +23,7 @@ func tokenOf(t *testing.T, url string) string {
 
 func TestTransferSingleUse(t *testing.T) {
 	srv := newTestServer(t)
-	actor := &User{ID: 1, Role: "Admin"}
+	actor := &db.User{ID: 1, Role: "Admin"}
 
 	url := srv.newTransfer("download", "nonce123", "", actor)
 	tok := tokenOf(t, url)
@@ -36,7 +38,7 @@ func TestTransferSingleUse(t *testing.T) {
 
 func TestTransferExpiry(t *testing.T) {
 	srv := newTestServer(t)
-	actor := &User{ID: 1, Role: "Admin"}
+	actor := &db.User{ID: 1, Role: "Admin"}
 
 	tok := tokenOf(t, srv.newTransfer("download", "n", "", actor))
 	srv.xfers[tok].ExpiresAt = time.Now().Add(-time.Minute)
@@ -58,7 +60,7 @@ func TestTransferUnknownToken(t *testing.T) {
 func TestTransferRoundTrip(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Admin"}
 
 	nonce, err := srv.coreCreateApp(admin, "My App", "", "", nil)
 	if err != nil {
@@ -111,7 +113,7 @@ func TestTransferRoundTrip(t *testing.T) {
 func TestListAppFiles(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Admin"}
 
 	nonce, err := srv.coreCreateApp(admin, "My App", "", "", nil)
 	if err != nil {
@@ -143,7 +145,7 @@ func TestListAppFiles(t *testing.T) {
 
 func TestTransferMethodMismatch(t *testing.T) {
 	srv := newTestServer(t)
-	admin := &User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Admin"}
 
 	// POSTing to a download token is the wrong verb for the action.
 	tok := tokenOf(t, srv.newTransfer("download", "n", "", admin))

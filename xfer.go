@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // Transfer tokens hand an LLM a plain URL instead of a base64 blob. An MCP tool
@@ -26,7 +28,7 @@ type transferEntry struct {
 	Nonce     string // app nonce; set for app-targeted transfers
 	ServiceID int64  // service ID; set for service-targeted transfers
 	Filename  string
-	Actor     *User
+	Actor     *db.User
 	ExpiresAt time.Time
 }
 
@@ -35,7 +37,7 @@ func (e *transferEntry) serviceTarget() bool { return e.ServiceID != 0 }
 
 // newTransfer mints a token for action on the given app, bound to actor, and
 // returns the full /api/xfer URL. Expired entries are pruned on each call.
-func (s *Server) newTransfer(action, nonce, filename string, actor *User) string {
+func (s *Server) newTransfer(action, nonce, filename string, actor *db.User) string {
 	return s.newTransferEntry(&transferEntry{
 		Action:   action,
 		Nonce:    nonce,
@@ -45,7 +47,7 @@ func (s *Server) newTransfer(action, nonce, filename string, actor *User) string
 }
 
 // newServiceTransfer mints a token for action on the given service, bound to actor.
-func (s *Server) newServiceTransfer(action string, serviceID int64, filename string, actor *User) string {
+func (s *Server) newServiceTransfer(action string, serviceID int64, filename string, actor *db.User) string {
 	return s.newTransferEntry(&transferEntry{
 		Action:    action,
 		ServiceID: serviceID,

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 func TestMCPCreateAppWithOwnerEmail(t *testing.T) {
@@ -41,7 +43,7 @@ func TestMCPCreateAppWithOwnerEmail(t *testing.T) {
 
 func TestMCPUpdateAppWithOwnerEmail(t *testing.T) {
 	srv := newTestServer(t)
-	admin := &User{ID: 1, Role: "Superuser"}
+	admin := &db.User{ID: 1, Role: "Superuser"}
 	nonce, err := srv.coreCreateApp(admin, "update-owner", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
@@ -72,8 +74,8 @@ func TestMCPUpdateAppWithOwnerEmail(t *testing.T) {
 func TestMCPServiceToolsByName(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "named-svc", "http://example.com", ServiceDescriptor{Type: "api"})
+	admin := &db.User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "named-svc", "http://example.com", db.ServiceDescriptor{Type: "api"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}

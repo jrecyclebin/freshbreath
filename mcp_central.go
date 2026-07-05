@@ -17,6 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
+	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
 )
 
@@ -78,7 +79,7 @@ func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 // verifyAdminTokenFromBearer verifies a raw Bearer token against the
 // admin auth service — extracted from verifyAdminToken to accept the
 // token string directly instead of parsing from the HTTP header.
-func (s *Server) verifyAdminTokenFromBearer(ctx context.Context, serviceID string, idTokenRaw string) (*User, error) {
+func (s *Server) verifyAdminTokenFromBearer(ctx context.Context, serviceID string, idTokenRaw string) (*db.User, error) {
 	svcID, err := parseID(serviceID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid service ID in settings")
@@ -221,11 +222,11 @@ func addToolIf(allow bool, mcps *mcp.Server, t *mcp.Tool, h mcp.ToolHandler) {
 // It checks the Bearer token against both central MCP JWTs and
 // the admin auth service OIDC. Returns a synthetic superuser if
 // auth is not configured.
-func (s *Server) mcpUser(req *mcp.CallToolRequest) (*User, error) {
+func (s *Server) mcpUser(req *mcp.CallToolRequest) (*db.User, error) {
 	// Check if auth is enabled.
 	svcIDStr, _ := s.store.GetSetting("admin_auth_service")
 	if svcIDStr == "" {
-		return &User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"}, nil
+		return &db.User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"}, nil
 	}
 
 	// Extract Bearer token from the MCP request header.
@@ -304,7 +305,7 @@ func (s *Server) resolveOwnerEmail(email string) (*int64, error) {
 
 // serviceByName looks up a service by name. It returns an error if the name is
 // missing, ambiguous, or not found. The caller is responsible for role gating.
-func (s *Server) serviceByName(name string) (*Service, error) {
+func (s *Server) serviceByName(name string) (*db.Service, error) {
 	if name == "" {
 		return nil, fmt.Errorf("name is required")
 	}
@@ -980,7 +981,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		}
 		svcURL, _ := args["url"].(string)
 
-		var desc ServiceDescriptor
+		var desc db.ServiceDescriptor
 		if raw, ok := args["descriptor"].(map[string]interface{}); ok {
 			descBytes, _ := json.Marshal(raw)
 			json.Unmarshal(descBytes, &desc)

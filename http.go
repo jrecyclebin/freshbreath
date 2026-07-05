@@ -4,9 +4,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
-func (s *Server) serviceDoProxy(svc *Service, r *http.Request) (*http.Response, error) {
+func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request) (*http.Response, error) {
 	target, err := url.Parse(svc.URL)
 	if err != nil {
 		return nil, err

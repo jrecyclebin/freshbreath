@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/formats"
 	"poggers.institute/freshbreath/internal/sshkit"
 
@@ -208,7 +209,7 @@ func slugify(s string) string {
 
 // appSlug returns the URL path segment for a hosted app.
 // If the app URL has no scheme it IS the route; otherwise derive from name.
-func appSlug(app *App) string {
+func appSlug(app *db.App) string {
 	if app.URL != "" && !strings.Contains(app.URL, "://") {
 		return strings.Trim(app.URL, "/")
 	}
@@ -412,7 +413,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// SSH auth — return a URL to the passphrase form
 	if svc.Descriptor.Type == "ssh" {
-		state := genNonce()
+		state := db.GenNonce()
 		s.pendingMu.Lock()
 		s.pending[state] = &pendingAuth{
 			serviceID:   svc.ID,
@@ -485,7 +486,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Services with no default API-key — redirect to key entry form
-		state := genNonce()
+		state := db.GenNonce()
 		s.pendingMu.Lock()
 		s.pending[state] = &pendingAuth{
 			serviceID:   svc.ID,
@@ -548,7 +549,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // completeAuth writes the postMessage callback page for a completed auth flow.
 // Used by both OIDC and SSH callback paths. If the token is Freshbreath-issued,
 // it also mints a refresh token and sets the HttpOnly cookie.
-func (s *Server) completeAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, oauth *OAuthData) {
+func (s *Server) completeAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, oauth *db.OAuthData) {
 	// If the access token is Freshbreath-issued, set the refresh cookie.
 	if isFreshbreathToken(oauth.AccessToken) {
 		if claims, _ := s.verifyFreshbreathToken(oauth.AccessToken); claims != nil {
@@ -779,7 +780,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 			mergedClaims["picture"] = claims.Picture
 		}
 
-		s.completeAuth(w, r, pending, &OAuthData{
+		s.completeAuth(w, r, pending, &db.OAuthData{
 			ClientID:    pending.clientID,
 			AccessToken: idToken,
 			TokenType:   "Bearer",
@@ -805,7 +806,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	s.completeAuth(w, r, pending, oauth)
 }
 
-func writeCallbackPage(w io.Writer, appState, appNonce string, serviceID int64, serviceURL string, oauth *OAuthData) {
+func writeCallbackPage(w io.Writer, appState, appNonce string, serviceID int64, serviceURL string, oauth *db.OAuthData) {
 	dataJSON, _ := json.Marshal(oauth)
 	fmt.Fprintf(w, `<!doctype html>
 <html>
@@ -881,7 +882,7 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 // ── Tasks service ───────────────────────────────────────────────────────
 
 // loadTasksForService reads and parses the tasks file for a service.
-func (s *Server) loadTasksForService(svc *Service) ([]formats.Task, error) {
+func (s *Server) loadTasksForService(svc *db.Service) ([]formats.Task, error) {
 	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -900,7 +901,7 @@ type serviceToolSummary struct {
 // loadServiceToolSummaries returns the tool names and descriptions exposed by
 // a tasks or virtual service. Other service types return an error. A missing
 // file returns an empty list so newly-created services don't error in the UI.
-func (s *Server) loadServiceToolSummaries(svc *Service) ([]serviceToolSummary, error) {
+func (s *Server) loadServiceToolSummaries(svc *db.Service) ([]serviceToolSummary, error) {
 	switch svc.Descriptor.Type {
 	case "tasks":
 		tasks, err := s.loadTasksForService(svc)
@@ -989,7 +990,7 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc *Service) {
+func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service) {
 	switch r.Method {
 	case http.MethodGet:
 		tasks, err := s.loadTasksForService(svc)
@@ -1012,7 +1013,7 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 	}
 }
 
-func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *Service) {
+func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service) {
 	switch r.Method {
 	case http.MethodGet:
 		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
@@ -1031,7 +1032,7 @@ func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *Service) {
+func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *db.Service) {
 	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1067,7 +1068,7 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 	json.NewEncoder(w).Encode(result)
 }
 
-func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *Service) {
+func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.Service) {
 	tasks, err := s.loadTasksForService(svc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1254,8 +1255,8 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func userFromContext(ctx context.Context) *User {
-	u, _ := ctx.Value(userKey).(*User)
+func userFromContext(ctx context.Context) *db.User {
+	u, _ := ctx.Value(userKey).(*db.User)
 	return u
 }
 
@@ -1516,9 +1517,9 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name       string            `json:"name"`
-		URL        string            `json:"url"`
-		Descriptor ServiceDescriptor `json:"descriptor"`
+		Name       string               `json:"name"`
+		URL        string               `json:"url"`
+		Descriptor db.ServiceDescriptor `json:"descriptor"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
@@ -1593,7 +1594,7 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(svc)
 	case http.MethodPut:
-		var req ServiceUpdate
+		var req db.ServiceUpdate
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
@@ -1624,7 +1625,7 @@ func (s *Server) handleServiceApps(w http.ResponseWriter, r *http.Request, servi
 	json.NewEncoder(w).Encode(map[string]interface{}{"apps": apps})
 }
 
-func (s *Server) handleServiceTools(w http.ResponseWriter, r *http.Request, svc *Service) {
+func (s *Server) handleServiceTools(w http.ResponseWriter, r *http.Request, svc *db.Service) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1754,7 +1755,7 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 
 	// Sub-route: /api/users/{id}/ssh-key (admin-only)
 	if len(parts) >= 4 && parts[3] == "ssh-key" {
-		actor, _ := r.Context().Value(userKey).(*User)
+		actor, _ := r.Context().Value(userKey).(*db.User)
 		if actor == nil || (actor.Role != "Superuser" && actor.Role != "Admin") {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
@@ -1926,7 +1927,7 @@ func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
 		svcIDStr, err := s.store.GetSetting("admin_auth_service")
 		if err != nil || svcIDStr == "" {
 			// Auth off — synthetic superuser so role checks still work downstream.
-			ctx := context.WithValue(r.Context(), userKey, &User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"})
+			ctx := context.WithValue(r.Context(), userKey, &db.User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"})
 			h(w, r.WithContext(ctx))
 			return
 		}
@@ -1958,7 +1959,7 @@ func requireAnyRole(roles ...string) func(http.HandlerFunc) http.HandlerFunc {
 	}
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			u, ok := r.Context().Value(userKey).(*User)
+			u, ok := r.Context().Value(userKey).(*db.User)
 			if !ok || u == nil {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
@@ -2006,7 +2007,7 @@ func (s *Server) requireAppServiceAccess(serviceType string) func(http.HandlerFu
 				return
 			}
 
-			user, _ := r.Context().Value(userKey).(*User)
+			user, _ := r.Context().Value(userKey).(*db.User)
 			if user == nil {
 				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
@@ -2052,7 +2053,7 @@ func (s *Server) requireAppServiceAccess(serviceType string) func(http.HandlerFu
 	}
 }
 
-func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*User, error) {
+func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*db.User, error) {
 	svcID, err := strconv.ParseInt(serviceID, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid service ID in settings")
@@ -2063,7 +2064,7 @@ func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*User, err
 // verifyTaskToken verifies a Bearer token against a referenced auth service.
 // Used by tasks services that require token auth. Returns the authenticated
 // user on success.
-func (s *Server) verifyTaskToken(r *http.Request, authSvcID int64) (*User, error) {
+func (s *Server) verifyTaskToken(r *http.Request, authSvcID int64) (*db.User, error) {
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
 		return nil, fmt.Errorf("missing bearer token")
@@ -2131,7 +2132,7 @@ func (s *Server) setRefreshCookie(w http.ResponseWriter, r *http.Request, claims
 	s.makeRefreshCookie(w, refreshData)
 }
 
-func (s *Server) verifyIDToken(ctx context.Context, svc *Service, raw string) (string, error) {
+func (s *Server) verifyIDToken(ctx context.Context, svc *db.Service, raw string) (string, error) {
 	if isFreshbreathToken(raw) {
 		claims, err := s.verifyFreshbreathToken(raw)
 		if err != nil {
@@ -2194,13 +2195,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	user, _ := r.Context().Value(userKey).(*User)
+	user, _ := r.Context().Value(userKey).(*db.User)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"user": user})
 }
 
 func (s *Server) handleSSHKey(w http.ResponseWriter, r *http.Request) {
-	user, _ := r.Context().Value(userKey).(*User)
+	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -2212,7 +2213,7 @@ func (s *Server) handleSSHKey(w http.ResponseWriter, r *http.Request) {
 // handleSessions handles GET /api/me/sessions (list active sessions) and
 // DELETE /api/me/sessions (revoke all sessions for the current user).
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
-	user, _ := r.Context().Value(userKey).(*User)
+	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -2254,7 +2255,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionDetail handles DELETE /api/me/sessions/{id} — revoke a specific session.
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
-	user, _ := r.Context().Value(userKey).(*User)
+	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -2297,7 +2298,7 @@ func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, _ := r.Context().Value(userKey).(*User)
+	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
@@ -2372,7 +2373,7 @@ func (s *Server) handleSSHSessionDetail(w http.ResponseWriter, r *http.Request) 
 		})
 
 	case http.MethodDelete:
-		user, _ := r.Context().Value(userKey).(*User)
+		user, _ := r.Context().Value(userKey).(*db.User)
 		if err := s.sessionMgr.Close(id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -2394,7 +2395,7 @@ func (s *Server) handleSSHHostKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.store.db.Query("SELECT host, port, fingerprint, trusted_at FROM ssh_host_keys ORDER BY host, port")
+	rows, err := s.store.DB().Query("SELECT host, port, fingerprint, trusted_at FROM ssh_host_keys ORDER BY host, port")
 	if err != nil {
 		http.Error(w, "Failed to list host keys", http.StatusInternalServerError)
 		return
@@ -2458,7 +2459,7 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	user, _ := r.Context().Value(userKey).(*User)
+	user, _ := r.Context().Value(userKey).(*db.User)
 	if user != nil {
 		_ = s.store.LogAudit(user.Email, "ssh_host_key_delete", fmt.Sprintf("%s:%d", host, port))
 	}
@@ -2669,7 +2670,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.completeAuth(w, r, pending, &OAuthData{
+		s.completeAuth(w, r, pending, &db.OAuthData{
 			AccessToken: idToken,
 			TokenType:   "Bearer",
 			ExpiresAt:   now.Add(accessTokenTTL),
@@ -2815,7 +2816,7 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.LinkAppService(pending.appNonce, pending.serviceID)
 
 		// Fabricate a simple token wrapping the API key
-		s.completeAuth(w, r, pending, &OAuthData{
+		s.completeAuth(w, r, pending, &db.OAuthData{
 			AccessToken: req.APIKey,
 			TokenType:   "Bearer",
 			ExpiresAt:   now.Add(24 * time.Hour * 365), // long-lived

@@ -17,16 +17,18 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
+	sqlDB, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
-	store := &Store{db: db}
+	t.Cleanup(func() { sqlDB.Close() })
+	store := db.NewStore(sqlDB)
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -238,7 +240,7 @@ func TestCreateServiceMissingURL(t *testing.T) {
 
 func TestServiceDetail(t *testing.T) {
 	srv := newTestServer(t)
-	id := registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+	id := registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 
 	rr := testRequest(t, srv, "GET", "/api/services/"+id, nil, nil)
 	if rr.Code != 200 {
@@ -264,7 +266,7 @@ func TestServiceDetailNotFound(t *testing.T) {
 
 func TestServiceToolsTasks(t *testing.T) {
 	srv := newTestServer(t)
-	id := registerService(t, srv, "mytasks", "", ServiceDescriptor{Type: "tasks"})
+	id := registerService(t, srv, "mytasks", "", db.ServiceDescriptor{Type: "tasks"})
 
 	// Missing file returns an empty list for newly-created services.
 	rr := testRequest(t, srv, "GET", "/api/services/"+id+"/tools", nil, nil)
@@ -309,7 +311,7 @@ func TestServiceToolsTasks(t *testing.T) {
 
 func TestServiceToolsVirtual(t *testing.T) {
 	srv := newTestServer(t)
-	id := registerService(t, srv, "myvirtual", "", ServiceDescriptor{Type: "virtual"})
+	id := registerService(t, srv, "myvirtual", "", db.ServiceDescriptor{Type: "virtual"})
 
 	path := filepath.Join("virtual", "myvirtual.txt")
 	if err := os.MkdirAll("virtual", 0755); err != nil {
@@ -342,7 +344,7 @@ func TestServiceToolsVirtual(t *testing.T) {
 
 func TestServiceToolsUnsupportedType(t *testing.T) {
 	srv := newTestServer(t)
-	id := registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+	id := registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 
 	rr := testRequest(t, srv, "GET", "/api/services/"+id+"/tools", nil, nil)
 	if rr.Code != 400 {
@@ -375,7 +377,7 @@ func TestServiceFilesHTTP(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
 
-	idStr := registerService(t, srv, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	idStr := registerService(t, srv, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	id, _ := strconv.ParseInt(idStr, 10, 64)
 	content := []byte("[build]\nmake all\n")
 
@@ -436,7 +438,7 @@ func TestServiceFilesHTTP(t *testing.T) {
 
 func TestServiceFilesHTTPUnsupportedType(t *testing.T) {
 	srv := newTestServer(t)
-	idStr := registerService(t, srv, "api-svc", "http://example.com", ServiceDescriptor{Type: "api"})
+	idStr := registerService(t, srv, "api-svc", "http://example.com", db.ServiceDescriptor{Type: "api"})
 	id, _ := strconv.ParseInt(idStr, 10, 64)
 
 	rr := uploadServiceFile(t, srv, id, "x.txt", []byte("x"))
@@ -447,7 +449,7 @@ func TestServiceFilesHTTPUnsupportedType(t *testing.T) {
 
 func TestServiceFilesHTTPNoZip(t *testing.T) {
 	srv := newTestServer(t)
-	idStr := registerService(t, srv, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	idStr := registerService(t, srv, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	id, _ := strconv.ParseInt(idStr, 10, 64)
 
 	rr := uploadServiceFile(t, srv, id, "site.zip", []byte("PK"))
@@ -476,7 +478,7 @@ func TestProxyForwardsRequest(t *testing.T) {
 
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "proxy")
-	id := registerService(t, srv, "mock", mockService.URL, ServiceDescriptor{Type: "mcp"})
+	id := registerService(t, srv, "mock", mockService.URL, db.ServiceDescriptor{Type: "mcp"})
 	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "POST", "/service/"+id+"/tools/list",
@@ -514,7 +516,7 @@ func TestLoginWithMetadataFallback(t *testing.T) {
 		}
 	})
 
-	registerService(t, srv, "github", "https://gh.example/mcp", ServiceDescriptor{Type: "mcp"})
+	registerService(t, srv, "github", "https://gh.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://gh.example/mcp&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -562,7 +564,7 @@ func TestLoginByServiceURL(t *testing.T) {
 	})
 
 	nonce := createApp(t, srv, "login-test")
-	registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+	registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -620,7 +622,7 @@ func TestLoginViaQueryParam(t *testing.T) {
 		}
 	})
 
-	registerService(t, srv, "slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+	registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 
 	// No X-App-Nonce header — nonce comes from query param
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x&app_nonce="+nonce, nil, nil)
@@ -660,7 +662,7 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 		}
 	})
 
-	registerService(t, srv, "github", "https://api.github.com", ServiceDescriptor{
+	registerService(t, srv, "github", "https://api.github.com", db.ServiceDescriptor{
 		Type:     "api",
 		ClientID: "gh-pre-registered-client",
 		OAuthURL: "https://github.com",
@@ -691,7 +693,7 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 func TestLoginWithAPIKey(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "key-test")
-	registerService(t, srv, "weather", "https://api.weather.com", ServiceDescriptor{
+	registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
 		Type: "api",
 		Auth: "key",
 	})
@@ -717,7 +719,7 @@ func TestLoginWithAPIKey(t *testing.T) {
 func TestLoginWithAPIKeyAdminSet(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "key-admin-test")
-	registerService(t, srv, "weather", "https://api.weather.com", ServiceDescriptor{
+	registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
 		Type:   "api",
 		Auth:   "key",
 		APIKey: "admin-secret-key",
@@ -751,7 +753,7 @@ func TestProxyInjectsAdminAPIKey(t *testing.T) {
 
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "proxy-key-test")
-	id := registerService(t, srv, "weather", mockService.URL, ServiceDescriptor{
+	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{
 		Type:   "api",
 		Auth:   "key",
 		APIKey: "admin-secret-key",
@@ -780,7 +782,7 @@ func TestProxyDoesNotOverrideUserAPIKey(t *testing.T) {
 
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "proxy-user-key-test")
-	id := registerService(t, srv, "weather", mockService.URL, ServiceDescriptor{
+	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{
 		Type:   "api",
 		Auth:   "key",
 		APIKey: "admin-secret-key",
@@ -875,7 +877,7 @@ func createApp(t *testing.T, srv *Server, name string) string {
 	return res["nonce"]
 }
 
-func registerService(t *testing.T, srv *Server, name, serviceURL string, descriptor ServiceDescriptor) string {
+func registerService(t *testing.T, srv *Server, name, serviceURL string, descriptor db.ServiceDescriptor) string {
 	t.Helper()
 	body, _ := json.Marshal(map[string]interface{}{
 		"name":       name,
@@ -948,7 +950,7 @@ func formatInt(n int64) string {
 // and signing a JWT. The caller must have already created the user in s.store.
 func authTokenForUser(t *testing.T, srv *Server, email, name, role string) string {
 	t.Helper()
-	svcID := registerService(t, srv, "test-auth", "http://localhost/mcp", ServiceDescriptor{Type: "mcp"})
+	svcID := registerService(t, srv, "test-auth", "http://localhost/mcp", db.ServiceDescriptor{Type: "mcp"})
 	sid, _ := strconv.ParseInt(svcID, 10, 64)
 	if err := srv.store.SetSetting("admin_auth_service", svcID); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
@@ -967,7 +969,7 @@ func TestGetMySessions(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 	token := authTokenForUser(t, srv, "session@example.com", "Session User", "Member")
-	fam := &RefreshFamily{
+	fam := &db.RefreshFamily{
 		ID:          "test-session-id",
 		UserEmail:   "session@example.com",
 		ServiceID:   1,
@@ -1004,7 +1006,7 @@ func TestRevokeAllSessions(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 	token := authTokenForUser(t, srv, "revoke@example.com", "Revoke User", "Member")
-	fam := &RefreshFamily{
+	fam := &db.RefreshFamily{
 		ID:          "revoke-session-id",
 		UserEmail:   "revoke@example.com",
 		ServiceID:   1,
@@ -1037,7 +1039,7 @@ func TestRevokeSpecificSession(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 	token := authTokenForUser(t, srv, "single@example.com", "Revoke Single User", "Member")
-	fam := &RefreshFamily{
+	fam := &db.RefreshFamily{
 		ID:          "single-session-id",
 		UserEmail:   "single@example.com",
 		ServiceID:   1,

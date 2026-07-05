@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // callCentralTool invokes a tool on the central MCP server via an in-memory
@@ -69,7 +71,7 @@ func createAppFile(t *testing.T, srv *Server, nonce, path string, content []byte
 
 func TestMCPListAppFiles(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "list-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "list-app", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -112,7 +114,7 @@ func TestMCPListAppFiles(t *testing.T) {
 
 func TestMCPReadAppFile(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "read-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-app", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -152,7 +154,7 @@ func TestMCPReadAppFile(t *testing.T) {
 
 func TestMCPReadAppFileBinary(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "read-bin", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-bin", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestMCPReadAppFileBinary(t *testing.T) {
 
 func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "write-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-app", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -209,7 +211,7 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 		t.Fatalf("write_app_file patch failed: %s", toolResultText(t, res))
 	}
 
-	data, err := srv.coreReadAppFile(&User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
+	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -220,7 +222,7 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 
 func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "write-missing", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-missing", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -242,7 +244,7 @@ func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
 
 func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "write-dup", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-dup", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -264,7 +266,7 @@ func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
 
 func TestMCPDeleteAppFile(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&User{ID: 1, Role: "Superuser"}, "delete-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "delete-app", "", "", nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -278,7 +280,7 @@ func TestMCPDeleteAppFile(t *testing.T) {
 		t.Fatalf("delete_app_file failed: %s", toolResultText(t, res))
 	}
 
-	_, err = srv.coreReadAppFile(&User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
+	_, err = srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
 	if err == nil {
 		t.Fatal("expected file to be deleted")
 	}
@@ -287,8 +289,8 @@ func TestMCPDeleteAppFile(t *testing.T) {
 func TestMCPListServiceFiles(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	admin := &db.User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -339,8 +341,8 @@ func TestMCPListServiceFiles(t *testing.T) {
 func TestMCPReadServiceFile(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	admin := &db.User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -380,8 +382,8 @@ func TestMCPReadServiceFile(t *testing.T) {
 func TestMCPWriteServiceFile(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	admin := &db.User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -415,8 +417,8 @@ func TestMCPWriteServiceFile(t *testing.T) {
 func TestMCPDeleteServiceFile(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	admin := &db.User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -437,8 +439,8 @@ func TestMCPDeleteServiceFile(t *testing.T) {
 
 func TestMCPServiceFileUnsupportedType(t *testing.T) {
 	srv := newTestServer(t)
-	admin := &User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", ServiceDescriptor{Type: "api"})
+	admin := &db.User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", db.ServiceDescriptor{Type: "api"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}

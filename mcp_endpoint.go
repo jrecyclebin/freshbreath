@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/formats"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -36,7 +37,7 @@ func newVirtualMCPRegistry() *virtualMCPRegistry {
 }
 
 // add builds and registers an MCP server for the given virtual service.
-func (r *virtualMCPRegistry) add(s *Server, svc *Service) {
+func (r *virtualMCPRegistry) add(s *Server, svc *db.Service) {
 	slug := strings.TrimPrefix(svc.URL, "/mcp/")
 
 	mcps, err := s.newVirtualMCPServer(svc)
@@ -91,7 +92,7 @@ func (r *virtualMCPRegistry) remove(slug string) {
 
 // newVirtualMCPServer creates an MCP server that exposes the virtual service's
 // tools via the MCP protocol.
-func (s *Server) newVirtualMCPServer(svc *Service) (*mcp.Server, error) {
+func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 	if err != nil {
 		return nil, fmt.Errorf("load virtual tools: %w", err)
@@ -185,7 +186,7 @@ func virtualToolInputSchema(vt formats.VirtualTool) map[string]interface{} {
 // Tokens arrive in two forms:
 //  1. Freshbreath-wrapped JWT (from MCP OAuth flow) — contains upstream_token claim
 //  2. Direct upstream OIDC JWT — verified against the upstream issuer
-func (s *Server) virtualTokenVerifier(svc *Service) auth.TokenVerifier {
+func (s *Server) virtualTokenVerifier(svc *db.Service) auth.TokenVerifier {
 	return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
 		// Try to unwrap a Freshbreath-wrapped JWT (MCP OAuth flow).
 		claims, err := s.verifyAndUnwrapToken(token, svc.ID)
@@ -239,7 +240,7 @@ func (s *Server) virtualTokenVerifier(svc *Service) auth.TokenVerifier {
 // virtualPRM builds the Protected Resource Metadata document for a virtual service.
 // The authorization_servers field points to Freshbreath itself, since Freshbreath
 // acts as the OAuth authorization server for MCP clients.
-func (s *Server) virtualPRM(svc *Service) *oauthex.ProtectedResourceMetadata {
+func (s *Server) virtualPRM(svc *db.Service) *oauthex.ProtectedResourceMetadata {
 	slug := strings.TrimPrefix(svc.URL, "/mcp/")
 	resourceURL := s.config.PublicBaseURL + "/mcp/" + slug
 

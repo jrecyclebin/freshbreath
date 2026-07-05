@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // forbidden reports whether err is a *coreErr carrying a 403 status.
@@ -22,8 +24,8 @@ func forbidden(err error) bool {
 // too-weak actor must get a 403 *before* any store work happens.
 func TestCoreAuthority(t *testing.T) {
 	srv := newTestServer(t)
-	member := &User{ID: 1, Role: "Member"}
-	other := &User{ID: 99, Role: "Member"}
+	member := &db.User{ID: 1, Role: "Member"}
+	other := &db.User{ID: 99, Role: "Member"}
 
 	// Admin+ operations: a Member must be forbidden.
 	adminPlusOps := map[string]func() error{
@@ -32,8 +34,8 @@ func TestCoreAuthority(t *testing.T) {
 		"coreDeleteApp":      func() error { return srv.coreDeleteApp(member, "n") },
 		"coreSetAppMembers":  func() error { return srv.coreSetAppMembers(member, "n", nil) },
 		"coreSetAppServices": func() error { return srv.coreSetAppServices(member, "n", nil) },
-		"coreCreateService":  func() error { _, e := srv.coreCreateService(member, "x", "http://x", ServiceDescriptor{}); return e },
-		"coreUpdateService":  func() error { return srv.coreUpdateService(member, 1, "x", "http://x", ServiceDescriptor{}) },
+		"coreCreateService":  func() error { _, e := srv.coreCreateService(member, "x", "http://x", db.ServiceDescriptor{}); return e },
+		"coreUpdateService":  func() error { return srv.coreUpdateService(member, 1, "x", "http://x", db.ServiceDescriptor{}) },
 		"coreDeleteService":  func() error { return srv.coreDeleteService(member, 1) },
 		"coreCreateUser":     func() error { _, e := srv.coreCreateUser(member, "n", "e@x", "Member", "Active"); return e },
 		"coreUpdateUser":     func() error { return srv.coreUpdateUser(member, 1, "n", "e@x", "Member", "Active", nil) },
@@ -50,10 +52,10 @@ func TestCoreAuthority(t *testing.T) {
 	if err := srv.coreUpdateSettings(member, nil, nil); !forbidden(err) {
 		t.Errorf("coreUpdateSettings as Member: got %v, want 403", err)
 	}
-	if err := srv.coreUpdateSettings(&User{ID: 2, Role: "Admin"}, nil, nil); !forbidden(err) {
+	if err := srv.coreUpdateSettings(&db.User{ID: 2, Role: "Admin"}, nil, nil); !forbidden(err) {
 		t.Errorf("coreUpdateSettings as Admin: got %v, want 403", err)
 	}
-	if err := srv.coreUpdateSettings(&User{ID: 3, Role: "Superuser"}, nil, nil); err != nil {
+	if err := srv.coreUpdateSettings(&db.User{ID: 3, Role: "Superuser"}, nil, nil); err != nil {
 		t.Errorf("coreUpdateSettings as Superuser: got %v, want pass", err)
 	}
 }
@@ -65,9 +67,9 @@ func TestCoreAuthority(t *testing.T) {
 // while a Member targeting another user is forbidden outright.
 func TestCoreAuthoritySelfOrAdmin(t *testing.T) {
 	srv := newTestServer(t)
-	member := &User{ID: 1, Role: "Member"}
-	other := &User{ID: 2, Role: "Member"}
-	admin := &User{ID: 3, Role: "Admin"}
+	member := &db.User{ID: 1, Role: "Member"}
+	other := &db.User{ID: 2, Role: "Member"}
+	admin := &db.User{ID: 3, Role: "Admin"}
 
 	// Self-service: gate passes (then 404 "no SSH key to delete", not 403).
 	if err := srv.coreDeleteSSHKey(member, member); forbidden(err) {
@@ -86,10 +88,10 @@ func TestCoreAuthoritySelfOrAdmin(t *testing.T) {
 // TestCoreServiceFilesAuthority verifies that service file ops are Admin+ only.
 func TestCoreServiceFilesAuthority(t *testing.T) {
 	srv := newTestServer(t)
-	member := &User{ID: 1, Role: "Member"}
-	admin := &User{ID: 2, Role: "Admin"}
+	member := &db.User{ID: 1, Role: "Member"}
+	admin := &db.User{ID: 2, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "tasksvc", "", ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "tasksvc", "", db.ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create tasks service: %v", err)
 	}
@@ -111,9 +113,9 @@ func TestCoreServiceFilesAuthority(t *testing.T) {
 func TestServiceFileTasksCRUD(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -170,10 +172,10 @@ func TestServiceFileTasksCRUD(t *testing.T) {
 func TestServiceFileVirtualReload(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Admin"}
 
 	name := "greeter"
-	svc, err := srv.coreCreateService(admin, name, "", ServiceDescriptor{Type: "virtual"})
+	svc, err := srv.coreCreateService(admin, name, "", db.ServiceDescriptor{Type: "virtual"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -200,9 +202,9 @@ func TestServiceFileVirtualReload(t *testing.T) {
 // file operations.
 func TestServiceFileUnsupportedType(t *testing.T) {
 	srv := newTestServer(t)
-	admin := &User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", ServiceDescriptor{Type: "api"})
+	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", db.ServiceDescriptor{Type: "api"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -222,9 +224,9 @@ func TestServiceFileUnsupportedType(t *testing.T) {
 func TestServiceFileNoZip(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -240,9 +242,9 @@ func TestGateApp(t *testing.T) {
 	srv := newTestServer(t)
 
 	// Create an app and two users: one member, one not.
-	admin := &User{ID: 1, Role: "Admin"}
-	member := &User{ID: 2, Role: "Member"}
-	outsider := &User{ID: 3, Role: "Member"}
+	admin := &db.User{ID: 1, Role: "Admin"}
+	member := &db.User{ID: 2, Role: "Member"}
+	outsider := &db.User{ID: 3, Role: "Member"}
 
 	nonce, err := srv.coreCreateApp(admin, "gate-test", "", "", nil)
 	if err != nil {
@@ -262,7 +264,7 @@ func TestGateApp(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		actor  *User
+		actor  *db.User
 		op     func() error
 		wantOK bool
 	}{

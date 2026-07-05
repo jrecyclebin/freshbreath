@@ -4,6 +4,8 @@ import (
 	"context"
 	"strconv"
 	"testing"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // TestIdentityTokenServiceBinding is a regression test for the IdP-confusion
@@ -18,11 +20,11 @@ func TestIdentityTokenServiceBinding(t *testing.T) {
 
 	// adminSvc is the designated admin auth service; otherSvc is an unrelated
 	// app-level OIDC service the attacker can register an account with.
-	adminID, err := srv.store.RegisterService("admin-idp", "https://admin.example", ServiceDescriptor{Type: "oidc"})
+	adminID, err := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
 	if err != nil {
 		t.Fatalf("register admin service: %v", err)
 	}
-	otherID, err := srv.store.RegisterService("other-idp", "https://other.example", ServiceDescriptor{Type: "oidc"})
+	otherID, err := srv.store.RegisterService("other-idp", "https://other.example", db.ServiceDescriptor{Type: "oidc"})
 	if err != nil {
 		t.Fatalf("register other service: %v", err)
 	}
