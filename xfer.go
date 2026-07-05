@@ -23,8 +23,8 @@ const xferMaxUpload = 50 << 20 // 50MB, matching the multipart web-upload limit
 // A token targets either an app (Nonce) or a service (ServiceID), never both.
 type transferEntry struct {
 	Action    string
-	Nonce     string  // app nonce; set for app-targeted transfers
-	ServiceID int64   // service ID; set for service-targeted transfers
+	Nonce     string // app nonce; set for app-targeted transfers
+	ServiceID int64  // service ID; set for service-targeted transfers
 	Filename  string
 	Actor     *User
 	ExpiresAt time.Time

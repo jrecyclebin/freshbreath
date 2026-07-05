@@ -365,7 +365,7 @@ func TestMCPReadServiceFile(t *testing.T) {
 
 	// Chunk read.
 	res = callCentralTool(t, srv, "read_service_file", map[string]interface{}{
-		"name": svc.Name,
+		"name":   svc.Name,
 		"offset": 1,
 		"limit":  5,
 	})
@@ -387,7 +387,7 @@ func TestMCPWriteServiceFile(t *testing.T) {
 	}
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"name": svc.Name,
+		"name":    svc.Name,
 		"content": "[build]\nmake all\n",
 	})
 	if res.IsError {
@@ -395,7 +395,7 @@ func TestMCPWriteServiceFile(t *testing.T) {
 	}
 
 	res = callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"name": svc.Name,
+		"name":     svc.Name,
 		"content":  "make install",
 		"old_text": "make all",
 	})
@@ -444,7 +444,7 @@ func TestMCPServiceFileUnsupportedType(t *testing.T) {
 	}
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"name": svc.Name,
+		"name":    svc.Name,
 		"content": "x",
 	})
 	if !res.IsError {

@@ -1495,6 +1495,7 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
 // services
 
 func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
@@ -2819,7 +2820,7 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:   now.Add(24 * time.Hour * 365), // long-lived
 			Claims: map[string]interface{}{
 				"sub": "api-key-user",
-				"iss":   "freshbreath",
+				"iss": "freshbreath",
 			},
 			Proxied: svc.Descriptor.Proxied,
 		})

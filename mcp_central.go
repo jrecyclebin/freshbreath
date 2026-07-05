@@ -1000,9 +1000,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name":       map[string]interface{}{"type": "string", "description": "Current service name"},
-				"new_name":   map[string]interface{}{"type": "string", "description": "New name"},
-				"url":        map[string]interface{}{"type": "string", "description": "New URL"},
+				"name":     map[string]interface{}{"type": "string", "description": "Current service name"},
+				"new_name": map[string]interface{}{"type": "string", "description": "New name"},
+				"url":      map[string]interface{}{"type": "string", "description": "New URL"},
 				"descriptor": map[string]interface{}{
 					"type":        "object",
 					"description": "Service descriptor",
