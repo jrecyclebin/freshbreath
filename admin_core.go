@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"poggers.institute/freshbreath/internal/sshkit"
 )
 
 // trimMCPSlug returns the virtual-service slug from a /mcp/<slug> URL.
@@ -188,11 +190,11 @@ func (s *Server) syncVirtualMCP(svc *Service, oldURL string) {
 
 // publicSSHInfo returns the non-secret view of an SSH key (public key,
 // fingerprint, type) — what's safe to hand back to a caller.
-func publicSSHInfo(k *SSHKeyInfo) *SSHKeyInfo {
+func publicSSHInfo(k *sshkit.SSHKeyInfo) *sshkit.SSHKeyInfo {
 	if k == nil {
 		return nil
 	}
-	return &SSHKeyInfo{
+	return &sshkit.SSHKeyInfo{
 		PublicKey:   k.PublicKey,
 		Fingerprint: k.Fingerprint,
 		KeyType:     k.KeyType,
@@ -394,7 +396,7 @@ func (s *Server) coreSetUserApps(actor *User, id int64, apps []string) error {
 
 // coreGenerateSSHKey generates and stores an SSH key for target, returning
 // the public key info. actor is credited in the audit log.
-func (s *Server) coreGenerateSSHKey(actor, target *User, passphrase string) (*SSHKeyInfo, error) {
+func (s *Server) coreGenerateSSHKey(actor, target *User, passphrase string) (*sshkit.SSHKeyInfo, error) {
 	if err := s.gateSelfOrAdmin(actor, target); err != nil {
 		return nil, err
 	}
@@ -404,7 +406,7 @@ func (s *Server) coreGenerateSSHKey(actor, target *User, passphrase string) (*SS
 	if target.Metadata != nil && target.Metadata.SSHKey != nil {
 		return nil, cerr(http.StatusConflict, "SSH key already exists — delete it first")
 	}
-	keyInfo, err := GenerateSSHKey(passphrase)
+	keyInfo, err := sshkit.GenerateSSHKey(passphrase)
 	if err != nil {
 		return nil, cerr(http.StatusInternalServerError, "key generation failed: %v", err)
 	}

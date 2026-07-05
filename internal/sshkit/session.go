@@ -1,7 +1,11 @@
-package main
+package sshkit
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"sync"
@@ -10,6 +14,13 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
+
+// HostKeyStore abstracts TOFU host key persistence. The caller provides
+// an implementation backed by whatever database they use.
+type HostKeyStore interface {
+	GetSSHHostKey(host string, port int) (keyData []byte, fingerprint string, err error)
+	StoreSSHHostKey(host string, port int, keyData []byte, fingerprint string) error
+}
 
 // Session represents an open SSH + SFTP connection to a remote host.
 type Session struct {
@@ -30,18 +41,18 @@ type SessionManager struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
 	agent    *AgentManager
-	store    *Store
+	hostKeys HostKeyStore
 	ttl      time.Duration
 }
 
-// NewSessionManager creates a session manager backed by the given agent and store.
-// The store is used for TOFU host key storage. The ttl controls how long
+// NewSessionManager creates a session manager backed by the given agent and host key store.
+// The host key store is used for TOFU host key storage. The ttl controls how long
 // sessions stay open before automatic expiry.
-func NewSessionManager(agent *AgentManager, store *Store, ttl time.Duration) *SessionManager {
+func NewSessionManager(agent *AgentManager, hostKeys HostKeyStore, ttl time.Duration) *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]*Session),
 		agent:    agent,
-		store:    store,
+		hostKeys: hostKeys,
 		ttl:      ttl,
 	}
 }
@@ -172,7 +183,7 @@ func (m *SessionManager) tofuHostKeyCallback(hostname string, remote net.Addr, k
 		port = 22
 	}
 
-	storedData, storedFP, err := m.store.GetSSHHostKey(host, port)
+	storedData, storedFP, err := m.hostKeys.GetSSHHostKey(host, port)
 	if err != nil {
 		return fmt.Errorf("host key lookup failed: %w", err)
 	}
@@ -182,7 +193,7 @@ func (m *SessionManager) tofuHostKeyCallback(hostname string, remote net.Addr, k
 
 	if storedData == nil {
 		// First connection — trust and store.
-		if err := m.store.StoreSSHHostKey(host, port, keyData, keyFP); err != nil {
+		if err := m.hostKeys.StoreSSHHostKey(host, port, keyData, keyFP); err != nil {
 			return fmt.Errorf("failed to store host key: %w", err)
 		}
 		return nil
@@ -195,4 +206,22 @@ func (m *SessionManager) tofuHostKeyCallback(hostname string, remote net.Addr, k
 	}
 
 	return nil
+}
+
+// genNonce generates a random 48-char hex string for session IDs.
+func genNonce() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// DeriveJWTSecretFromTLSKey derives a 32-byte HMAC-SHA256 signing key
+// from the TLS private key using a fixed domain label. This makes the JWT
+// secret stable across restarts without additional configuration.
+func DeriveJWTSecretFromTLSKey(tlsKeyPEM []byte) []byte {
+	h := hmac.New(sha256.New, tlsKeyPEM)
+	h.Write([]byte("freshbreath.jwt.v1"))
+	return h.Sum(nil)
 }

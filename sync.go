@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
+
+	"poggers.institute/freshbreath/internal/sshkit"
 )
 
 // ── File listing ──
@@ -286,7 +288,7 @@ func (s *Server) handleSyncFileOps(w http.ResponseWriter, r *http.Request) {
 // ── Helpers ──
 
 // resolveSession extracts the sessionId query param and looks up the session.
-func (s *Server) resolveSession(r *http.Request) (*Session, error) {
+func (s *Server) resolveSession(r *http.Request) (*sshkit.Session, error) {
 	sid := r.URL.Query().Get("sessionId")
 	if sid == "" {
 		return nil, fmt.Errorf("missing sessionId parameter")
