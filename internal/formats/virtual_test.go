@@ -1,4 +1,4 @@
-package main
+package formats
 
 import (
   "bytes"
@@ -15,7 +15,7 @@ import (
 // ── Parser Tests ─────────────────────────────────────────────────────
 
 func TestParseSharepoint(t *testing.T) {
-  data, err := os.ReadFile("samples/Sharepoint.txt")
+  data, err := os.ReadFile("../../samples/Sharepoint.txt")
   if err != nil {
     t.Fatal(err)
   }
@@ -829,7 +829,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  result, err := executeVirtualTool(http.DefaultClient, tools, "greet", nil, "test-token")
+  result, err := ExecuteVirtualTool(http.DefaultClient, tools, "greet", nil, "test-token")
   if err != nil {
     t.Fatal(err)
   }
@@ -870,7 +870,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  result, err := executeVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"name": "Ada"}, "")
+  result, err := ExecuteVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"name": "Ada"}, "")
   if err != nil {
     t.Fatal(err)
   }
@@ -896,7 +896,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  result, err := executeVirtualTool(http.DefaultClient, tools, "get-site", nil, "")
+  result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-site", nil, "")
   if err != nil {
     t.Fatal(err)
   }
@@ -924,7 +924,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  result, err := executeVirtualTool(http.DefaultClient, tools, "oof", nil, "")
+  result, err := ExecuteVirtualTool(http.DefaultClient, tools, "oof", nil, "")
   if err != nil {
     t.Fatalf("unexpected error: %v", err)
   }
@@ -973,7 +973,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  result, err := executeVirtualTool(http.DefaultClient, tools, "get-lists", nil, "")
+  result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-lists", nil, "")
   if err != nil {
     t.Fatal(err)
   }
@@ -1002,7 +1002,7 @@ assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
     t.Fatal(err)
   }
 
-  _, err = executeVirtualTool(http.DefaultClient, tools, "fetch", nil, "")
+  _, err = ExecuteVirtualTool(http.DefaultClient, tools, "fetch", nil, "")
   if err == nil {
     t.Fatal("assertion should have failed")
   }
@@ -1013,7 +1013,7 @@ assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
 
 func TestExecuteVirtualToolNotFound(t *testing.T) {
   tools := []VirtualTool{{Name: "greet"}}
-  _, err := executeVirtualTool(http.DefaultClient, tools, "missing", nil, "")
+  _, err := ExecuteVirtualTool(http.DefaultClient, tools, "missing", nil, "")
   if err == nil {
     t.Fatal("expected error")
   }
@@ -1225,7 +1225,7 @@ HTTP 200
 
   // "hello $world" proves the body goes through verbatim: a $ in the
   // file data must NOT be interpreted as a variable reference.
-  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, "")
+  _, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, "")
   if err != nil {
     t.Fatal(err)
   }
@@ -1258,7 +1258,7 @@ HTTP 200
   // A PNG signature — bytes that aren't legal inside a JSON string.
   want := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
   encoded := base64.StdEncoding.EncodeToString(want)
-  _, err = executeVirtualTool(http.DefaultClient, tools, "upload-image", map[string]interface{}{"content": encoded}, "")
+  _, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload-image", map[string]interface{}{"content": encoded}, "")
   if err != nil {
     t.Fatal(err)
   }
@@ -1287,7 +1287,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "raw bytes here"}, "")
+  _, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "raw bytes here"}, "")
   if err != nil {
     t.Fatal(err)
   }
@@ -1311,7 +1311,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hi"}, "")
+  _, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hi"}, "")
   if err == nil {
     t.Fatal("expected error for missing Content-Type")
   }
@@ -1331,7 +1331,7 @@ HTTP 200
     t.Fatal(err)
   }
 
-  _, err = executeVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, "")
+  _, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, "")
   if err == nil {
     t.Fatal("expected error for non-string raw body")
   }
