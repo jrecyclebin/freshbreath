@@ -1134,7 +1134,7 @@ func TestParseRawBodyBase64Expr(t *testing.T) {
   input := `[upload-image] Upload an image.
 PUT https://example.com/images/$path
 Content-Type: image/png
-...base64($content)
+...base64dec($content)
 HTTP 200
 `
   tools, err := parseVirtualFile([]byte(input))
@@ -1142,8 +1142,8 @@ HTTP 200
     t.Fatal(err)
   }
   step := tools[0].Steps[0]
-  if step.BodyRaw != "base64($content)" {
-    t.Errorf("BodyRaw = %q, want base64($content)", step.BodyRaw)
+  if step.BodyRaw != "base64dec($content)" {
+    t.Errorf("BodyRaw = %q, want base64dec($content)", step.BodyRaw)
   }
 }
 
@@ -1172,22 +1172,32 @@ HTTP 200
   }
 }
 
-func TestEvalExprBase64(t *testing.T) {
-  val, err := evalExpr(`base64("aGVsbG8=")`, nil, nil, "")
+func TestEvalExprBase64Dec(t *testing.T) {
+  val, err := evalExpr(`base64dec("aGVsbG8=")`, nil, nil, "")
   if err != nil {
     t.Fatal(err)
   }
   if val != "hello" {
-    t.Errorf("base64() = %v, want hello", val)
+    t.Errorf("base64dec() = %v, want hello", val)
   }
 }
 
-func TestEvalExprBase64Invalid(t *testing.T) {
-  _, err := evalExpr(`base64("not valid b64!!!")`, nil, nil, "")
+func TestEvalExprBase64Enc(t *testing.T) {
+  val, err := evalExpr(`base64enc("hello")`, nil, nil, "")
+  if err != nil {
+    t.Fatal(err)
+  }
+  if val != "aGVsbG8=" {
+    t.Errorf("base64enc() = %v, want aGVsbG8=", val)
+  }
+}
+
+func TestEvalExprBase64DecInvalid(t *testing.T) {
+  _, err := evalExpr(`base64dec("not valid b64!!!")`, nil, nil, "")
   if err == nil {
     t.Fatal("expected error for invalid base64")
   }
-  if !strings.Contains(err.Error(), "base64()") {
+  if !strings.Contains(err.Error(), "base64dec()") {
     t.Errorf("error = %v", err)
   }
 }
@@ -1238,7 +1248,7 @@ func TestExecuteVirtualToolRawBodyBase64(t *testing.T) {
   tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload-image] Upload image.
 PUT %s/files
 Content-Type: image/png
-...base64($content)
+...base64dec($content)
 HTTP 200
 `, srv.URL)))
   if err != nil {

@@ -60,7 +60,7 @@ type VirtualStep struct {
   URL         string // URL template with $variable interpolation
   Headers     map[string]string
   Body        string                   // Raw JSON body template
-  BodyRaw     string                   // String-spread body expression, e.g. "$content" or "base64($content)"
+  BodyRaw     string                   // String-spread body expression, e.g. "$content" or "base64dec($content)"
   Responses   map[int]*VirtualResponse // Expected status → response handling
 }
 
@@ -779,19 +779,28 @@ func evalFunction(name, argsStr string, vars map[string]interface{}, scope inter
       return nil, fmt.Errorf("path(): %w", err)
     }
     return u.Path, nil
-  case "base64":
+  case "base64dec":
     if len(resolved) != 1 {
-      return nil, fmt.Errorf("base64() takes 1 argument, got %d", len(resolved))
+      return nil, fmt.Errorf("base64dec() takes 1 argument, got %d", len(resolved))
     }
     s, ok := resolved[0].(string)
     if !ok {
-      return nil, fmt.Errorf("base64() requires a string argument, got %T", resolved[0])
+      return nil, fmt.Errorf("base64dec() requires a string argument, got %T", resolved[0])
     }
     decoded, err := base64.StdEncoding.DecodeString(s)
     if err != nil {
-      return nil, fmt.Errorf("base64(): %w", err)
+      return nil, fmt.Errorf("base64dec(): %w", err)
     }
     return string(decoded), nil
+  case "base64enc":
+    if len(resolved) != 1 {
+      return nil, fmt.Errorf("base64enc() takes 1 argument, got %d", len(resolved))
+    }
+    s, ok := resolved[0].(string)
+    if !ok {
+      return nil, fmt.Errorf("base64enc() requires a string argument, got %T", resolved[0])
+    }
+    return base64.StdEncoding.EncodeToString([]byte(s)), nil
   default:
     return nil, fmt.Errorf("unknown function: %s", name)
   }
