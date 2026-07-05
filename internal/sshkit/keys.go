@@ -1,12 +1,10 @@
-package main
+package sshkit
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -15,6 +13,17 @@ import (
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/ssh"
 )
+
+// SSHKeyInfo holds an Ed25519 SSH key pair, with the private key encrypted
+// via Argon2id + AES-256-GCM.
+type SSHKeyInfo struct {
+	PublicKey       string `json:"public_key"`
+	Fingerprint     string `json:"fingerprint"`
+	KeyType         string `json:"key_type"`
+	EncryptedSecret string `json:"encrypted_secret,omitempty"` // AES-256-GCM encrypted private key (never sent to frontend)
+	Salt            string `json:"salt,omitempty"`             // Argon2id salt (hex)
+	Nonce           string `json:"nonce,omitempty"`            // GCM nonce (hex)
+}
 
 // GenerateSSHKey creates an Ed25519 key pair, encrypts the private key with
 // the given passphrase using Argon2id + AES-256-GCM, and returns SSHKeyInfo.
@@ -122,13 +131,4 @@ func ParseSSHPrivateKey(info *SSHKeyInfo, passphrase string) (ssh.Signer, error)
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	return signer, nil
-}
-
-// deriveJWTSecretFromTLSKey derives a 32-byte HMAC-SHA256 signing key
-// from the TLS private key using a fixed domain label. This makes the JWT
-// secret stable across restarts without additional configuration.
-func deriveJWTSecretFromTLSKey(tlsKeyPEM []byte) []byte {
-	h := hmac.New(sha256.New, tlsKeyPEM)
-	h.Write([]byte("freshbreath.jwt.v1"))
-	return h.Sum(nil)
 }

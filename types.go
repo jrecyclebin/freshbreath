@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"time"
+
+	"poggers.institute/freshbreath/internal/sshkit"
 )
 
 type App struct {
@@ -36,14 +38,9 @@ type UserMetadata struct {
 	SSHKey *SSHKeyInfo `json:"ssh_key,omitempty"`
 }
 
-type SSHKeyInfo struct {
-	PublicKey       string `json:"public_key"`
-	Fingerprint     string `json:"fingerprint"`
-	KeyType         string `json:"key_type"`
-	EncryptedSecret string `json:"encrypted_secret,omitempty"` // AES-256-GCM encrypted private key (never sent to frontend)
-	Salt            string `json:"salt,omitempty"`             // Argon2id salt (hex)
-	Nonce           string `json:"nonce,omitempty"`            // GCM nonce (hex)
-}
+// SSHKeyInfo is an alias for sshkit.SSHKeyInfo so that the root package
+// (and future internal/server) can reference it without qualification.
+type SSHKeyInfo = sshkit.SSHKeyInfo
 
 // MarshalJSON masks sensitive SSH key fields before sending to the frontend.
 // The DB stores metadata separately via json.Marshal(metadata) which is unaffected.

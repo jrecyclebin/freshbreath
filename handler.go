@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"poggers.institute/freshbreath/internal/formats"
+	"poggers.institute/freshbreath/internal/sshkit"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
@@ -1839,7 +1840,7 @@ func (s *Server) handleUserSSHKey(w http.ResponseWriter, r *http.Request, userID
 
 	switch r.Method {
 	case http.MethodGet:
-		info := (*SSHKeyInfo)(nil)
+		info := (*sshkit.SSHKeyInfo)(nil)
 		if user.Metadata != nil && user.Metadata.SSHKey != nil {
 			info = user.Metadata.SSHKey
 		}
@@ -2324,7 +2325,7 @@ func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
 
 	session, err := s.sessionMgr.Open(user.ID, req.Host, req.Port, req.Username)
 	if err != nil {
-		if errors.Is(err, ErrNoKey) {
+		if errors.Is(err, sshkit.ErrNoKey) {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
@@ -2632,7 +2633,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Verify the passphrase
-		if !VerifyPassphrase(user.Metadata.SSHKey, req.Passphrase) {
+		if !sshkit.VerifyPassphrase(user.Metadata.SSHKey, req.Passphrase) {
 			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 			return
 		}

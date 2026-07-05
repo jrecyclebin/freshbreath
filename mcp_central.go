@@ -16,6 +16,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
+
+	"poggers.institute/freshbreath/internal/sshkit"
 )
 
 // ── Central MCP Server ──────────────────────────────────────────────
@@ -1408,7 +1410,7 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("user not found: %v", err), nil
 		}
-		var info *SSHKeyInfo
+		var info *sshkit.SSHKeyInfo
 		if u.Metadata != nil {
 			info = publicSSHInfo(u.Metadata.SSHKey)
 		}
@@ -1574,7 +1576,7 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 			return mcpToolError("no SSH key for setup account"), nil
 		}
 
-		var info *SSHKeyInfo
+		var info *sshkit.SSHKeyInfo
 		if user.Metadata != nil {
 			info = publicSSHInfo(user.Metadata.SSHKey)
 		}

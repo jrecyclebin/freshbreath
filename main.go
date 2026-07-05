@@ -17,6 +17,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
+
+	"poggers.institute/freshbreath/internal/sshkit"
 )
 
 type Config struct {
@@ -40,9 +42,9 @@ type Server struct {
 	oidcProviders     map[int64]*oidc.Provider
 	oidcProvidersMu   sync.RWMutex
 	localKey          []byte
-	adminNonce        string          // ephemeral nonce for the admin panel (same-origin)
-	agentMgr          *AgentManager   // per-user SSH key signers
-	sessionMgr        *SessionManager // SSH + SFTP sessions
+	adminNonce        string                 // ephemeral nonce for the admin panel (same-origin)
+	agentMgr          *sshkit.AgentManager   // per-user SSH key signers
+	sessionMgr        *sshkit.SessionManager // SSH + SFTP sessions
 	lastSeenAt        map[int64]time.Time
 	lastSeenMu        sync.Mutex
 	hostedRoutes      map[string]string // slug → app nonce
@@ -248,12 +250,12 @@ func main() {
 		if err != nil {
 			log.Fatalf("read TLS key for JWT derivation: %v", err)
 		}
-		localKey = deriveJWTSecretFromTLSKey(tlsKey)
+		localKey = sshkit.DeriveJWTSecretFromTLSKey(tlsKey)
 	}
 
-	agentMgr := NewAgentManager()
+	agentMgr := sshkit.NewAgentManager()
 
-	sessionMgr := NewSessionManager(agentMgr, store, 8*time.Hour)
+	sessionMgr := sshkit.NewSessionManager(agentMgr, store, 8*time.Hour)
 
 	srv := &Server{
 		config:         cfg,
