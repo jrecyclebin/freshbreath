@@ -16,6 +16,8 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -23,10 +25,10 @@ import (
 // createRefreshFamily creates a RefreshFamily in the store and returns
 // its id. Useful when setting up refresh-token tests that now require a
 // backing family record.
-func createRefreshFamily(t *testing.T, store *Store, email string, svcID int64, currentJTI string) string {
+func createRefreshFamily(t *testing.T, store *db.Store, email string, svcID int64, currentJTI string) string {
 	t.Helper()
-	famID := genNonce()
-	fam := &RefreshFamily{
+	famID := db.GenNonce()
+	fam := &db.RefreshFamily{
 		ID:         famID,
 		UserEmail:  email,
 		ServiceID:  svcID,
@@ -251,7 +253,7 @@ func TestOAuthAuthorizeRedirectsUpstream(t *testing.T) {
 
 	// The MCP resource resolves to a service by its URL (the slug path);
 	// OAuthURL points discovery at the upstream auth server.
-	registerService(t, srv, "up", "/mcp/up", ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"})
+	registerService(t, srv, "up", "/mcp/up", db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"})
 
 	clientID, _ := registerOAuthClient(t, srv, "https://client.example/callback")
 	_, challenge := pkcePair()
@@ -379,7 +381,7 @@ func TestOAuthAuthCodeGrantWrappedHappyPath(t *testing.T) {
 	srv := newTestServer(t)
 	clientID, secret := registerOAuthClient(t, srv)
 	verifier, challenge := pkcePair()
-	svcID := registerService(t, srv, "up", "/mcp/up", ServiceDescriptor{Type: "mcp"})
+	svcID := registerService(t, srv, "up", "/mcp/up", db.ServiceDescriptor{Type: "mcp"})
 	sid, _ := strconv.ParseInt(svcID, 10, 64)
 
 	code := "fb-auth-code-xyz"
@@ -459,7 +461,7 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 	srv := newTestServer(t)
 	clientID, secret := registerOAuthClient(t, srv)
 	verifier, challenge := pkcePair()
-	svcID := registerService(t, srv, "up", "/mcp/up", ServiceDescriptor{Type: "mcp"})
+	svcID := registerService(t, srv, "up", "/mcp/up", db.ServiceDescriptor{Type: "mcp"})
 	sid, _ := strconv.ParseInt(svcID, 10, 64)
 
 	// Create a user so the identity-refresh path can re-resolve them.
@@ -635,7 +637,7 @@ func TestOAuthRefreshGrantInvalidToken(t *testing.T) {
 // re-resolved from the DB, so this also covers refreshIdentity's lookup.
 func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, err := srv.store.RegisterService("admin-idp", "https://admin.example", ServiceDescriptor{Type: "oidc"})
+	svcID, err := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
 	if err != nil {
 		t.Fatalf("register service: %v", err)
 	}
@@ -643,7 +645,7 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	jti := genNonce()
+	jti := db.GenNonce()
 	famID := createRefreshFamily(t, srv.store, "ada@example.com", svcID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Kind:      "identity",
@@ -690,8 +692,8 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 // the user from the DB and fails closed.
 func TestOAuthRefreshIdentityDeletedUser(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", ServiceDescriptor{Type: "oidc"})
-	jti := genNonce()
+	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
+	jti := db.GenNonce()
 	famID := createRefreshFamily(t, srv.store, "ghost@example.com", svcID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Kind:      "identity",
@@ -736,7 +738,7 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
 		}
 	})
 
-	svcID, err := srv.store.RegisterService("up", "/mcp/up", ServiceDescriptor{
+	svcID, err := srv.store.RegisterService("up", "/mcp/up", db.ServiceDescriptor{
 		Type:     "mcp",
 		OAuthURL: "https://up.example",
 		ClientID: "up-client",
@@ -745,7 +747,7 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
 		t.Fatalf("register service: %v", err)
 	}
 
-	jti := genNonce()
+	jti := db.GenNonce()
 	famID := createRefreshFamily(t, srv.store, "user@example.com", svcID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Kind:             "wrapped",
@@ -788,11 +790,11 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
 // refresh token — otherwise any script reading the response defeats HttpOnly.
 func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Web User", "web@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	jti := genNonce()
+	jti := db.GenNonce()
 	famID := createRefreshFamily(t, srv.store, "web@example.com", svcID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Kind: "identity", ServiceID: svcID, UserEmail: "web@example.com",
@@ -831,11 +833,11 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 // returning refresh_token, per the OAuth token-response contract.
 func TestRefreshGrantFormKeepsBodyToken(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("CLI User", "cli@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	jti := genNonce()
+	jti := db.GenNonce()
 	famID := createRefreshFamily(t, srv.store, "cli@example.com", svcID, jti)
 	rt, _ := srv.mintRefreshToken(freshbreathRefreshData{
 		Kind: "identity", ServiceID: svcID, UserEmail: "cli@example.com",
@@ -922,14 +924,14 @@ func hasRefreshCookie(rr *httptest.ResponseRecorder) bool {
 // and issues a fresh token pair.
 func TestOAuthRefreshRotationHappyPath(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Rot User", "rot@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	famID := genNonce()
-	jti1 := genNonce()
-	fam := &RefreshFamily{
+	famID := db.GenNonce()
+	jti1 := db.GenNonce()
+	fam := &db.RefreshFamily{
 		ID:         famID,
 		UserEmail:  "rot@example.com",
 		ServiceID:  svcID,
@@ -970,14 +972,14 @@ func TestOAuthRefreshRotationHappyPath(t *testing.T) {
 // idempotently — no second rotate, no revoke.
 func TestOAuthRefreshRotationGraceWindow(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Grace User", "grace@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	famID := genNonce()
-	jti1 := genNonce()
-	srv.store.CreateRefreshFamily(&RefreshFamily{
+	famID := db.GenNonce()
+	jti1 := db.GenNonce()
+	srv.store.CreateRefreshFamily(&db.RefreshFamily{
 		ID:         famID,
 		UserEmail:  "grace@example.com",
 		ServiceID:  svcID,
@@ -1024,14 +1026,14 @@ func TestOAuthRefreshRotationGraceWindow(t *testing.T) {
 // reuse → the entire family is revoked and subsequent attempts fail.
 func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Reuse User", "reuse@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	famID := genNonce()
-	jti1 := genNonce()
-	srv.store.CreateRefreshFamily(&RefreshFamily{
+	famID := db.GenNonce()
+	jti1 := db.GenNonce()
+	srv.store.CreateRefreshFamily(&db.RefreshFamily{
 		ID:         famID,
 		UserEmail:  "reuse@example.com",
 		ServiceID:  svcID,
@@ -1054,7 +1056,7 @@ func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
 	}
 
 	// Advance rotated_at past the grace window by forcing an update.
-	srv.store.db.Exec(
+	srv.store.DB().Exec(
 		"UPDATE refresh_families SET rotated_at = datetime('now', '-60 seconds') WHERE id = ?", famID,
 	)
 
@@ -1090,14 +1092,14 @@ func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
 // A revoked family rejects all refresh attempts immediately.
 func TestOAuthRefreshRotationRevokedFamily(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Revoked User", "rev@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	famID := genNonce()
-	jti1 := genNonce()
-	srv.store.CreateRefreshFamily(&RefreshFamily{
+	famID := db.GenNonce()
+	jti1 := db.GenNonce()
+	srv.store.CreateRefreshFamily(&db.RefreshFamily{
 		ID:         famID,
 		UserEmail:  "rev@example.com",
 		ServiceID:  svcID,
@@ -1128,7 +1130,7 @@ func TestOAuthRefreshRotationRevokedFamily(t *testing.T) {
 // family and fails gracefully — the client must re-login.
 func TestOAuthRefreshLegacyNoFamily(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Legacy User", "leg@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}

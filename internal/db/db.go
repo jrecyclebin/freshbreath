@@ -1,4 +1,4 @@
-package main
+package db
 
 import (
 	"crypto/rand"
@@ -11,6 +11,14 @@ import (
 )
 
 type Store struct{ db *sql.DB }
+
+// NewStore wraps an open *sql.DB so callers outside package db can construct
+// a Store without touching its unexported db field.
+func NewStore(database *sql.DB) *Store { return &Store{db: database} }
+
+// DB exposes the underlying connection for callers that run ad-hoc SQL
+// (e.g. the host-key listing in the hub). Prefer adding real Store methods.
+func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) Migrate() error {
 	_, err := s.db.Exec(`
@@ -168,14 +176,14 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64) (string,
 	if env == "" {
 		env = "Development"
 	}
-	nonce := genNonce()
+	nonce := GenNonce()
 	for {
 		_, err := s.db.Exec("INSERT INTO apps (nonce, name, environment, url, owner_id) VALUES (?, ?, ?, ?, ?)", nonce, name, env, url, ownerID)
 		if err == nil {
 			return nonce, nil
 		}
 		if isUnique(err) {
-			nonce = genNonce()
+			nonce = GenNonce()
 			continue
 		}
 		return "", err
@@ -900,7 +908,7 @@ func (s *Store) ListServices() ([]*Service, error) {
 	return out, rows.Err()
 }
 
-func genNonce() string {
+func GenNonce() string {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)

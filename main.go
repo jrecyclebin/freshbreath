@@ -18,6 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
+	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
 )
 
@@ -34,7 +35,7 @@ type Config struct {
 
 type Server struct {
 	config            Config
-	store             *Store
+	store             *db.Store
 	mux               *http.ServeMux
 	pending           map[string]*pendingAuth
 	pendingMu         sync.Mutex
@@ -221,13 +222,13 @@ func main() {
 		cfg.PublicBaseURL = fmt.Sprintf("%s://%s", proto, host)
 	}
 
-	db, err := sql.Open("sqlite3", cfg.DBPath)
+	sqlDB, err := sql.Open("sqlite3", cfg.DBPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer sqlDB.Close()
 
-	store := &Store{db: db}
+	store := db.NewStore(sqlDB)
 	if err := store.Migrate(); err != nil {
 		log.Fatal(err)
 	}
@@ -267,7 +268,7 @@ func main() {
 		httpClient:     &http.Client{Timeout: 300 * time.Second},
 		oidcProviders:  make(map[int64]*oidc.Provider),
 		localKey:       localKey,
-		adminNonce:     genNonce(),
+		adminNonce:     db.GenNonce(),
 		agentMgr:       agentMgr,
 		sessionMgr:     sessionMgr,
 		virtualMCPs:    newVirtualMCPRegistry(),

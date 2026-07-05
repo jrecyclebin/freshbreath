@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // ── Central MCP: protected resource metadata ────────────────────────
@@ -36,7 +38,7 @@ func TestCentralMCPRequiresBearer(t *testing.T) {
 	srv := newTestServer(t)
 	// admin auth service configured so the verifier reaches token validation,
 	// not the "not configured" short-circuit.
-	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
 	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcID, 10))
 
 	rr := testRequest(t, srv, "POST", "/mcp", nil, map[string]string{"Accept": "application/json"})
@@ -50,7 +52,7 @@ func TestCentralMCPRequiresBearer(t *testing.T) {
 
 func TestCentralMCPRejectsBadToken(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
 	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcID, 10))
 
 	rr := testRequest(t, srv, "POST", "/mcp", nil, map[string]string{
@@ -75,7 +77,7 @@ func TestCentralMCPTokenVerifierNoAdminService(t *testing.T) {
 
 func TestCentralMCPTokenVerifierValid(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, err := srv.store.RegisterService("admin-idp", "https://admin.example", ServiceDescriptor{Type: "oidc"})
+	svcID, err := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
 	if err != nil {
 		t.Fatalf("register service: %v", err)
 	}
@@ -114,7 +116,7 @@ func TestCentralMCPTokenVerifierValid(t *testing.T) {
 
 func TestVirtualTokenVerifierWrapped(t *testing.T) {
 	srv := newTestServer(t)
-	svc := &Service{ID: 7, Name: "up", URL: "/mcp/up", Descriptor: ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
+	svc := &db.Service{ID: 7, Name: "up", URL: "/mcp/up", Descriptor: db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
 
 	tok, err := srv.mintFreshbreathToken("wrapped", "user@example.com", "", "", svc.ID,
 		&sealedUpstreamData{UpstreamToken: "upstream-xyz", UpstreamScopes: "openid email"})
@@ -134,7 +136,7 @@ func TestVirtualTokenVerifierWrapped(t *testing.T) {
 	}
 
 	// A token wrapped for a different service must be rejected.
-	otherSvc := &Service{ID: 99, Name: "other", URL: "/mcp/other", Descriptor: ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
+	otherSvc := &db.Service{ID: 99, Name: "other", URL: "/mcp/other", Descriptor: db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
 	if _, err := srv.virtualTokenVerifier(otherSvc)(context.Background(), tok, req); err == nil {
 		t.Error("expected wrapped token bound to svc 7 to be rejected by svc 99")
 	}
@@ -156,7 +158,7 @@ func TestVirtualMCPPRM(t *testing.T) {
 		t.Fatalf("write tool file: %v", err)
 	}
 
-	svc := &Service{ID: 7, Name: "Upstream", URL: "/mcp/upstream", Descriptor: ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
+	svc := &db.Service{ID: 7, Name: "Upstream", URL: "/mcp/upstream", Descriptor: db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
 	srv.virtualMCPs.add(srv, svc)
 
 	rr := testRequest(t, srv, "GET", "/.well-known/oauth-protected-resource/mcp/upstream", nil, nil)
@@ -196,7 +198,7 @@ func TestVirtualMCPNoAuthHasNoPRM(t *testing.T) {
 		[]byte("[ping] Ping\nGET https://open.example/ping\n"), 0o644)
 
 	// No OAuthURL / ClientID / key auth → unauthenticated virtual service.
-	svc := &Service{ID: 8, Name: "Open", URL: "/mcp/open", Descriptor: ServiceDescriptor{Type: "mcp"}}
+	svc := &db.Service{ID: 8, Name: "Open", URL: "/mcp/open", Descriptor: db.ServiceDescriptor{Type: "mcp"}}
 	srv.virtualMCPs.add(srv, svc)
 
 	rr := testRequest(t, srv, "GET", "/.well-known/oauth-protected-resource/mcp/open", nil, nil)
@@ -228,7 +230,7 @@ func TestIsFreshbreathToken(t *testing.T) {
 
 func TestVerifyTaskTokenMissingBearer(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	req := httptest.NewRequest("GET", "/whatever", nil)
 	if _, err := srv.verifyTaskToken(req, svcID); err == nil {
 		t.Fatal("expected error when Authorization header is absent")
@@ -237,7 +239,7 @@ func TestVerifyTaskTokenMissingBearer(t *testing.T) {
 
 func TestVerifyTaskTokenIdentity(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", ServiceDescriptor{Type: "oidc"})
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Kay", "kay@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}

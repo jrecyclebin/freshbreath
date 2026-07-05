@@ -18,6 +18,8 @@ import (
 
 	"github.com/mileusna/useragent"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
+
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // ── OAuth Authorization Server ──────────────────────────────────────
@@ -58,10 +60,10 @@ func oauthWriteError(w http.ResponseWriter, status int, code string, desc string
 // oauthClientStore persists DCR clients to the database so they survive restarts.
 // MCP clients (like Claude Code) cache their client_id across sessions.
 type oauthClientStore struct {
-	store *Store
+	store *db.Store
 }
 
-func newOAuthClientStore(s *Store) *oauthClientStore {
+func newOAuthClientStore(s *db.Store) *oauthClientStore {
 	return &oauthClientStore{store: s}
 }
 
@@ -258,7 +260,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the service to authenticate against.
 	// Central (/mcp) uses the admin auth service; virtual (/mcp/{slug}) uses the named service.
-	var svc *Service
+	var svc *db.Service
 	var mcpServiceURL, serviceType string
 
 	if slug == "/mcp" {

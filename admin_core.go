@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
 )
 
@@ -29,7 +30,7 @@ func trimMCPSlug(url string) string {
 // expose the same operations; the logic lives here once and each
 // transport is a thin adapter: parse input → call core → format output.
 //
-// Core functions take an already-authenticated *User actor and self-enforce
+// Core functions take an already-authenticated *db.User actor and self-enforce
 // authorization as their first act: each begins with s.gate(...) (or
 // gateSelfOrAdmin for the dual self/admin SSH ops). This is the single source
 // of truth for "who may do what" — the HTTP and MCP transports no longer
@@ -91,7 +92,7 @@ func roleIn(role string, allowed []string) bool {
 // gate returns a 403 *coreErr unless actor holds one of the allowed roles.
 // Core functions call it as their first statement — before input validation —
 // so unauthorized callers can't probe validation behavior.
-func (s *Server) gate(actor *User, allowed []string) error {
+func (s *Server) gate(actor *db.User, allowed []string) error {
 	if actor != nil && roleIn(actor.Role, allowed) {
 		return nil
 	}
@@ -101,7 +102,7 @@ func (s *Server) gate(actor *User, allowed []string) error {
 // gateApp returns a 403 *coreErr unless the actor is Admin+ or a member of
 // the app identified by nonce. It is the single source of truth for app-level
 // access in both HTTP and MCP paths.
-func (s *Server) gateApp(actor *User, nonce string) error {
+func (s *Server) gateApp(actor *db.User, nonce string) error {
 	if actor != nil && roleIn(actor.Role, rolesAdminPlus) {
 		return nil
 	}
@@ -122,7 +123,7 @@ func (s *Server) gateApp(actor *User, nonce string) error {
 // or when actor is Admin+. Backs the SSH-key ops that serve both the
 // self-service (generate_my_ssh_key) and admin (generate_user_ssh_key)
 // surfaces from a single core function.
-func (s *Server) gateSelfOrAdmin(actor, target *User) error {
+func (s *Server) gateSelfOrAdmin(actor, target *db.User) error {
 	if actor != nil && target != nil && actor.ID == target.ID {
 		return nil
 	}
@@ -133,7 +134,7 @@ func (s *Server) gateSelfOrAdmin(actor, target *User) error {
 
 // actorName resolves the audit actor label for a user: name, then email,
 // then user:ID, then "unknown".
-func actorName(u *User) string {
+func actorName(u *db.User) string {
 	if u == nil {
 		return "unknown"
 	}
@@ -147,13 +148,13 @@ func actorName(u *User) string {
 }
 
 // audit logs an audit entry attributed to the given actor.
-func (s *Server) audit(actor *User, action, target string) {
+func (s *Server) audit(actor *db.User, action, target string) {
 	_ = s.store.LogAudit(actorName(actor), action, target)
 }
 
 // auditApp logs an app action, resolving the app's display name from its
 // nonce (falling back to the nonce itself).
-func (s *Server) auditApp(actor *User, action, nonce string) {
+func (s *Server) auditApp(actor *db.User, action, nonce string) {
 	target := nonce
 	if app, err := s.store.GetApp(nonce); err == nil {
 		target = app.Name
@@ -164,7 +165,7 @@ func (s *Server) auditApp(actor *User, action, nonce string) {
 // defaultServiceURL fills in the implicit URL for service types that don't
 // carry a remote one (tasks:// and /mcp/ for virtual). Returns url unchanged
 // when already set, or "" when the type needs an explicit URL.
-func defaultServiceURL(url, name string, d ServiceDescriptor) string {
+func defaultServiceURL(url, name string, d db.ServiceDescriptor) string {
 	if url != "" {
 		return url
 	}
@@ -180,7 +181,7 @@ func defaultServiceURL(url, name string, d ServiceDescriptor) string {
 // syncVirtualMCP keeps the in-memory virtual MCP registry in step with a
 // service write: virtual services are (re)registered; anything else has its
 // old /mcp/ slug removed.
-func (s *Server) syncVirtualMCP(svc *Service, oldURL string) {
+func (s *Server) syncVirtualMCP(svc *db.Service, oldURL string) {
 	if svc.Descriptor.Type == "virtual" {
 		s.virtualMCPs.add(s, svc)
 	} else if oldURL != "" {
@@ -203,7 +204,7 @@ func publicSSHInfo(k *sshkit.SSHKeyInfo) *sshkit.SSHKeyInfo {
 
 // ── App operations ──────────────────────────────────────────────────
 
-func (s *Server) coreCreateApp(actor *User, name, env, url string, ownerID *int64) (string, error) {
+func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *int64) (string, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return "", err
 	}
@@ -219,7 +220,7 @@ func (s *Server) coreCreateApp(actor *User, name, env, url string, ownerID *int6
 	return nonce, nil
 }
 
-func (s *Server) coreUpdateApp(actor *User, nonce, name, env, url string, ownerID *int64) error {
+func (s *Server) coreUpdateApp(actor *db.User, nonce, name, env, url string, ownerID *int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -231,7 +232,7 @@ func (s *Server) coreUpdateApp(actor *User, nonce, name, env, url string, ownerI
 	return nil
 }
 
-func (s *Server) coreDeleteApp(actor *User, nonce string) error {
+func (s *Server) coreDeleteApp(actor *db.User, nonce string) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -248,7 +249,7 @@ func (s *Server) coreDeleteApp(actor *User, nonce string) error {
 	return nil
 }
 
-func (s *Server) coreSetAppMembers(actor *User, nonce string, members []int64) error {
+func (s *Server) coreSetAppMembers(actor *db.User, nonce string, members []int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -259,7 +260,7 @@ func (s *Server) coreSetAppMembers(actor *User, nonce string, members []int64) e
 	return nil
 }
 
-func (s *Server) coreSetAppServices(actor *User, nonce string, services []int64) error {
+func (s *Server) coreSetAppServices(actor *db.User, nonce string, services []int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -272,7 +273,7 @@ func (s *Server) coreSetAppServices(actor *User, nonce string, services []int64)
 
 // ── Service operations ──────────────────────────────────────────────
 
-func (s *Server) coreCreateService(actor *User, name, url string, d ServiceDescriptor) (*Service, error) {
+func (s *Server) coreCreateService(actor *db.User, name, url string, d db.ServiceDescriptor) (*db.Service, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, err
 	}
@@ -287,7 +288,7 @@ func (s *Server) coreCreateService(actor *User, name, url string, d ServiceDescr
 	if err != nil {
 		return nil, cerr(http.StatusInternalServerError, "%v", err)
 	}
-	svc := &Service{ID: id, Name: name, URL: url, Descriptor: d}
+	svc := &db.Service{ID: id, Name: name, URL: url, Descriptor: d}
 	s.syncVirtualMCP(svc, "")
 	s.audit(actor, "created service", name)
 	return svc, nil
@@ -296,7 +297,7 @@ func (s *Server) coreCreateService(actor *User, name, url string, d ServiceDescr
 // coreUpdateService replaces a service's fields. Callers wanting patch
 // semantics (fill blanks from the existing record) should resolve those
 // before calling. The built-in SSH service keeps its name and URL.
-func (s *Server) coreUpdateService(actor *User, id int64, name, url string, d ServiceDescriptor) error {
+func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d db.ServiceDescriptor) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -318,12 +319,12 @@ func (s *Server) coreUpdateService(actor *User, id int64, name, url string, d Se
 	if err := s.store.UpdateService(id, name, url, d); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
-	s.syncVirtualMCP(&Service{ID: id, Name: name, URL: url, Descriptor: d}, existing.URL)
+	s.syncVirtualMCP(&db.Service{ID: id, Name: name, URL: url, Descriptor: d}, existing.URL)
 	s.audit(actor, "updated service", name)
 	return nil
 }
 
-func (s *Server) coreDeleteService(actor *User, id int64) error {
+func (s *Server) coreDeleteService(actor *db.User, id int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -346,7 +347,7 @@ func (s *Server) coreDeleteService(actor *User, id int64) error {
 
 // ── User operations ─────────────────────────────────────────────────
 
-func (s *Server) coreCreateUser(actor *User, name, email, role, status string) (*User, error) {
+func (s *Server) coreCreateUser(actor *db.User, name, email, role, status string) (*db.User, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, err
 	}
@@ -361,7 +362,7 @@ func (s *Server) coreCreateUser(actor *User, name, email, role, status string) (
 	return u, nil
 }
 
-func (s *Server) coreUpdateUser(actor *User, id int64, name, email, role, status string, meta *UserMetadata) error {
+func (s *Server) coreUpdateUser(actor *db.User, id int64, name, email, role, status string, meta *db.UserMetadata) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -372,7 +373,7 @@ func (s *Server) coreUpdateUser(actor *User, id int64, name, email, role, status
 	return nil
 }
 
-func (s *Server) coreDeleteUser(actor, target *User) error {
+func (s *Server) coreDeleteUser(actor, target *db.User) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -383,7 +384,7 @@ func (s *Server) coreDeleteUser(actor, target *User) error {
 	return nil
 }
 
-func (s *Server) coreSetUserApps(actor *User, id int64, apps []string) error {
+func (s *Server) coreSetUserApps(actor *db.User, id int64, apps []string) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -396,7 +397,7 @@ func (s *Server) coreSetUserApps(actor *User, id int64, apps []string) error {
 
 // coreGenerateSSHKey generates and stores an SSH key for target, returning
 // the public key info. actor is credited in the audit log.
-func (s *Server) coreGenerateSSHKey(actor, target *User, passphrase string) (*sshkit.SSHKeyInfo, error) {
+func (s *Server) coreGenerateSSHKey(actor, target *db.User, passphrase string) (*sshkit.SSHKeyInfo, error) {
 	if err := s.gateSelfOrAdmin(actor, target); err != nil {
 		return nil, err
 	}
@@ -412,7 +413,7 @@ func (s *Server) coreGenerateSSHKey(actor, target *User, passphrase string) (*ss
 	}
 	meta := target.Metadata
 	if meta == nil {
-		meta = &UserMetadata{}
+		meta = &db.UserMetadata{}
 	}
 	meta.SSHKey = keyInfo
 	if err := s.store.UpdateUser(target.ID, target.Name, target.Email, target.Role, target.Status, meta); err != nil {
@@ -422,14 +423,14 @@ func (s *Server) coreGenerateSSHKey(actor, target *User, passphrase string) (*ss
 	return publicSSHInfo(keyInfo), nil
 }
 
-func (s *Server) coreDeleteSSHKey(actor, target *User) error {
+func (s *Server) coreDeleteSSHKey(actor, target *db.User) error {
 	if err := s.gateSelfOrAdmin(actor, target); err != nil {
 		return err
 	}
 	if target.Metadata == nil || target.Metadata.SSHKey == nil {
 		return cerr(http.StatusNotFound, "no SSH key to delete")
 	}
-	if err := s.store.UpdateUser(target.ID, target.Name, target.Email, target.Role, target.Status, &UserMetadata{}); err != nil {
+	if err := s.store.UpdateUser(target.ID, target.Name, target.Email, target.Role, target.Status, &db.UserMetadata{}); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
 	s.audit(actor, "deleted SSH key for user", target.Email)
@@ -439,7 +440,7 @@ func (s *Server) coreDeleteSSHKey(actor, target *User) error {
 // ── Settings operations ─────────────────────────────────────────────
 
 // coreUpdateSettings applies the non-nil settings fields, validating each.
-func (s *Server) coreUpdateSettings(actor *User, adminAuthService, defaultApp *string) error {
+func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp *string) error {
 	if err := s.gate(actor, rolesSuperuser); err != nil {
 		return err
 	}
@@ -478,7 +479,7 @@ type appFile struct {
 // An app with no uploaded files lists empty (not an error). If search is
 // non-empty, only files whose path or content contains the term (case-
 // insensitive) are returned.
-func (s *Server) coreListAppWeb(actor *User, nonce, search string) ([]appFile, error) {
+func (s *Server) coreListAppWeb(actor *db.User, nonce, search string) ([]appFile, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
@@ -510,7 +511,7 @@ func (s *Server) coreListAppWeb(actor *User, nonce, search string) ([]appFile, e
 }
 
 // coreDownloadAppWeb returns the app's web directory as a zip archive.
-func (s *Server) coreDownloadAppWeb(actor *User, nonce string) ([]byte, string, error) {
+func (s *Server) coreDownloadAppWeb(actor *db.User, nonce string) ([]byte, string, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, "", err
 	}
@@ -554,7 +555,7 @@ func (s *Server) coreDownloadAppWeb(actor *User, nonce string) ([]byte, string, 
 // coreUploadAppWeb writes web files for an app from raw content. The
 // filename determines handling: .html is saved as index.html; .zip is
 // extracted via extractZip.
-func (s *Server) coreUploadAppWeb(actor *User, nonce string, data []byte, filename string) (string, error) {
+func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, filename string) (string, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return "", err
 	}
@@ -586,7 +587,7 @@ func (s *Server) coreUploadAppWeb(actor *User, nonce string, data []byte, filena
 	now := time.Now().UTC()
 	details := app.Details
 	if details == nil {
-		details = &AppDetails{}
+		details = &db.AppDetails{}
 	}
 	details.LastUploaded = &now
 	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
@@ -598,7 +599,7 @@ func (s *Server) coreUploadAppWeb(actor *User, nonce string, data []byte, filena
 }
 
 // coreDeleteAppWeb removes an app's web directory and clears its details.
-func (s *Server) coreDeleteAppWeb(actor *User, nonce string) error {
+func (s *Server) coreDeleteAppWeb(actor *db.User, nonce string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
@@ -610,7 +611,7 @@ func (s *Server) coreDeleteAppWeb(actor *User, nonce string) error {
 	if err := os.RemoveAll(webDir); err != nil {
 		return cerr(http.StatusInternalServerError, "failed to remove web dir")
 	}
-	if err := s.store.UpdateAppDetails(nonce, &AppDetails{}); err != nil {
+	if err := s.store.UpdateAppDetails(nonce, &db.AppDetails{}); err != nil {
 		return cerr(http.StatusInternalServerError, "failed to save details")
 	}
 	s.rebuildHostedRoutes()
@@ -665,7 +666,7 @@ func fileMatchesSearch(webDir, relPath, term string) bool {
 // coreReadAppFile reads all or part of a file from an app's web directory.
 // offset is a zero-based byte position; limit is the maximum bytes to return.
 // A zero limit reads to the end of the file.
-func (s *Server) coreReadAppFile(actor *User, nonce, filePath string, offset, limit int64) ([]byte, error) {
+func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset, limit int64) ([]byte, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
@@ -703,7 +704,7 @@ func replaceUniqueText(src, old, repl []byte) ([]byte, error) {
 // coreWriteAppFile writes or patches a file in an app's web directory. If
 // oldText is empty the entire file is replaced. Otherwise the single occurrence
 // of oldText in the existing file is replaced with data.
-func (s *Server) coreWriteAppFile(actor *User, nonce, filePath string, data []byte, oldText string) error {
+func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data []byte, oldText string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
@@ -746,7 +747,7 @@ func (s *Server) coreWriteAppFile(actor *User, nonce, filePath string, data []by
 	now := time.Now().UTC()
 	details := app.Details
 	if details == nil {
-		details = &AppDetails{}
+		details = &db.AppDetails{}
 	}
 	details.LastUploaded = &now
 	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
@@ -758,7 +759,7 @@ func (s *Server) coreWriteAppFile(actor *User, nonce, filePath string, data []by
 }
 
 // coreDeleteAppFile removes a single file from an app's web directory.
-func (s *Server) coreDeleteAppFile(actor *User, nonce, filePath string) error {
+func (s *Server) coreDeleteAppFile(actor *db.User, nonce, filePath string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
@@ -786,7 +787,7 @@ func (s *Server) coreDeleteAppFile(actor *User, nonce, filePath string) error {
 
 // serviceDefinitionPath returns the on-disk definition path for tasks and
 // virtual services, or "" for other service types.
-func serviceDefinitionPath(dataDir string, svc *Service) string {
+func serviceDefinitionPath(dataDir string, svc *db.Service) string {
 	switch svc.Descriptor.Type {
 	case "tasks":
 		return filepath.Join(dataDir, "tasks", svc.Name+".txt")
@@ -799,7 +800,7 @@ func serviceDefinitionPath(dataDir string, svc *Service) string {
 // coreDownloadServiceFiles returns a service's published definition file.
 // Only tasks and virtual services support file publishing; the returned file
 // is the raw plain-text definition.
-func (s *Server) coreDownloadServiceFiles(actor *User, id int64) ([]byte, string, error) {
+func (s *Server) coreDownloadServiceFiles(actor *db.User, id int64) ([]byte, string, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, "", err
 	}
@@ -825,7 +826,7 @@ func (s *Server) coreDownloadServiceFiles(actor *User, id int64) ([]byte, string
 // coreUploadServiceFiles writes files for a service from raw content.
 // Only tasks and virtual services support file publishing; they each accept a
 // single plain-text file stored in their existing definition directory.
-func (s *Server) coreUploadServiceFiles(actor *User, id int64, data []byte, filename string) (string, error) {
+func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, filename string) (string, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return "", err
 	}
@@ -857,7 +858,7 @@ func (s *Server) coreUploadServiceFiles(actor *User, id int64, data []byte, file
 
 // coreDeleteServiceFiles removes a service's published definition file.
 // Only tasks and virtual services support file publishing.
-func (s *Server) coreDeleteServiceFiles(actor *User, id int64) error {
+func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -884,7 +885,7 @@ func (s *Server) coreDeleteServiceFiles(actor *User, id int64) error {
 // coreReadServiceFile reads all or part of a tasks/virtual service definition
 // file. offset is a zero-based byte position; limit is the maximum bytes to
 // return. A zero limit reads to the end of the file.
-func (s *Server) coreReadServiceFile(actor *User, id int64, offset, limit int64) ([]byte, string, error) {
+func (s *Server) coreReadServiceFile(actor *db.User, id int64, offset, limit int64) ([]byte, string, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, "", err
 	}
@@ -910,7 +911,7 @@ func (s *Server) coreReadServiceFile(actor *User, id int64, offset, limit int64)
 // coreWriteServiceFile writes or patches a tasks/virtual service definition
 // file. If oldText is empty the entire file is replaced. Otherwise the single
 // occurrence of oldText in the existing file is replaced with data.
-func (s *Server) coreWriteServiceFile(actor *User, id int64, data []byte, oldText string) error {
+func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, oldText string) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -958,7 +959,7 @@ func (s *Server) coreWriteServiceFile(actor *User, id int64, data []byte, oldTex
 // coreListServiceFiles returns the tasks/virtual service definition file as a
 // single-item listing. If search is non-empty, the file is only returned when
 // its content contains the term (case-insensitive).
-func (s *Server) coreListServiceFiles(actor *User, id int64, search string) ([]appFile, error) {
+func (s *Server) coreListServiceFiles(actor *db.User, id int64, search string) ([]appFile, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, err
 	}

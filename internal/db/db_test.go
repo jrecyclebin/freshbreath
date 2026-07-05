@@ -1,4 +1,4 @@
-package main
+package db
 
 import (
 	"database/sql"
@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -315,7 +317,7 @@ func containsHelper(s, substr string) bool {
 func TestRefreshFamilyCreateAndGet(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
-		ID:          genNonce(),
+		ID:          GenNonce(),
 		UserEmail:   "test@example.com",
 		ServiceID:   1,
 		DeviceLabel: "test-device",
@@ -358,7 +360,7 @@ func TestRefreshFamilyGetNotFound(t *testing.T) {
 func TestRefreshFamilyRotate(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
-		ID:         genNonce(),
+		ID:         GenNonce(),
 		UserEmail:  "a@x.co",
 		ServiceID:  1,
 		CurrentJTI: "old-jti",
@@ -391,7 +393,7 @@ func TestRefreshFamilyRotate(t *testing.T) {
 func TestRefreshFamilyRotateCAS(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
-		ID:         genNonce(),
+		ID:         GenNonce(),
 		UserEmail:  "a@x.co",
 		ServiceID:  1,
 		CurrentJTI: "jti-1",
@@ -418,7 +420,7 @@ func TestRefreshFamilyRotateCAS(t *testing.T) {
 func TestRefreshFamilyRotateConcurrent(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
-		ID:         genNonce(),
+		ID:         GenNonce(),
 		UserEmail:  "a@x.co",
 		ServiceID:  1,
 		CurrentJTI: "jti-1",
@@ -460,7 +462,7 @@ func TestRefreshFamilyRotateConcurrent(t *testing.T) {
 func TestRefreshFamilyRevoke(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
-		ID:         genNonce(),
+		ID:         GenNonce(),
 		UserEmail:  "a@x.co",
 		ServiceID:  1,
 		CurrentJTI: "jti-1",
@@ -490,9 +492,9 @@ func TestRefreshFamilyRevoke(t *testing.T) {
 
 func TestRefreshFamilyRevokeUser(t *testing.T) {
 	store := newTestStore(t)
-	f1 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: time.Now().Add(24 * time.Hour)}
-	f2 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: time.Now().Add(24 * time.Hour)}
-	f3 := &RefreshFamily{ID: genNonce(), UserEmail: "b@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: time.Now().Add(24 * time.Hour)}
+	f1 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: time.Now().Add(24 * time.Hour)}
+	f2 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: time.Now().Add(24 * time.Hour)}
+	f3 := &RefreshFamily{ID: GenNonce(), UserEmail: "b@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: time.Now().Add(24 * time.Hour)}
 	store.CreateRefreshFamily(f1)
 	store.CreateRefreshFamily(f2)
 	store.CreateRefreshFamily(f3)
@@ -515,9 +517,9 @@ func TestRefreshFamilyRevokeUser(t *testing.T) {
 func TestRefreshFamilyList(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now()
-	f1 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(24 * time.Hour)}
-	f2 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(-1 * time.Hour)}
-	f3 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: now.Add(24 * time.Hour)}
+	f1 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(24 * time.Hour)}
+	f2 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(-1 * time.Hour)}
+	f3 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: now.Add(24 * time.Hour)}
 	store.CreateRefreshFamily(f1)
 	store.CreateRefreshFamily(f2)
 	store.CreateRefreshFamily(f3)
@@ -538,8 +540,8 @@ func TestRefreshFamilyList(t *testing.T) {
 func TestRefreshFamilyDeleteExpired(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now()
-	f1 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(-1 * time.Hour)}
-	f2 := &RefreshFamily{ID: genNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(24 * time.Hour)}
+	f1 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(-1 * time.Hour)}
+	f2 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(24 * time.Hour)}
 	store.CreateRefreshFamily(f1)
 	store.CreateRefreshFamily(f2)
 
