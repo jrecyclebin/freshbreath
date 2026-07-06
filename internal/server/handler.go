@@ -165,6 +165,12 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/ssh/sessions", s.authWrap(pipeline(s.handleSSHSessions, s.requireAppServiceAccess("ssh"))))
 	s.mux.HandleFunc("/ssh/sessions/", s.authWrap(pipeline(s.handleSSHSessionDetail, s.requireAppServiceAccess("ssh"))))
 
+	// Git over SSH — same access gate as SSH sessions (sign/branches/pull/commit)
+	s.mux.HandleFunc("/ssh/git/sign", s.authWrap(pipeline(s.handleGitSign, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/ssh/git/branches", s.authWrap(pipeline(s.handleGitBranches, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/ssh/git/pull", s.authWrap(pipeline(s.handleGitPull, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/ssh/git/commit", s.authWrap(pipeline(s.handleGitCommit, s.requireAppServiceAccess("ssh"))))
+
 	// File sync — same access gate as SSH sessions
 	s.mux.HandleFunc("/sync/files/diff", s.authWrap(pipeline(s.handleSyncDiff, s.requireAppServiceAccess("ssh"))))
 	s.mux.HandleFunc("/sync/files/{path...}", s.authWrap(pipeline(s.handleSyncFileOps, s.requireAppServiceAccess("ssh"))))

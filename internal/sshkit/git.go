@@ -33,6 +33,10 @@ var ErrStaleBase = fmt.Errorf("remote has moved past baseCommit — pull and ret
 // working tree).
 var ErrNothingToCommit = fmt.Errorf("nothing to commit")
 
+// ErrInvalidInput wraps every caller-input validation failure (missing url/
+// message, non-hex sha, bad path, etc.). The server layer maps it to 400.
+var ErrInvalidInput = fmt.Errorf("invalid input")
+
 // GitFile is a single file's path and bytes pulled from (or written to) a repo.
 // Content travels as base64 in JSON (encoding/json handles []byte automatically).
 type GitFile struct {
@@ -216,7 +220,7 @@ func (g *GitGateway) signOne(s sshCommitSigner, c CommitToSign) (SignedCommit, e
 		return SignedCommit{}, fmt.Errorf("tree sha: %w", err)
 	}
 	if c.Message == "" {
-		return SignedCommit{}, errors.New("commit message is required")
+		return SignedCommit{}, fmt.Errorf("%w: commit message is required", ErrInvalidInput)
 	}
 	for _, p := range c.Parents {
 		if err := validateHexSHA(p); err != nil {
@@ -229,7 +233,7 @@ func (g *GitGateway) signOne(s sshCommitSigner, c CommitToSign) (SignedCommit, e
 		author = *c.Author
 	}
 	if author.Name == "" || author.Email == "" {
-		return SignedCommit{}, errors.New("author name and email are required")
+		return SignedCommit{}, fmt.Errorf("%w: author name and email are required", ErrInvalidInput)
 	}
 	if author.Date.IsZero() {
 		author.Date = time.Now()
@@ -461,13 +465,13 @@ func readTreePath(tree *object.Tree, p string) ([]GitFile, error) {
 // push race yields ErrStaleBase; a clean tree yields ErrNothingToCommit.
 func (g *GitGateway) CommitPush(userID int64, req GitCommitRequest) (sha string, err error) {
 	if req.URL == "" {
-		return "", errors.New("url is required")
+		return "", fmt.Errorf("%w: url is required", ErrInvalidInput)
 	}
 	if req.Message == "" {
-		return "", errors.New("commit message is required")
+		return "", fmt.Errorf("%w: commit message is required", ErrInvalidInput)
 	}
 	if req.AuthorName == "" || req.AuthorEmail == "" {
-		return "", errors.New("author name and email are required")
+		return "", fmt.Errorf("%w: author name and email are required", ErrInvalidInput)
 	}
 
 	// Signer first: signing is mandatory, and this short-circuits to ErrNoKey
@@ -585,10 +589,10 @@ func hashesFromStrings(ss []string) []plumbing.Hash {
 // validateHexSHA accepts a 40-char lowercase-or-uppercase hex SHA-1.
 func validateHexSHA(s string) error {
 	if len(s) != 40 {
-		return fmt.Errorf("expected 40-char sha, got %d", len(s))
+		return fmt.Errorf("%w: expected 40-char sha, got %d", ErrInvalidInput, len(s))
 	}
 	if _, err := hex.DecodeString(s); err != nil {
-		return fmt.Errorf("non-hex sha: %w", err)
+		return fmt.Errorf("%w: non-hex sha: %v", ErrInvalidInput, err)
 	}
 	return nil
 }
@@ -599,13 +603,13 @@ func cleanGitPath(p string) (string, error) {
 	p = strings.TrimPrefix(p, "/")
 	p = path.Clean(p)
 	if p == "." || p == "/" || p == "" {
-		return "", errors.New("empty path")
+		return "", fmt.Errorf("%w: empty path", ErrInvalidInput)
 	}
 	if p == ".." || strings.HasPrefix(p, "../") {
-		return "", fmt.Errorf("invalid path %q: '..' segments not allowed", p)
+		return "", fmt.Errorf("%w: invalid path %q: '..' segments not allowed", ErrInvalidInput, p)
 	}
 	if path.IsAbs(p) {
-		return "", fmt.Errorf("invalid path %q: absolute paths not allowed", p)
+		return "", fmt.Errorf("%w: invalid path %q: absolute paths not allowed", ErrInvalidInput, p)
 	}
 	return p, nil
 }
