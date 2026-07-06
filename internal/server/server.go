@@ -44,6 +44,7 @@ type Server struct {
 	adminNonce        string                 // ephemeral nonce for the admin panel (same-origin)
 	agentMgr          *sshkit.AgentManager   // per-user SSH key signers
 	sessionMgr        *sshkit.SessionManager // SSH + SFTP sessions
+	gitGw             *sshkit.GitGateway     // stateless git-over-SSH gateway
 	lastSeenAt        map[int64]time.Time
 	lastSeenMu        sync.Mutex
 	hostedRoutes      map[string]string // slug → app nonce
@@ -93,6 +94,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		adminNonce:     db.GenNonce(),
 		agentMgr:       agentMgr,
 		sessionMgr:     sessionMgr,
+		gitGw:          sshkit.NewGitGateway(agentMgr, store),
 		virtualMCPs:    newVirtualMCPRegistry(),
 		mcpAuthPending: &sync.Map{},
 	}
