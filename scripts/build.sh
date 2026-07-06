@@ -23,7 +23,7 @@ fi
 
 # ── Build ──────────────────────────────────────────────────────────
 echo "→ Building $binary (GOOS=$GOOS GOARCH=$GOARCH CC=${CC:-default})"
-go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/${GOOS}-${arch}-$binary" .
+go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/${GOOS}-${arch}-$binary" ./cmd/freshbreath
 
 # ── Package ────────────────────────────────────────────────────────
 staging="dist/staging"
