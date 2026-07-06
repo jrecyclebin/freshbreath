@@ -48,8 +48,6 @@ type Server struct {
 	lastSeenMu        sync.Mutex
 	hostedRoutes      map[string]string // slug → app nonce
 	hostedMu          sync.RWMutex
-	xfers             map[string]*transferEntry // token → pending file transfer
-	xfersMu           sync.Mutex
 	virtualMCPs       *virtualMCPRegistry                // slug → MCP server entries
 	mcpAuthPending    *sync.Map                          // key → *mcpPendingAuth (MCP OAuth flow state)
 	oauthSrv          *oauthServer                       // Freshbreath OAuth authorization server
@@ -87,7 +85,6 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		pending:        make(map[string]*pendingAuth),
 		lastSeenAt:     make(map[int64]time.Time),
 		hostedRoutes:   make(map[string]string),
-		xfers:          make(map[string]*transferEntry),
 		httpClient:     &http.Client{Timeout: 300 * time.Second},
 		oidcProviders:  make(map[int64]*oidc.Provider),
 		localKey:       localKey,
