@@ -20,6 +20,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/sshkit"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -41,6 +42,7 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("path issue: %v", err)
 	}
+	agentMgr := sshkit.NewAgentManager()
 	srv := &Server{
 		config: Config{
 			Dir:           baseDir,
@@ -54,6 +56,8 @@ func newTestServer(t *testing.T) *Server {
 		hostedRoutes:   make(map[string]string),
 		lastSeenAt:     make(map[int64]time.Time),
 		localKey:       localKey,
+		agentMgr:       agentMgr,
+		gitGw:          sshkit.NewGitGateway(agentMgr, store),
 		virtualMCPs:    newVirtualMCPRegistry(),
 		mcpAuthPending: &sync.Map{},
 	}
