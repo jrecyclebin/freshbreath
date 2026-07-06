@@ -68,7 +68,7 @@ func (m *SessionManager) Open(userID int64, host string, port int, username stri
 	config := &ssh.ClientConfig{
 		User:            username,
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: m.tofuHostKeyCallback,
+		HostKeyCallback: NewTOFUHostKeyCallback(m.hostKeys),
 		Timeout:         15 * time.Second,
 	}
 
@@ -165,47 +165,50 @@ func (m *SessionManager) Stop() {
 	}
 }
 
-// tofuHostKeyCallback implements Trust On First Use host key verification.
-// On first connection to a host, its key is recorded. On subsequent
-// connections, the key must match — if it's changed, the connection is
-// rejected with a clear error. This is the same security model as the
-// default OpenSSH client behavior.
-func (m *SessionManager) tofuHostKeyCallback(hostname string, remote net.Addr, key ssh.PublicKey) error {
-	// Parse host:port from the remote address
-	host, portStr, err := net.SplitHostPort(remote.String())
-	if err != nil {
-		host = hostname
-		portStr = "22"
-	}
-	var port int
-	fmt.Sscanf(portStr, "%d", &port)
-	if port == 0 {
-		port = 22
-	}
-
-	storedData, storedFP, err := m.hostKeys.GetSSHHostKey(host, port)
-	if err != nil {
-		return fmt.Errorf("host key lookup failed: %w", err)
-	}
-
-	keyData := key.Marshal()
-	keyFP := ssh.FingerprintSHA256(key)
-
-	if storedData == nil {
-		// First connection — trust and store.
-		if err := m.hostKeys.StoreSSHHostKey(host, port, keyData, keyFP); err != nil {
-			return fmt.Errorf("failed to store host key: %w", err)
+// NewTOFUHostKeyCallback returns an ssh.HostKeyCallback implementing Trust
+// On First Use host key verification against the given store. On first
+// connection to a host, its key is recorded. On subsequent connections, the
+// key must match — if it's changed, the connection is rejected with a clear
+// error. This is the same security model as the default OpenSSH client
+// behavior. Shared by SessionManager.Open and the git gateway's SSH transport.
+func NewTOFUHostKeyCallback(store HostKeyStore) ssh.HostKeyCallback {
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		// Parse host:port from the remote address
+		host, portStr, err := net.SplitHostPort(remote.String())
+		if err != nil {
+			host = hostname
+			portStr = "22"
 		}
+		var port int
+		fmt.Sscanf(portStr, "%d", &port)
+		if port == 0 {
+			port = 22
+		}
+
+		storedData, storedFP, err := store.GetSSHHostKey(host, port)
+		if err != nil {
+			return fmt.Errorf("host key lookup failed: %w", err)
+		}
+
+		keyData := key.Marshal()
+		keyFP := ssh.FingerprintSHA256(key)
+
+		if storedData == nil {
+			// First connection — trust and store.
+			if err := store.StoreSSHHostKey(host, port, keyData, keyFP); err != nil {
+				return fmt.Errorf("failed to store host key: %w", err)
+			}
+			return nil
+		}
+
+		// Subsequent connection — verify the key matches.
+		if !bytes.Equal(storedData, keyData) {
+			return fmt.Errorf("host key mismatch for %s:%d — expected %s, got %s. The server's key may have changed (could indicate a MITM attack). Delete the stored key to accept the new one.",
+				host, port, storedFP, keyFP)
+		}
+
 		return nil
 	}
-
-	// Subsequent connection — verify the key matches.
-	if !bytes.Equal(storedData, keyData) {
-		return fmt.Errorf("host key mismatch for %s:%d — expected %s, got %s. The server's key may have changed (could indicate a MITM attack). Delete the stored key to accept the new one.",
-			host, port, storedFP, keyFP)
-	}
-
-	return nil
 }
 
 // genNonce generates a random 48-char hex string for session IDs.
