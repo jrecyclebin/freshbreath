@@ -52,7 +52,6 @@ func newTestServer(t *testing.T) *Server {
 		httpClient:     &http.Client{},
 		oidcProviders:  make(map[int64]*oidc.Provider),
 		hostedRoutes:   make(map[string]string),
-		xfers:          make(map[string]*transferEntry),
 		lastSeenAt:     make(map[int64]time.Time),
 		localKey:       localKey,
 		virtualMCPs:    newVirtualMCPRegistry(),
