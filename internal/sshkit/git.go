@@ -633,15 +633,19 @@ func mapPathErr(p string, err error) error {
 }
 
 // mapRemoteErr surfaces clone/ls/transport failures as-is for the server layer
-// to map to 502, while translating "reference not found" to a 404-mappable
-// os.ErrNotExist.
+// to map to 502, while translating a missing remote ref to a 404-mappable
+// os.ErrNotExist. The primary signal is go-git's typed NoMatchingRefSpecError
+// (raised when cloning a branch the remote doesn't have); a string fallback
+// covers exec/SSH-transport variants that surface as "reference not found".
 func mapRemoteErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := err.Error()
-	if strings.Contains(msg, "reference not found") ||
-		(strings.Contains(msg, "remote ref") && strings.Contains(msg, "not found")) {
+	var noMatch git.NoMatchingRefSpecError
+	if errors.As(err, &noMatch) {
+		return fmt.Errorf("clone: %w", os.ErrNotExist)
+	}
+	if msg := err.Error(); strings.Contains(msg, "reference not found") {
 		return fmt.Errorf("clone: %w", os.ErrNotExist)
 	}
 	return fmt.Errorf("git remote: %w", err)
