@@ -10,7 +10,7 @@ GIT_COMMIT = "{{ exec(command='git rev-parse --short HEAD 2>/dev/null || echo no
 
 [tasks.build]
 description = "Build freshbreath (native)"
-run = "go build -ldflags \"-X main.version=$GIT_VERSION -X main.commit=$GIT_COMMIT\" -o freshbreath ."
+run = "go build -ldflags \"-X main.version=$GIT_VERSION -X main.commit=$GIT_COMMIT\" -o freshbreath ./cmd/freshbreath"
 
 [tasks."build:linux"]
 description = "Build for Linux x64"
@@ -115,15 +115,15 @@ depends = ["lint", "test"]
 
 [tasks.local]
 description = "Run the server locally"
-run = "go run ."
+run = "go run ./cmd/freshbreath"
 
 [tasks.default]
 description = "Run with auto-restart (requires entr or similar)"
-run = "find . -name '*.go' | entr -r go run ."
+run = "find . -name '*.go' | entr -r go run ./cmd/freshbreath"
 
 [tasks.deadcode]
 description = "Find unreachable functions (requires golang.org/x/tools/cmd/deadcode)"
-run = "deadcode ."
+run = "deadcode ./cmd/freshbreath"
 
 [tasks.unused]
 description = "Find unused identifiers (requires honnef.co/go/tools/cmd/staticcheck)"

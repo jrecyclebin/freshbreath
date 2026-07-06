@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -337,7 +337,7 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 		}
 	}
 	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, authServiceURL: %q, authServiceType: %q, appNonce: %q, version: %q, commit: %q };\n",
-		apiBase, authRequired, authServiceName, authServiceURL, authServiceType, appNonce, version, commit))
+		apiBase, authRequired, authServiceName, authServiceURL, authServiceType, appNonce, s.version, s.commit))
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
@@ -346,7 +346,8 @@ func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFrbr(w http.ResponseWriter, r *http.Request) {
-	data, err := os.ReadFile("web/frbr.js")
+	frbrPath := filepath.Join(s.config.Dir, "web", "frbr.js")
+	data, err := os.ReadFile(frbrPath)
 	if err != nil {
 		http.Error(w, "frbr.js not found", http.StatusInternalServerError)
 		return

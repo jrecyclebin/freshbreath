@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -123,7 +123,7 @@ func (s *Server) buildCentralMCPPRM() *oauthex.ProtectedResourceMetadata {
 func (s *Server) buildCentralMCPServerForRole(role string) *mcp.Server {
 	mcps := mcp.NewServer(&mcp.Implementation{
 		Name:    "freshbreath",
-		Version: version,
+		Version: s.version,
 	}, &mcp.ServerOptions{
 		Instructions: fmt.Sprintf(`Fresh Breath is an app server designed to give flexiblity to standalone HTML
 apps - or any other app that needs third-party connections, auth or an SSH agent.

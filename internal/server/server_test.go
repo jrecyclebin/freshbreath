@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	_ "github.com/mattn/go-sqlite3"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -36,10 +37,14 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("signing key: %v", err)
 	}
+	baseDir, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("path issue: %v", err)
+	}
 	srv := &Server{
 		config: Config{
-			Dir:           ".",
-			DataDir:       ".",
+			Dir:           baseDir,
+			DataDir:       baseDir,
 			PublicBaseURL: "http://localhost:9009",
 		},
 		store:          store,
@@ -266,6 +271,7 @@ func TestServiceDetailNotFound(t *testing.T) {
 
 func TestServiceToolsTasks(t *testing.T) {
 	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
 	id := registerService(t, srv, "mytasks", "", db.ServiceDescriptor{Type: "tasks"})
 
 	// Missing file returns an empty list for newly-created services.
@@ -280,8 +286,8 @@ func TestServiceToolsTasks(t *testing.T) {
 	}
 
 	// Write a tasks file and verify the endpoint parses it.
-	path := filepath.Join("tasks", "mytasks.txt")
-	if err := os.MkdirAll("tasks", 0755); err != nil {
+	path := filepath.Join(srv.config.DataDir, "tasks", "mytasks.txt")
+	if err := os.MkdirAll(filepath.Join(srv.config.DataDir, "tasks"), 0755); err != nil {
 		t.Fatalf("mkdir tasks: %v", err)
 	}
 	if err := os.WriteFile(path, []byte("[greet] Say hello\necho hi\n[build] Compile\nmake\n"), 0644); err != nil {
@@ -311,10 +317,11 @@ func TestServiceToolsTasks(t *testing.T) {
 
 func TestServiceToolsVirtual(t *testing.T) {
 	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
 	id := registerService(t, srv, "myvirtual", "", db.ServiceDescriptor{Type: "virtual"})
 
-	path := filepath.Join("virtual", "myvirtual.txt")
-	if err := os.MkdirAll("virtual", 0755); err != nil {
+	path := filepath.Join(srv.config.DataDir, "virtual", "myvirtual.txt")
+	if err := os.MkdirAll(filepath.Join(srv.config.DataDir, "virtual"), 0755); err != nil {
 		t.Fatalf("mkdir virtual: %v", err)
 	}
 	content := "[get-user] Fetch a user\nGET https://api.example.com/users/$id\n---\n[list-users] List users\nGET https://api.example.com/users\n"
