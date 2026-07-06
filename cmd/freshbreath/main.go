@@ -4,79 +4,19 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/adrg/xdg"
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/joho/godotenv"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/server"
 	"poggers.institute/freshbreath/internal/sshkit"
 )
-
-type Config struct {
-	Dir           string // install directory (web/ control panel)
-	DataDir       string // mutable state directory (apps/, virtual/, tasks/)
-	ConfigDir     string // XDG config directory, empty if none found
-	DBPath        string
-	PublicBaseURL string
-	ListenAddr    string
-	TLSCertFile   string
-	TLSKeyFile    string
-}
-
-type Server struct {
-	config            Config
-	store             *db.Store
-	mux               *http.ServeMux
-	pending           map[string]*pendingAuth
-	pendingMu         sync.Mutex
-	httpClient        *http.Client
-	oidcProviders     map[int64]*oidc.Provider
-	oidcProvidersMu   sync.RWMutex
-	localKey          []byte
-	adminNonce        string                 // ephemeral nonce for the admin panel (same-origin)
-	agentMgr          *sshkit.AgentManager   // per-user SSH key signers
-	sessionMgr        *sshkit.SessionManager // SSH + SFTP sessions
-	lastSeenAt        map[int64]time.Time
-	lastSeenMu        sync.Mutex
-	hostedRoutes      map[string]string // slug → app nonce
-	hostedMu          sync.RWMutex
-	xfers             map[string]*transferEntry // token → pending file transfer
-	xfersMu           sync.Mutex
-	virtualMCPs       *virtualMCPRegistry                // slug → MCP server entries
-	mcpAuthPending    *sync.Map                          // key → *mcpPendingAuth (MCP OAuth flow state)
-	oauthSrv          *oauthServer                       // Freshbreath OAuth authorization server
-	centralMCPHandler http.Handler                       // central MCP at /mcp
-	centralMCPPRMVal  *oauthex.ProtectedResourceMetadata // PRM for central MCP
-	centralMCPServers map[string]*mcp.Server             // role → lazily-built central MCP server
-	centralMCPSrvMu   sync.Mutex                         // guards centralMCPServers
-}
-
-type pendingAuth struct {
-	serviceID     int64
-	serviceURL    string
-	appNonce      string
-	appState      string
-	verifier      string
-	clientID      string
-	clientSecret  string
-	tokenEndpoint string
-	scopes        string
-	proxied       bool
-	serviceType   string // descriptor type: "oidc", "ssh", "mcp", "api"
-	// OIDC fields
-	oidcNonce  string
-	oidcIssuer string
-}
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -192,7 +132,7 @@ func main() {
 
 	dataDir, dbPath := resolveDataDir(binDir)
 
-	cfg := Config{
+	cfg := server.Config{
 		Dir:           dir,
 		DataDir:       dataDir,
 		ConfigDir:     resolveConfigDir(),
@@ -255,48 +195,13 @@ func main() {
 	}
 
 	agentMgr := sshkit.NewAgentManager()
-
 	sessionMgr := sshkit.NewSessionManager(agentMgr, store, 8*time.Hour)
 
-	srv := &Server{
-		config:         cfg,
-		store:          store,
-		pending:        make(map[string]*pendingAuth),
-		lastSeenAt:     make(map[int64]time.Time),
-		hostedRoutes:   make(map[string]string),
-		xfers:          make(map[string]*transferEntry),
-		httpClient:     &http.Client{Timeout: 300 * time.Second},
-		oidcProviders:  make(map[int64]*oidc.Provider),
-		localKey:       localKey,
-		adminNonce:     db.GenNonce(),
-		agentMgr:       agentMgr,
-		sessionMgr:     sessionMgr,
-		virtualMCPs:    newVirtualMCPRegistry(),
-		mcpAuthPending: &sync.Map{},
-	}
-	srv.oauthSrv = newOAuthServer(srv)
-	srv.SetupRoutes()
-
-	// Periodically expire stale SSH agent keys and sessions.
-	go func() {
-		t := time.NewTicker(60 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			agentMgr.ExpireKeys()
-			sessionMgr.ExpireSessions()
-			store.DeleteExpiredRefreshFamilies(time.Now())
-		}
-	}()
+	srv := server.New(cfg, store, localKey, agentMgr, sessionMgr, version, commit)
 
 	log.Printf("*:・ﾟ✧ freshbreath %s server on %s [dir: %s, data: %s, db: %s]", version, cfg.PublicBaseURL, cfg.Dir, cfg.DataDir, cfg.DBPath)
-	if tlsEnabled {
-		if err := http.ListenAndServeTLS(cfg.ListenAddr, cfg.TLSCertFile, cfg.TLSKeyFile, srv); err != nil {
-			log.Fatal(err)
-		}
-	} else {
-		if err := http.ListenAndServe(cfg.ListenAddr, srv); err != nil {
-			log.Fatal(err)
-		}
+	if err := srv.ListenAndServe(); err != nil {
+		log.Fatal(err)
 	}
 	sessionMgr.Stop()
 }
