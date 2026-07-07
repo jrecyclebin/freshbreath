@@ -25,7 +25,7 @@ const Icon = ({ name, size = 16 }) => {
     filter:  <><path d="M4 5h16l-6 8v6l-4-2v-4z"/></>,
     sort:    <><path d="M7 4v16M3 8l4-4 4 4"/><path d="M17 20V4M13 16l4 4 4-4"/></>,
     copy:    <><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></>,
-    sparkle: <><path d="M12 4l1.8 4.5L18 10l-4.2 1.5L12 16l-1.8-4.5L6 10l4.2-1.5z"/><path d="M19 4v3M19 17v3M5 17v3M5 4v3"/></>,
+    sparkle: <><path d="M12 2l2.2 7.8L22 12l-7.8 2.2L12 22l-2.2-7.8L2 12l7.8-2.2z"/></>,
     bell:    <><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 7H4c0-1 2-2 2-7z"/><path d="M10 19a2 2 0 0 0 4 0"/></>,
     refresh: <><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></>,
     lock:    <><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></>,
@@ -58,6 +58,7 @@ const Badge = ({ tone = "gray", dot = true, children }) => (
 
 const statusTone = (s='') => ({ Active:'green', Invited:'blue', Suspended:'red' }[s] || 'gray');
 const envTone = (e='') => ({ Production:'green', Staging:'amber', Development:'blue' }[e] || 'gray');
+const envShort = (e='') => ({ Production:'Prod', Staging:'Staging', Development:'Dev' }[e] || e);
 const roleTone = (r='') => ({ Superuser:'violet', Admin:'blue', Member:'gray', 'Read-only':'gray' }[r] || 'gray');
 
 const actionIcon = (a='') => {
@@ -332,8 +333,7 @@ function MobileTopBar({ onMenuOpen, pageLabel }) {
   return (
     <div className="mobile-topbar">
       <div className="mb-brand">
-        <span className="brand-mark"/>
-        Fresh Breath
+        <img src="/control/freshbreath.svg" alt="Fresh Breath" className="brand-logo"/>
       </div>
       <div style={{display:'flex',alignItems:'center',gap:8}}>
         {pageLabel && <span className="mb-page">{pageLabel}</span>}
@@ -366,13 +366,15 @@ function Sidebar({ active, onNav, counts, user, onLogout, mobileOpen, onMobileCl
   return (
     <aside className={`sidebar${mobileOpen ? ' mobile-open' : ''}`}>
       <div className="sb-brand">
-        <span style={{display:'flex',alignItems:'center',gap:10}}><span className="brand-mark"/>Fresh Breath</span>
-        <button className="theme-toggle" onClick={toggleTheme} title={dark ? 'Switch to light' : 'Switch to dark'}>
-          <Icon name={dark ? 'sun' : 'moon'} size={16}/>
-        </button>
+        <img src="/control/freshbreath.svg" alt="Fresh Breath" className="brand-logo"/>
       </div>
       <div>
-        <div className="sb-section">Workspace</div>
+        <div className="sb-section sb-section-row">
+          <span>Workspace</span>
+          <button className="theme-toggle" onClick={toggleTheme} title={dark ? 'Switch to light' : 'Switch to dark'}>
+            <Icon name={dark ? 'sun' : 'moon'} size={16}/>
+          </button>
+        </div>
         <div className="sb-nav">
           {workspace.map(n=>NavLink(n,active,handleNav,counts))}
         </div>
@@ -435,11 +437,18 @@ function Toolbar({ search, onSearch, placeholder, filters=[], activeFilter, onFi
         <span className="icn"><Icon name="search" size={14}/></span>
         <input value={search} onChange={e=>onSearch(e.target.value)} placeholder={placeholder}/>
       </div>
-      {filters.map(f=>
-        <button key={f} className={`filter-chip ${activeFilter===f?'active':''}`} onClick={()=>onFilter(activeFilter===f?null:f)}>
-          {activeFilter===f && <Icon name="check" size={11}/>}{f}
-        </button>
-      )}
+      {filters.map(f=>{
+        const value = typeof f === 'string' ? f : f.value;
+        const label = typeof f === 'string' ? f : f.label;
+        const mobile = typeof f === 'string' ? f : (f.mobile || f.label);
+        return (
+          <button key={value} className={`filter-chip ${activeFilter===value?'active':''}`} onClick={()=>onFilter(activeFilter===value?null:value)}>
+            {activeFilter===value && <Icon name="check" size={11}/>}
+            <span className="env-full">{label}</span>
+            <span className="env-short">{mobile}</span>
+          </button>
+        );
+      })}
       <div style={{flex:1}}/>{children}
     </div>
   );
@@ -499,6 +508,12 @@ function serviceInstructions(service) {
     return `  - ${service.name} (MCP): "${service.url}"`
   }
   return `  - ${service.name} (${service.descriptor?.type?.toLocaleUpperCase()}): "${service.url}"`
+}
+
+function hostRoute(app) {
+  if (app.url && !app.url.includes('://')) return '/' + app.url.replace(/^\//, '');
+  const slug = (app.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  return '/' + slug;
 }
 
 function buildPrompt(app, appServices) {
@@ -572,20 +587,20 @@ function Overview({ users, apps, services, audit }) {
           </div></div>
         </div>
         <div>
-          <h3 style={{margin:'0 0 12px',fontSize:14,fontWeight:500}}>Apps</h3>
+          <h3 style={{margin:'0 0 12px',fontSize:14,fontWeight:500}}>Hosted Apps</h3>
           <div className="table-wrap" style={{padding:4}}>
-            {apps.length === 0 ? (
+            {apps.filter(a => a.details?.last_uploaded).length === 0 ? (
               <div className="empty" style={{padding:'24px 16px'}}>
-                <b>No apps yet.</b><br/>Create your first app to start connecting services.
+                <b>No hosted apps yet.</b><br/>Upload web content to an app to make it reachable.
               </div>
             ) : (
-              apps.slice(0,6).map((a,i)=>
-                <div key={a.nonce} style={{padding:'12px 16px',display:'flex',alignItems:'center',gap:16,borderBottom:i<5?'1px solid var(--line-soft)':0}}>
-                  <div style={{flex:1}}>
-                    <div className="mono" style={{fontSize:13}}>{a.name}</div>
-                    <div style={{fontSize:11.5,color:'var(--ink-3)'}}>{a.environment} · {a.owner_name||'No owner'}</div>
+              apps.filter(a => a.details?.last_uploaded).slice(0,6).map((a,i,arr)=>
+                <div key={a.nonce} style={{padding:'12px 16px',display:'flex',alignItems:'center',gap:16,borderBottom:i<arr.length-1?'1px solid var(--line-soft)':0}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <a className="mono hosted-app-link" href={hostRoute(a)} target="_blank" rel="noopener noreferrer">{a.name}</a>
+                    <div style={{fontSize:11.5,color:'var(--ink-3)'}}>{a.owner_name||'No owner'}</div>
                   </div>
-                  <Badge tone={envTone(a.environment)}>{a.environment||'—'}</Badge>
+                  <Badge tone={envTone(a.environment)}><span className="env-full">{a.environment||'—'}</span><span className="env-short">{envShort(a.environment)}</span></Badge>
                 </div>
               )
             )}
@@ -893,7 +908,11 @@ function AppsView({ token, apps, services, users, onRefresh }) {
       <Toolbar
         search={q} onSearch={setQ}
         placeholder="Search apps…"
-        filters={['Production','Staging','Development']}
+        filters={[
+          {value:'Production', label:'Production', mobile:'Prod'},
+          {value:'Staging', label:'Staging', mobile:'Staging'},
+          {value:'Development', label:'Development', mobile:'Dev'}
+        ]}
         activeFilter={filter} onFilter={setFilter}
       />
       <div className="table-wrap">
@@ -920,7 +939,7 @@ function AppsView({ token, apps, services, users, onRefresh }) {
                     </div>
                   </div>
                 </td>
-                <td data-col="badge"><Badge tone={envTone(a.environment)}>{a.environment||'—'}</Badge></td>
+                <td data-col="badge"><Badge tone={envTone(a.environment)}><span className="env-full">{a.environment||'—'}</span><span className="env-short">{envShort(a.environment)}</span></Badge></td>
                 <td data-col="detail">{a.owner_name||<span className="muted">—</span>}</td>
                 <td data-col="detail" className="mono">{a.member_count??0}</td>
                 <td data-col="detail" className="mono">{a.service_count??0}</td>
@@ -951,11 +970,7 @@ function HostUpload({ token, app, onRefresh }) {
   const inputRef = useRef(null);
   const toast = useToast();
 
-  const route = (() => {
-    if (app.url && !app.url.includes('://')) return '/' + app.url.replace(/^\//, '');
-    const slug = (app.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    return '/' + slug;
-  })();
+  const route = hostRoute(app);
 
   const upload = async (file) => {
     if (!file) return;
