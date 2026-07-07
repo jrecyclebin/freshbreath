@@ -293,7 +293,7 @@ func TestServiceToolsTasks(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(srv.config.DataDir, "tasks"), 0755); err != nil {
 		t.Fatalf("mkdir tasks: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("[greet] Say hello\necho hi\n[build] Compile\nmake\n"), 0644); err != nil {
+	if err := os.WriteFile(path, []byte("[greet] Say hello\necho hi\n---\n[build] Compile\nmake\n"), 0644); err != nil {
 		t.Fatalf("write tasks file: %v", err)
 	}
 	defer os.Remove(path)

@@ -29,10 +29,13 @@ func parseHeader(line string) (name, desc string, ok bool) {
 // ParseTasksFile parses the task definitions from a tasks file.
 //
 // Format: a [task-name] header optionally followed by a description on the
-// same line, then the script body until the next header or EOF.
+// same line, then the script body until the next header, a "---" separator,
+// or EOF. The "---" delimiter matches the virtual tool file format and lets
+// callers visually separate tasks without consuming the marker as script body.
 //
 //	[greet] Say hello to someone
 //	echo "Hello, $TASK_NAME"
+//	---
 //	[build] Compile the project
 //	make all
 //
@@ -42,6 +45,13 @@ func ParseTasksFile(data []byte) []Task {
 	var tasks []Task
 	var cur *Task
 	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "---" {
+			if cur != nil {
+				tasks = append(tasks, *cur)
+				cur = nil
+			}
+			continue
+		}
 		if name, desc, ok := parseHeader(line); ok {
 			if cur != nil {
 				tasks = append(tasks, *cur)
