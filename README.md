@@ -14,7 +14,7 @@ apps - almost all of them standalone static HTML files - I realized that I
 could offload some of the harder work to this thing.
 
 If you find yourself writing lots of little apps that are going beyond static
-HMTL - they need basic auth, some integrations, some LLM calls, some file I/O -
+HTML - they need basic auth, some integrations, some LLM calls, some file I/O -
 oh and proxying API calls to get around CORS - then this is the project for you.
 (Think of this almost like N8N or Zapier - a box of integrations - but then
 having the flexibility of actual code to tie them together, rather than
@@ -72,7 +72,7 @@ third-party connections, SSH, all that stuff.
 
 ## Running the server
 
-Grab a binary from the Github release. You can run the binary from an unpacked
+Grab a binary from the GitHub release.
 zip and later move the file into place for a personal installation or somewhere
 on the machine.
 
@@ -149,8 +149,6 @@ sudo certbot certonly --standalone -d freshbreath.poggers.institute
 ```
 Point `FRBR_TLS_CERT` at `fullchain.pem` and `FRBR_TLS_KEY` at `privkey.pem`. Add a cron job or systemd timer to run `certbot renew`.
 
-Create a `.env` file in the project root — the server loads it automatically on startup.
-
 ## Building & testing
 
 You'll need to install Mise.
@@ -195,29 +193,29 @@ Visit `/control` in a browser to open the admin panel. On first boot, with no au
 
 ```
 .
-├── main.go              # Entry point, config, server setup
-├── handler.go           # HTTP handlers (API, OAuth, proxy, admin)
-├── admin_core.go        # Transport-agnostic business logic
-├── db.go                # SQLite store, migrations, queries
-├── types.go             # Shared Go types
-├── mcp_central.go       # Central MCP server / tools
-├── mcp_endpoint.go      # Per-service MCP endpoint (virtual tools)
-├── virtual.go           # Virtual tool parser and executor
-├── http.go              # HTTP forwarding / proxy
-├── *_test.go            # Tests
-├── web/                 # ← FRBR_DIR (install assets)
-│   ├── control.html     # Admin panel shell (React CDN)
+├── cmd/freshbreath/          # Entry point: config resolution, server setup
+│   ├── main.go
+│   └── version.go            # Version + commit (set via ldflags)
+├── internal/
+│   ├── db/                   # SQLite store, migrations, queries, types
+│   ├── formats/              # Virtual-tool + task-file parsers
+│   ├── server/               # HTTP server, handlers, MCP, OAuth, admin, /ssh/git
+│   └── sshkit/               # SSH keys, agent, sessions, GitGateway
+├── web/
+│   ├── control.html          # Admin panel shell (React CDN)
+│   ├── frbr.js               # Frontend SDK (login + ServiceProxy)
 │   └── control/
-│       ├── app.js       # React admin app
-│       └── styles.css   # Geist / geist-mono theme
-│   └── frbr.js          # Frontend SDK (env.js + login + ServiceProxy)
-├── apps/                # ← FRBR_DATA_DIR (user-created at runtime)
-├── virtual/             # ← FRBR_DATA_DIR
-├── tasks/               # ← FRBR_DATA_DIR
+│       ├── app.js            # React admin app
+│       ├── styles.css        # Theme
+│       └── freshbreath.svg   # Logo
 ├── skills/
 │   └── freshbreath/
-│       └── SKILL.md     # Detailed SDK integration skill
-└── mise.toml            # Task definitions
+│       ├── SKILL.md          # Detailed SDK integration skill
+│       └── guides/           # Publishing, services, SSH, tasks, virtuals
+├── samples/                  # Example apps (mcp.html, ssh.html, …)
+├── scripts/
+│   └── build.sh              # Release packaging
+└── mise.toml                 # Task definitions
 ```
 
-The backend is a single Go module. The admin panel is a single-file React app loaded from CDN. The frontend SDK is a small standalone ES module. No build step is required for the frontend — the Go server serves everything directly.
+The backend is a single Go module split into `cmd/freshbreath` (entry point) and `internal/{db,formats,server,sshkit}` packages. The admin panel is a single-file React app loaded from CDN. The frontend SDK is a small standalone ES module. No build step is required for the frontend — the Go server serves everything directly.
