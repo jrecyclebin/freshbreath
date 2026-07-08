@@ -95,6 +95,9 @@ func resolveDataDir(binDir string) (string, string) {
 		filepath.Join(binDir, "freshbreath.db"),
 		filepath.Join(xdg.DataHome, "freshbreath", "freshbreath.db"),
 	}
+	for _, dir := range xdg.DataDirs {
+		candidates = append(candidates, filepath.Join(dir, "freshbreath", "freshbreath.db"))
+	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return filepath.Dir(c), c
