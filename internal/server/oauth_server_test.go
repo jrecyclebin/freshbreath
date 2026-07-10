@@ -788,11 +788,20 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
 // A browser refreshes with the HttpOnly cookie (credentials: include). The
 // cookie is the system of record, so the response body must NOT echo the
 // refresh token — otherwise any script reading the response defeats HttpOnly.
+//
+// This models the control panel's own identity session: the cookie path
+// requires an app identity, and the console is the sole consumer of the
+// ephemeral adminNonce, which is restricted to the configured admin auth
+// service. The token's sealed ServiceID must equal that service.
 func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	srv := newTestServer(t)
 	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	if _, err := srv.store.CreateUser("Web User", "web@example.com", "Member", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
+	}
+	srv.adminNonce = db.GenNonce() // production sets this in NewServer; tests build the literal directly
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcID, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
 	}
 	jti := db.GenNonce()
 	famID := createRefreshFamily(t, srv.store, "web@example.com", svcID, jti)
@@ -804,12 +813,7 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 		t.Fatalf("mint refresh token: %v", err)
 	}
 
-	req := httptest.NewRequest("POST", "/oauth/token",
-		strings.NewReader(url.Values{"grant_type": {"refresh_token"}}.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: rt})
-	rr := httptest.NewRecorder()
-	srv.ServeHTTP(rr, req)
+	rr := cookieRefresh(srv, svcID, rt, srv.adminNonce)
 
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
@@ -822,9 +826,13 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	if _, present := resp["refresh_token"]; present {
 		t.Error("cookie-based (browser) refresh must NOT echo refresh_token in the body")
 	}
-	// A rotated refresh token must still be issued — as a fresh cookie.
+	// A rotated refresh token must still be issued — as a fresh cookie, scoped
+	// to this service's token path.
 	if !hasRefreshCookie(rr) {
 		t.Error("expected a rotated refresh_token Set-Cookie")
+	}
+	if got, want := refreshCookiePath(rr), "/oauth/token/"+strconv.FormatInt(svcID, 10); got != want {
+		t.Errorf("rotated cookie Path = %q, want %q", got, want)
 	}
 }
 
@@ -856,6 +864,193 @@ func TestRefreshGrantFormKeepsBodyToken(t *testing.T) {
 	if resp["refresh_token"] == nil || resp["refresh_token"] == "" {
 		t.Error("form-based (CLI) refresh must include refresh_token in the body")
 	}
+}
+
+// ── Cookie-path app/service authorization ─────────────────────────────
+//
+// The cookie is SameSite=None (file:// and foreign-origin apps need it), so
+// it attaches cross-site. The CORS origin allowlist gates which origins may
+// call at all, but a registered app is still allowed — so on its own the
+// allowlist can't stop one app's page from refreshing another app's cookie, or
+// stop an app from harvesting a token for a service it was never granted. On
+// the cookie path we therefore bind the request's app (X-App-Nonce) to the
+// token's sealed service. The form path (CLI/MCP) is authorized by possession
+// and is exempt.
+
+// cookieRefresh simulates a browser POSTing to the path-scoped token
+// endpoint with the HttpOnly refresh_token cookie attached and the given
+// app identity in X-App-Nonce. The cookie is added directly (path-matching is
+// the browser's job); the request URL carries the service id the path is
+// scoped to.
+func cookieRefresh(srv *Server, svcID int64, rt, appNonce string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/oauth/token/"+strconv.FormatInt(svcID, 10),
+		strings.NewReader(url.Values{"grant_type": {"refresh_token"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if appNonce != "" {
+		req.Header.Set("X-App-Nonce", appNonce)
+	}
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: rt})
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	return rr
+}
+
+// mintIdentityRefresh mints a refresh token for a service backed by a real
+// refresh family, the minimal setup the cookie path needs to reach rotation.
+func mintIdentityRefresh(t *testing.T, srv *Server, email string, svcID int64) string {
+	t.Helper()
+	jti := db.GenNonce()
+	famID := createRefreshFamily(t, srv.store, email, svcID, jti)
+	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
+		Kind: "identity", ServiceID: svcID, UserEmail: email,
+		FamilyID: famID, JTI: jti,
+	})
+	if err != nil {
+		t.Fatalf("mint refresh token: %v", err)
+	}
+	return rt
+}
+
+// A cookie-path refresh with no X-App-Nonce at all is rejected. We must not
+// fall back to the admin nonce on a headerless request the way the env/CORS
+// helpers do — there the origin allowlist still backs the fallback, but here
+// the header is the only app signal, so absence must mean deny.
+func TestRefreshGrantCookieRequiresAppNonce(t *testing.T) {
+	srv := newTestServer(t)
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
+	srv.store.CreateUser("No-Nonce User", "nn@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, "nn@example.com", svcID)
+
+	rr := cookieRefresh(srv, svcID, rt, "")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// A registered app that was never granted the token's service cannot refresh
+// that service's cookie — the cross-app / cross-service harvest is refused.
+func TestRefreshGrantCookieAppNotPermitted(t *testing.T) {
+	srv := newTestServer(t)
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
+	srv.store.CreateUser("Unauth User", "unauth@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, "unauth@example.com", svcID)
+	appNonce := createApp(t, srv, "outsider-app") // no service link granted
+
+	rr := cookieRefresh(srv, svcID, rt, appNonce)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// A registered app that IS granted the token's service refreshes its cookie
+// happily — the hosted-app happy path.
+func TestRefreshGrantCookieAppPermitted(t *testing.T) {
+	srv := newTestServer(t)
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
+	srv.store.CreateUser("Hosted User", "hosted@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, "hosted@example.com", svcID)
+	appNonce := createApp(t, srv, "hosted-app")
+	linkServiceToApp(t, srv, appNonce, strconv.FormatInt(svcID, 10))
+
+	rr := cookieRefresh(srv, svcID, rt, appNonce)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if _, present := decodeMap(rr)["refresh_token"]; present {
+		t.Error("cookie-based refresh must NOT echo refresh_token in the body")
+	}
+	if got, want := refreshCookiePath(rr), "/oauth/token/"+strconv.FormatInt(svcID, 10); got != want {
+		t.Errorf("rotated cookie Path = %q, want %q", got, want)
+	}
+}
+
+// The admin console's ephemeral nonce may only refresh the configured admin
+// auth service — not any other service's cookie. A leaked adminNonce must not
+// become a universal refresh credential.
+func TestRefreshGrantAdminNonceWrongService(t *testing.T) {
+	srv := newTestServer(t)
+	authSvc, _ := srv.store.RegisterService("auth-idp", "https://auth.example", db.ServiceDescriptor{Type: "oidc"})
+	otherSvc, _ := srv.store.RegisterService("other-idp", "https://other.example", db.ServiceDescriptor{Type: "oidc"})
+	srv.store.CreateUser("Admin User", "admin@example.com", "Admin", "Active")
+	srv.adminNonce = db.GenNonce()
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(authSvc, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
+	// A refresh token bound to *other*Svc, presented with the admin nonce.
+	rt := mintIdentityRefresh(t, srv, "admin@example.com", otherSvc)
+
+	rr := cookieRefresh(srv, otherSvc, rt, srv.adminNonce)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// The clobber fix: two services' refresh cookies get distinct, service-scoped
+// Paths so the browser's jar keeps both slots instead of one overwriting the
+// other. (The jar's path-matching itself is the browser's job; this pins the
+// server's side of the contract — distinct services → distinct cookie Paths.)
+func TestRefreshCookiePathScopedByService(t *testing.T) {
+	srv := newTestServer(t)
+	svcA, _ := srv.store.RegisterService("idp-a", "https://a.example", db.ServiceDescriptor{Type: "oidc"})
+	svcB, _ := srv.store.RegisterService("idp-b", "https://b.example", db.ServiceDescriptor{Type: "oidc"})
+	srv.store.CreateUser("Scope User", "scope@example.com", "Admin", "Active")
+	srv.adminNonce = db.GenNonce()
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcA, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
+
+	rtA := mintIdentityRefresh(t, srv, "scope@example.com", svcA)
+	rrA := cookieRefresh(srv, svcA, rtA, srv.adminNonce)
+	if rrA.Code != 200 {
+		t.Fatalf("svcA refresh = %d, body = %s", rrA.Code, rrA.Body.String())
+	}
+
+	// Second service: re-point admin_auth_service at svcB so the admin nonce is
+	// valid for it too, then refresh.
+	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcB, 10))
+	rtB := mintIdentityRefresh(t, srv, "scope@example.com", svcB)
+	rrB := cookieRefresh(srv, svcB, rtB, srv.adminNonce)
+	if rrB.Code != 200 {
+		t.Fatalf("svcB refresh = %d, body = %s", rrB.Code, rrB.Body.String())
+	}
+
+	pathA := refreshCookiePath(rrA)
+	pathB := refreshCookiePath(rrB)
+	if pathA != "/oauth/token/"+strconv.FormatInt(svcA, 10) {
+		t.Errorf("svcA cookie Path = %q", pathA)
+	}
+	if pathB != "/oauth/token/"+strconv.FormatInt(svcB, 10) {
+		t.Errorf("svcB cookie Path = %q", pathB)
+	}
+	if pathA == pathB {
+		t.Errorf("expected distinct cookie Paths for distinct services, both %q", pathA)
+	}
+}
+
+// The form path (CLI/MCP) carries the token in the body and is authorized by
+// possession — no X-App-Nonce, no app/service grant, no admin_auth_service.
+// The app/service check must be skipped there entirely.
+func TestRefreshGrantFormPathSkipsAppAuth(t *testing.T) {
+	srv := newTestServer(t)
+	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
+	srv.store.CreateUser("CLI User", "form@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, "form@example.com", svcID)
+
+	// No X-App-Nonce, no admin_auth_service, no app — form body only.
+	rr := postForm(t, srv, "/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {rt},
+	})
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// decodeMap is a small helper for asserting on a token-response JSON body.
+func decodeMap(rr *httptest.ResponseRecorder) map[string]interface{} {
+	var m map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &m)
+	return m
 }
 
 // A newly-minted refresh token must carry family_id and jti in its JWT
@@ -916,6 +1111,18 @@ func hasRefreshCookie(rr *httptest.ResponseRecorder) bool {
 		}
 	}
 	return false
+}
+
+// refreshCookiePath returns the Path of the rotated refresh_token Set-Cookie,
+// or "" if none was set. The path is scoped by service id so that refresh
+// tokens for several services occupy distinct cookie slots.
+func refreshCookiePath(rr *httptest.ResponseRecorder) string {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "refresh_token" {
+			return c.Path
+		}
+	}
+	return ""
 }
 
 // ── Refresh token rotation (token families) ─────────────────────────

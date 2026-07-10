@@ -136,6 +136,13 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/oauth/register", s.oauthSrv.handleRegister)
 	s.mux.HandleFunc("/oauth/authorize", s.oauthSrv.handleAuthorize)
 	s.mux.HandleFunc("/oauth/token", s.oauthSrv.handleToken)
+	// Path-scoped token endpoint for browser cookie refresh. The advertised
+	// /oauth/token above stays the OAuth-standard endpoint (CLI/MCP code grant
+	// + form-body refresh); this variant scopes the refresh_token cookie by the
+	// service id so a browser holding several services' refresh tokens keeps
+	// them in distinct cookie slots (see makeRefreshCookie). Both routes share
+	// the handler; the path service id is only consulted on the cookie path.
+	s.mux.HandleFunc("/oauth/token/{serviceID}", s.oauthSrv.handleToken)
 	s.mux.HandleFunc("/oauth/jwks", s.oauthSrv.handleJWKS)
 
 	// Admin API — role-gated
