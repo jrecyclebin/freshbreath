@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -663,10 +664,19 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, data freshbreathRefres
 	if err != nil {
 		return "", err
 	}
+	// Scope the cookie to the service's own token path so that a browser
+	// holding refresh tokens for several services keeps them in separate
+	// cookie slots (the jar keys cookies by name+domain+path). Without this,
+	// a second login silently overwrites the first refresh_token cookie and
+	// the wrong service's token bleeds into the next refresh. SameSite=None is
+	// required because legitimate consumers include file://-loaded apps and
+	// apps served from a foreign origin registered in the app config; the
+	// cross-site CSRF surface this opens is closed by the app/service
+	// authorization in handleRefreshTokenGrant rather than by SameSite.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    rt,
-		Path:     "/oauth/token",
+		Path:     "/oauth/token/" + strconv.FormatInt(data.ServiceID, 10),
 		MaxAge:   int(refreshTokenTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   s.config.TLSCertFile != "",

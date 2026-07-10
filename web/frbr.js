@@ -238,8 +238,11 @@ export class ServiceProxy extends EventEmitter {
     } else if (isFreshbreathToken(this.#data?.access_token)) {
       // Freshbreath-issued token — refresh through /oauth/token.
       // The refresh token is in an HttpOnly cookie auto-attached to this path.
+      // The path is scoped by service id so that refresh tokens for several
+      // services live in separate cookie slots instead of overwriting each
+      // other; the cookie's Path is set by the server to match.
       const body = new URLSearchParams({ grant_type: "refresh_token" });
-      const r = await fetch(`${API}/oauth/token`, {
+      const r = await fetch(`${API}/oauth/token/${this.#serviceID}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",

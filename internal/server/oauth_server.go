@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -632,6 +633,58 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 	if fam.ServiceID != data.ServiceID {
 		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token service mismatch")
 		return
+	}
+
+	// 🔒 Cookie-path authorization. The cookie is SameSite=None (file:// and
+	// foreign-origin apps need it), so it attaches to any cross-site request the
+	// browser makes to this path. The CORS origin allowlist gates *which origins*
+	// may call us at all, but a registered app is still allowed to call — so on
+	// its own the allowlist can't stop app A from harvesting a token issued for
+	// app A's connection to service X, or stop one app's page from refreshing
+	// another app's cookie. So on the cookie path only (CLI/MCP carry the token
+	// in the body and are authorized by possession), we bind the request's app
+	// to the token's sealed service: the app must be permitted that service.
+	// The token's own data.ServiceID is the source of truth — there is no
+	// service_id request parameter on this path to spoof.
+	if !fromForm {
+		appNonce := r.Header.Get("X-App-Nonce")
+		if appNonce == "" {
+			oauthWriteError(w, http.StatusForbidden, "invalid_grant", "missing app for cookie refresh")
+			return
+		}
+		if appNonce == os.server.adminNonce {
+			// The admin control panel is the only consumer of the ephemeral
+			// adminNonce; it only ever holds an identity token for the
+			// configured admin auth service. Restrict it to that service
+			// rather than blanket-trusting it, so a leaked adminNonce can't
+			// refresh arbitrary services' tokens.
+			svcIDStr, _ := os.server.store.GetSetting("admin_auth_service")
+			adminSvcID, err := parseID(svcIDStr)
+			if err != nil || data.ServiceID != adminSvcID {
+				oauthWriteError(w, http.StatusForbidden, "invalid_grant", "admin refresh not bound to admin auth service")
+				return
+			}
+		} else {
+			allowed, err := os.server.store.IsServiceAllowedForApp(appNonce, data.ServiceID)
+			if err != nil || !allowed {
+				oauthWriteError(w, http.StatusForbidden, "invalid_grant", "app not permitted for this service")
+				return
+			}
+		}
+	}
+
+	// 🔒 Path/service binding (defense in depth). On the path-scoped route
+	// /oauth/token/{serviceID} the cookie jar routes the right cookie by path;
+	// the path segment must agree with the token's sealed service, so a stale
+	// legacy cookie (Path=/oauth/token, from before path-scoping) that leaks
+	// onto a /oauth/token/<id> request is rejected at the refresh step rather
+	// than minting a token for the wrong service.
+	if sidStr := r.PathValue("serviceID"); sidStr != "" {
+		pathSvc, err := strconv.ParseInt(sidStr, 10, 64)
+		if err != nil || pathSvc != data.ServiceID {
+			oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token service mismatch")
+			return
+		}
 	}
 
 	var nextJTI string
