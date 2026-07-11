@@ -406,12 +406,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// MCP auth flows must go through /oauth/authorize, not /service/login.
-	if strings.HasPrefix(serviceURL, "/mcp/") {
-		http.Error(w, "MCP auth flows must use /oauth/authorize", http.StatusBadRequest)
-		return
-	}
-
 	svc, err := s.store.GetServiceByURL(serviceURL)
 	if err != nil {
 		http.Error(w, "Service not registered", http.StatusForbidden)
@@ -421,6 +415,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Tasks services don't use login
 	if svc.Descriptor.Type == "tasks" {
 		http.Error(w, "Task services don't login - instead pass in an `authService` object to ServiceProxy.", http.StatusForbidden)
+		return
+	}
+
+	// Browser logins require an explicit app/service link. The admin panel
+	// may only log in to the configured admin auth service.
+	if !s.canLoginToService(nonce, svc.ID) {
+		http.Error(w, "Service not approved for this app", http.StatusForbidden)
 		return
 	}
 
@@ -481,9 +482,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// API-key auth — no OAuth flow, just return service info as JSON
 	if svc.Descriptor.Auth == "key" {
-		if svc.Descriptor.APIKey != "" {
-			_ = s.store.LinkAppService(nonce, svc.ID)
-			w.Header().Set("Content-Type", "application/json")
+	if svc.Descriptor.APIKey != "" {
+		w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"type":       "key-auth-complete",
 				"state":      appState,
@@ -540,23 +540,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.pendingMu.Unlock()
 
-	// Record first use (auto-connect) and check if blocked
-	_ = s.store.LinkAppService(nonce, svc.ID)
-	links, err := s.store.GetAppServiceLinks(nonce)
-	if err == nil {
-		for _, link := range links {
-			if link.ServiceID == svc.ID && !link.Allowed {
-				http.Error(w, "Service is blocked for this app", http.StatusForbidden)
-				return
-			}
-		}
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"type": "redirect",
 		"url":  authURL,
 	})
+}
+
+// canLoginToService decides whether the app identified by nonce may initiate
+// a browser login for svc. The admin nonce is restricted to the configured
+// admin auth service; regular apps must have an allowed app_service_links row.
+func (s *Server) canLoginToService(nonce string, svcID int64) bool {
+	if nonce == s.adminNonce {
+		svcIDStr, _ := s.store.GetSetting("admin_auth_service")
+		adminSvcID, err := parseID(svcIDStr)
+		return err == nil && adminSvcID == svcID
+	}
+	allowed, err := s.store.IsServiceAllowedForApp(nonce, svcID)
+	return err == nil && allowed
 }
 
 // completeAuth writes the postMessage callback page for a completed auth flow.
