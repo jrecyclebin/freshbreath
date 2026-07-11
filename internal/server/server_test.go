@@ -526,7 +526,8 @@ func TestLoginWithMetadataFallback(t *testing.T) {
 		}
 	})
 
-	registerService(t, srv, "github", "https://gh.example/mcp", db.ServiceDescriptor{Type: "mcp"})
+	id := registerService(t, srv, "github", "https://gh.example/mcp", db.ServiceDescriptor{Type: "mcp"})
+	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://gh.example/mcp&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -574,7 +575,8 @@ func TestLoginByServiceURL(t *testing.T) {
 	})
 
 	nonce := createApp(t, srv, "login-test")
-	registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
+	id := registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
+	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -632,7 +634,8 @@ func TestLoginViaQueryParam(t *testing.T) {
 		}
 	})
 
-	registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
+	id := registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
+	linkServiceToApp(t, srv, nonce, id)
 
 	// No X-App-Nonce header — nonce comes from query param
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x&app_nonce="+nonce, nil, nil)
@@ -672,11 +675,12 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 		}
 	})
 
-	registerService(t, srv, "github", "https://api.github.com", db.ServiceDescriptor{
+	id := registerService(t, srv, "github", "https://api.github.com", db.ServiceDescriptor{
 		Type:     "api",
 		ClientID: "gh-pre-registered-client",
 		OAuthURL: "https://github.com",
 	})
+	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.github.com&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -703,10 +707,11 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 func TestLoginWithAPIKey(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "key-test")
-	registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
+	id := registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
 		Type: "api",
 		Auth: "key",
 	})
+	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -729,11 +734,12 @@ func TestLoginWithAPIKey(t *testing.T) {
 func TestLoginWithAPIKeyAdminSet(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "key-admin-test")
-	registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
+	id := registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
 		Type:   "api",
 		Auth:   "key",
 		APIKey: "admin-secret-key",
 	})
+	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -749,6 +755,54 @@ func TestLoginWithAPIKeyAdminSet(t *testing.T) {
 	// Admin key is available in the response
 	if resp["apiKey"] != "admin-secret-key" {
 		t.Errorf("apiKey = %v, want admin-secret-key", resp["apiKey"])
+	}
+}
+
+func TestLoginAppNotAllowed(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "no-link-test")
+	registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
+		Type: "api",
+		Auth: "key",
+	})
+
+	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 403 {
+		t.Errorf("status = %d, want 403", rr.Code)
+	}
+}
+
+func TestLoginAdminNonceAllowed(t *testing.T) {
+	srv := newTestServer(t)
+	srv.adminNonce = db.GenNonce()
+	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
+			return jsonResp(200, map[string]interface{}{
+				"issuer":                           "https://admin.example",
+				"authorization_endpoint":           "https://admin.example/authorize",
+				"token_endpoint":                   "https://admin.example/token",
+				"registration_endpoint":            "https://admin.example/register",
+				"code_challenge_methods_supported": []string{"S256"},
+			})
+		case req.URL.Path == "/register":
+			return jsonResp(201, map[string]string{"client_id": "mock-client"})
+		default:
+			return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
+		}
+	})
+
+	id := registerService(t, srv, "admin-idp", "https://admin.example", db.ServiceDescriptor{
+		Type:     "api",
+		OAuthURL: "https://admin.example",
+	})
+	srv.store.SetSetting("admin_auth_service", id)
+
+	rr := testRequest(t, srv, "GET", "/service/login?url=https://admin.example&state=x", nil,
+		map[string]string{"X-App-Nonce": srv.adminNonce})
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 }
 
