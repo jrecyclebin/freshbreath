@@ -40,6 +40,7 @@ jobs:
             ext: .zip
             label: windows-x64
             mise_task: build:windows
+            mise_installer_task: build:windows-installer
           - os: windows-11-arm
             goos: windows
             goarch: arm64
@@ -47,6 +48,7 @@ jobs:
             ext: .zip
             label: windows-arm64
             mise_task: build:windows-arm64
+            mise_installer_task: build:windows-arm64-installer
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -81,6 +83,11 @@ jobs:
         run: choco install zip -y
         shell: powershell
 
+      - name: Install NSIS
+        if: matrix.goos == 'windows'
+        run: choco install nsis -y
+        shell: powershell
+
       - name: Build & package
         shell: bash
         run: mise run ${{ matrix.mise_task }}
@@ -94,6 +101,22 @@ jobs:
         with:
           name: freshbreath-${{ github.ref_name }}-${{ matrix.label }}
           path: dist/freshbreath-${{ github.ref_name }}-${{ matrix.label }}${{ matrix.ext }}
+
+      - name: Build & package installer
+        if: matrix.goos == 'windows'
+        shell: bash
+        run: mise run ${{ matrix.mise_installer_task }}
+        env:
+          CC: ${{ matrix.cc }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+
+      - name: Upload installer artifact
+        if: matrix.goos == 'windows'
+        uses: actions/upload-artifact@v6
+        with:
+          name: freshbreath-${{ github.ref_name }}-${{ matrix.label }}-setup
+          path: dist/freshbreath-${{ github.ref_name }}-${{ matrix.label }}-setup.exe
 
   release:
     needs: build
@@ -113,3 +136,4 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*-setup.exe
