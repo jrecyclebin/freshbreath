@@ -10,7 +10,8 @@
 ;   /DOUTFILE=..\dist\freshbreath-1.2.3-windows-x64-setup.exe
 ;
 ; Expects the payload already staged at ..\dist\nsis-staging\ relative to this
-; script, containing: freshbreath.exe, nssm.exe, README.txt, web\, skills\
+; script, containing: freshbreath.exe, nssm.exe, README.txt, and the web and
+; skills directories.
 
 !ifndef VERSION
   !define VERSION "0.0.0-dev"
@@ -34,7 +35,6 @@ Name "freshbreath"
 OutFile "${OUTFILE}"
 Unicode true
 RequestExecutionLevel admin
-SetRegView 64
 InstallDir "$PROGRAMFILES64\freshbreath"
 InstallDirRegKey HKLM "Software\freshbreath" "InstallDir"
 
@@ -53,6 +53,10 @@ Var DataDir
 !insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
+  ; SetRegView is a runtime instruction, so it can't live at top level - it
+  ; has to be set here, early, since it also governs the InstallDirRegKey
+  ; lookup that happens once the directory page initializes.
+  SetRegView 64
   StrCpy $DataDir "$PROGRAMDATA\freshbreath"
 FunctionEnd
 
@@ -125,6 +129,10 @@ Section "freshbreath" SecMain
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
+
+Function un.onInit
+  SetRegView 64
+FunctionEnd
 
 Section "Uninstall"
   nsExec::ExecToLog '"$INSTDIR\nssm.exe" stop ${SERVICE_NAME}'
