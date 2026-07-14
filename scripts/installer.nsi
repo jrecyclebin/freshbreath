@@ -24,18 +24,18 @@
 !endif
 
 !define STAGING "..\dist\nsis-staging"
-!define SERVICE_NAME "freshbreath"
+!define SERVICE_NAME "Fresh Breath Service"
 !define SERVICE_ACCOUNT "NT AUTHORITY\LocalService"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\freshbreath"
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
-Name "freshbreath"
+Name "Fresh Breath"
 OutFile "${OUTFILE}"
 Unicode true
 RequestExecutionLevel admin
-InstallDir "$PROGRAMFILES64\freshbreath"
+InstallDir "$PROGRAMFILES64\Fresh Breath"
 InstallDirRegKey HKLM "Software\freshbreath" "InstallDir"
 
 Var DataDir
@@ -91,7 +91,7 @@ Section "freshbreath" SecMain
   Pop $0
   ${If} $0 != 0
     DetailPrint "nssm install failed (exit $0)"
-    Abort "Could not install the freshbreath service."
+    Abort "Could not install the Fresh Breath service."
   ${EndIf}
 
   nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} AppDirectory "$INSTDIR"'
@@ -104,9 +104,9 @@ Section "freshbreath" SecMain
   Pop $0
   nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} AppRotateFiles 1'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} DisplayName "freshbreath"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} DisplayName "Fresh Breath"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} Description "freshbreath MCP gateway"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} Description "Fresh Breath personal app server and MCP gateway"'
   Pop $0
   nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} Start SERVICE_AUTO_START'
   Pop $0
@@ -114,7 +114,7 @@ Section "freshbreath" SecMain
   Pop $0
   ${If} $0 != 0
     DetailPrint "nssm set ObjectName failed (exit $0)"
-    Abort "Could not configure the freshbreath service account."
+    Abort "Could not configure the Fresh Breath service account."
   ${EndIf}
 
   nsExec::ExecToLog '"$INSTDIR\nssm.exe" start ${SERVICE_NAME}'
@@ -123,7 +123,7 @@ Section "freshbreath" SecMain
   WriteRegStr HKLM "Software\freshbreath" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\freshbreath" "DataDir" "$DataDir"
 
-  WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "freshbreath"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "Fresh Breath"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "Poggers Institute"
   WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
