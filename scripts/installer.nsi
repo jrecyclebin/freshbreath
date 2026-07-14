@@ -57,7 +57,11 @@ Function .onInit
   ; has to be set here, early, since it also governs the InstallDirRegKey
   ; lookup that happens once the directory page initializes.
   SetRegView 64
-  StrCpy $DataDir "$PROGRAMDATA\freshbreath"
+  ; NSIS has no built-in $PROGRAMDATA constant. SetShellVarContext all makes
+  ; $APPDATA resolve to the machine-wide C:\ProgramData instead of the
+  ; per-user roaming AppData folder.
+  SetShellVarContext all
+  StrCpy $DataDir "$APPDATA\freshbreath"
 FunctionEnd
 
 Section "freshbreath" SecMain
