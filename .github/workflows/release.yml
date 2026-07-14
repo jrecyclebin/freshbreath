@@ -85,8 +85,18 @@ jobs:
 
       - name: Install NSIS
         if: matrix.goos == 'windows'
-        run: choco install nsis -y
         shell: powershell
+        run: |
+          choco install nsis -y
+          # Chocolatey doesn't reliably shim makensis.exe, so add its
+          # install dir to PATH for later steps ourselves. NSIS's own
+          # installer is a 32-bit app and defaults to Program Files (x86)
+          # on both x64 and arm64 Windows, but check both to be safe.
+          foreach ($dir in @("${env:ProgramFiles(x86)}\NSIS", "$env:ProgramFiles\NSIS")) {
+            if (Test-Path $dir) {
+              Add-Content -Path $env:GITHUB_PATH -Value $dir
+            }
+          }
 
       - name: Build & package
         shell: bash
