@@ -23,8 +23,6 @@ case "$GOARCH" in
   *)     echo "unsupported GOARCH=$GOARCH" >&2; exit 1 ;;
 esac
 
-nssm_version="2.24"
-
 # ── Build ──────────────────────────────────────────────────────────
 echo "→ Building freshbreath.exe (GOOS=$GOOS GOARCH=$GOARCH CC=${CC:-default})"
 go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/freshbreath.exe" ./cmd/freshbreath
@@ -37,19 +35,10 @@ mv "dist/freshbreath.exe" "$staging/"
 cp README.md "$staging/README.txt"
 cp -r web skills "$staging/"
 
-# ── Fetch NSSM ────────────────────────────────────────────────────────
-nssm_cache="dist/nssm-cache"
-nssm_bin="$nssm_cache/nssm-$nssm_version/$nssm_arch/nssm.exe"
-if [ ! -f "$nssm_bin" ]; then
-  echo "→ Fetching NSSM $nssm_version ($nssm_arch)"
-  mkdir -p "$nssm_cache"
-  curl -fsSL "https://nssm.cc/release/nssm-$nssm_version.zip" -o "$nssm_cache/nssm.zip"
-  # Use Expand-Archive rather than tar/unzip: PowerShell is guaranteed
-  # present on every Windows runner, unlike either of those, and its
-  # System.IO.Compression backing accepts forward-slash paths fine.
-  powershell -NoProfile -Command "Expand-Archive -Path '$nssm_cache/nssm.zip' -DestinationPath '$nssm_cache' -Force"
-fi
-cp "$nssm_bin" "$staging/"
+# ── NSSM ──────────────────────────────────────────────────────────────
+# Vendored under scripts/vendor/ rather than fetched at build time - see
+# scripts/vendor/nssm/README.txt for why.
+cp "scripts/vendor/nssm/$nssm_arch/nssm.exe" "$staging/"
 
 # ── Package installer ────────────────────────────────────────────────
 archive="freshbreath-${VERSION}-windows-${arch}-setup.exe"

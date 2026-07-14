@@ -63,11 +63,15 @@ arg "<version>"
 '''
 run = """
 VERSION="${usage_version}"
+COMMIT="$(git rev-parse HEAD)"
 echo "→ Tagging $VERSION"
 git tag "$VERSION"
 git push origin "$VERSION"
 echo "→ Creating release"
-gh release create "$VERSION" --title "$VERSION" --generate-notes
+# --target pins the release to the commit directly instead of having gh look
+# up the tag over the API, which can lag a moment behind the push above and
+# fail with "tag exists locally but has not been pushed".
+gh release create "$VERSION" --title "$VERSION" --generate-notes --target "$COMMIT"
 echo "✓ Release $VERSION created — CI will build and attach binaries"
 """
 
