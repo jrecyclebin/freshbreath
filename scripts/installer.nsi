@@ -82,42 +82,42 @@ Section "freshbreath" SecMain
 
   ; Stop/remove any previous install of the service so re-running the
   ; installer (e.g. an upgrade) doesn't fail on an already-registered name.
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" stop ${SERVICE_NAME}'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" stop "${SERVICE_NAME}"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" remove ${SERVICE_NAME} confirm'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" remove "${SERVICE_NAME}" confirm'
   Pop $0
 
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" install ${SERVICE_NAME} "$INSTDIR\freshbreath.exe"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" install "${SERVICE_NAME}" "$INSTDIR\freshbreath.exe"'
   Pop $0
   ${If} $0 != 0
     DetailPrint "nssm install failed (exit $0)"
     Abort "Could not install the Fresh Breath service."
   ${EndIf}
 
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} AppDirectory "$INSTDIR"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppDirectory "$INSTDIR"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} AppEnvironmentExtra "FRBR_DATA_DIR=$DataDir"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppEnvironmentExtra "FRBR_DATA_DIR=$DataDir"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} AppStdout "$DataDir\freshbreath.log"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppStdout "$DataDir\freshbreath.log"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} AppStderr "$DataDir\freshbreath.log"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppStderr "$DataDir\freshbreath.log"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} AppRotateFiles 1'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppRotateFiles 1'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} DisplayName "Fresh Breath"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" DisplayName "Fresh Breath"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} Description "Fresh Breath personal app server and MCP gateway"'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" Description "Fresh Breath personal app server and MCP gateway"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} Start SERVICE_AUTO_START'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" Start SERVICE_AUTO_START'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set ${SERVICE_NAME} ObjectName "${SERVICE_ACCOUNT}" ""'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" ObjectName "${SERVICE_ACCOUNT}" ""'
   Pop $0
   ${If} $0 != 0
     DetailPrint "nssm set ObjectName failed (exit $0)"
     Abort "Could not configure the Fresh Breath service account."
   ${EndIf}
 
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" start ${SERVICE_NAME}'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" start "${SERVICE_NAME}"'
   Pop $0
 
   WriteRegStr HKLM "Software\freshbreath" "InstallDir" "$INSTDIR"
@@ -139,9 +139,9 @@ Function un.onInit
 FunctionEnd
 
 Section "Uninstall"
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" stop ${SERVICE_NAME}'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" stop "${SERVICE_NAME}"'
   Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" remove ${SERVICE_NAME} confirm'
+  nsExec::ExecToLog '"$INSTDIR\nssm.exe" remove "${SERVICE_NAME}" confirm'
   Pop $0
 
   Delete "$INSTDIR\freshbreath.exe"
