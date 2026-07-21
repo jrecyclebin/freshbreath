@@ -28,6 +28,17 @@
 !define SERVICE_ACCOUNT "NT AUTHORITY\LocalService"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\freshbreath"
 
+; URL the finish-page checkbox opens in the user's default browser. Matches
+; the default FRBR_BASE_URL / FRBR_LISTEN_ADDR (:9009) documented in README.md.
+; Defaulted to http:// for v1 - if FRBR_TLS_CERT/FRBR_TLS_KEY are configured the
+; base URL becomes https://localhost:9009, which the installer can't easily
+; detect at install time. Guarded so a future follow-up (or a build that knows
+; the scheme) can pass /DFRESHBREATH_URL=https://localhost:9009 from the
+; makensis command line without editing this script.
+!ifndef FRESHBREATH_URL
+  !define FRESHBREATH_URL "http://localhost:9009"
+!endif
+
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
@@ -45,6 +56,16 @@ Var DataDir
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+
+; Finish-page "launch" checkbox. MUI_FINISHPAGE_RUN must be defined (even
+; empty) for the checkbox to render; MUI_FINISHPAGE_RUN_FUNCTION redirects the
+; checkbox's action to the LaunchFreshBreath function below, which opens the
+; URL via the shell "open" verb (ExecShell) rather than launching a bare
+; process. The checkbox is checked by default - friendly for a personal app
+; server the user just installed.
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_TEXT "Launch Fresh Breath now"
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchFreshBreath
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -62,6 +83,16 @@ Function .onInit
   ; per-user roaming AppData folder.
   SetShellVarContext all
   StrCpy $DataDir "$APPDATA\freshbreath"
+FunctionEnd
+
+; Invoked by the finish-page "Launch Fresh Breath now" checkbox (see the
+; MUI_FINISHPAGE_RUN_FUNCTION define above). The service was started near the
+; end of the install section via nssm, but the browser can beat the process
+; to binding :9009; a brief sleep softens the race. If the user is quicker
+; than the sleep they can just refresh.
+Function LaunchFreshBreath
+  Sleep 2000
+  ExecShell "open" "${FRESHBREATH_URL}"
 FunctionEnd
 
 Section "freshbreath" SecMain
