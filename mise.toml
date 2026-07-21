@@ -43,13 +43,15 @@ env = { CGO_ENABLED = "1", GOOS = "windows", GOARCH = "arm64", CC = "${CC:-aarch
 run = "bash scripts/build.sh"
 
 [tasks."build:windows-installer"]
-description = "Build the Windows x64 service installer (requires makensis; must run on Windows to build a native x64 binary)"
-env = { CGO_ENABLED = "1", GOOS = "windows", GOARCH = "amd64", CC = "${CC:-gcc}" }
+description = "Build the Windows x64 service installer (requires makensis; depends on build:windows)"
+depends = ["build:windows"]
+env = { GOOS = "windows", GOARCH = "amd64" }
 run = "bash scripts/build-installer.sh"
 
 [tasks."build:windows-arm64-installer"]
-description = "Build the Windows arm64 service installer (requires makensis; must run on Windows to build a native arm64 binary)"
-env = { CGO_ENABLED = "1", GOOS = "windows", GOARCH = "arm64", CC = "${CC:-clang}" }
+description = "Build the Windows arm64 service installer (requires makensis; depends on build:windows-arm64, which needs aarch64-w64-mingw32-gcc)"
+depends = ["build:windows-arm64"]
+env = { GOOS = "windows", GOARCH = "arm64" }
 run = "bash scripts/build-installer.sh"
 
 [tasks."build:all"]

@@ -78,9 +78,9 @@ jobs:
           update: true
           install: mingw-w64-clang-aarch64-gcc
 
-      - name: Install zip
+      - name: Install zip & unzip
         if: matrix.goos == 'windows'
-        run: choco install zip -y
+        run: choco install zip unzip -y
         shell: powershell
 
       - name: Install NSIS
