@@ -57,6 +57,9 @@ staging="dist/nsis-staging"
 rm -rf "$staging"
 mkdir -p "$staging"
 extract_archive "$zip" "$staging"
+if [ -d data ]; then
+  cp -r data "$staging/data"
+fi
 
 # NSSM, vendored under scripts/vendor/ (see scripts/vendor/nssm/README.txt).
 cp "scripts/vendor/nssm/$nssm_arch/nssm.exe" "$staging/"
