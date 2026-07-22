@@ -105,9 +105,11 @@ Section "freshbreath" SecMain
   File /r "${STAGING}\web"
   File /r "${STAGING}\skills"
 
+  SetOutPath "$DataDir"
+  File /r "${STAGING}\data\*.*"
+
   ; Data directory: LocalService needs an explicit grant, ProgramData's
   ; default ACLs only give BUILTIN\Users read & execute.
-  CreateDirectory "$DataDir"
   nsExec::ExecToLog 'icacls "$DataDir" /grant "${SERVICE_ACCOUNT}:(OI)(CI)M"'
   Pop $0
 

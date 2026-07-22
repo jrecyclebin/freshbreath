@@ -3,6 +3,7 @@
 
 # Local testing
 .env
+/data
 /freshbreath
 *.db
 *.db-journal
