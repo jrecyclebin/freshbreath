@@ -61,6 +61,7 @@ if [ -d data ]; then
   cp -r data "$staging/data"
 else
   mkdir -p "$staging/data"
+  echo "The Fresh Breath database and uploaded content will go here." >> "$staging/data/README.txt"
 fi
 
 # NSSM, vendored under scripts/vendor/ (see scripts/vendor/nssm/README.txt).
