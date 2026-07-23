@@ -19,15 +19,19 @@ import (
 // actTokenLabel is the HKDF subkey label for act-token signing — the same
 // deriveSubkey pattern as jwtSignLabel/sealLabel in services.go. A separate
 // subkey means act-token HMACs can't interact with the JWT or seal keys
-// even though all three derive from the one localKey. It rotates with
-// localKey, so outstanding act tokens die on a relaunch that re-derives the
-// key — accepted (J's call: the short TTL is the replay defense).
+// even though all three derive from the one localKey. localKey is stable
+// across restarts (persisted, or re-derived from the same TLS key), so the
+// subkey is stable too — see actTokenTTL for the revocation consequences.
 const actTokenLabel = "freshbreath/act-token"
 
 // actTokenTTL is how long a minted act token stays valid. Short by design —
 // it's the replay defense (no nonces, no server-side consumption state). A
-// leaked token dies on its own clock, and on server relaunch if localKey is
-// re-derived. See docs/mcp-file-transfer.md.
+// leaked token dies on its own clock. localKey is stable across restarts
+// (persisted in the settings table, or re-derived from the same TLS key
+// file), so a relaunch does NOT revoke outstanding tokens; the TTL is the
+// sole expiry. localKey changes only on a wiped settings row (new DB) or a
+// rotated TLS key — neither happens on a normal relaunch. See
+// docs/mcp-file-transfer.md.
 const actTokenTTL = 10 * time.Minute
 
 // actTokenPayload is the signed content of a capability ("act") token.
