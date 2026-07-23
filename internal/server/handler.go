@@ -486,8 +486,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// API-key auth — no OAuth flow, just return service info as JSON
 	if svc.Descriptor.Auth == "key" {
-	if svc.Descriptor.APIKey != "" {
-		w.Header().Set("Content-Type", "application/json")
+		if svc.Descriptor.APIKey != "" {
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"type":       "key-auth-complete",
 				"state":      appState,
