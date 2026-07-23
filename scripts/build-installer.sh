@@ -59,6 +59,8 @@ mkdir -p "$staging"
 extract_archive "$zip" "$staging"
 if [ -d data ]; then
   cp -r data "$staging/data"
+else
+  mkdir -p "$staging/data"
 fi
 
 # NSSM, vendored under scripts/vendor/ (see scripts/vendor/nssm/README.txt).
