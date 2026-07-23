@@ -29,18 +29,46 @@ The MCP tools work like the file tools LLMs are used to:
 - **`list_app_files`** — `{ nonce, search? }` → `{ files }`, each
   `{ path, size }`, sorted by path. Empty when nothing's published. If `search`
   is provided, only files whose path or content contains the term are returned.
-- **`read_app_file`** — `{ nonce, path, offset?, limit? }` → `{ content }`,
-  optionally with `{ encoding: "base64" }` for binary files. `offset` and
-  `limit` are zero-based byte bounds for reading chunks.
-- **`write_app_file`** — `{ nonce, path, content, old_text? }` →
+- **`read_app_file`** — `{ nonce, path, offset?, limit?, transport? }` →
+  `{ content }` (with `{ encoding: "base64" }` for binary files). `offset` and
+  `limit` are zero-based byte bounds for reading chunks. `transport` (see §3)
+  selects inline vs. a fetch URL; whole-file reads over 10 KiB auto-escape to
+  a URL even at the default.
+- **`write_app_file`** — `{ nonce, path, content, old_text?, transport? }` →
   `{ status: "written" }`. Without `old_text` the entire file is replaced.
   With `old_text`, the single occurrence of `old_text` is replaced with
   `content`. An error is returned if `old_text` is not found or appears more
-  than once.
+  than once. `transport` (see §3) selects inline vs. a PUT URL; writes never
+  auto-escape.
 - **`delete_app_file`** — `{ nonce, path }` → `{ status: "deleted" }`.
 
-These tools read and write file data directly — no transfer URLs or base64
-round-trips.
+---
+
+## 3. Large files: the `transport` argument
+
+`read_app_file` and `write_app_file` take an optional `transport` argument,
+an enum of `"mcp"` (the default) or `"http"`. It decides how the bytes
+travel.
+
+**`"mcp"` (default) — inline.** The tool result carries the bytes directly,
+as in §2.
+
+A whole-file `read_app_file` (no `offset`/`limit`) on a file **larger than
+10 KiB escapes automatically** to a URL, returning `{ error, url, method,
+size, content_type, max_inline_bytes }` instead of the content.
+
+**`"http"` — return a URL, fetch it yourself.** The tool returns a
+short-lived URL instead of inlining. The URL is an *act token*: signed,
+scoped to that one file and HTTP method, good for **10 minutes**, and
+self-authenticating — no auth header needed. It still resolves to your
+user, so your app/role permissions apply at the other end.
+
+- **`read_app_file`, `transport:"http"`** → `{ url, method:"GET", size,
+  content_type }`. GET the URL. Incompatible with `offset`/`limit` — the
+  URL targets the whole file.
+- **`write_app_file`, `transport:"http"`** → `{ url, method:"PUT" }`. PUT
+  your bytes to the URL. Incompatible with `old_text` — patches always stay
+  inline (they're small).
 
 ---
 

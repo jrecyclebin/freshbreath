@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -249,6 +250,47 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*db.User, error) {
 		return nil, err
 	}
 	return user, nil
+}
+
+// mcpInlineMaxBytes is the threshold above which a whole-file read result
+// escapes to an act-token URL instead of returning inline. Chunked reads
+// (offset/limit set) always stay inline — the client bounded the size. Writes
+// have no threshold: if MCP received the bytes, write them; a client that
+// wants to skip the inline bloat uses transport:"http" up front.
+const mcpInlineMaxBytes = 10 * 1024
+
+// actTokenTransport is the closed enum for the transfer tools' `transport`
+// option. "mcp" (default) returns bytes inline; "http" mints an act-token URL
+// the client fetches/PUTs over HTTP. Named to accept future sensible additions
+// without restructuring.
+const (
+	actTokenTransportMCP  = "mcp"
+	actTokenTransportHTTP = "http"
+)
+
+// mintActFileURL mints an act token for method+pathQuery and returns the full
+// PublicBaseURL/api/act/<token> URL the MCP client can hand to its fetch tool.
+func (s *Server) mintActFileURL(user *db.User, method, pathQuery string) (string, error) {
+	tok, err := s.mintActToken(user, method, pathQuery, actTokenTTL)
+	if err != nil {
+		return "", err
+	}
+	return s.config.PublicBaseURL + "/api/act/" + tok, nil
+}
+
+// appFileActPath builds the act-token target path for an app web file:
+// /api/apps/{nonce}/web?file=<relpath>, with the file path query-encoded.
+func appFileActPath(nonce, filePath string) string {
+	q := url.Values{}
+	q.Set("file", filePath)
+	return "/api/apps/" + nonce + "/web?" + q.Encode()
+}
+
+// serviceFileActPath builds the act-token target path for a service
+// definition file: /api/services/{id}/files. Services take no client path —
+// the definition path is server-derived.
+func serviceFileActPath(id int64) string {
+	return "/api/services/" + strconv.FormatInt(id, 10) + "/files"
 }
 
 // mcpToolError returns a tool result with an error message.
@@ -667,10 +709,11 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":  map[string]interface{}{"type": "string", "description": "App nonce"},
-				"path":   map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
-				"offset": map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
-				"limit":  map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
+				"nonce":     map[string]interface{}{"type": "string", "description": "App nonce"},
+				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
+				"offset":    map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
+				"limit":     map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to fetch/PUT over HTTP — for large files)"},
 			},
 			"required": []string{"nonce", "path"},
 		},
@@ -685,11 +728,66 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		path, _ := args["path"].(string)
 		offset := int64Arg(args, "offset")
 		limit := int64Arg(args, "limit")
-		data, err := s.coreReadAppFile(user, nonce, path, offset, limit)
-		if err != nil {
-			return mcpToolError("%v", err), nil
+		transport, _ := args["transport"].(string)
+		chunked := offset != 0 || limit != 0
+
+		switch transport {
+		case "", actTokenTransportMCP:
+			if chunked {
+				data, err := s.coreReadAppFile(user, nonce, path, offset, limit)
+				if err != nil {
+					return mcpToolError("%v", err), nil
+				}
+				return mcpToolResult(mcpFileContent(data))
+			}
+			// Whole-file: bound the read so a huge file isn't loaded just to
+			// decide it's too big; escape to an act-token URL if it is.
+			data, err := s.coreReadAppFile(user, nonce, path, 0, int64(mcpInlineMaxBytes)+1)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			if int64(len(data)) > mcpInlineMaxBytes {
+				size, ct, serr := s.coreStatAppFile(user, nonce, path)
+				if serr != nil {
+					return mcpToolError("%v", serr), nil
+				}
+				u, merr := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, path))
+				if merr != nil {
+					return mcpToolError("%v", merr), nil
+				}
+				return mcpToolResult(map[string]interface{}{
+					"error":            "file too large for inline MCP response",
+					"url":              u,
+					"method":           http.MethodGet,
+					"size":             size,
+					"content_type":     ct,
+					"max_inline_bytes": mcpInlineMaxBytes,
+				})
+			}
+			return mcpToolResult(mcpFileContent(data))
+
+		case actTokenTransportHTTP:
+			if chunked {
+				return mcpToolError("transport:\"http\" is incompatible with offset/limit (the URL targets the whole file)"), nil
+			}
+			size, ct, err := s.coreStatAppFile(user, nonce, path)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			u, err := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, path))
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]interface{}{
+				"url":          u,
+				"method":       http.MethodGet,
+				"size":         size,
+				"content_type": ct,
+			})
+
+		default:
+			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
 		}
-		return mcpToolResult(mcpFileContent(data))
 	})
 
 	// write_app_file
@@ -699,10 +797,11 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":    map[string]interface{}{"type": "string", "description": "App nonce"},
-				"path":     map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
-				"content":  map[string]interface{}{"type": "string", "description": "New file content"},
-				"old_text": map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
+				"nonce":     map[string]interface{}{"type": "string", "description": "App nonce"},
+				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
+				"content":   map[string]interface{}{"type": "string", "description": "New file content"},
+				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to PUT over HTTP — for large files). Incompatible with old_text."},
 			},
 			"required": []string{"nonce", "path", "content"},
 		},
@@ -717,10 +816,33 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		path, _ := args["path"].(string)
 		content, _ := args["content"].(string)
 		oldText, _ := args["old_text"].(string)
-		if err := s.coreWriteAppFile(user, nonce, path, []byte(content), oldText); err != nil {
-			return mcpToolError("%v", err), nil
+		transport, _ := args["transport"].(string)
+
+		switch transport {
+		case "", actTokenTransportMCP:
+			if err := s.coreWriteAppFile(user, nonce, path, []byte(content), oldText); err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"status": "written"})
+
+		case actTokenTransportHTTP:
+			if oldText != "" {
+				return mcpToolError("transport:\"http\" is incompatible with old_text (patches stay inline)"), nil
+			}
+			// Gate at mint time so a non-member gets a clear error instead of a
+			// URL that 403s at dispatch. coreWriteAppFile gates on the mcp path.
+			if err := s.gateApp(user, nonce); err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			u, err := s.mintActFileURL(user, http.MethodPut, appFileActPath(nonce, path))
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"url": u, "method": http.MethodPut})
+
+		default:
+			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
 		}
-		return mcpToolResult(map[string]string{"status": "written"})
 	})
 
 	// delete_app_file
@@ -796,9 +918,10 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name":   map[string]interface{}{"type": "string", "description": "Service name"},
-				"offset": map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
-				"limit":  map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
+				"name":      map[string]interface{}{"type": "string", "description": "Service name"},
+				"offset":    map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
+				"limit":     map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to fetch over HTTP — for large files)"},
 			},
 			"required": []string{"name"},
 		},
@@ -812,6 +935,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		name, _ := args["name"].(string)
 		offset := int64Arg(args, "offset")
 		limit := int64Arg(args, "limit")
+		transport, _ := args["transport"].(string)
+		chunked := offset != 0 || limit != 0
+
 		if err := s.gate(user, rolesAdminPlus); err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -819,11 +945,63 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		data, _, err := s.coreReadServiceFile(user, svc.ID, offset, limit)
-		if err != nil {
-			return mcpToolError("%v", err), nil
+		pathQuery := serviceFileActPath(svc.ID)
+
+		switch transport {
+		case "", actTokenTransportMCP:
+			if chunked {
+				data, _, err := s.coreReadServiceFile(user, svc.ID, offset, limit)
+				if err != nil {
+					return mcpToolError("%v", err), nil
+				}
+				return mcpToolResult(mcpFileContent(data))
+			}
+			data, _, err := s.coreReadServiceFile(user, svc.ID, 0, int64(mcpInlineMaxBytes)+1)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			if int64(len(data)) > mcpInlineMaxBytes {
+				size, ct, serr := s.coreStatServiceFile(user, svc.ID)
+				if serr != nil {
+					return mcpToolError("%v", serr), nil
+				}
+				u, merr := s.mintActFileURL(user, http.MethodGet, pathQuery)
+				if merr != nil {
+					return mcpToolError("%v", merr), nil
+				}
+				return mcpToolResult(map[string]interface{}{
+					"error":            "file too large for inline MCP response",
+					"url":              u,
+					"method":           http.MethodGet,
+					"size":             size,
+					"content_type":     ct,
+					"max_inline_bytes": mcpInlineMaxBytes,
+				})
+			}
+			return mcpToolResult(mcpFileContent(data))
+
+		case actTokenTransportHTTP:
+			if chunked {
+				return mcpToolError("transport:\"http\" is incompatible with offset/limit (the URL targets the whole file)"), nil
+			}
+			size, ct, err := s.coreStatServiceFile(user, svc.ID)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			u, err := s.mintActFileURL(user, http.MethodGet, pathQuery)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]interface{}{
+				"url":          u,
+				"method":       http.MethodGet,
+				"size":         size,
+				"content_type": ct,
+			})
+
+		default:
+			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
 		}
-		return mcpToolResult(mcpFileContent(data))
 	})
 
 	// write_service_file
@@ -833,9 +1011,10 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name":     map[string]interface{}{"type": "string", "description": "Service name"},
-				"content":  map[string]interface{}{"type": "string", "description": "New file content"},
-				"old_text": map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
+				"name":      map[string]interface{}{"type": "string", "description": "Service name"},
+				"content":   map[string]interface{}{"type": "string", "description": "New file content"},
+				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to PUT over HTTP — for large files). Incompatible with old_text."},
 			},
 			"required": []string{"name", "content"},
 		},
@@ -849,17 +1028,42 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		name, _ := args["name"].(string)
 		content, _ := args["content"].(string)
 		oldText, _ := args["old_text"].(string)
-		if err := s.gate(user, rolesAdminPlus); err != nil {
-			return mcpToolError("%v", err), nil
+		transport, _ := args["transport"].(string)
+
+		switch transport {
+		case "", actTokenTransportMCP:
+			if err := s.gate(user, rolesAdminPlus); err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			svc, err := s.serviceByName(name)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			if err := s.coreWriteServiceFile(user, svc.ID, []byte(content), oldText); err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"status": "written"})
+
+		case actTokenTransportHTTP:
+			if oldText != "" {
+				return mcpToolError("transport:\"http\" is incompatible with old_text (patches stay inline)"), nil
+			}
+			if err := s.gate(user, rolesAdminPlus); err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			svc, err := s.serviceByName(name)
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			u, err := s.mintActFileURL(user, http.MethodPut, serviceFileActPath(svc.ID))
+			if err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			return mcpToolResult(map[string]string{"url": u, "method": http.MethodPut})
+
+		default:
+			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
 		}
-		svc, err := s.serviceByName(name)
-		if err != nil {
-			return mcpToolError("%v", err), nil
-		}
-		if err := s.coreWriteServiceFile(user, svc.ID, []byte(content), oldText); err != nil {
-			return mcpToolError("%v", err), nil
-		}
-		return mcpToolResult(map[string]string{"status": "written"})
 	})
 
 	// delete_service_file

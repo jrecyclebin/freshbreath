@@ -150,6 +150,10 @@ func (s *Server) SetupRoutes() {
 	adminPlus := requireAnyRole(rolesAdminPlus...)
 	anyRole := requireAnyRole(rolesAll...)
 
+	// Act-token dispatch — anonymous by design; handleAct verifies its own
+	// capability token (see act_token.go). Bare on purpose, NOT authWrap'd.
+	s.mux.HandleFunc("/api/act/", s.handleAct)
+
 	s.mux.HandleFunc("/api/apps", s.authWrap(pipeline(s.handleApps, anyRole)))
 	s.mux.HandleFunc("/api/apps/", s.authWrap(pipeline(s.handleAppDetail, anyRole)))
 	s.mux.HandleFunc("/api/services", s.authWrap(pipeline(s.handleServices, adminPlus)))
@@ -1464,6 +1468,43 @@ func (s *Server) handleAppServices(w http.ResponseWriter, r *http.Request, nonce
 func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce string) {
 	actor := userFromContext(r.Context())
 
+	// ?file=<relpath> selects single-file GET/PUT/DELETE on the web dir;
+	// without it the bulk archive ops below run unchanged. PUT is only
+	// valid with ?file= — it's a full-file raw-body replace; patches stay
+	// MCP-only (no PATCH verb over HTTP).
+	if file := r.URL.Query().Get("file"); file != "" {
+		switch r.Method {
+		case http.MethodGet:
+			data, err := s.coreReadAppFile(actor, nonce, file, 0, 0)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			w.Header().Set("Content-Type", http.DetectContentType(data))
+			w.Write(data)
+		case http.MethodPut:
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, "read failed", http.StatusInternalServerError)
+				return
+			}
+			if err := s.coreWriteAppFile(actor, nonce, file, data, ""); err != nil {
+				writeErr(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodDelete:
+			if err := s.coreDeleteAppFile(actor, nonce, file); err != nil {
+				writeErr(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		data, slug, err := s.coreDownloadAppWeb(actor, nonce)
@@ -1692,6 +1733,18 @@ func (s *Server) handleServiceFiles(w http.ResponseWriter, r *http.Request, serv
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"route": route})
+
+	case http.MethodPut:
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read failed", http.StatusInternalServerError)
+			return
+		}
+		if err := s.coreWriteServiceFile(actor, serviceID, data, ""); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 
 	case http.MethodDelete:
 		if err := s.coreDeleteServiceFiles(actor, serviceID); err != nil {
@@ -1938,6 +1991,14 @@ const userKey contextKey = "user"
 
 func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Pre-authenticated path: if userKey is already set, trust the caller and
+		// skip bearer verification. Today the only other setter is handleAct
+		// (act-token dispatch); the boundary is a two-member club. Without this
+		// the auth-off synthetic user below would clobber the act-token's user.
+		if u, ok := r.Context().Value(userKey).(*db.User); ok && u != nil {
+			h(w, r)
+			return
+		}
 		svcIDStr, err := s.store.GetSetting("admin_auth_service")
 		if err != nil || svcIDStr == "" {
 			// Auth off — synthetic superuser so role checks still work downstream.

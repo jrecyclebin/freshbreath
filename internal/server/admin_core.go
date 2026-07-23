@@ -688,6 +688,49 @@ func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset,
 	return sliceBytes(data, offset, limit), nil
 }
 
+// coreStatAppFile returns the size and sniffed content type of a file in an
+// app's web directory without reading the whole file. Used by the MCP
+// read_app_file transport:"http" and threshold-escape paths to populate
+// {size, content_type} without loading a potentially large file into memory.
+func (s *Server) coreStatAppFile(actor *db.User, nonce, filePath string) (int64, string, error) {
+	if err := s.gateApp(actor, nonce); err != nil {
+		return 0, "", err
+	}
+	if _, err := s.store.GetApp(nonce); err != nil {
+		return 0, "", cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	rel, err := cleanAppFilePath(filePath)
+	if err != nil {
+		return 0, "", cerr(http.StatusBadRequest, "%v", err)
+	}
+	size, ct, err := sniffFile(filepath.Join(s.config.DataDir, "apps", nonce, "web", rel))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, "", cerr(http.StatusNotFound, "file not found")
+		}
+		return 0, "", cerr(http.StatusInternalServerError, "stat failed: %v", err)
+	}
+	return size, ct, nil
+}
+
+// sniffFile returns the size and sniffed content type of a file, reading at
+// most 512 bytes (http.DetectContentType only consults the first 512). It lets
+// callers populate {size, content_type} without loading a large file.
+func sniffFile(fullPath string) (size int64, contentType string, err error) {
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return 0, "", err
+	}
+	f, err := os.Open(fullPath)
+	if err != nil {
+		return 0, "", err
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	return info.Size(), http.DetectContentType(head[:n]), nil
+}
+
 // replaceUniqueText replaces the single occurrence of old in src with repl.
 // It returns an error if old is not found or appears more than once.
 func replaceUniqueText(src, old, repl []byte) ([]byte, error) {
@@ -906,6 +949,30 @@ func (s *Server) coreReadServiceFile(actor *db.User, id int64, offset, limit int
 		return nil, "", cerr(http.StatusInternalServerError, "read failed: %v", err)
 	}
 	return sliceBytes(data, offset, limit), filepath.Base(path), nil
+}
+
+// coreStatServiceFile returns the size and sniffed content type of a
+// tasks/virtual service definition file without reading the whole file.
+// Symmetric to coreStatAppFile for the MCP service-file read paths.
+func (s *Server) coreStatServiceFile(actor *db.User, id int64) (int64, string, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return 0, "", err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return 0, "", cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return 0, "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+	size, ct, err := sniffFile(serviceDefinitionPath(s.config.DataDir, svc))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, "", cerr(http.StatusNotFound, "no service files uploaded")
+		}
+		return 0, "", cerr(http.StatusInternalServerError, "stat failed: %v", err)
+	}
+	return size, ct, nil
 }
 
 // coreWriteServiceFile writes or patches a tasks/virtual service definition
