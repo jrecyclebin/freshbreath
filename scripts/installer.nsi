@@ -106,10 +106,8 @@ Section "freshbreath" SecMain
   File /r "${STAGING}\skills"
 
   SetOutPath "$DataDir"
-  ; Optional out-of-band payload (see build-installer.sh). /nonfatal keeps
-  ; the build green when scripts/build-installer.sh didn't stage a data dir
-  ; because no top-level data/ existed at build time.
-  File /r /nonfatal "${STAGING}\data\*.*"
+  ; Optional out-of-band payload (see build-installer.sh).
+  File /r "${STAGING}\data\*.*"
 
   ; Data directory: LocalService needs an explicit grant, ProgramData's
   ; default ACLs only give BUILTIN\Users read & execute.
