@@ -323,8 +323,11 @@ func (s *Store) UpdateAppDetails(nonce string, details *AppDetails) error {
 	return err
 }
 
+// ListHostedApps returns every app with its environment and details blob.
+// Routability is decided by the caller: a slot is served iff its directory
+// exists on disk, so this no longer gates on LastUploaded.
 func (s *Store) ListHostedApps() ([]*App, error) {
-	rows, err := s.db.Query("SELECT nonce, name, url, details FROM apps WHERE details != '{}'")
+	rows, err := s.db.Query("SELECT nonce, name, url, environment, details FROM apps")
 	if err != nil {
 		return nil, err
 	}
@@ -333,14 +336,15 @@ func (s *Store) ListHostedApps() ([]*App, error) {
 	for rows.Next() {
 		a := &App{}
 		var detailsStr string
-		if err := rows.Scan(&a.Nonce, &a.Name, &a.URL, &detailsStr); err != nil {
+		if err := rows.Scan(&a.Nonce, &a.Name, &a.URL, &a.Environment, &detailsStr); err != nil {
 			return nil, err
 		}
-		var d AppDetails
-		if json.Unmarshal([]byte(detailsStr), &d) != nil || d.LastUploaded == nil {
-			continue
+		if detailsStr != "" && detailsStr != "{}" {
+			d := AppDetails{}
+			if json.Unmarshal([]byte(detailsStr), &d) == nil {
+				a.Details = &d
+			}
 		}
-		a.Details = &d
 		apps = append(apps, a)
 	}
 	return apps, rows.Err()
