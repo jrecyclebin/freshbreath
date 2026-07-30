@@ -232,30 +232,45 @@ func appSlug(app *db.App) string {
 	return slugify(app.Name)
 }
 
-// rebuildHostedRoutes reloads the slug→nonce map from the DB.
+// rebuildHostedRoutes reloads the slug→app route map. An app is routable iff
+// at least one deployment slot dir exists on disk (web, staging, production);
+// the details blob is only a report, not the gate.
 func (s *Server) rebuildHostedRoutes() {
 	apps, err := s.store.ListHostedApps()
 	if err != nil {
 		log.Printf("rebuildHostedRoutes: %v", err)
 		return
 	}
-	routes := make(map[string]string, len(apps))
+	routes := make(map[string]hostedApp, len(apps))
 	for _, a := range apps {
-		if slug := appSlug(a); slug != "" {
-			routes[slug] = a.Nonce
+		slug := appSlug(a)
+		if slug == "" || !s.appHasSlotDir(a.Nonce) {
+			continue
 		}
+		routes[slug] = hostedApp{nonce: a.Nonce, environment: a.Environment}
 	}
 	s.hostedMu.Lock()
 	s.hostedRoutes = routes
 	s.hostedMu.Unlock()
 }
 
+// appHasSlotDir reports whether any deployment slot dir exists for the app.
+func (s *Server) appHasSlotDir(nonce string) bool {
+	base := filepath.Join(s.config.DataDir, "apps", nonce)
+	for _, dir := range []string{"web", "staging", "production"} {
+		if fi, err := os.Stat(filepath.Join(base, dir)); err == nil && fi.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		if nonce, _ := s.store.GetSetting("default_app"); nonce != "" && nonce != "control" {
 			s.hostedMu.RLock()
-			for slug, n := range s.hostedRoutes {
-				if n == nonce {
+			for slug, ha := range s.hostedRoutes {
+				if ha.nonce == nonce {
 					s.hostedMu.RUnlock()
 					http.Redirect(w, r, "/"+slug+"/", http.StatusFound)
 					return
@@ -273,8 +288,15 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	slug, rest, _ := strings.Cut(path, "/")
 
+	// An @slot suffix picks a deployment slot explicitly: @dev, @staging, @prod.
+	// Slugs themselves are alnum+dash, so '@' is unambiguous.
+	slot, explicitSlot := "", false
+	if i := strings.IndexByte(slug, '@'); i >= 0 {
+		slot, explicitSlot, slug = slug[i+1:], true, slug[:i]
+	}
+
 	s.hostedMu.RLock()
-	nonce, ok := s.hostedRoutes[slug]
+	ha, ok := s.hostedRoutes[slug]
 	s.hostedMu.RUnlock()
 
 	if !ok {
@@ -288,7 +310,19 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
+	// Resolve the slot's on-disk dir. Without an explicit @slot the app's
+	// Environment picks the default; unknown slots and undeployed dirs 404
+	// rather than silently falling back to another slot.
+	dirName := slotDirName(slot, explicitSlot, ha.environment)
+	if dirName == "" {
+		http.NotFound(w, r)
+		return
+	}
+	webDir := filepath.Join(s.config.DataDir, "apps", ha.nonce, dirName)
+	if fi, err := os.Stat(webDir); err != nil || !fi.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
 
 	if rest != "" {
 		clean := filepath.Clean(rest)
@@ -310,6 +344,31 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	fi, _ := f.Stat()
 	http.ServeContent(w, r, "index.html", fi.ModTime(), f)
+}
+
+// slotDirName maps a requested slot to its on-disk dir under the app folder.
+// An explicit @slot must be one of dev/staging/prod; otherwise the app's
+// Environment names the default (empty/unknown means Development). Returns ""
+// for an unrecognized explicit slot.
+func slotDirName(slot string, explicit bool, environment string) string {
+	if explicit {
+		switch slot {
+		case "dev":
+			return "web"
+		case "staging":
+			return "staging"
+		case "prod":
+			return "production"
+		}
+		return ""
+	}
+	switch environment {
+	case "Staging":
+		return "staging"
+	case "Production":
+		return "production"
+	}
+	return "web"
 }
 
 func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -1356,6 +1415,12 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/apps/{nonce}/deploy
+	if len(parts) >= 4 && parts[3] == "deploy" {
+		s.handleAppDeploy(w, r, nonce)
+		return
+	}
+
 	app, err := s.store.GetApp(nonce)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1551,6 +1616,31 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleAppDeploy copies one deployment slot over another.
+// POST /api/apps/{nonce}/deploy with {"source": "dev|staging", "target":
+// "staging|prod"} (source defaults to dev).
+func (s *Server) handleAppDeploy(w http.ResponseWriter, r *http.Request, nonce string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Source string `json:"source"`
+		Target string `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	route, err := s.coreDeployApp(userFromContext(r.Context()), nonce, req.Source, req.Target)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"route": route})
 }
 
 // services

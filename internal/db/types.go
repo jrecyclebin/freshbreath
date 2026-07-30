@@ -19,7 +19,9 @@ type App struct {
 }
 
 type AppDetails struct {
-	LastUploaded *time.Time `json:"last_uploaded,omitempty"`
+	LastUploaded           *time.Time `json:"last_uploaded,omitempty"`
+	LastDeployedStaging    *time.Time `json:"last_deployed_staging,omitempty"`
+	LastDeployedProduction *time.Time `json:"last_deployed_production,omitempty"`
 }
 
 type User struct {

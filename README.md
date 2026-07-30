@@ -70,6 +70,47 @@ can copy into Claude Code - instructing it to load the skill, build the app and
 publish changes back to Fresh Breath! This eases any work done adding auth,
 third-party connections, SSH, all that stuff.
 
+## Deployment slots
+
+Every hosted app gets three slots, each backed by its own folder:
+
+- **Development** — the upload folder. Everything you drop into Fresh Breath
+  lands here, unchanged from how hosting has always worked.
+- **Staging** — a frozen copy of Development, made by deploying.
+- **Production** — same idea, one step further along.
+
+Uploads always go to Development. Deploying copies the current Development
+folder into Staging or Production (buttons in the app's hosting panel, or
+`POST /api/apps/{nonce}/deploy` with `{"target":"staging"}` — pass
+`"source":"staging"` to promote Staging straight to Production).
+
+Each slot is reachable at its own URL, and the bare app URL serves whichever
+slot the app's **default environment** names (Development unless you change
+it):
+
+| URL | Serves |
+|-----|--------|
+| `/your-app@dev` | Development (the upload folder) |
+| `/your-app@staging` | Staging |
+| `/your-app@prod` | Production |
+| `/your-app` | the app's default environment |
+
+Asking for a slot that hasn't been deployed yet (or setting the default
+environment to an undeployed slot) gets you an honest 404 — Fresh Breath won't
+quietly substitute a different slot behind your back.
+
+> ⚠️ **HARDCODED BASE PATHS**
+>
+> Apps that bake `/your-app/` into their asset URLs or router base will miss
+> when served from `/your-app@staging`. Prefer relative asset paths (`./app.js`)
+> so the same build works in every slot.
+
+The typical loop: iterate on Development (`/your-app@dev`), deploy to Staging
+to freeze a candidate, then deploy to Production and flip the app's default
+environment to Production so the bare URL goes live. Sites you don't care to
+stage can just live on Development forever — the bare URL serves it by
+default.
+
 ## Running the server
 
 Grab a binary from the GitHub release.

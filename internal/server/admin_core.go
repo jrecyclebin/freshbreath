@@ -598,7 +598,8 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, fil
 	return "/" + appSlug(app), nil
 }
 
-// coreDeleteAppWeb removes an app's web directory and clears its details.
+// coreDeleteAppWeb removes an app's web directory (the Development slot).
+// Staging/production deploy records survive: what's live elsewhere stays live.
 func (s *Server) coreDeleteAppWeb(actor *db.User, nonce string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
@@ -611,12 +612,109 @@ func (s *Server) coreDeleteAppWeb(actor *db.User, nonce string) error {
 	if err := os.RemoveAll(webDir); err != nil {
 		return cerr(http.StatusInternalServerError, "failed to remove web dir")
 	}
-	if err := s.store.UpdateAppDetails(nonce, &db.AppDetails{}); err != nil {
+	details := app.Details
+	if details == nil {
+		details = &db.AppDetails{}
+	}
+	details.LastUploaded = nil
+	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
 		return cerr(http.StatusInternalServerError, "failed to save details")
 	}
 	s.rebuildHostedRoutes()
 	s.audit(actor, "removed web files", app.Name)
 	return nil
+}
+
+// deploySlotDirs maps deploy API slot names to on-disk dirs. Development is
+// the web upload folder; the URL scheme uses the same dev/staging/prod names.
+var deploySlotDirs = map[string]string{
+	"dev":     "web",
+	"staging": "staging",
+	"prod":    "production",
+}
+
+// coreDeployApp copies one deployment slot over another, replacing the target
+// entirely. Source may be dev or staging (dev when empty); target staging or
+// prod. Returns the deployed slot's URL route.
+func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (string, error) {
+	if err := s.gateApp(actor, nonce); err != nil {
+		return "", err
+	}
+	if source == "" {
+		source = "dev"
+	}
+	srcName, ok := deploySlotDirs[source]
+	if !ok || source == "prod" {
+		return "", cerr(http.StatusBadRequest, "invalid source slot %q (dev or staging)", source)
+	}
+	dstName, ok := deploySlotDirs[target]
+	if !ok || target == "dev" {
+		return "", cerr(http.StatusBadRequest, "invalid target slot %q (staging or prod)", target)
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		return "", cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	base := filepath.Join(s.config.DataDir, "apps", nonce)
+	srcDir := filepath.Join(base, srcName)
+	if fi, err := os.Stat(srcDir); err != nil || !fi.IsDir() {
+		return "", cerr(http.StatusNotFound, "%s slot is empty; nothing to deploy", source)
+	}
+	dstDir := filepath.Join(base, dstName)
+	if err := os.RemoveAll(dstDir); err != nil {
+		return "", cerr(http.StatusInternalServerError, "failed to clear %s slot", target)
+	}
+	if err := copyDir(srcDir, dstDir); err != nil {
+		return "", cerr(http.StatusInternalServerError, "deploy failed: %v", err)
+	}
+
+	now := time.Now().UTC()
+	details := app.Details
+	if details == nil {
+		details = &db.AppDetails{}
+	}
+	if target == "staging" {
+		details.LastDeployedStaging = &now
+	} else {
+		details.LastDeployedProduction = &now
+	}
+	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
+		return "", cerr(http.StatusInternalServerError, "failed to save details")
+	}
+	s.rebuildHostedRoutes()
+	s.audit(actor, "deployed "+source+" → "+target, app.Name)
+	return "/" + appSlug(app) + "@" + target, nil
+}
+
+// copyDir recursively copies the contents of src into dst, preserving file
+// modes. dst is created if missing.
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		out := filepath.Join(dst, rel)
+		if fi.IsDir() {
+			return os.MkdirAll(out, 0755)
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		w, err := os.OpenFile(out, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fi.Mode())
+		if err != nil {
+			in.Close()
+			return err
+		}
+		_, copyErr := io.Copy(w, in)
+		in.Close()
+		closeErr := w.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
 }
 
 // cleanAppFilePath validates a path relative to an app's web directory and
@@ -1164,8 +1262,8 @@ func extractZip(r io.ReaderAt, size int64, destDir string) error {
 func (s *Server) isHostedNonce(nonce string) bool {
 	s.hostedMu.RLock()
 	defer s.hostedMu.RUnlock()
-	for _, n := range s.hostedRoutes {
-		if n == nonce {
+	for _, ha := range s.hostedRoutes {
+		if ha.nonce == nonce {
 			return true
 		}
 	}

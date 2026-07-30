@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) *Server {
 		pending:        make(map[string]*pendingAuth),
 		httpClient:     &http.Client{},
 		oidcProviders:  make(map[int64]*oidc.Provider),
-		hostedRoutes:   make(map[string]string),
+		hostedRoutes:   make(map[string]hostedApp),
 		lastSeenAt:     make(map[int64]time.Time),
 		localKey:       localKey,
 		agentMgr:       agentMgr,

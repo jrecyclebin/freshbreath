@@ -47,7 +47,7 @@ type Server struct {
 	gitGw             *sshkit.GitGateway     // stateless git-over-SSH gateway
 	lastSeenAt        map[int64]time.Time
 	lastSeenMu        sync.Mutex
-	hostedRoutes      map[string]string // slug → app nonce
+	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedMu          sync.RWMutex
 	virtualMCPs       *virtualMCPRegistry                // slug → MCP server entries
 	mcpAuthPending    *sync.Map                          // key → *mcpPendingAuth (MCP OAuth flow state)
@@ -56,6 +56,13 @@ type Server struct {
 	centralMCPPRMVal  *oauthex.ProtectedResourceMetadata // PRM for central MCP
 	centralMCPServers map[string]*mcp.Server             // role → lazily-built central MCP server
 	centralMCPSrvMu   sync.Mutex                         // guards centralMCPServers
+}
+
+// hostedApp is one routable app: the nonce resolves on-disk slot dirs, and
+// environment picks which slot the bare /<slug> path serves.
+type hostedApp struct {
+	nonce       string
+	environment string
 }
 
 type pendingAuth struct {
@@ -85,7 +92,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		store:          store,
 		pending:        make(map[string]*pendingAuth),
 		lastSeenAt:     make(map[int64]time.Time),
-		hostedRoutes:   make(map[string]string),
+		hostedRoutes:   make(map[string]hostedApp),
 		httpClient:     &http.Client{Timeout: 300 * time.Second},
 		oidcProviders:  make(map[int64]*oidc.Provider),
 		localKey:       localKey,

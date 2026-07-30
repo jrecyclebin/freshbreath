@@ -516,6 +516,11 @@ function hostRoute(app) {
   return '/' + slug;
 }
 
+// An app is hosted when any deployment slot has content: the dev upload or a
+// staging/production deploy. Slots live at <route>@dev|@staging|@prod; the
+// bare route serves the app's default environment.
+const isHosted = (a) => !!(a.details?.last_uploaded || a.details?.last_deployed_staging || a.details?.last_deployed_production);
+
 function buildPrompt(app, appServices) {
   const fbURL = window.__HOMESLICE_CONFIG?.apiBase || window.location.origin;
   const serviceLines = appServices.length
@@ -528,7 +533,7 @@ function buildPrompt(app, appServices) {
 
 function Overview({ users, apps, services, audit }) {
   const activeUsers = users.filter(u=>u.status==='Active').length;
-  const prodApps = apps.filter(a=>a.environment==='Production').length;
+  const prodApps = apps.filter(a=>a.details?.last_deployed_production).length;
   return (
     <>
       <PageHead
@@ -589,12 +594,12 @@ function Overview({ users, apps, services, audit }) {
         <div>
           <h3 style={{margin:'0 0 12px',fontSize:14,fontWeight:500}}>Hosted Apps</h3>
           <div className="table-wrap" style={{padding:4}}>
-            {apps.filter(a => a.details?.last_uploaded).length === 0 ? (
+            {apps.filter(isHosted).length === 0 ? (
               <div className="empty" style={{padding:'24px 16px'}}>
                 <b>No hosted apps yet.</b><br/>Upload web content to an app to make it reachable.
               </div>
             ) : (
-              apps.filter(a => a.details?.last_uploaded).slice(0,6).map((a,i,arr)=>
+              apps.filter(isHosted).slice(0,6).map((a,i,arr)=>
                 <div key={a.nonce} style={{padding:'12px 16px',display:'flex',alignItems:'center',gap:16,borderBottom:i<arr.length-1?'1px solid var(--line-soft)':0}}>
                   <div style={{flex:1,minWidth:0}}>
                     <a className="mono hosted-app-link" href={hostRoute(a)} target="_blank" rel="noopener noreferrer">{a.name}</a>
@@ -931,7 +936,7 @@ function AppsView({ token, apps, services, users, onRefresh }) {
                     <div className="meta">
                       <div style={{display:'flex',alignItems:'center',gap:6}}>
                         <b>{a.name}</b>
-                        {a.details?.last_uploaded && <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'oklch(from var(--tone-green) var(--tone-bg-l) calc(c*.25) h)',color:'oklch(from var(--tone-green) var(--tone-fg-l) calc(c*.67) h)',border:'1px solid oklch(from var(--tone-green) var(--tone-border-l) calc(c*.33) h)',lineHeight:1.4}}>hosted</span>}
+                        {isHosted(a) && <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'oklch(from var(--tone-green) var(--tone-bg-l) calc(c*.25) h)',color:'oklch(from var(--tone-green) var(--tone-fg-l) calc(c*.67) h)',border:'1px solid oklch(from var(--tone-green) var(--tone-border-l) calc(c*.33) h)',lineHeight:1.4}}>hosted</span>}
                       </div>
                       <span className="mono" style={{cursor:'pointer'}} onClick={()=>copyNonce(a.nonce)} title={`${a.nonce} — click to copy`}>
                         {a.nonce.slice(0,8)}… <span style={{opacity:0.6,verticalAlign:'middle',marginLeft:2}}><Icon name="copy" size={12}/></span>
@@ -962,9 +967,13 @@ function AppsView({ token, apps, services, users, onRefresh }) {
 }
 
 function HostUpload({ token, app, onRefresh }) {
-  const isHosted = !!(app.details?.last_uploaded);
-  const [hosted, setHosted] = useState(isHosted);
+  const [hosted, setHosted] = useState(!!(app.details?.last_uploaded));
   const [uploadedAt, setUploadedAt] = useState(app.details?.last_uploaded || null);
+  const [deployed, setDeployed] = useState({
+    staging: app.details?.last_deployed_staging || null,
+    prod: app.details?.last_deployed_production || null,
+  });
+  const [deploying, setDeploying] = useState(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const inputRef = useRef(null);
@@ -1023,6 +1032,27 @@ function HostUpload({ token, app, onRefresh }) {
     upload(e.dataTransfer.files[0]);
   };
 
+  // Deploys copy the current Development (web) folder into the target slot.
+  const deploy = async (target) => {
+    setDeploying(target);
+    try {
+      const res = await api(token, 'POST', '/api/apps/' + app.nonce + '/deploy', { target });
+      setDeployed(d => ({...d, [target]: new Date().toISOString()}));
+      toast('Deployed to ' + (res.route || route + '@' + target));
+      onRefresh();
+    } catch(e) {
+      toast(e.message, true);
+    } finally {
+      setDeploying(null);
+    }
+  };
+
+  const slots = [
+    { name:'Development', suffix:'@dev', when: uploadedAt, verb:'uploaded', empty:'not uploaded' },
+    { name:'Staging', suffix:'@staging', when: deployed.staging, verb:'deployed', empty:'not deployed', target:'staging' },
+    { name:'Production', suffix:'@prod', when: deployed.prod, verb:'deployed', empty:'not deployed', target:'prod' },
+  ];
+
   return (
     <div className="field">
       <label>Web hosting</label>
@@ -1046,6 +1076,34 @@ function HostUpload({ token, app, onRefresh }) {
         {uploading ? 'Uploading…' : (hosted ? 'Drop to replace' : 'Drop .html or .zip here, or click to browse')}
         <input ref={inputRef} type="file" accept=".html,.zip" style={{display:'none'}}
           onChange={e=>upload(e.target.files[0])}/>
+      </div>
+
+      <div style={{marginTop:16}}>
+        <div style={{fontSize:13,fontWeight:500,marginBottom:4}}>Deployment slots</div>
+        <span className="help" style={{display:'block',marginBottom:10}}>
+          Deploying copies the Development folder into a slot. The bare {route} URL serves the default environment (above); each slot also has its own URL.
+        </span>
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          {slots.map(s=>(
+            <div key={s.suffix} style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              <Badge tone={envTone(s.name)}><span className="env-full">{s.name}</span><span className="env-short">{envShort(s.name)}</span></Badge>
+              {s.when ? (
+                <a className="mono hosted-app-link" style={{fontSize:12.5}} href={route + s.suffix} target="_blank" rel="noopener noreferrer">{route + s.suffix}</a>
+              ) : (
+                <span className="mono muted" style={{fontSize:12.5}}>{route + s.suffix}</span>
+              )}
+              <span className="muted" style={{fontSize:12,flex:1}}>{s.when ? s.verb + ' ' + fmtAuditTime(s.when) : s.empty}</span>
+              {s.target && (
+                <button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:12}}
+                  disabled={!hosted || deploying===s.target}
+                  title={hosted ? 'Copy Development into ' + s.name : 'Upload to Development first'}
+                  onClick={()=>deploy(s.target)}>
+                  {deploying===s.target ? 'Deploying…' : 'Deploy'}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -1131,10 +1189,11 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
         <input className="input" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
       </div>
       <div className="field-row">
-        <div className="field"><label>Environment</label>
+        <div className="field"><label>Default environment</label>
           <select className="input" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
             <option>Production</option><option>Staging</option><option>Development</option>
           </select>
+          <span className="help">Which deployment slot the bare app URL serves.</span>
         </div>
         <div className="field"><label>Owner</label>
           <select className="input" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
@@ -1740,11 +1799,11 @@ function SettingsView({ token, services, apps, user }) {
             <label>Landing page</label>
             <select className="input" value={defaultApp} onChange={e => setDefaultApp(e.target.value)}>
               <option value="">Control Panel</option>
-              {apps.filter(a => a.details?.last_uploaded).map(a => (
+              {apps.filter(isHosted).map(a => (
                 <option key={a.nonce} value={a.nonce}>{a.name}</option>
               ))}
             </select>
-            {apps.filter(a => a.details?.last_uploaded).length === 0 && (
+            {apps.filter(isHosted).length === 0 && (
               <span className="help">No hosted apps yet. Upload web content to an app to make it available as a landing page.</span>
             )}
             <div style={{display:'flex',gap:8,marginTop:16}}>
