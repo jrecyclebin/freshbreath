@@ -32,6 +32,19 @@ mv "dist/${GOOS}-${arch}-$binary" "$staging/$binary"
 cp README.md "$staging/README.txt"
 cp -r web skills "$staging/"
 
+# Swap the control panel into dist mode: the working tree loads app.js (JSX)
+# via in-browser babel for edit-and-refresh development; packaged dists get
+# the pre-compiled app and no babel payload.
+node scripts/compile-control.mjs
+cp -f web/control/app.compiled.js "$staging/web/control/app.compiled.js"
+sed -i \
+  -e '/Dev mode:/d' \
+  -e '/babel-standalone-7.29.0.min.js/d' \
+  -e 's|<script type="text/babel" src="/control/app.js"></script>|<script src="/control/app.compiled.js"></script>|' \
+  "$staging/web/control.html"
+grep -q 'app.compiled.js' "$staging/web/control.html" || { echo "✗ control.html swap failed"; exit 1; }
+rm -rf "$staging/web/control/app.js" "$staging/web/control/vendor/babel-standalone-7.29.0.min.js"
+
 if [ "$GOOS" = "windows" ]; then
   archive="freshbreath-${VERSION}-${GOOS}-${arch}.zip"
   echo "→ Packaging $archive"
