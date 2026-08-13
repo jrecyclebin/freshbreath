@@ -12,17 +12,14 @@
       document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     })();
   </script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/control/fonts.css">
   <link rel="stylesheet" href="/control/styles.css">
   <script type="module" src="/frbr.js"></script>
-  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin></script>
-  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin></script>
-  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin></script>
+  <script src="/control/vendor/react-18.3.1.production.min.js"></script>
+  <script src="/control/vendor/react-dom-18.3.1.production.min.js"></script>
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel" src="/control/app.js"></script>
+  <script src="/control/app.compiled.js"></script>
 </body>
 </html>

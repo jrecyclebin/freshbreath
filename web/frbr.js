@@ -5,9 +5,7 @@
  * localStorage. The server's OAuth client_secret is never exposed to
  * the client — token exchange and refresh run server-side.
  */
-import { Client as McpClient } from "https://esm.sh/@modelcontextprotocol/sdk@1.29.0/client/index.js?deps=zod@3";
-import { StreamableHTTPClientTransport } from "https://esm.sh/@modelcontextprotocol/sdk@1.29.0/client/streamableHttp.js?deps=zod@3";
-import EventEmitter from 'https://esm.sh/eventemitter3';
+import { McpClient, StreamableHTTPClientTransport, EventEmitter } from "/control/vendor/frbr-deps-1.29.0.js";
 
 const API = window.__HOMESLICE_CONFIG?.apiBase ?? "";
 const APP_NONCE = window.__HOMESLICE_CONFIG?.appNonce ?? null;
