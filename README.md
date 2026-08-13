@@ -224,8 +224,10 @@ Tokens are automatically refreshed in these calls, if possible.
 Visit `/control` in a browser to open the admin panel. The panel is fully
 self-hosted: React, fonts, and the SDK's dependencies are all vendored and
 served by the binary — it works on airgapped machines with no internet access.
-(If you edit `web/control/app.js`, recompile it with
-`node scripts/compile-control.mjs` before serving.)
+In a dev checkout the panel compiles its JSX (`web/control/app.js`) in-browser
+with a vendored babel, so edits take effect on refresh. `mise run build:*`
+packaged dists compile it ahead of time (`web/control/app.compiled.js`) and
+ship without babel.
 
 - Register **apps** (static HTML projects that use the SDK)
 - Register **services** (OAuth/OIDC providers, MCP servers, or API-key services)

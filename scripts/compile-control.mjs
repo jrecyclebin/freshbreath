@@ -1,12 +1,13 @@
 // Compiles the control panel JSX source (web/control/app.js) to plain JS
-// (web/control/app.compiled.js) so the served page needs no babel runtime.
+// (web/control/app.compiled.js) for distribution builds. In dev the page
+// compiles app.js in-browser via the same vendored babel; scripts/build.sh
+// runs this before packaging a dist and swaps the HTML to the compiled app.
 // Run from the repo root: node scripts/compile-control.mjs
-// Uses the vendored babel-standalone in scripts/vendor/ — no npm install needed.
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const Babel = require("./vendor/babel-standalone-7.29.0.min.js");
+const Babel = require("../web/control/vendor/babel-standalone-7.29.0.min.js");
 
 const SRC = "web/control/app.js";
 const OUT = "web/control/app.compiled.js";
