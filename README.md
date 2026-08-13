@@ -221,7 +221,11 @@ Tokens are automatically refreshed in these calls, if possible.
 
 ## Admin panel
 
-Visit `/control` in a browser to open the admin panel. On first boot, with no auth service configured, you are granted synthetic superuser access. You can then:
+Visit `/control` in a browser to open the admin panel. The panel is fully
+self-hosted: React, fonts, and the SDK's dependencies are all vendored and
+served by the binary — it works on airgapped machines with no internet access.
+(If you edit `web/control/app.js`, recompile it with
+`node scripts/compile-control.mjs` before serving.)
 
 - Register **apps** (static HTML projects that use the SDK)
 - Register **services** (OAuth/OIDC providers, MCP servers, or API-key services)
@@ -243,10 +247,14 @@ Visit `/control` in a browser to open the admin panel. On first boot, with no au
 │   ├── server/               # HTTP server, handlers, MCP, OAuth, admin, /ssh/git
 │   └── sshkit/               # SSH keys, agent, sessions, GitGateway
 ├── web/
-│   ├── control.html          # Admin panel shell (React CDN)
+│   ├── control.html          # Admin panel shell
 │   ├── frbr.js               # Frontend SDK (login + ServiceProxy)
 │   └── control/
-│       ├── app.js            # React admin app
+│       ├── app.js            # React admin app (JSX source)
+│       ├── app.compiled.js   # Compiled app — regenerate via scripts/compile-control.mjs
+│       ├── fonts.css         # @font-face for the vendored Geist fonts
+│       ├── fonts/            # Geist + Geist Mono woff2 (OFL)
+│       ├── vendor/           # React/ReactDOM UMD + MCP SDK bundle (version-pinned)
 │       ├── styles.css        # Theme
 │       └── freshbreath.svg   # Logo
 ├── skills/
