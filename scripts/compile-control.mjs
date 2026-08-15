@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
 const Babel = require("../web/control/vendor/babel-standalone-7.29.0.min.js");
 
 const SRC = "web/control/app.js";
-const OUT = "web/control/app.compiled.js";
+const OUT = "dist/app.compiled.js";
 
 const src = readFileSync(SRC, "utf8");
 const header = "// Generated from app.js by scripts/compile-control.mjs — do not edit directly.\n";
