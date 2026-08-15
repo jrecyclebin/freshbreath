@@ -36,7 +36,7 @@ cp -r web skills "$staging/"
 # via in-browser babel for edit-and-refresh development; packaged dists get
 # the pre-compiled app and no babel payload.
 node scripts/compile-control.mjs
-cp -f web/control/app.compiled.js "$staging/web/control/app.compiled.js"
+mv dist/app.compiled.js "$staging/web/control/app.compiled.js"
 sed -i \
   -e '/Dev mode:/d' \
   -e '/babel-standalone-7.29.0.min.js/d' \
