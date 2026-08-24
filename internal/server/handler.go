@@ -491,15 +491,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// SSH auth — return a URL to the passphrase form
 	if svc.Descriptor.Type == "ssh" {
 		state := db.GenNonce()
-		s.pendingMu.Lock()
-		s.pending[state] = &pendingAuth{
+		s.putPending(state, &pendingAuth{
 			serviceID:   svc.ID,
 			serviceURL:  svc.URL,
 			appNonce:    nonce,
 			appState:    appState,
 			serviceType: "ssh",
-		}
-		s.pendingMu.Unlock()
+		})
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -517,8 +515,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Failed to begin OIDC auth: %v", err), http.StatusInternalServerError)
 			return
 		}
-		s.pendingMu.Lock()
-		s.pending[state] = &pendingAuth{
+		s.putPending(state, &pendingAuth{
 			serviceID:     svc.ID,
 			serviceURL:    svc.URL,
 			appNonce:      nonce,
@@ -532,8 +529,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			serviceType:   "oidc",
 			oidcNonce:     oidcNonce,
 			oidcIssuer:    svc.URL,
-		}
-		s.pendingMu.Unlock()
+		})
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -563,15 +559,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 		// Services with no default API-key — redirect to key entry form
 		state := db.GenNonce()
-		s.pendingMu.Lock()
-		s.pending[state] = &pendingAuth{
+		s.putPending(state, &pendingAuth{
 			serviceID:   svc.ID,
 			serviceURL:  svc.URL,
 			appNonce:    nonce,
 			appState:    appState,
 			serviceType: "apikey",
-		}
-		s.pendingMu.Unlock()
+		})
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -587,8 +581,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.pendingMu.Lock()
-	s.pending[state] = &pendingAuth{
+	s.putPending(state, &pendingAuth{
 		serviceID:     svc.ID,
 		serviceURL:    svc.URL,
 		appNonce:      nonce,
@@ -600,8 +593,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		scopes:        svc.Descriptor.Scopes,
 		proxied:       svc.Descriptor.Proxied,
 		serviceType:   svc.Descriptor.Type,
-	}
-	s.pendingMu.Unlock()
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -641,12 +633,11 @@ func (s *Server) completeAuth(w http.ResponseWriter, r *http.Request, pending *p
 // Exchanges the upstream code, stores the upstream token in the mcpPendingAuth,
 // generates a Freshbreath auth code, and redirects to the MCP client's redirect_uri.
 func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, code string) {
-	mcpPendingVal, ok := s.mcpAuthPending.LoadAndDelete(pending.appNonce)
+	mcpPending, ok, _ := s.getMCPPending(pending.appNonce)
 	if !ok {
 		http.Error(w, "MCP auth session expired", http.StatusBadRequest)
 		return
 	}
-	mcpPending := mcpPendingVal.(*mcpPendingAuth)
 
 	redirectURI := s.config.PublicBaseURL + "/service/callback"
 
@@ -737,6 +728,7 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
 
 	// Generate a Freshbreath auth code and store it
 	fbCode := rand.Text()
+	s.oauthSrv.sweepExpiredCodes(time.Now())
 	s.oauthSrv.codesMu.Lock()
 	s.oauthSrv.codes[fbCode] = &mcpAuthCode{
 		pending: mcpPending,
@@ -753,18 +745,18 @@ func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending
 // (SSH, API key). Returns the redirect URL the browser should navigate to, or writes an
 // error response and returns ("", false).
 func (s *Server) completeMCPDirectAuth(w http.ResponseWriter, appNonce, token, email, scopes string, expiry time.Time) (string, bool) {
-	v, ok := s.mcpAuthPending.LoadAndDelete(appNonce)
+	mcp, ok, _ := s.getMCPPending(appNonce)
 	if !ok {
 		http.Error(w, "MCP auth session expired", http.StatusBadRequest)
 		return "", false
 	}
-	mcp := v.(*mcpPendingAuth)
 	mcp.upstreamToken = token
 	mcp.userEmail = email
 	mcp.upstreamExpiry = expiry
 	mcp.upstreamScopes = scopes
 
 	code := rand.Text()
+	s.oauthSrv.sweepExpiredCodes(time.Now())
 	s.oauthSrv.codesMu.Lock()
 	s.oauthSrv.codes[code] = &mcpAuthCode{pending: mcp, issued: time.Now()}
 	s.oauthSrv.codesMu.Unlock()
@@ -780,15 +772,14 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.pendingMu.Lock()
-	pending, ok := s.pending[state]
-	if ok {
-		delete(s.pending, state)
-	}
-	s.pendingMu.Unlock()
+	pending, ok, expired := s.getPending(state)
 
+	if !ok && expired {
+		http.Error(w, "Auth state expired — restart the login flow", http.StatusBadRequest)
+		return
+	}
 	if !ok {
-		http.Error(w, "Unknown or expired state", http.StatusBadRequest)
+		http.Error(w, "Unknown auth state", http.StatusBadRequest)
 		return
 	}
 
@@ -2772,18 +2763,17 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Look up the pending auth entry
-		s.pendingMu.Lock()
-		pending, ok := s.pending[req.State]
-		if ok && pending.serviceType == "ssh" {
-			delete(s.pending, req.State)
-		} else {
-			ok = false
-		}
-		s.pendingMu.Unlock()
+		// Look up the pending auth entry. Kept alive until its TTL so a
+		// mistyped passphrase (or a back-button revisit) can be retried.
+		pending, ok, expired := s.getPending(req.State)
+		ok = ok && pending.serviceType == "ssh"
 
+		if !ok && expired {
+			http.Error(w, "Auth state expired — restart the login flow", http.StatusBadRequest)
+			return
+		}
 		if !ok {
-			http.Error(w, "Unknown or expired auth state", http.StatusBadRequest)
+			http.Error(w, "Unknown auth state", http.StatusBadRequest)
 			return
 		}
 
@@ -2825,7 +2815,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 
 		// MCP flow — return redirect URL for the form's JS to navigate to
-		if _, hasMCP := s.mcpAuthPending.Load(pending.appNonce); hasMCP {
+		if _, hasMCP, _ := s.getMCPPending(pending.appNonce); hasMCP {
 			redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, idToken, user.Email, "", now.Add(accessTokenTTL))
 			if !ok {
 				return
@@ -2945,22 +2935,20 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.pendingMu.Lock()
-		pending, ok := s.pending[req.State]
-		if ok && pending.serviceType == "apikey" {
-			delete(s.pending, req.State)
-		} else {
-			ok = false
-		}
-		s.pendingMu.Unlock()
+		pending, ok, expired := s.getPending(req.State)
+		ok = ok && pending.serviceType == "apikey"
 
+		if !ok && expired {
+			http.Error(w, "Auth state expired — restart the login flow", http.StatusBadRequest)
+			return
+		}
 		if !ok {
-			http.Error(w, "Unknown or expired auth state", http.StatusBadRequest)
+			http.Error(w, "Unknown auth state", http.StatusBadRequest)
 			return
 		}
 
 		// MCP flow — complete via redirect to the MCP client's redirect_uri
-		if _, hasMCP := s.mcpAuthPending.Load(pending.appNonce); hasMCP {
+		if _, hasMCP, _ := s.getMCPPending(pending.appNonce); hasMCP {
 			redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, req.APIKey, "api-key-user", "", time.Now().Add(365*24*time.Hour))
 			if !ok {
 				return
