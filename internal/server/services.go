@@ -404,6 +404,7 @@ const (
 	accessTokenTTL     = 15 * time.Minute
 	refreshTokenTTL    = 14 * 24 * time.Hour
 	refreshGraceWindow = 30 * time.Second
+	pendingAuthTTL     = 30 * time.Minute // login link stays usable this long; retries allowed
 )
 
 // freshbreathClaims is the single claim type for all Freshbreath JWTs.

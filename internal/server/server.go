@@ -80,6 +80,69 @@ type pendingAuth struct {
 	// OIDC fields
 	oidcNonce  string
 	oidcIssuer string
+	expiresAt  time.Time
+}
+
+// putPending registers a login-in-progress state, stamped with pendingAuthTTL.
+// State is only removed by expiry (or its own retrieval of an expired entry) —
+// failed credentials and link replays must not kill it.
+func (s *Server) putPending(state string, p *pendingAuth) {
+	p.expiresAt = time.Now().Add(pendingAuthTTL)
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	s.sweepPendingLocked(time.Now())
+	s.pending[state] = p
+}
+
+// getPending returns the in-flight login for state. Non-expired entries are
+// never deleted here — the expired flag distinguishes "expired" from
+// "unknown" for error messages, and sweeps the expired entry.
+func (s *Server) getPending(state string) (p *pendingAuth, ok, expired bool) {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+	if p, ok = s.pending[state]; ok && time.Now().After(p.expiresAt) {
+		delete(s.pending, state)
+		return nil, false, true
+	}
+	return p, ok, false
+}
+
+// sweepPendingLocked drops expired login states; caller holds pendingMu.
+// Lazy by design — no background goroutine purely for GC.
+func (s *Server) sweepPendingLocked(now time.Time) {
+	for k, p := range s.pending {
+		if now.After(p.expiresAt) {
+			delete(s.pending, k)
+		}
+	}
+}
+
+func (s *Server) putMCPPending(key string, m *mcpPendingAuth) {
+	m.expiresAt = time.Now().Add(pendingAuthTTL)
+	s.sweepMCPPending(time.Now())
+	s.mcpAuthPending.Store(key, m)
+}
+
+// getMCPPending mirrors getPending for the MCP OAuth flow state.
+func (s *Server) getMCPPending(key string) (m *mcpPendingAuth, ok, expired bool) {
+	if v, found := s.mcpAuthPending.Load(key); found {
+		m = v.(*mcpPendingAuth)
+		if time.Now().After(m.expiresAt) {
+			s.mcpAuthPending.Delete(key)
+			return nil, false, true
+		}
+		return m, true, false
+	}
+	return nil, false, false
+}
+
+func (s *Server) sweepMCPPending(now time.Time) {
+	s.mcpAuthPending.Range(func(k, v any) bool {
+		if now.After(v.(*mcpPendingAuth).expiresAt) {
+			s.mcpAuthPending.Delete(k)
+		}
+		return true
+	})
 }
 
 // New constructs a freshbreath server from its externally-wired dependencies

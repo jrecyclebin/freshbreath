@@ -106,6 +106,7 @@ type mcpPendingAuth struct {
 	upstreamExpiry   time.Time
 	userEmail        string
 	upstreamScopes   string
+	expiresAt        time.Time // pendingAuthTTL from creation; link usable until then
 }
 
 // ── MCP Auth Code Store ─────────────────────────────────────────────
@@ -132,6 +133,18 @@ func newOAuthServer(s *Server) *oauthServer {
 		clients: newOAuthClientStore(s.store),
 		codes:   make(map[string]*mcpAuthCode),
 		server:  s,
+	}
+}
+
+// sweepsExpiredCodes drops exchanged-or-stale auth codes; called lazily on
+// store/lookup, same janitor style as sweepPendingLocked.
+func (os *oauthServer) sweepExpiredCodes(now time.Time) {
+	os.codesMu.Lock()
+	defer os.codesMu.Unlock()
+	for k, c := range os.codes {
+		if now.Sub(c.issued) > 10*time.Minute {
+			delete(os.codes, k)
+		}
 	}
 }
 
@@ -294,7 +307,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// Store the MCP client's pending auth request.
 	mcpPendingKey := rand.Text()
-	os.server.mcpAuthPending.Store(mcpPendingKey, &mcpPendingAuth{
+	os.server.putMCPPending(mcpPendingKey, &mcpPendingAuth{
 		clientID:            clientID,
 		redirectURI:         redirectURI,
 		state:               state,
@@ -310,15 +323,13 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// SSH — redirect to passphrase form.
 	if svc.Descriptor.Type == "ssh" {
 		stateKey := rand.Text()
-		os.server.pendingMu.Lock()
-		os.server.pending[stateKey] = &pendingAuth{
+		os.server.putPending(stateKey, &pendingAuth{
 			serviceID:   svc.ID,
 			serviceURL:  svc.URL,
 			appNonce:    mcpPendingKey,
 			appState:    mcpPendingKey,
 			serviceType: "ssh",
-		}
-		os.server.pendingMu.Unlock()
+		})
 		http.Redirect(w, r, fmt.Sprintf("%s/service/ssh-auth?state=%s&service_id=%d&mcp=1",
 			os.server.config.PublicBaseURL, stateKey, svc.ID), http.StatusFound)
 		return
@@ -327,15 +338,13 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// API key — redirect to key entry form.
 	if svc.Descriptor.Auth == "key" {
 		stateKey := rand.Text()
-		os.server.pendingMu.Lock()
-		os.server.pending[stateKey] = &pendingAuth{
+		os.server.putPending(stateKey, &pendingAuth{
 			serviceID:   svc.ID,
 			serviceURL:  svc.URL,
 			appNonce:    mcpPendingKey,
 			appState:    mcpPendingKey,
 			serviceType: "apikey",
-		}
-		os.server.pendingMu.Unlock()
+		})
 		http.Redirect(w, r, fmt.Sprintf("%s/service/apikey-auth?state=%s&service_id=%d&mcp=1",
 			os.server.config.PublicBaseURL, stateKey, svc.ID), http.StatusFound)
 		return
@@ -380,9 +389,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		pa.tokenEndpoint = tu
 	}
 
-	os.server.pendingMu.Lock()
-	os.server.pending[oauthState] = pa
-	os.server.pendingMu.Unlock()
+	os.server.putPending(oauthState, pa)
 
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
@@ -442,6 +449,7 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 	}
 
 	// Look up the auth code
+	os.sweepExpiredCodes(time.Now())
 	os.codesMu.Lock()
 	mcpCode, ok := os.codes[code]
 	if ok {
