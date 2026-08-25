@@ -126,6 +126,23 @@ func (s *Store) Migrate() error {
     );
     CREATE INDEX IF NOT EXISTS idx_refresh_families_user_email ON refresh_families(user_email);
     CREATE INDEX IF NOT EXISTS idx_refresh_families_expires_at ON refresh_families(expires_at);
+
+    CREATE TABLE IF NOT EXISTS update_feeds (
+      id                   TEXT PRIMARY KEY,
+      url                  TEXT NOT NULL DEFAULT '',
+      mode                 TEXT NOT NULL,
+      key_hex              TEXT NOT NULL,
+      name                 TEXT NOT NULL DEFAULT '',
+      created_by           INTEGER NOT NULL DEFAULT 0,
+      created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      last_applied_version TEXT NOT NULL DEFAULT '',
+      last_applied_at      TEXT,
+      last_etag            TEXT NOT NULL DEFAULT '',
+      last_modified        TEXT NOT NULL DEFAULT '',
+      last_error           TEXT NOT NULL DEFAULT '',
+      last_error_at        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_update_feeds_mode ON update_feeds(mode);
   `)
 	if err != nil {
 		return err
@@ -1201,4 +1218,140 @@ func (s *Store) DeleteExpiredRefreshFamilies(now time.Time) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ── Update Feeds ──
+
+const updateFeedCols = `id, url, mode, key_hex, name, created_by, created_at,
+    last_applied_version, last_applied_at, last_etag, last_modified, last_error, last_error_at`
+
+func scanUpdateFeed(row interface{ Scan(...any) error }) (*UpdateFeed, error) {
+	f := &UpdateFeed{}
+	var createdAt string
+	var appliedAt, errAt sql.NullString
+	err := row.Scan(&f.ID, &f.URL, &f.Mode, &f.KeyHex, &f.Name, &f.CreatedBy, &createdAt,
+		&f.LastAppliedVersion, &appliedAt, &f.LastETag, &f.LastModified, &f.LastError, &errAt)
+	if err != nil {
+		return nil, err
+	}
+	f.CreatedAt = parseTime(createdAt)
+	if appliedAt.Valid && appliedAt.String != "" {
+		t := parseTime(appliedAt.String)
+		f.LastAppliedAt = &t
+	}
+	if errAt.Valid && errAt.String != "" {
+		t := parseTime(errAt.String)
+		f.LastErrorAt = &t
+	}
+	return f, nil
+}
+
+// CreateUpdateFeed inserts a feed row with a caller-supplied key. The caller
+// generates both the id and the key so the core layer can return the key in
+// the same breath it first persists it.
+func (s *Store) CreateUpdateFeed(id, url, mode, name, keyHex string, createdBy int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO update_feeds (id, url, mode, key_hex, name, created_by) VALUES (?, ?, ?, ?, ?, ?)`,
+		id, url, mode, keyHex, name, createdBy,
+	)
+	return err
+}
+
+func (s *Store) ListUpdateFeeds() ([]*UpdateFeed, error) {
+	rows, err := s.db.Query(`SELECT ` + updateFeedCols + ` FROM update_feeds ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*UpdateFeed
+	for rows.Next() {
+		f, err := scanUpdateFeed(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListUpdateFeedsByMode(mode string) ([]*UpdateFeed, error) {
+	rows, err := s.db.Query(`SELECT `+updateFeedCols+` FROM update_feeds WHERE mode = ? ORDER BY created_at`, mode)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*UpdateFeed
+	for rows.Next() {
+		f, err := scanUpdateFeed(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetUpdateFeed(id string) (*UpdateFeed, error) {
+	f, err := scanUpdateFeed(s.db.QueryRow(`SELECT `+updateFeedCols+` FROM update_feeds WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return nil, errors.New("update feed not found")
+	}
+	return f, err
+}
+
+func (s *Store) DeleteUpdateFeed(id string) error {
+	_, err := s.db.Exec("DELETE FROM update_feeds WHERE id = ?", id)
+	return err
+}
+
+// UpdateUpdateFeed patches the mutable fields. Editing the URL drops the
+// cached etag/last-modified (they describe the old remote) and any recorded
+// error (it described the old fetch).
+func (s *Store) UpdateUpdateFeed(id string, url, name *string) error {
+	if url != nil {
+		_, err := s.db.Exec(`UPDATE update_feeds SET url = ?, last_etag = '', last_modified = '', last_error = '', last_error_at = NULL WHERE id = ?`, *url, id)
+		if err != nil {
+			return err
+		}
+	}
+	if name != nil {
+		if _, err := s.db.Exec("UPDATE update_feeds SET name = ? WHERE id = ?", *name, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StampUpdateFeedApplied records a fully-applied manifest version and clears
+// any recorded error (a successful apply is self-healing).
+func (s *Store) StampUpdateFeedApplied(id, version string) error {
+	_, err := s.db.Exec(
+		`UPDATE update_feeds SET last_applied_version = ?, last_applied_at = ?, last_error = '', last_error_at = NULL WHERE id = ?`,
+		version, time.Now().UTC().Format(time.RFC3339), id,
+	)
+	return err
+}
+
+// UpdateFeedCache refreshes the conditional-GET cache (etag/last-modified)
+// without touching the applied-version stamp.
+func (s *Store) UpdateFeedCache(id, etag, lastModified string) error {
+	_, err := s.db.Exec(
+		"UPDATE update_feeds SET last_etag = ?, last_modified = ? WHERE id = ?",
+		etag, lastModified, id,
+	)
+	return err
+}
+
+// SetUpdateFeedError records a check/apply failure for admin visibility. An
+// empty message clears it.
+func (s *Store) SetUpdateFeedError(id, msg string) error {
+	if msg == "" {
+		_, err := s.db.Exec("UPDATE update_feeds SET last_error = '', last_error_at = NULL WHERE id = ?", id)
+		return err
+	}
+	_, err := s.db.Exec(
+		"UPDATE update_feeds SET last_error = ?, last_error_at = ? WHERE id = ?",
+		msg, time.Now().UTC().Format(time.RFC3339), id,
+	)
+	return err
 }

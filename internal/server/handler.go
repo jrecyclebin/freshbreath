@@ -168,6 +168,16 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/me/sessions/", s.authWrap(pipeline(s.handleSessionDetail, anyRole)))
 	s.mux.HandleFunc("/api/settings", s.authWrap(pipeline(s.handleSettings, superuser)))
 
+	// Remote update feeds (design/remote-updates.md). Management is
+	// admin-only; check/apply are mounted BARE — anonymous by design, the
+	// point being that a hosted app can pull its own updates. Their exact
+	// patterns win over the /api/updates/ subtree, so they never pass
+	// through the admin mount.
+	s.mux.HandleFunc("/api/updates", s.authWrap(pipeline(s.handleUpdates, adminPlus)))
+	s.mux.HandleFunc("/api/updates/", s.authWrap(pipeline(s.handleUpdateDetail, adminPlus)))
+	s.mux.HandleFunc("/api/updates/check", s.handleUpdateCheck)
+	s.mux.HandleFunc("/api/updates/apply", s.handleUpdateApply)
+
 	// SSH host keys (TOFU) — same access gate as SSH sessions
 	s.mux.HandleFunc("/ssh/known-hosts", s.authWrap(pipeline(s.handleSSHHostKeys, s.requireAppServiceAccess("ssh"))))
 	s.mux.HandleFunc("/ssh/known-hosts/", s.authWrap(pipeline(s.handleSSHHostKeyDetail, s.requireAppServiceAccess("ssh"))))

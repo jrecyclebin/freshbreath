@@ -111,6 +111,44 @@ environment to Production so the bare URL goes live. Sites you don't care to
 stage can just live on Development forever — the bare URL serves it by
 default.
 
+## Remote updates
+
+Deployment slots made the iterate→freeze→promote loop a per-instance thing.
+Remote updates are the layer over it: a way for one Fresh Breath instance to
+*pull* updates for its apps and services from an encrypted archive that
+another one (or any static host) serves — landing them in Staging, exactly
+where the slots loop already expects a human to eyeball before promoting.
+
+Two modes, managed from the settings page:
+
+- **Receive** — register an archive URL. Fresh Breath fetches it, decrypts
+  it with the feed's key, and applies its manifest (`update_app_files` /
+  `update_service_files` ops) into the staging slots of existing apps.
+  Updates overwrite; they never create or delete anything, and they can't
+  touch Production — that promotion stays a human's job.
+- **Publish** — select apps and services, and Fresh Breath builds the same
+  kind of encrypted archive for you to download and self-host anywhere.
+
+The crypto is integrity, not secrecy: the host serving the archive never
+holds the key, so it can't forge or tamper with an update — a corrupt or
+hostile archive simply fails to decrypt and nothing is applied. Each feed
+has its own random 32-byte key (shown once at creation, so save it). To
+pair two of your own instances: paste one side's key when creating the
+other's feed, and they speak the same cipher.
+
+Because the archives are key-authenticated and land in staging only, the
+check/apply endpoints are deliberately anonymous — a hosted app can pull
+its own updates with no Fresh Breath login:
+
+```
+GET  /api/updates/check   → {"updates":[{"id":"…","version":"2026.09.01"}]}
+POST /api/updates/apply   → SSE stream of fetch → decrypt → validate → ops → done
+```
+
+A version is only stamped after a *fully* successful apply, so a failed
+apply is safely retriable — and an anonymous caller can never force
+re-applies, downgrades, or hammer the disk (per-IP rate limits apply).
+
 ## Running the server
 
 Grab a binary from the GitHub release.
