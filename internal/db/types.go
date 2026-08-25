@@ -83,6 +83,26 @@ type Service struct {
 	Descriptor ServiceDescriptor `json:"descriptor"`
 }
 
+// UpdateFeed is one remote-updates entry: either a receive feed (a remote URL
+// Freshbreath pulls key-authenticated archives from) or a publish feed (a
+// label for archives this instance produces). KeyHex is the per-feed random
+// AES key — never included in API responses (see coreListUpdateFeeds).
+type UpdateFeed struct {
+	ID                 string     `json:"id"`
+	URL                string     `json:"url"`
+	Mode               string     `json:"mode"` // "receive" | "publish"
+	KeyHex             string     `json:"-"`
+	Name               string     `json:"name"`
+	CreatedBy          int64      `json:"created_by"`
+	CreatedAt          time.Time  `json:"created_at"`
+	LastAppliedVersion string     `json:"last_applied_version"`
+	LastAppliedAt      *time.Time `json:"last_applied_at"`
+	LastETag           string     `json:"last_etag"`
+	LastModified       string     `json:"last_modified"`
+	LastError          string     `json:"last_error"`
+	LastErrorAt        *time.Time `json:"last_error_at"`
+}
+
 type ServiceDescriptor struct {
 	Type          string `json:"type"`                          // "mcp", "api", "oidc", "tasks", or "ssh"
 	Auth          string `json:"auth,omitempty"`                // "key" for API-key auth

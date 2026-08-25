@@ -56,6 +56,19 @@ type Server struct {
 	centralMCPPRMVal  *oauthex.ProtectedResourceMetadata // PRM for central MCP
 	centralMCPServers map[string]*mcp.Server             // role → lazily-built central MCP server
 	centralMCPSrvMu   sync.Mutex                         // guards centralMCPServers
+
+	// Remote update feeds (design/remote-updates.md).
+	pendingArchives map[string]*pendingArchive // "feedID/ref" → built archive, one-shot
+	updateMu        sync.Mutex                 // guards pendingArchives + updateRate
+	updateRate      map[string]updateRateCount // per-IP limiter for anonymous check/apply
+}
+
+// updateRateCount is one per-IP fixed-window counter for the anonymous
+// update endpoints. Blunt, but enough to stop an anonymous hammer turning
+// apply into a download DoS.
+type updateRateCount struct {
+	windowStart time.Time
+	count       int
 }
 
 // hostedApp is one routable app: the nonce resolves on-disk slot dirs, and

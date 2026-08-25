@@ -1813,6 +1813,8 @@ function SettingsView({ token, services, apps, user }) {
         )}
       </div>
 
+      <RemoteUpdates token={token} apps={apps} services={services} />
+
       {user && user.id > 0 && (
       <div className="setting-section" style={{marginTop:32}}>
         <h3 className="setting-heading">SSH Key</h3>
@@ -1878,6 +1880,338 @@ function SettingsView({ token, services, apps, user }) {
         </div>
       )}
     </>
+  );
+}
+
+// ── Remote Updates ──────────────────────────────────────────────
+
+// SSE-over-POST needs fetch streaming — EventSource is GET-only. Parses
+// text/event-stream blocks and hands each {event, data} to onEvent.
+async function sseStream(path, { method = 'POST', body, token, onEvent } = {}) {
+  const opts = { method, headers: { 'Accept': 'text/event-stream' } };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(`${res.status}: ${(await res.text().catch(() => '')) || res.statusText}`);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let ev = 'message', data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event: ')) ev = line.slice(7);
+        else if (line.startsWith('data: ')) data += line.slice(6);
+      }
+      if (data) { try { onEvent && onEvent(ev, JSON.parse(data)); } catch {} }
+    }
+  }
+}
+
+// UpdateProgress renders the live apply/build event stream as a log.
+function UpdateProgress({ events, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.scrollTo(0, ref.current.scrollHeight); }, [events]);
+  const line = (e, i) => {
+    const d = e.data || {};
+    let text;
+    switch (e.event) {
+      case 'fetch': case 'decrypt': case 'validate': case 'manifest': case 'encrypt':
+        text = `${e.event}…${d.ops ? ` (${d.ops} ops)` : ''}`; break;
+      case 'collect': text = `collecting ${d.apps ?? 0} app(s), ${d.services ?? 0} service(s)`; break;
+      case 'app': text = `packaged app ${d.nonce} (from ${d.source_slot})`; break;
+      case 'service': text = `packaged service ${d.name}`; break;
+      case 'op':
+        text = d.status === 'start' ? `op ${d.index}: ${d.action} → ${d.target}` : `op ${d.index}: done`;
+        break;
+      case 'skip': text = `skipped — already applied${d.version ? ` (${d.version})` : ''}`; break;
+      case 'done': text = d.download_url ? `built ${d.version} — downloading archive…` : `applied ${d.version} (${d.applied ?? '?'} ops)`; break;
+      case 'summary': text = `done: ${d.applied ?? 0} applied, ${d.failed ?? 0} failed, ${d.skipped ?? 0} skipped`; break;
+      case 'feed_error': text = `error at ${d.step ?? 'feed'}${d.id ? ` [${d.id.slice(0, 8)}]` : ''}: ${d.message}`; break;
+      default: text = e.event;
+    }
+    const tone = e.event === 'feed_error' || e.event === 'error' ? 'var(--red)' :
+      e.event === 'done' || e.event === 'summary' ? 'var(--green)' : '';
+    return <div key={i} style={{color: tone || undefined}}>{text}</div>;
+  };
+  return (
+    <div style={{marginTop:16}}>
+      <div ref={ref} className="mono" style={{
+        background:'var(--bg2, #16181d)', border:'1px solid var(--border, #2a2d33)', borderRadius:8,
+        padding:'10px 12px', maxHeight:220, overflowY:'auto', fontSize:12, lineHeight:1.7,
+      }}>
+        {events.length === 0 ? <span className="muted">waiting for events…</span> : events.map(line)}
+      </div>
+      {onClose && <div style={{marginTop:8}}><button className="btn btn-ghost" onClick={onClose}>Close log</button></div>}
+    </div>
+  );
+}
+
+// RemoteUpdates is the settings-page section for update feeds: receive
+// feeds pull key-authenticated archives into staging; publish feeds build
+// them for self-hosting. See design/remote-updates.md.
+function RemoteUpdates({ token, apps, services }) {
+  const [feeds, setFeeds] = useState(null);
+  const [mode, setMode] = useState('receive');
+  const [url, setUrl] = useState('');
+  const [name, setName] = useState('');
+  const [keyHex, setKeyHex] = useState('');
+  const [newKey, setNewKey] = useState(null); // one-time reveal after create
+  const [busy, setBusy] = useState(false);
+  const [applying, setApplying] = useState(null); // {events: []}
+  const [buildFor, setBuildFor] = useState(null); // feed being built
+  const [buildSel, setBuildSel] = useState({ apps: [], services: [] });
+  const [buildVersion, setBuildVersion] = useState('');
+  const [buildLog, setBuildLog] = useState(null); // {events: [], done: null}
+  const toast = useToast();
+
+  const load = () => api(token, 'GET', '/api/updates')
+    .then(d => setFeeds(d.feeds || []))
+    .catch(e => toast(e.message, true));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const add = async () => {
+    setBusy(true);
+    try {
+      const body = { mode, name };
+      if (mode === 'receive') body.url = url;
+      if (keyHex.trim()) body.key_hex = keyHex.trim();
+      const d = await api(token, 'POST', '/api/updates', body);
+      setNewKey({ id: d.id, key: d.key });
+      setUrl(''); setName(''); setKeyHex('');
+      load();
+    } catch (e) { toast(e.message, true); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async (f) => {
+    if (!confirm(`Delete update feed "${f.name || f.url || f.id.slice(0, 8)}"?`)) return;
+    try { await api(token, 'DELETE', '/api/updates/' + f.id); load(); toast('Feed deleted'); }
+    catch (e) { toast(e.message, true); }
+  };
+
+  const checkNow = async () => {
+    try {
+      const d = await api(token, 'GET', '/api/updates/check');
+      const ups = d.updates || [];
+      toast(ups.length === 0 ? 'All feeds up to date' :
+        `${ups.length} update${ups.length > 1 ? 's' : ''} available: ${ups.map(u => u.version || '?').join(', ')}`);
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const applyFeed = async (f) => {
+    const entry = { events: [] };
+    setApplying(entry);
+    try {
+      await sseStream('/api/updates/apply', {
+        body: { ids: [f.id] },
+        onEvent: (ev, data) => setApplying(prev => prev && { ...prev, events: [...prev.events, { event: ev, data }] }),
+      });
+      load();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const runBuild = async () => {
+    const entry = { events: [], done: null };
+    setBuildLog(entry);
+    try {
+      await sseStream(`/api/updates/${buildFor.id}/build`, {
+        token,
+        body: { apps: buildSel.apps, services: buildSel.services, version: buildVersion || undefined },
+        onEvent: (ev, data) => setBuildLog(prev => prev && {
+          ...prev,
+          events: [...prev.events, { event: ev, data }],
+          done: ev === 'done' ? data : prev.done,
+        }),
+      });
+    } catch (e) { toast(e.message, true); }
+  };
+
+  // Auto-download once the build's done event carries a URL.
+  useEffect(() => {
+    if (!buildLog?.done?.download_url) return;
+    (async () => {
+      try {
+        const r = await fetch(buildLog.done.download_url, {
+          headers: token?.data?.access_token ? { 'Authorization': 'Bearer ' + token.data.access_token } : {},
+        });
+        if (!r.ok) throw new Error(`download: ${r.status}`);
+        const blob = await r.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `update-${buildFor.id}.tar.gz.enc`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        toast('Archive downloaded — host it at your feed URL');
+      } catch (e) { toast(e.message, true); }
+    })();
+  }, [buildLog?.done]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggleSel = (kind, val) => setBuildSel(s => ({
+    ...s,
+    [kind]: s[kind].includes(val) ? s[kind].filter(v => v !== val) : [...s[kind], val],
+  }));
+
+  const pubServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
+
+  return (
+    <div className="setting-section" style={{marginTop:32}}>
+      <h3 className="setting-heading">Remote updates</h3>
+      <p className="muted" style={{marginBottom:20,fontSize:13}}>
+        Track remote feeds of encrypted app/service updates (landed in staging), or publish your own for other
+        Freshbreath instances. Archives are AES-GCM encrypted with a per-feed key — the host can't tamper with them.
+      </p>
+
+      {/* feed list */}
+      {feeds === null ? <span className="muted">Loading…</span> : feeds.length === 0 ? (
+        <span className="muted" style={{fontSize:13}}>No update feeds yet.</span>
+      ) : (
+        <div className="table-wrap" style={{marginBottom:24}}>
+          <table className="tbl">
+            <thead><tr>
+              <th>Feed</th><th>Mode</th><th>URL</th><th>Last applied</th><th></th>
+            </tr></thead>
+            <tbody>
+              {feeds.map(f => (
+                <tr key={f.id}>
+                  <td>
+                    <div style={{fontWeight:500}}>{f.name || <span className="muted">(unnamed)</span>}</div>
+                    {f.last_error && <div style={{fontSize:12,color:'var(--red)',marginTop:2}}>⚠ {f.last_error}</div>}
+                  </td>
+                  <td><Badge tone={f.mode === 'publish' ? 'violet' : 'blue'}>{f.mode}</Badge></td>
+                  <td className="mono" style={{fontSize:12,maxWidth:260,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{f.url || '—'}</td>
+                  <td style={{fontSize:13}}>
+                    {f.mode === 'publish' ? <span className="muted">publish feed</span> :
+                      f.last_applied_version
+                        ? <>{f.last_applied_version}<div className="muted" style={{fontSize:11}}>{fmtAuditTime(f.last_applied_at)}</div></>
+                        : <span className="muted">never</span>}
+                  </td>
+                  <td style={{whiteSpace:'nowrap',textAlign:'right'}}>
+                    {f.mode === 'receive' ? <>
+                      <button className="btn btn-ghost" onClick={checkNow}><Icon name="refresh" size={13}/> Check</button>{' '}
+                      <button className="btn btn-ghost" onClick={() => applyFeed(f)}><Icon name="download" size={13}/> Apply</button>{' '}
+                    </> : <>
+                      <button className="btn btn-ghost" onClick={() => {
+                        setBuildFor(f); setBuildSel({ apps: [], services: [] }); setBuildVersion(''); setBuildLog(null);
+                      }}><Icon name="sparkle" size={13}/> Build archive</button>{' '}
+                    </>}
+                    <button className="btn btn-ghost" style={{color:'var(--red)'}} onClick={() => remove(f)}><Icon name="trash" size={13}/></button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {applying && <UpdateProgress events={applying.events} onClose={() => setApplying(null)} />}
+
+      {/* add form */}
+      <div style={{borderTop:feeds && feeds.length ? '1px solid var(--border,#2a2d33)' : undefined,paddingTop:20}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <div className="field" style={{width:110}}>
+            <label>Mode</label>
+            <select className="input" value={mode} onChange={e => setMode(e.target.value)}>
+              <option value="receive">receive</option>
+              <option value="publish">publish</option>
+            </select>
+          </div>
+          <div className="field" style={{flex:1,minWidth:220}}>
+            <label>{mode === 'receive' ? 'Archive URL' : 'Feed URL (label)'}</label>
+            <input className="input mono" style={{fontSize:12}} value={url} onChange={e => setUrl(e.target.value)}
+              placeholder={mode === 'receive' ? 'https://…/update.tar.gz.enc' : 'https://…/where-you-host-it'} />
+          </div>
+          <div className="field" style={{width:180}}>
+            <label>Name</label>
+            <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="optional" />
+          </div>
+          <div className="field" style={{width:260}}>
+            <label>Key (optional)</label>
+            <input className="input mono" style={{fontSize:12}} value={keyHex} onChange={e => setKeyHex(e.target.value)} placeholder="64 hex chars — else generated" />
+          </div>
+          <div className="field" style={{alignSelf:'flex-end'}}>
+            <button className="btn btn-primary" disabled={busy || (mode === 'receive' && !url.trim())} onClick={add}>
+              <Icon name="plus" size={14}/> Add feed
+            </button>
+          </div>
+        </div>
+        {mode === 'receive' && (
+          <p className="help" style={{marginTop:4}}>
+            Leave key blank to generate one; paste the publisher's key to pair with their publish feed.
+          </p>
+        )}
+      </div>
+
+      {/* one-time key reveal */}
+      {newKey && (
+        <div style={{marginTop:20,padding:16,border:'1px solid var(--border,#2a2d33)',borderRadius:8}}>
+          <div style={{fontWeight:500,marginBottom:6}}>Feed encryption key — shown once</div>
+          <p className="muted" style={{fontSize:13,marginBottom:12}}>
+            Give this key to whoever encrypts the archives for this feed (or, if you supplied a publisher's key
+            when pairing, you already know it). It will not be shown again.
+          </p>
+          <div style={{display:'flex',gap:8}}>
+            <input className="input mono" style={{fontSize:12}} value={newKey.key} readOnly />
+            <button className="btn btn-ghost" onClick={() => copyText(newKey.key, toast)}><Icon name="copy" size={14}/></button>
+            <button className="btn btn-ghost" onClick={() => setNewKey(null)}>Done</button>
+          </div>
+        </div>
+      )}
+
+      {/* build modal */}
+      {buildFor && (
+        <div className="modal-overlay" onClick={() => setBuildFor(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:520}}>
+            <h3 style={{marginBottom:12}}>Build archive</h3>
+            <p className="muted" style={{fontSize:13,marginBottom:16}}>
+              Package the selected apps (current staging slot — dev if none yet) and service definitions into an
+              encrypted archive for “{buildFor.name || buildFor.url}”. Receivers land it in their staging slots.
+            </p>
+            <div className="field">
+              <label>Version</label>
+              <input className="input mono" style={{fontSize:12}} value={buildVersion} onChange={e => setBuildVersion(e.target.value)} placeholder="blank = timestamp" />
+            </div>
+            <div className="field">
+              <label>Apps ({buildSel.apps.length} selected)</label>
+              <div style={{maxHeight:140,overflowY:'auto',border:'1px solid var(--border,#2a2d33)',borderRadius:8,padding:'6px 10px'}}>
+                {apps.length === 0 && <span className="muted" style={{fontSize:13}}>no apps</span>}
+                {apps.map(a => (
+                  <label key={a.nonce} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
+                    <input type="checkbox" checked={buildSel.apps.includes(a.nonce)} onChange={() => toggleSel('apps', a.nonce)} />
+                    {a.name} <span className="muted" style={{fontSize:11}}>{a.nonce}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="field">
+              <label>Services ({buildSel.services.length} selected)</label>
+              <div style={{maxHeight:120,overflowY:'auto',border:'1px solid var(--border,#2a2d33)',borderRadius:8,padding:'6px 10px'}}>
+                {pubServices.length === 0 && <span className="muted" style={{fontSize:13}}>no tasks/virtual services</span>}
+                {pubServices.map(s => (
+                  <label key={s.id} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
+                    <input type="checkbox" checked={buildSel.services.includes(s.name)} onChange={() => toggleSel('services', s.name)} />
+                    {s.name} <span className="muted" style={{fontSize:11}}>{s.descriptor?.type}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
+              <button className="btn btn-ghost" onClick={() => setBuildFor(null)}>Cancel</button>
+              <button className="btn btn-primary" disabled={buildSel.apps.length + buildSel.services.length === 0} onClick={runBuild}>
+                <Icon name="sparkle" size={14}/> Build
+              </button>
+            </div>
+            {buildLog && <UpdateProgress events={buildLog.events} />}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
