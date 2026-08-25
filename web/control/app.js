@@ -1884,35 +1884,8 @@ function SettingsView({ token, services, apps, user }) {
 }
 
 // ── Remote Updates ──────────────────────────────────────────────
-
-// SSE-over-POST needs fetch streaming — EventSource is GET-only. Parses
-// text/event-stream blocks and hands each {event, data} to onEvent.
-async function sseStream(path, { method = 'POST', body, token, onEvent } = {}) {
-  const opts = { method, headers: { 'Accept': 'text/event-stream' } };
-  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-  if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${res.status}: ${(await res.text().catch(() => '')) || res.statusText}`);
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const block = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      let ev = 'message', data = '';
-      for (const line of block.split('\n')) {
-        if (line.startsWith('event: ')) ev = line.slice(7);
-        else if (line.startsWith('data: ')) data += line.slice(6);
-      }
-      if (data) { try { onEvent && onEvent(ev, JSON.parse(data)); } catch {} }
-    }
-  }
-}
+// sseStream now lives in frbr.js (shared with the opt-in auto-updater for
+// hosted apps) and is exposed on window.FrBr.
 
 // UpdateProgress renders the live apply/build event stream as a log.
 function UpdateProgress({ events, onClose }) {
@@ -2009,7 +1982,7 @@ function RemoteUpdates({ token, apps, services }) {
     const entry = { events: [] };
     setApplying(entry);
     try {
-      await sseStream('/api/updates/apply', {
+      await FrBr.sseStream('/api/updates/apply', {
         body: { ids: [f.id] },
         onEvent: (ev, data) => setApplying(prev => prev && { ...prev, events: [...prev.events, { event: ev, data }] }),
       });
@@ -2021,7 +1994,7 @@ function RemoteUpdates({ token, apps, services }) {
     const entry = { events: [], done: null };
     setBuildLog(entry);
     try {
-      await sseStream(`/api/updates/${buildFor.id}/build`, {
+      await FrBr.sseStream(`/api/updates/${buildFor.id}/build`, {
         token,
         body: { apps: buildSel.apps, services: buildSel.services, version: buildVersion || undefined },
         onEvent: (ev, data) => setBuildLog(prev => prev && {

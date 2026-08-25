@@ -493,9 +493,192 @@ export function load(jsonString) {
   return ServiceProxy.fromJSON(jsonString);
 }
 
+// ── Remote updates ──────────────────────────────────────────────
+// Opt-in auto-update for hosted apps. The /check and /apply endpoints are
+// anonymous and server-global (see design/remote-updates.md) — any hosted app
+// can poll them. Nothing here runs unless the app calls autoUpdates().
+//
+// sseStream is the shared SSE-over-POST helper (fetch + ReadableStream;
+// EventSource is GET-only). The control panel reuses it via window.FrBr.
+
+export async function sseStream(path, { method = 'POST', body, token, onEvent } = {}) {
+  const opts = { method, headers: { 'Accept': 'text/event-stream' } };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
+  const res = await fetch(path, opts);
+  if (!res.ok) throw new Error(`${res.status}: ${(await res.text().catch(() => '')) || res.statusText}`);
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let ev = 'message', data = '';
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event: ')) ev = line.slice(7);
+        else if (line.startsWith('data: ')) data += line.slice(6);
+      }
+      if (data) { try { onEvent && onEvent(ev, JSON.parse(data)); } catch {} }
+    }
+  }
+}
+
+class _RateLimited extends Error {}
+
+// GET /api/updates/check — anonymous. Returns feeds with an update available.
+export async function fetchUpdatesCheck() {
+  const r = await fetch(`${API}/api/updates/check`);
+  if (r.status === 429) throw new _RateLimited('rate limited');
+  if (!r.ok) throw new Error(`check failed (${r.status})`);
+  const { updates } = await r.json();
+  return updates || [];
+}
+
+// POST /api/updates/apply — anonymous, SSE progress. Body {ids?}: named feeds
+// or all receive feeds. Resolves to the collected event log.
+export async function applyUpdates(ids, { onEvent } = {}) {
+  const events = [];
+  await sseStream(`${API}/api/updates/apply`, {
+    body: { ids },
+    onEvent: (ev, data) => { events.push({ event: ev, data }); onEvent?.(ev, data); },
+  });
+  return events;
+}
+
+const DISMISS_KEY = 'frbr:dismissed-updates';
+
+function dismissedVersions() {
+  try { return new Set(JSON.parse(localStorage.getItem(DISMISS_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+
+function rememberDismissed(versions) {
+  if (!versions.length) return;
+  const set = dismissedVersions();
+  for (const v of versions) set.add(v);
+  // Keep the list bounded — only remember the last 32.
+  const arr = [...set].slice(-32);
+  try { localStorage.setItem(DISMISS_KEY, JSON.stringify(arr)); } catch {}
+}
+
+/**
+ * Start an opt-in auto-update poller. Returns a stop() function.
+ *
+ * @param {Object} opts
+ * @param {number} [opts.intervalMs=900000]   — poll cadence (default 15 min)
+ * @param {Function} [opts.onAvailable]       — (ups[], apply) => void | Promise
+ * @param {Function} [opts.onProgress]        — (event, data) => void  (during apply)
+ * @param {Function} [opts.onApplied]          — (events[]) => void   (after apply)
+ */
+export function autoUpdates({
+  intervalMs = 15 * 60_000,
+  onAvailable,
+  onProgress,
+  onApplied,
+} = {}) {
+  let stopped = false, timer = null, backoff = 1;
+
+  const arm = () => {
+    if (stopped) return;
+    // Don't burn the per-IP rate budget on a backgrounded tab.
+    if (typeof document !== 'undefined' && document.hidden) {
+      document.addEventListener('visibilitychange', tick, { once: true });
+      return;
+    }
+    timer = setTimeout(tick, intervalMs * backoff);
+  };
+
+  const tick = async () => {
+    timer = null;
+    if (stopped || (typeof document !== 'undefined' && document.hidden)) return arm();
+    try {
+      const ups = await fetchUpdatesCheck();
+      backoff = 1;
+      if (!ups.length) return arm();
+      // Don't re-nag for versions the user already dismissed.
+      const dismissed = dismissedVersions();
+      const fresh = ups.filter(u => !dismissed.has(u.version));
+      if (fresh.length) await onAvailable?.(fresh, (ids) => doApply(ids));
+    } catch (e) {
+      if (e instanceof _RateLimited) backoff = Math.min(backoff * 2, 8); // cap ~2h
+      // other errors: stay quiet, retry next tick
+    }
+    arm();
+  };
+
+  const doApply = async (ids) => {
+    const events = await applyUpdates(ids, { onEvent: onProgress });
+    onApplied?.(events);
+    return events;
+  };
+
+  arm();
+  return () => { stopped = true; if (timer) clearTimeout(timer); };
+}
+
+/**
+ * Turnkey DOM banner for apps that don't want to build their own UI.
+ * Prepends a small banner; returns a remove() function. Clicking "Apply &
+ * reload" runs apply then reloads the page (the running app may be one of
+ * the things that just changed).
+ */
+export function defaultUpdateBanner(ups, apply) {
+  const el = document.createElement('div');
+  el.className = 'frbr-update-banner';
+  el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+    'background:#1a1a2e;color:#eee;font:13px/1.5 system-ui,sans-serif;' +
+    'padding:10px 14px;display:flex;gap:12px;align-items:center;' +
+    'box-shadow:0 2px 8px rgba(0,0,0,.4)';
+
+  const label = ups.map(u => u.name || u.version || (u.id || '').slice(0, 8)).join(', ');
+  const txt = document.createElement('span');
+  txt.innerHTML = '<b>Update available</b> — ';
+
+  const span = document.createElement('span');
+  span.textContent = label;
+  txt.appendChild(span);
+
+  const btn = document.createElement('button');
+  btn.textContent = 'Apply & reload';
+  btn.style.cssText = 'margin-left:auto;cursor:pointer;padding:4px 10px';
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = 'Applying…';
+    try {
+      await apply(ups.map(u => u.id));
+      location.reload();
+    } catch (e) {
+      btn.textContent = 'Failed: ' + e.message;
+      btn.disabled = false;
+    }
+  };
+
+  const dismiss = document.createElement('button');
+  dismiss.textContent = '×';
+  dismiss.title = 'Dismiss (won\'t nag for these versions again)';
+  dismiss.style.cssText = 'cursor:pointer;padding:4px 8px;background:none;' +
+    'border:none;color:#eee;font-size:16px;line-height:1';
+  dismiss.onclick = () => {
+    rememberDismissed(ups.map(u => u.version).filter(Boolean));
+    el.remove();
+  };
+
+  el.append(txt, btn, dismiss);
+  document.body.prepend(el);
+  return () => el.remove();
+}
+
 export default ServiceProxy;
 
 // Expose to window for non-module consumers (e.g. the admin panel)
 if (typeof window !== 'undefined') {
-  window.FreshBreath = window.FrBr = { login, load, ServiceProxy, Svc: ServiceProxy };
+  window.FreshBreath = window.FrBr = {
+    login, load, ServiceProxy, Svc: ServiceProxy,
+    sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
+  };
 }
