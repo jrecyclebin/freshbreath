@@ -37,11 +37,14 @@ cp -r web skills "$staging/"
 # the pre-compiled app and no babel payload.
 node scripts/compile-control.mjs
 mv dist/app.compiled.js "$staging/web/control/app.compiled.js"
-sed -i \
+# Note: no `sed -i` here — BSD sed (macOS) requires a backup suffix after -i,
+# which would swallow the first -e as its argument. Redirect + mv is portable.
+sed \
   -e '/Dev mode:/d' \
   -e '/babel-standalone-7.29.0.min.js/d' \
   -e 's|<script type="text/babel" src="/control/app.js"></script>|<script src="/control/app.compiled.js"></script>|' \
-  "$staging/web/control.html"
+  "$staging/web/control.html" > "$staging/web/control.html.tmp"
+mv "$staging/web/control.html.tmp" "$staging/web/control.html"
 grep -q 'app.compiled.js' "$staging/web/control.html" || { echo "✗ control.html swap failed"; exit 1; }
 rm -rf "$staging/web/control/app.js" "$staging/web/control/vendor/babel-standalone-7.29.0.min.js"
 
