@@ -1,23 +1,31 @@
 # Fresh Breath
 
-## Start Your Personal Apps Off Right
+**𝓐 𝓹𝓮𝓻𝓼𝓸𝓷𝓪𝓵 𝓪𝓹𝓹 𝓼𝓮𝓻𝓿𝓮𝓻.**
 
-For a long time, I've wanted a personal app server that I can run little apps
-for blogging, wiki management and, now, LLM dashboards. Each of these projects
-needs the same basic infrastructure - so I've tried to put that infrastructure
-in Fresh Breath. All the inputs and outputs can be managed by it, so that the
-apps themselves can then focus on their core needs - the custom UI and logic
-that is performed on those inputs and outputs.
+So - weirdly enough - this is a dream project I've had it in mind to do for
+ages. I love writing little personal blogging tools, feed readers and assorted
+personal tools. (My son recently made a tool for me to run a contest for friends
+over text message. I made an app to read online purchase receipts from my
+email to help me get a weekly summary. These apps sit side-by-side in Fresh Breath.)
+
+I want these apps to be *together* and to share authentication and whatever
+integrations they need - including SSH access to other servers. (Like for
+publishing blog entries.)
 
 And now that friends and family are cooking up their own little single-use
-apps - almost all of them standalone static HTML files - I realized that I
-could offload some of the harder work to this thing.
+apps - almost all of them standalone static HTML files - I realized that lots
+of people need this kind of thing!
+
+> [!TIP]
+> Part of the goal here is to keep EVERYTHING client-side - keep it all in
+> pure, static HTML. All external connections and necessities can be handled
+> by Fresh Breath.
 
 If you find yourself writing lots of little apps that are going beyond static
 HTML - they need basic auth, some integrations, some LLM calls, some file I/O -
 oh and proxying API calls to get around CORS - then this is the project for you.
 (Think of this almost like N8N or Zapier - a box of integrations - but then
-having the flexibility of actual code to tie them together, rather than
+having the flexibility of actual client-side code to tie them together, rather than
 restrictive pipes.)
 
 **OH! Also!** I wanted these apps to allow people to log in using their OWN
@@ -25,6 +33,10 @@ creds - of course. So you needn't make accounts in Fresh Breath for people who
 are just using the apps you build. Fresh Breath's whole point is to let you
 build apps that use the connections and credentials of the people using them -
 not some shared account that you set up for them.
+
+In this way, you could host an app for the members of your workplace to use.
+It could be a dashboard showing Github and Linear activity. Your coworkers
+creds are kept in their browser - no sessions are kept in Fresh Breath's database.
 
 ## Rundown of Features
 
@@ -41,7 +53,7 @@ not some shared account that you set up for them.
 - Upload static HTML apps that you've built with Cowork or other agent harnesses
   to host them. (Will automatically proxy these apps. Oh and you don't strictly
   NEED to do this - Fresh Breath will work with static HTML files you're just
-  running from the `file://` URL.)
+  running from the `file://` URL!!)
 
 - Limit access to MCPs or APIs to specific calls. Limit what the LLM can do, to
   avoid headaches with apps that really should just have read-only access.
@@ -52,6 +64,21 @@ not some shared account that you set up for them.
 
 - Lightweight skills for publishing to Fresh Breath, setting up the MCP and API
   connections and guidance for using the SSH key.
+
+- Fresh Breath itself can be used as a local MCP - to publish work from a
+  harness directly. The MCP has built-in guides to help guide the code writer
+  through adding different auth and services. (But yeah, you can just say,
+  "Hey, Claude, create a new Fresh Breath app for me and require a Github
+  login to access it.")
+
+  - Wrap any APIs into a "virtual" service. This is a set of tools that can be
+    called from your apps or as its own MCP.
+
+  - Wrap Powershell or bash script into a "task" service. Same thing: can be
+    called from anywhere.
+
+- Publishing and administrative API. This isn't very well documented yet, but
+  I'll get to it. This is important.
 
 Its control panel is used to register the different apps, set up the service
 each app needs and manage users, if you want to give others access to manage
@@ -69,6 +96,29 @@ When Fresh Breath sees that the zip has a README, it'll offer you a prompt you
 can copy into Claude Code - instructing it to load the skill, build the app and
 publish changes back to Fresh Breath! This eases any work done adding auth,
 third-party connections, SSH, all that stuff.
+
+## Using With Claude Desktop and Cowork
+
+If you want to use Fresh Breath (or any of its virtual or task services) as an
+MCP in Claude Desktop, you'll need to add an "mcpServers" entry to your config
+file.
+
+I have a great tool for doing this - after getting frustrated with mcp-remote.
+The project is [LMFriend](https://github.com/jrecyclebin/lmfriend) - a very
+basic CLI for setting up and proxying local MCP servers with Claude Desktop.
+
+```bash
+lmfriend setup freshbreath=https://localhost:9009
+```
+
+It'll alter your config and add itself as the one to manage the connection.
+The nice thing is that, if you get logged out, the connection won't die.
+(If you've dealt with piles of popups showing connection difficulties in
+Claude Desktop, then you know.)
+
+One nice thing for Cowork: you can drop artifacts from Cowork into Fresh Breath
+and it'll host them for you. (You'll need to set up the services it needs first,
+of course.) This is pretty new - there's a lot of work to do on it.
 
 ## Deployment slots
 
@@ -113,49 +163,27 @@ default.
 
 ## Remote updates
 
-Deployment slots made the iterate→freeze→promote loop a per-instance thing.
-Remote updates are the layer over it: a way for one Fresh Breath instance to
-*pull* updates for its apps and services from an encrypted archive that
-another one (or any static host) serves — landing them in Staging, exactly
-where the slots loop already expects a human to eyeball before promoting.
+I've started using Fresh Breath for projects I do for others. Give them a
+Fresh Breath installer with the apps and services they need, but then what
+if I need to update anything later on?
 
-Two modes, managed from the settings page:
+Remote updates are a way for one Fresh Breath instance to
+*pull* updates for its apps and services from an encrypted archive, hosted
+online. You add the URL in the Settings area and Fresh Breath will notify
+the user when there's an update available.
 
-- **Receive** — register an archive URL. Fresh Breath fetches it, decrypts
-  it with the feed's key, and applies its manifest (`update_app_files` /
-  `update_service_files` ops) into the staging slots of existing apps.
-  Updates overwrite; they never create or delete anything, and they can't
-  touch Production — that promotion stays a human's job.
-- **Publish** — select apps and services, and Fresh Breath builds the same
-  kind of encrypted archive for you to download and self-host anywhere.
+App updates go to the Staging slot - so you can either let the user test it
+and deploy to Production, or you can set the app's default environment to
+Staging so they can use it right away.
 
-The crypto is integrity, not secrecy: the host serving the archive never
-holds the key, so it can't forge or tamper with an update — a corrupt or
-hostile archive simply fails to decrypt and nothing is applied. Each feed
-has its own random 32-byte key (shown once at creation, so save it). To
-pair two of your own instances: paste one side's key when creating the
-other's feed, and they speak the same cipher.
-
-Because the archives are key-authenticated and land in staging only, the
-check/apply endpoints are deliberately anonymous — a hosted app can pull
-its own updates with no Fresh Breath login:
-
-```
-GET  /api/updates/check   → {"updates":[{"id":"…","version":"2026.09.01"}]}
-POST /api/updates/apply   → SSE stream of fetch → decrypt → validate → ops → done
-```
-
-A version is only stamped after a *fully* successful apply, so a failed
-apply is safely retriable — and an anonymous caller can never force
-re-applies, downgrades, or hammer the disk (per-IP rate limits apply).
+# Setup and Config
 
 ## Running the server
 
-Grab a binary from the GitHub release.
-zip and later move the file into place for a personal installation or somewhere
-on the machine.
+Grab a binary from the GitHub release. There is a Windows installer and zips
+that you can either centrally install or just unzip and run.
 
-You can also install from Mise.
+You can also install from [Mise](https://mise.jdx.dev).
 
 ```bash
 mise use -g github:jrecyclebin/freshbreath
@@ -166,9 +194,9 @@ The server starts on `:9009` by default with an SQLite database at `./freshbreat
 
 ### Personal Installation
 
-If you installed through Mise - or want to just drop the binary in
-`~/bin` - you can also move the rest of the zip to `~/.local/share/freshbreath`
-and the binary will find it.
+However you install it, Fresh Breath will figure out sensible defaults for where
+to keep its files. Start it up and visit `http://localhost:9009/` to see
+the admin panel.
 
 * On Windows, you can just unzip wherever you like (even in
   `C:\Program Files\Fresh Breath`) and create a new folder
@@ -184,8 +212,7 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 >
 > For the common case — unzipping the release and running from that folder — everything
 > resolves automatically: the binary finds `web/` next to itself, the database lands in the
-> current directory, and no env vars are needed. XDG resolution kicks in only when a
-> package manager installs the binary and its support files to separate locations.
+> current directory, and no env vars are needed.
 
 ### Environment variables
 
