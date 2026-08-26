@@ -131,7 +131,7 @@ func (op UpdateOp) opSource() string {
 
 // validateUpdateOps pre-flights every op against the store and the extracted
 // archive before the first one executes: targets must exist, sources must be
-// in the tarball, slots must be staging (v1). A validation failure touches
+// in the tarball, slots default to staging. A validation failure touches
 // nothing — "feed refused before it started" beats "half-applied feed."
 func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string) error {
 	for i, op := range ops {
@@ -431,9 +431,10 @@ func (s *Server) coreDeleteUpdateFeed(actor *db.User, id string) error {
 // checkUpdateFeed runs the two-layer check for one receive feed: a cheap
 // conditional GET (etag, then last-modified) that short-circuits a 304, then
 // the semantic layer — decrypt and compare the manifest version against the
-// last applied one. The etag/last-modified cache is refreshed on any 200 so
-// the next poll can be a 304 even when the version is unchanged. Errors are
-// recorded on the row (last_error) — the caller sees only actionable results.
+// last applied one. A successful 200 records the seen version together with
+// the etag/last-modified cache, so a later 304 can decide pending-ness by
+// seen-vs-applied. Errors are recorded on the row (last_error) — the caller
+// sees only actionable results.
 func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err error) {
 	fail := func(e error) (string, string, error) {
 		_ = s.store.SetUpdateFeedError(f.ID, e.Error())
@@ -454,28 +455,37 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
-		// 304 means "unchanged since you last looked", not "nothing to
-		// apply". For a feed that has never successfully applied anything,
-		// the unchanged archive is still pending — the check→apply sequence
-		// (and any failed apply that cached the etag) must not skip it.
-		if f.LastAppliedVersion == "" {
-			return "update_available", "", nil
+		// A 304 means "unchanged since we last looked". Whether that's
+		// pending or current is seen-vs-applied, not applied-vs-empty: a
+		// version that was discovered but never applied must stay
+		// available, or /check goes quiet about it until the publisher
+		// ships again.
+		if f.LastSeenVersion != f.LastAppliedVersion {
+			return "update_available", f.LastSeenVersion, nil
 		}
 		return "up_to_date", f.LastAppliedVersion, nil
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fail(fmt.Errorf("fetch: status %d", resp.StatusCode))
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize))
+	if resp.ContentLength > maxArchiveSize {
+		return fail(fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize+1))
 	if err != nil {
 		return fail(fmt.Errorf("download: %w", err))
 	}
+	if len(body) > maxArchiveSize {
+		return fail(fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
+	}
+	// Cache the validators on any 200 (even one that later fails to decrypt):
+	// they describe this response, and the design promises the next check can
+	// be a cheap 304.
 	etag, lastMod := resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")
 	if err := s.store.UpdateFeedCache(f.ID, etag, lastMod); err != nil {
 		return fail(err)
 	}
 	f.LastETag, f.LastModified = etag, lastMod
-
 	key, err := hex.DecodeString(f.KeyHex)
 	if err != nil {
 		return fail(fmt.Errorf("stored key invalid: %w", err))
@@ -484,6 +494,10 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 	if err != nil {
 		return fail(err)
 	}
+	if err := s.store.UpdateFeedSeen(f.ID, manifest.Version); err != nil {
+		return fail(err)
+	}
+	f.LastSeenVersion = manifest.Version
 	if manifest.Version == f.LastAppliedVersion {
 		return "up_to_date", manifest.Version, nil
 	}
@@ -602,10 +616,17 @@ func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, progress
 	if err != nil {
 		return fail("fetch", err)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize))
+	if resp.ContentLength > maxArchiveSize {
+		resp.Body.Close()
+		return fail("fetch", fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize+1))
 	resp.Body.Close()
 	if err != nil {
 		return fail("fetch", fmt.Errorf("download: %w", err))
+	}
+	if len(body) > maxArchiveSize {
+		return fail("fetch", fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fail("fetch", fmt.Errorf("status %d", resp.StatusCode))

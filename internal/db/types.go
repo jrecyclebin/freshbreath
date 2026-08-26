@@ -97,6 +97,7 @@ type UpdateFeed struct {
 	CreatedAt          time.Time  `json:"created_at"`
 	LastAppliedVersion string     `json:"last_applied_version"`
 	LastAppliedAt      *time.Time `json:"last_applied_at"`
+	LastSeenVersion    string     `json:"last_seen_version"`
 	LastETag           string     `json:"last_etag"`
 	LastModified       string     `json:"last_modified"`
 	LastError          string     `json:"last_error"`

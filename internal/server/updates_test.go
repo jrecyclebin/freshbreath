@@ -349,6 +349,68 @@ func TestUpdateCheckLayers(t *testing.T) {
 	}
 }
 
+// The vanishing-update hole: a version discovered but never applied must
+// stay available across 304s, or /check goes quiet about it until the
+// publisher ships again. Pending-ness is seen-vs-applied, not
+// applied-vs-empty.
+func TestUpdateCheckPendingSurvives304(t *testing.T) {
+	srv := newTestServer(t)
+	key := strings.Repeat("cd", 32)
+
+	// A publisher that can ship a new version mid-test.
+	data := []byte(nil)
+	manifest := &UpdateManifest{Version: "v1"}
+	data = makeUpdateArchive(t, key, manifest, nil)
+	etag := "\"v1\""
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		w.Write(data)
+	}))
+	t.Cleanup(ts.Close)
+
+	id, _ := createUpdateFeed(t, srv, ts.URL, "receive", "pend", key)
+
+	// Discover v1 but never apply it. A later 304 must keep reporting it.
+	ups := checkUpdates(t, srv)
+	if len(ups) != 1 || ups[0].Version != "v1" {
+		t.Fatalf("first check = %+v, want v1 available", ups)
+	}
+	ups = checkUpdates(t, srv) // 304 now
+	if len(ups) != 1 || ups[0].Version != "v1" {
+		t.Fatalf("304 before apply = %+v, want v1 still available", ups)
+	}
+
+	// Apply, then publisher ships v2. Check discovers it; nobody applies;
+	// the next 304 must keep reporting v2 — this is the exact hole.
+	if err := srv.store.StampUpdateFeedApplied(id, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Version = "v2"
+	data = makeUpdateArchive(t, key, manifest, nil)
+	etag = "\"v2\""
+	ups = checkUpdates(t, srv)
+	if len(ups) != 1 || ups[0].Version != "v2" {
+		t.Fatalf("check after v2 ships = %+v, want v2 available", ups)
+	}
+	ups = checkUpdates(t, srv) // 304, v2 seen but not applied
+	if len(ups) != 1 || ups[0].Version != "v2" {
+		t.Fatalf("304 with pending v2 = %+v, want v2 still available", ups)
+	}
+
+	// Once applied, the same 304 goes quiet.
+	if err := srv.store.StampUpdateFeedApplied(id, "v2"); err != nil {
+		t.Fatal(err)
+	}
+	ups = checkUpdates(t, srv)
+	if len(ups) != 0 {
+		t.Errorf("304 after apply = %+v, want none", ups)
+	}
+}
+
 func TestUpdateCheckFailuresOmittedAndRecorded(t *testing.T) {
 	srv := newTestServer(t)
 
