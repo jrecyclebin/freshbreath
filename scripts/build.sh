@@ -34,7 +34,10 @@ cp -r web skills "$staging/"
 
 # Swap the control panel into dist mode: the working tree loads app.js (JSX)
 # via in-browser babel for edit-and-refresh development; packaged dists get
-# the pre-compiled app and no babel payload.
+# the pre-compiled app and no babel payload. The compiled app stays a module
+# script so it executes strictly after /frbr.js (also a module) — a classic
+# script would race it and the app would boot before __HOMESLICE_CONFIG/FrBr
+# exist, silently skipping the stored admin token.
 node scripts/compile-control.mjs
 mv dist/app.compiled.js "$staging/web/control/app.compiled.js"
 # Note: no `sed -i` here — BSD sed (macOS) requires a backup suffix after -i,
@@ -42,7 +45,7 @@ mv dist/app.compiled.js "$staging/web/control/app.compiled.js"
 sed \
   -e '/Dev mode:/d' \
   -e '/babel-standalone-7.29.0.min.js/d' \
-  -e 's|<script type="text/babel" src="/control/app.js"></script>|<script src="/control/app.compiled.js"></script>|' \
+  -e 's|<script type="text/babel" src="/control/app.js"></script>|<script type="module" src="/control/app.compiled.js"></script>|' \
   "$staging/web/control.html" > "$staging/web/control.html.tmp"
 mv "$staging/web/control.html.tmp" "$staging/web/control.html"
 grep -q 'app.compiled.js' "$staging/web/control.html" || { echo "✗ control.html swap failed"; exit 1; }

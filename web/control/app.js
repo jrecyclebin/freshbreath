@@ -207,6 +207,13 @@ function AuthProvider({ children }) {
           setToken(s);
         });
 
+        if (!window.FrBr || !window.__HOMESLICE_CONFIG) {
+          // Script-ordering bug: frbr.js (which defines window.FrBr and
+          // __HOMESLICE_CONFIG) must execute before this app. Without it we
+          // can't read authRequired and would silently skip the stored token.
+          console.error('Fresh Breath: frbr.js/config not loaded before app init — script ordering bug');
+        }
+
         if (!cfg.authRequired) { setReady(true); return; }
         setAuthRequired(true);
         setServiceName(cfg.authServiceName || '');
@@ -219,7 +226,9 @@ function AuthProvider({ children }) {
           const d = await api(result, 'GET','/api/me');
           setUser(d.user);
         }
-      } catch {}
+      } catch (e) {
+        console.error('Fresh Breath: auth restore failed', e);
+      }
       setReady(true);
     })();
   }, []);
@@ -2263,7 +2272,7 @@ function AppShell() {
       setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]); setRoles(r.roles||[]); setAudit(au.audit||[]);
     } catch(e) { if (!authRequired || user) toast('Failed to load: '+e.message, true); }
     setLoading(false);
-  },[authRequired, user]); // eslint-disable-line react-hooks/exhaustive-deps
+  },[authRequired, user, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(()=>{
     if (authRequired && !user) return;
