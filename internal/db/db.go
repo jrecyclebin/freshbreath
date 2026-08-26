@@ -137,6 +137,7 @@ func (s *Store) Migrate() error {
       created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
       last_applied_version TEXT NOT NULL DEFAULT '',
       last_applied_at      TEXT,
+      last_seen_version    TEXT NOT NULL DEFAULT '',
       last_etag            TEXT NOT NULL DEFAULT '',
       last_modified        TEXT NOT NULL DEFAULT '',
       last_error           TEXT NOT NULL DEFAULT '',
@@ -164,6 +165,22 @@ func (s *Store) Migrate() error {
 	if !hasDetails {
 		_, err = s.db.Exec("ALTER TABLE apps ADD COLUMN details TEXT NOT NULL DEFAULT '{}'")
 		if err != nil {
+			return err
+		}
+	}
+
+	// Add last_seen_version to update_feeds if missing. Cached validators are
+	// dropped alongside: they predate the column, and a 304 decided without a
+	// seen-version would be wrong for feeds pending at upgrade time. The next
+	// check re-fetches (a 200) and stamps it.
+	var hasSeenVersion bool
+	s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('update_feeds') WHERE name='last_seen_version'").Scan(&hasSeenVersion)
+	if !hasSeenVersion {
+		_, err = s.db.Exec("ALTER TABLE update_feeds ADD COLUMN last_seen_version TEXT NOT NULL DEFAULT ''")
+		if err != nil {
+			return err
+		}
+		if _, err = s.db.Exec("UPDATE update_feeds SET last_etag = '', last_modified = '"); err != nil {
 			return err
 		}
 	}
@@ -1223,14 +1240,14 @@ func (s *Store) DeleteExpiredRefreshFamilies(now time.Time) (int64, error) {
 // ── Update Feeds ──
 
 const updateFeedCols = `id, url, mode, key_hex, name, created_by, created_at,
-    last_applied_version, last_applied_at, last_etag, last_modified, last_error, last_error_at`
+    last_applied_version, last_applied_at, last_seen_version, last_etag, last_modified, last_error, last_error_at`
 
 func scanUpdateFeed(row interface{ Scan(...any) error }) (*UpdateFeed, error) {
 	f := &UpdateFeed{}
 	var createdAt string
 	var appliedAt, errAt sql.NullString
 	err := row.Scan(&f.ID, &f.URL, &f.Mode, &f.KeyHex, &f.Name, &f.CreatedBy, &createdAt,
-		&f.LastAppliedVersion, &appliedAt, &f.LastETag, &f.LastModified, &f.LastError, &errAt)
+		&f.LastAppliedVersion, &appliedAt, &f.LastSeenVersion, &f.LastETag, &f.LastModified, &f.LastError, &errAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1309,7 +1326,9 @@ func (s *Store) DeleteUpdateFeed(id string) error {
 // error (it described the old fetch).
 func (s *Store) UpdateUpdateFeed(id string, url, name *string) error {
 	if url != nil {
-		_, err := s.db.Exec(`UPDATE update_feeds SET url = ?, last_etag = '', last_modified = '', last_error = '', last_error_at = NULL WHERE id = ?`, *url, id)
+		// The cached validators, seen-version, and recorded error all describe
+		// the old remote.
+		_, err := s.db.Exec(`UPDATE update_feeds SET url = ?, last_etag = '', last_modified = '', last_seen_version = '', last_error = '', last_error_at = NULL WHERE id = ?`, *url, id)
 		if err != nil {
 			return err
 		}
@@ -1333,11 +1352,22 @@ func (s *Store) StampUpdateFeedApplied(id, version string) error {
 }
 
 // UpdateFeedCache refreshes the conditional-GET cache (etag/last-modified)
-// without touching the applied-version stamp.
+// without touching the version stamps. Used by both check (any 200, before
+// the manifest is parsed) and apply.
 func (s *Store) UpdateFeedCache(id, etag, lastModified string) error {
 	_, err := s.db.Exec(
 		"UPDATE update_feeds SET last_etag = ?, last_modified = ? WHERE id = ?",
 		etag, lastModified, id,
+	)
+	return err
+}
+
+// UpdateFeedSeen records the version a check just saw (the manifest version
+// from the same 200 whose etag/last-modified went into the cache).
+func (s *Store) UpdateFeedSeen(id, version string) error {
+	_, err := s.db.Exec(
+		"UPDATE update_feeds SET last_seen_version = ? WHERE id = ?",
+		version, id,
 	)
 	return err
 }
