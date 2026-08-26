@@ -567,10 +567,12 @@ function rememberDismissed(versions) {
 }
 
 /**
- * Start an opt-in auto-update poller. Returns a stop() function.
+ * Start an opt-in auto-update poller. Checks once immediately, then again
+ * every intervalMs. Returns a stop() function.
  *
  * @param {Object} opts
- * @param {number} [opts.intervalMs=900000]   — poll cadence (default 15 min)
+ * @param {number} [opts.intervalMs=900000]   — poll cadence (default 15 min);
+ *                                      first check runs immediately on start
  * @param {Function} [opts.onAvailable]       — (ups[], apply) => void | Promise
  * @param {Function} [opts.onProgress]        — (event, data) => void  (during apply)
  * @param {Function} [opts.onApplied]          — (events[]) => void   (after apply)
@@ -617,7 +619,9 @@ export function autoUpdates({
     return events;
   };
 
-  arm();
+  // Check once right away, then keep the interval cadence via arm(). If the
+  // page loads hidden, tick's own guard defers until it becomes visible.
+  tick();
   return () => { stopped = true; if (timer) clearTimeout(timer); };
 }
 
