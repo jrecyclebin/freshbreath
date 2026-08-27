@@ -3,20 +3,22 @@
 **𝓐 𝓹𝓮𝓻𝓼𝓸𝓷𝓪𝓵 𝓪𝓹𝓹 𝓼𝓮𝓻𝓿𝓮𝓻.**
 
 So - weirdly enough - this is a dream project I've had it in mind to do for
-ages. I love writing little personal blogging tools, feed readers and assorted
-personal tools. (My son recently made a tool for me to run a contest for friends
+ages. I love writing *little personal tools* - blogging tools, feed readers,
+task trackers, calendar tools - things that require some storage, some auth,
+some access. (My son recently made a tool for me to run a contest for friends
 over text message. I made an app to read online purchase receipts from my
 email to help me get a weekly summary. These apps sit side-by-side in Fresh Breath.)
 
 I want these apps to be *together* and to share authentication and whatever
-integrations they need - including SSH access to other servers. (Like for
-publishing blog entries.)
+integrations they need - a big one more me was SSH access to other servers.
+(I want to publish all kinds of little things easily.)
 
 And now that friends and family are cooking up their own little single-use
 apps - almost all of them standalone static HTML files - I realized that lots
 of people need this kind of thing!
 
-> [!TIP]
+> ⌐■_■ **STATIC IS SO SIMPLE**
+>
 > Part of the goal here is to keep EVERYTHING client-side - keep it all in
 > pure, static HTML. All external connections and necessities can be handled
 > by Fresh Breath.
