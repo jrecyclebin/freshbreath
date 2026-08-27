@@ -960,4 +960,59 @@ func TestUpdateRoundTrip(t *testing.T) {
 	if st.LastAppliedVersion != "rt-1" || st.LastError != "" {
 		t.Errorf("receiver state = %+v", st)
 	}
+	if st.LastSeenVersion != "rt-1" {
+		t.Errorf("receiver seen = %q, want rt-1 (apply implies seen)", st.LastSeenVersion)
+	}
+
+	// 6. The reloaded app's first check must go quiet — no re-offering the
+	// version that just applied. (The remote serves an etag, so this exercises
+	// the 304 short-circuit path.)
+	if ups := checkUpdates(t, srv); len(ups) != 0 {
+		t.Errorf("post-apply check = %+v, want none", ups)
+	}
+}
+
+// TestUpdateCheckGhostFeedPreMigration guards against the state every feed
+// applied before the last_seen_version migration landed in: cached
+// validators, an applied version, and no seen version. A conditional GET
+// would 304 and the seen-vs-applied comparison would re-offer the already
+// applied update forever, with an empty version string that even dismissal
+// can't match. The fix forces a full fetch until seen is known.
+func TestUpdateCheckGhostFeedPreMigration(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "ghostapp")
+	key := "2222222222222222222222222222222222222222222222222222222222222222"
+	arc := makeUpdateArchive(t, key, &UpdateManifest{Version: "Version 2.0", Ops: []UpdateOp{
+		{Action: "update_app_files", Target: nonce},
+	}}, map[string][]byte{"apps/" + nonce + "/index.html": []byte("hello")})
+	ts := archiveServer(t, arc, `"6a8e1e8b-499"`, "Tue, 25 Aug 2026 23:00:27 GMT")
+	rxID, _ := createUpdateFeed(t, srv, ts.URL, "receive", "ghost", key)
+
+	// Forge the migrated state: validators cached, version applied, seen
+	// empty (UpdateFeedSeen never legitimately writes "").
+	if err := srv.store.UpdateFeedCache(rxID, `"6a8e1e8b-499"`, "Tue, 25 Aug 2026 23:00:27 GMT"); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.StampUpdateFeedApplied(rxID, "Version 2.0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.store.DB().Exec("UPDATE update_feeds SET last_seen_version = '' WHERE id = ?", rxID); err != nil {
+		t.Fatal(err)
+	}
+
+	// First check self-heals: full fetch, seen recorded, up to date.
+	ups := checkUpdates(t, srv)
+	if len(ups) != 0 {
+		t.Fatalf("ghost check = %+v, want none", ups)
+	}
+	st := feedState(t, srv, rxID)
+	if st.LastSeenVersion != "Version 2.0" {
+		t.Errorf("seen = %q, want Version 2.0 (self-healed)", st.LastSeenVersion)
+	}
+
+	// And the next check is back to the cheap 304, still quiet.
+	ups = checkUpdates(t, srv)
+	if len(ups) != 0 {
+		t.Fatalf("post-heal check = %+v, want none", ups)
+	}
 }
