@@ -566,24 +566,88 @@ function rememberDismissed(versions) {
   try { localStorage.setItem(DISMISS_KEY, JSON.stringify(arr)); } catch {}
 }
 
+// applyUpdates resolves whenever the stream completes — failures arrive
+// INSIDE it as feed_error events (or summary.failed > 0), e.g. validation
+// refusing an unknown target. Both the banner and the auto-apply path need
+// this check, so it lives here: returns the first failure message or null.
+function applyFailures(events) {
+  const bad = events.filter(e => e.event === 'feed_error');
+  if (bad.length) return (bad[0] && bad[0].data && bad[0].data.message) || 'apply failed';
+  const summary = events.find(e => e.event === 'summary');
+  if (summary && summary.data.failed > 0) return 'apply failed';
+  return null;
+}
+
+// Session-scoped memory of versions auto-apply already attempted. Without
+// it, a feed whose apply persistently fails would be retried and re-bannered
+// on every tick — and a reload-loop guard for anything unexpected. Success
+// reloads the page anyway, so stale entries are harmless.
+const AUTOATTEMPT_KEY = 'frbr:autoapply-attempted';
+const autoAttempted = new Set();
+
+function loadAutoAttempted() {
+  try {
+    for (const v of JSON.parse(sessionStorage.getItem(AUTOATTEMPT_KEY) || '[]')) autoAttempted.add(v);
+  } catch {}
+  return autoAttempted;
+}
+
+function rememberAutoAttempted(versions) {
+  for (const v of versions) autoAttempted.add(v);
+  try { sessionStorage.setItem(AUTOATTEMPT_KEY, JSON.stringify([...autoAttempted].slice(-32))); } catch {}
+}
+
+// autoApplyNow is the prompt-free handler: apply, then reload. On failure it
+// marks the versions attempted and falls back to the banner — a human should
+// see why the update didn't land, and can dismiss or retry from there.
+async function autoApplyNow(ups, apply) {
+  const attempted = loadAutoAttempted();
+  const todo = ups.filter(u => u.version && !attempted.has(u.version));
+  if (!todo.length) return defaultUpdateBanner(ups, apply);
+  rememberAutoAttempted(todo.map(u => u.version));
+  try {
+    const events = await apply(todo.map(u => u.id));
+    const fail = applyFailures(events);
+    if (fail) throw new Error(fail);
+    location.reload();
+  } catch (e) {
+    console.error('[frbr] auto-apply failed, falling back to the banner:', e);
+    defaultUpdateBanner(todo, apply, e.message);
+  }
+}
+
 /**
  * Start an opt-in auto-update poller. Checks once immediately, then again
  * every intervalMs. Returns a stop() function.
  *
+ * Bare `autoUpdates()` just works: with no options it shows the built-in
+ * banner whenever an update appears.
+ *
  * @param {Object} opts
  * @param {number} [opts.intervalMs=900000]   — poll cadence (default 15 min);
  *                                      first check runs immediately on start
- * @param {Function} [opts.onAvailable]       — (ups[], apply) => void | Promise
+ * @param {Function} [opts.onAvailable]       — (ups[], apply) => void | Promise.
+ *                                      Defaults to defaultUpdateBanner.
+ * @param {boolean} [opts.autoApply=false]   — skip the prompt: apply and
+ *                                      reload as soon as an update appears.
+ *                                      Supersedes the default banner; an
+ *                                      explicit onAvailable still fires
+ *                                      (notification only). On a failed
+ *                                      apply it falls back to the banner
+ *                                      rather than reload-looping.
  * @param {Function} [opts.onProgress]        — (event, data) => void  (during apply)
  * @param {Function} [opts.onApplied]          — (events[]) => void   (after apply)
  */
 export function autoUpdates({
   intervalMs = 15 * 60_000,
   onAvailable,
+  autoApply = false,
   onProgress,
   onApplied,
 } = {}) {
   let stopped = false, timer = null, backoff = 1;
+  const applyFn = (ids) => doApply(ids);
+  const notify = onAvailable || (typeof document !== 'undefined' ? defaultUpdateBanner : null);
 
   const arm = () => {
     if (stopped) return;
@@ -605,7 +669,14 @@ export function autoUpdates({
       // Don't re-nag for versions the user already dismissed.
       const dismissed = dismissedVersions();
       const fresh = ups.filter(u => !dismissed.has(u.version));
-      if (fresh.length) await onAvailable?.(fresh, (ids) => doApply(ids));
+      if (!fresh.length) return arm();
+      if (autoApply) {
+        // Notification only — the apply happens in autoApplyNow.
+        if (onAvailable) await onAvailable(fresh, applyFn);
+        await autoApplyNow(fresh, applyFn);
+      } else {
+        await notify?.(fresh, applyFn);
+      }
     } catch (e) {
       if (e instanceof _RateLimited) backoff = Math.min(backoff * 2, 8); // cap ~2h
       // other errors: stay quiet, retry next tick
@@ -625,54 +696,114 @@ export function autoUpdates({
   return () => { stopped = true; if (timer) clearTimeout(timer); };
 }
 
+// Banner styles are injected once. Base looks live inline on the elements
+// so a CSP that blocks this <style> only costs the animation and hover
+// polish, not the banner itself.
+function ensureBannerStyles() {
+  if (document.getElementById('frbr-banner-styles')) return;
+  const st = document.createElement('style');
+  st.id = 'frbr-banner-styles';
+  st.textContent =
+    '@keyframes frbr-slide-down{from{transform:translateY(-100%)}to{transform:none}}' +
+    '@keyframes frbr-spin{to{transform:rotate(360deg)}}' +
+    '.frbr-update-banner{animation:frbr-slide-down .35s cubic-bezier(.2,.85,.3,1.08)}' +
+    '.frbr-update-banner b{color:#bcc7ff;font-weight:600}' +
+    '.frbr-update-banner .frbr-apply:not(:disabled):hover{filter:brightness(1.15)}' +
+    '.frbr-update-banner .frbr-apply:not(:disabled):active{transform:translateY(1px)}' +
+    '.frbr-update-banner .frbr-spin{display:inline-block;width:11px;height:11px;margin-right:7px;' +
+      'border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;' +
+      'animation:frbr-spin .8s linear infinite;vertical-align:-1px}';
+  document.head.appendChild(st);
+}
+
 /**
  * Turnkey DOM banner for apps that don't want to build their own UI.
  * Prepends a small banner; returns a remove() function. Clicking "Apply &
  * reload" runs apply then reloads the page (the running app may be one of
- * the things that just changed).
+ * the things that just changed). An existing banner is replaced, so repeated
+ * calls (poller ticks) never stack. `note` (optional) pre-populates the
+ * error line — used by the auto-apply fallback to say why it gave up.
  */
-export function defaultUpdateBanner(ups, apply) {
+export function defaultUpdateBanner(ups, apply, note) {
+  ensureBannerStyles();
+  document.querySelectorAll('.frbr-update-banner').forEach(el => el.remove());
+
   const el = document.createElement('div');
   el.className = 'frbr-update-banner';
   el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
-    'background:#1a1a2e;color:#eee;font:13px/1.5 system-ui,sans-serif;' +
-    'padding:10px 14px;display:flex;gap:12px;align-items:center;' +
-    'box-shadow:0 2px 8px rgba(0,0,0,.4)';
+    'background:linear-gradient(180deg,#1f2347 0%,#16182f 100%);' +
+    'border-bottom:1px solid rgba(126,143,255,.25);color:#e8eaf6;' +
+    'font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;' +
+    'padding:10px 16px;display:flex;gap:10px;align-items:center;' +
+    'box-shadow:0 4px 18px rgba(0,0,0,.45)';
+
+  const txt = document.createElement('span');
+  txt.innerHTML = '<b>Update available</b>';
 
   const label = ups.map(u => u.name || u.version || (u.id || '').slice(0, 8)).join(', ');
-  const txt = document.createElement('span');
-  txt.innerHTML = '<b>Update available</b> — ';
+  const chip = document.createElement('span');
+  chip.textContent = label;
+  chip.style.cssText = 'background:rgba(126,143,255,.14);border:1px solid rgba(126,143,255,.3);' +
+    'border-radius:6px;padding:1px 8px;font-weight:600;color:#c6d0ff;' +
+    'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:32em';
 
-  const span = document.createElement('span');
-  span.textContent = label;
-  txt.appendChild(span);
+  // Hidden until an apply fails — then the message lives here in red
+  // instead of replacing the button label, so retry stays one click away.
+  const err = document.createElement('span');
+  err.style.cssText = 'display:none;color:#ff9b9b;font-size:12px;' +
+    'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:36em';
+  if (note) {
+    err.textContent = note;
+    err.title = note;
+    err.style.display = 'inline';
+  }
 
   const btn = document.createElement('button');
+  btn.className = 'frbr-apply';
   btn.textContent = 'Apply & reload';
-  btn.style.cssText = 'margin-left:auto;cursor:pointer;padding:4px 10px';
+  btn.style.cssText = 'margin-left:auto;cursor:pointer;border:none;border-radius:999px;' +
+    'padding:7px 18px;font:600 12.5px/1 system-ui,sans-serif;letter-spacing:.02em;color:#fff;' +
+    'background:linear-gradient(180deg,#5c7fff 0%,#3a54d6 100%);' +
+    'box-shadow:0 2px 10px rgba(70,95,225,.5),inset 0 1px 0 rgba(255,255,255,.28);' +
+    'transition:filter .15s ease,transform .06s ease,opacity .15s ease';
   btn.onclick = async () => {
     btn.disabled = true;
-    btn.textContent = 'Applying…';
+    btn.style.opacity = '.8';
+    btn.innerHTML = '<span class="frbr-spin"></span>Applying…';
     try {
-      await apply(ups.map(u => u.id));
+      const events = await apply(ups.map(u => u.id));
+      // applyUpdates resolves whenever the stream completes — failures
+      // arrive INSIDE it as feed_error events (or summary.failed > 0),
+      // e.g. validation refusing an unknown target. Don't reload over
+      // them: the version never stamped, so /check would just re-offer
+      // the same update after reload. Surface it instead.
+      const fail = applyFailures(events);
+      if (fail) throw new Error(fail);
       location.reload();
     } catch (e) {
-      btn.textContent = 'Failed: ' + e.message;
+      err.textContent = e.message;
+      err.title = e.message;
+      err.style.display = 'inline';
       btn.disabled = false;
+      btn.style.opacity = '';
+      btn.textContent = 'Apply & reload';
     }
   };
 
   const dismiss = document.createElement('button');
   dismiss.textContent = '×';
   dismiss.title = 'Dismiss (won\'t nag for these versions again)';
-  dismiss.style.cssText = 'cursor:pointer;padding:4px 8px;background:none;' +
-    'border:none;color:#eee;font-size:16px;line-height:1';
+  dismiss.style.cssText = 'cursor:pointer;padding:2px 8px;background:none;border:none;' +
+    'color:#e8eaf6;opacity:.6;font-size:17px;line-height:1;' +
+    'transition:opacity .15s,color .15s';
+  dismiss.onmouseenter = () => { dismiss.style.opacity = '1'; dismiss.style.color = '#ff9b9b'; };
+  dismiss.onmouseleave = () => { dismiss.style.opacity = ''; dismiss.style.color = ''; };
   dismiss.onclick = () => {
     rememberDismissed(ups.map(u => u.version).filter(Boolean));
     el.remove();
   };
 
-  el.append(txt, btn, dismiss);
+  el.append(txt, chip, err, btn, dismiss);
   document.body.prepend(el);
   return () => el.remove();
 }

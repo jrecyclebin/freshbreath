@@ -1342,11 +1342,14 @@ func (s *Store) UpdateUpdateFeed(id string, url, name *string) error {
 }
 
 // StampUpdateFeedApplied records a fully-applied manifest version and clears
-// any recorded error (a successful apply is self-healing).
+// any recorded error (a successful apply is self-healing). It also records
+// the version as seen: an applied version is by definition one we saw, which
+// keeps the 304 short-circuit (seen vs applied) interpretable even for feeds
+// whose pre-apply check took the 304 path.
 func (s *Store) StampUpdateFeedApplied(id, version string) error {
 	_, err := s.db.Exec(
-		`UPDATE update_feeds SET last_applied_version = ?, last_applied_at = ?, last_error = '', last_error_at = NULL WHERE id = ?`,
-		version, time.Now().UTC().Format(time.RFC3339), id,
+		`UPDATE update_feeds SET last_applied_version = ?, last_applied_at = ?, last_seen_version = ?, last_error = '', last_error_at = NULL WHERE id = ?`,
+		version, time.Now().UTC().Format(time.RFC3339), version, id,
 	)
 	return err
 }

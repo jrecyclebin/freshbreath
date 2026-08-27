@@ -444,10 +444,18 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 	if err != nil {
 		return fail(fmt.Errorf("bad url: %w", err))
 	}
-	if f.LastETag != "" {
-		req.Header.Set("If-None-Match", f.LastETag)
-	} else if f.LastModified != "" {
-		req.Header.Set("If-Modified-Since", f.LastModified)
+	// Conditional GET only when the cached validators are interpretable: a
+	// 304 says "unchanged" about a response whose version we recorded in
+	// last_seen_version. Rows migrated in before that column existed (and
+	// 200s whose manifest failed to parse) have validators but no seen
+	// version — for those, force a full fetch until seen is known. One
+	// unconditional GET, then cheap 304s resume.
+	if f.LastSeenVersion != "" {
+		if f.LastETag != "" {
+			req.Header.Set("If-None-Match", f.LastETag)
+		} else if f.LastModified != "" {
+			req.Header.Set("If-Modified-Since", f.LastModified)
+		}
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
