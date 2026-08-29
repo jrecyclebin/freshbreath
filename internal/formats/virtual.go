@@ -1192,13 +1192,17 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 	// Optional params the caller didn't supply resolve as empty strings
 	// (so template resolution doesn't error), and their empty query pairs
 	// are dropped from resolved URLs: an optional filter the caller passed
-	// on should vanish from the query, not ride along as `state=`.
+	// on should vanish from the query, not ride along as `state=`. In SQL
+	// steps the same omission binds as NULL — the honest value for "not
+	// given" in a database.
 	optionalNames := make(map[string]bool)
+	omittedOptionals := make(map[string]bool)
 	for _, p := range tool.Params {
 		if p.Optional {
 			optionalNames[p.Name] = true
 			if _, ok := scope[p.Name]; !ok {
 				scope[p.Name] = ""
+				omittedOptionals[p.Name] = true
 			}
 		}
 	}
@@ -1231,6 +1235,12 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 			for _, name := range step.SQLNames {
 				if name == "token" {
 					params[name] = token
+					continue
+				}
+				if omittedOptionals[name] {
+					// Caller omitted this optional: bind NULL, not "" — the
+					// honest value for "not given" on the database side.
+					params[name] = nil
 					continue
 				}
 				if v, ok := vars[name]; ok {
