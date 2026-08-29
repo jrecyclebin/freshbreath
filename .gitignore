@@ -7,6 +7,9 @@
 /freshbreath
 *.db
 *.db-journal
+# WAL sidecars — the main store runs in WAL mode (cmd/freshbreath/main.go)
+*.db-wal
+*.db-shm
 *.pem
 /apps
 /tasks
