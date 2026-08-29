@@ -1142,7 +1142,7 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 		token = strings.TrimPrefix(auth, "Bearer ")
 	}
 
-	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, token)
+	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, token, nil) // SQL runner: Phase 4 wiring
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

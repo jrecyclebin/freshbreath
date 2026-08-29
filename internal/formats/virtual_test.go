@@ -829,7 +829,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "greet", nil, "test-token")
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "greet", nil, "test-token", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -870,7 +870,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"name": "Ada"}, "")
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"name": "Ada"}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -896,7 +896,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-site", nil, "")
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-site", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +924,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "oof", nil, "")
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "oof", nil, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -973,7 +973,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-lists", nil, "")
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-lists", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1002,7 +1002,7 @@ assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "fetch", nil, "")
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "fetch", nil, "", nil)
 	if err == nil {
 		t.Fatal("assertion should have failed")
 	}
@@ -1013,7 +1013,7 @@ assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
 
 func TestExecuteVirtualToolNotFound(t *testing.T) {
 	tools := []VirtualTool{{Name: "greet"}}
-	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "missing", nil, "")
+	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "missing", nil, "", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1225,7 +1225,7 @@ HTTP 200
 
 	// "hello $world" proves the body goes through verbatim: a $ in the
 	// file data must NOT be interpreted as a variable reference.
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, "")
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,7 +1258,7 @@ HTTP 200
 	// A PNG signature — bytes that aren't legal inside a JSON string.
 	want := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
 	encoded := base64.StdEncoding.EncodeToString(want)
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload-image", map[string]interface{}{"content": encoded}, "")
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload-image", map[string]interface{}{"content": encoded}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1287,7 +1287,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "raw bytes here"}, "")
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "raw bytes here"}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1311,7 +1311,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hi"}, "")
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hi"}, "", nil)
 	if err == nil {
 		t.Fatal("expected error for missing Content-Type")
 	}
@@ -1331,11 +1331,256 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, "")
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, "", nil)
 	if err == nil {
 		t.Fatal("expected error for non-string raw body")
 	}
 	if !strings.Contains(err.Error(), "requires a string") {
 		t.Errorf("error = %v, want 'requires a string'", err)
+	}
+}
+
+// ── SQL steps ────────────────────────────────────────────────────────
+
+func TestParseSQLStep(t *testing.T) {
+	tools, err := parseVirtualFile([]byte(`[recent-tasks] The ten most recent tasks.
+
+SELECT id, title, done
+  FROM tasks
+  WHERE done = $done
+  ORDER BY created_at DESC
+  LIMIT 10
+
+{
+  "tasks": $.rows
+}
+---
+[add-task] Add a task to the list.
+
+INSERT INTO tasks (title, done)
+  VALUES ($title, 0)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tools = %d, want 2", len(tools))
+	}
+
+	first := tools[0]
+	if len(first.Steps) != 1 {
+		t.Fatalf("steps = %d, want 1", len(first.Steps))
+	}
+	st := first.Steps[0]
+	if st.Method != "" || st.URL != "" {
+		t.Errorf("HTTP fields set on SQL step: method=%q url=%q", st.Method, st.URL)
+	}
+	wantSQL := "SELECT id, title, done\nFROM tasks\nWHERE done = :done\nORDER BY created_at DESC\nLIMIT 10"
+	if st.SQL != wantSQL {
+		t.Errorf("SQL = %q\nwant %q", st.SQL, wantSQL)
+	}
+	if len(st.SQLNames) != 1 || st.SQLNames[0] != "done" {
+		t.Errorf("SQLNames = %v, want [done]", st.SQLNames)
+	}
+	// Shaping block attaches to the SQL step (anchor status 0).
+	if sh := st.Responses[0]; sh == nil || sh.Shaping == "" {
+		t.Errorf("shaping missing on SQL step: %+v", st.Responses)
+	}
+	// $done is a tool parameter.
+	params := map[string]bool{}
+	for _, p := range first.Params {
+		params[p.Name] = true
+	}
+	if !params["done"] {
+		t.Errorf("params missing done: %+v", first.Params)
+	}
+
+	second := tools[1]
+	if len(second.Steps) != 1 || second.Steps[0].SQLNames[0] != "title" {
+		t.Errorf("second tool steps = %+v", second.Steps)
+	}
+	if second.Steps[0].Responses[0] == nil {
+		t.Error("second tool SQL step missing shaping anchor")
+	}
+}
+
+func TestParseSQLVersusHTTPDelete(t *testing.T) {
+	tools, err := parseVirtualFile([]byte(`[drop-task]
+DELETE FROM tasks WHERE id = $id
+---
+[delete-remote]
+DELETE https://api.example.com/things/$id
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := tools[0].Steps[0]; st.SQL == "" || st.Method != "" {
+		t.Errorf("DELETE FROM: sql=%q method=%q — want a SQL step", st.SQL, st.Method)
+	}
+	if st := tools[1].Steps[0]; st.Method != "DELETE" || st.URL != "https://api.example.com/things/$id" {
+		t.Errorf("DELETE url: method=%q url=%q", st.Method, st.URL)
+	}
+}
+
+func TestParseSQLStringLiteralError(t *testing.T) {
+	_, err := parseVirtualFile([]byte(`[search]
+SELECT id FROM tasks WHERE name LIKE '%$term%'
+`))
+	if err == nil || !strings.Contains(err.Error(), "string literal") {
+		t.Errorf("want string-literal error, got %v", err)
+	}
+	// Correct form: bind the whole pattern.
+	_, err = parseVirtualFile([]byte(`[search]
+SELECT id FROM tasks WHERE name LIKE $pattern
+`))
+	if err != nil {
+		t.Errorf("bound pattern: %v", err)
+	}
+}
+
+func TestParseSQLReservedAppNonce(t *testing.T) {
+	_, err := parseVirtualFile([]byte(`[bad]
+SELECT * FROM t WHERE x = $app_nonce
+`))
+	if err == nil || !strings.Contains(err.Error(), "app_nonce") {
+		t.Errorf("want app_nonce reserved error, got %v", err)
+	}
+	// Also refused in HTTP templates, not just SQL.
+	_, err = parseVirtualFile([]byte(`[bad]
+GET https://api.example.com/$app_nonce
+`))
+	if err == nil || !strings.Contains(err.Error(), "app_nonce") {
+		t.Errorf("want app_nonce reserved error, got %v", err)
+	}
+}
+
+func TestParseSQLCompileDetails(t *testing.T) {
+	// $$ escape, duplicate names deduped, quoted literals untouched
+	// ($5 has no name so it stays literal; $name in a literal errors).
+	tools, err := parseVirtualFile([]byte(`[q]
+SELECT 'it''s $5, cheap' AS note, x
+  FROM t WHERE a = $a AND b = $a AND c = $$
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := tools[0].Steps[0]
+	want := "SELECT 'it''s $5, cheap' AS note, x\nFROM t WHERE a = :a AND b = :a AND c = $"
+	if st.SQL != want {
+		t.Errorf("SQL = %q\nwant %q", st.SQL, want)
+	}
+	if len(st.SQLNames) != 1 || st.SQLNames[0] != "a" {
+		t.Errorf("SQLNames = %v, want [a]", st.SQLNames)
+	}
+}
+
+func TestExecuteSQLStepShapingAndAssignment(t *testing.T) {
+	var gotSQL string
+	var gotParams map[string]interface{}
+	runner := func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		gotSQL = sqlText
+		gotParams = params
+		return map[string]interface{}{
+			"columns": []interface{}{"id", "title"},
+			"rows":    []interface{}{[]interface{}{float64(1), "one"}, []interface{}{float64(2), "two"}},
+		}, nil
+	}
+	tools, err := parseVirtualFile([]byte(`[recent]
+SELECT id, title FROM tasks
+  WHERE done = $done
+
+{
+  "firstId": $.rows.0.0,
+  "firstTitle": $.rows.0.1
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "recent",
+		map[string]interface{}{"done": float64(0)}, "", runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSQL != "SELECT id, title FROM tasks\nWHERE done = :done" {
+		t.Errorf("runner sql = %q", gotSQL)
+	}
+	if gotParams["done"] != float64(0) {
+		t.Errorf("runner params = %v", gotParams)
+	}
+	m := result.(map[string]interface{})
+	if m["firstId"] != float64(1) {
+		t.Errorf("firstId = %v", m["firstId"])
+	}
+	if m["firstTitle"] != "one" {
+		t.Errorf("firstTitle = %v", m["firstTitle"])
+	}
+}
+
+func TestExecuteSQLStepUnresolvedVar(t *testing.T) {
+	tools, err := parseVirtualFile([]byte(`[q]
+SELECT * FROM t WHERE x = $nope
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "q", nil, "",
+		func(string, map[string]interface{}) (map[string]interface{}, error) {
+			return map[string]interface{}{}, nil
+		})
+	if err == nil || !strings.Contains(err.Error(), "unresolved $nope") {
+		t.Errorf("want unresolved error, got %v", err)
+	}
+
+	// No runner wired at all.
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "q", nil, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "no database target") {
+		t.Errorf("want no-runner error, got %v", err)
+	}
+}
+
+func TestExecuteMixedHTTPAndSQL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, `{"title": "Fetched", "body": "Content"}`)
+	}))
+	defer srv.Close()
+
+	var insertSQL string
+	var insertParams map[string]interface{}
+	runner := func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		insertSQL = sqlText
+		insertParams = params
+		return map[string]interface{}{"rowsAffected": float64(1), "lastInsertId": float64(7)}, nil
+	}
+
+	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[import-issue] Fetch and file.
+
+GET %s/issues/1
+
+HTTP 200
+
+$title = $.title
+$body = $.body
+
+INSERT INTO issues (title, body, source)
+  VALUES ($title, $body, 'github')
+`, srv.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "import-issue", nil, "", runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if insertSQL != "INSERT INTO issues (title, body, source)\nVALUES (:title, :body, 'github')" {
+		t.Errorf("insert sql = %q", insertSQL)
+	}
+	if insertParams["title"] != "Fetched" || insertParams["body"] != "Content" {
+		t.Errorf("insert params = %v", insertParams)
+	}
+	// No shaping: the tool returns the SQL step's scope.
+	m := result.(map[string]interface{})
+	if m["lastInsertId"] != float64(7) {
+		t.Errorf("result = %v", m)
 	}
 }

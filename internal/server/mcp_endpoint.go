@@ -146,7 +146,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 				json.Unmarshal(req.Params.Arguments, &args)
 			}
 
-			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, token)
+			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, token, nil) // SQL runner: Phase 4 wiring
 			if err != nil {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},

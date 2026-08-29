@@ -52,7 +52,8 @@ type typeAnnotation struct {
 	typ  ParamType
 }
 
-// VirtualStep is one HTTP request step within a tool's script.
+// VirtualStep is one step within a tool's script — an HTTP request, a SQL
+// statement, or an assignments-only post-processing step.
 type VirtualStep struct {
 	Assignments []VirtualAssignment
 	Assertions  []VirtualAssertion
@@ -61,7 +62,9 @@ type VirtualStep struct {
 	Headers     map[string]string
 	Body        string                   // Raw JSON body template
 	BodyRaw     string                   // String-spread body expression, e.g. "$content" or "base64dec($content)"
-	Responses   map[int]*VirtualResponse // Expected status → response handling
+	SQL         string                   // Compiled SQL: $var → :var bindings
+	SQLNames    []string                 // Unique bind names, first-appearance order
+	Responses   map[int]*VirtualResponse // Expected status → response handling (0 = SQL step shaping)
 }
 
 // VirtualAssignment binds a variable name to an expression.
@@ -93,26 +96,36 @@ func parseVirtualFile(data []byte) ([]VirtualTool, error) {
 	var cur *VirtualTool
 	var curLines []string
 
-	flush := func() {
+	flush := func() error {
 		if cur != nil {
-			parseVirtualToolBody(cur, curLines)
+			if err := parseVirtualToolBody(cur, curLines); err != nil {
+				return fmt.Errorf("tool %s: %w", cur.Name, err)
+			}
+			if err := rejectReservedParams(*cur); err != nil {
+				return fmt.Errorf("tool %s: %w", cur.Name, err)
+			}
 			cur.Params = toolParams(*cur)
 			tools = append(tools, *cur)
 		}
 		cur = nil
 		curLines = nil
+		return nil
 	}
 
 	for _, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 
 		if trimmed == "---" {
-			flush()
+			if err := flush(); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
 		if name, desc, ok := parseVirtualToolHeader(trimmed); ok {
-			flush()
+			if err := flush(); err != nil {
+				return nil, err
+			}
 			cur = &VirtualTool{Name: name, Description: desc}
 			curLines = nil
 			continue
@@ -122,7 +135,9 @@ func parseVirtualFile(data []byte) ([]VirtualTool, error) {
 			curLines = append(curLines, line)
 		}
 	}
-	flush()
+	if err := flush(); err != nil {
+		return nil, err
+	}
 
 	return tools, nil
 }
@@ -171,6 +186,12 @@ func toolParams(tool VirtualTool) []ToolParam {
 		}
 		scan(step.Body)
 		scan(step.BodyRaw)
+		// SQL steps keep their bind names from compilation — scan those.
+		for _, name := range step.SQLNames {
+			if !defined[name] {
+				seen[name] = true
+			}
+		}
 		for _, a := range step.Assignments {
 			scan(a.Expr)
 		}
@@ -212,7 +233,7 @@ func parseVirtualToolHeader(line string) (name, desc string, ok bool) {
 }
 
 // parseVirtualToolBody parses the lines of a tool definition into steps.
-func parseVirtualToolBody(tool *VirtualTool, lines []string) {
+func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 	var step *VirtualStep
 	var bodyLines, shapingLines []string
 	var braceDepth int
@@ -228,7 +249,7 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) {
 	state := sPre
 
 	newStep := func() {
-		if step != nil && (step.Method != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+		if step != nil && (step.Method != "" || step.SQL != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
 			tool.Steps = append(tool.Steps, *step)
 		}
 		step = &VirtualStep{Responses: make(map[int]*VirtualResponse)}
@@ -271,6 +292,41 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) {
 				step.Assertions = append(step.Assertions, VirtualAssertion{Expr: ex, Msg: msg})
 			} else if m := typeAnnotationRe.FindStringSubmatch(line); m != nil {
 				tool.typeAnnotations = append(tool.typeAnnotations, typeAnnotation{name: m[1], typ: ParamType(m[2])})
+			} else if isSQLVerbLine(line) {
+				// SQL step: the verb line plus every indented continuation,
+				// against the RAW line (the loop's trim already happened).
+				// Ends at the first non-indented line. Blank lines and
+				// indented # comments are skipped, not collected. Checked
+				// before tryParseRequest: "DELETE FROM" is SQL, not a
+				// DELETE to the URL "FROM …".
+				sqlLines := []string{line}
+				j := i + 1
+				for j < len(lines) {
+					raw := lines[j]
+					t := strings.TrimSpace(raw)
+					if t == "" {
+						j++
+						continue
+					}
+					if raw[0] != ' ' && raw[0] != '\t' {
+						break
+					}
+					if !strings.HasPrefix(t, "#") {
+						sqlLines = append(sqlLines, t)
+					}
+					j++
+				}
+				i = j - 1
+				compiled, names, err := compileSQL(strings.Join(sqlLines, "\n"))
+				if err != nil {
+					return err
+				}
+				step.SQL = compiled
+				step.SQLNames = names
+				// SQL has no status line; anchor any shaping block to 0.
+				step.Responses[0] = &VirtualResponse{}
+				lastHTTPStatus = 0
+				state = sResp
 			} else if ok, m, u := tryParseRequest(line); ok {
 				step.Method = m
 				step.URL = u
@@ -352,9 +408,10 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) {
 	}
 
 	// Finalize last step
-	if step != nil && (step.Method != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+	if step != nil && (step.Method != "" || step.SQL != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
 		tool.Steps = append(tool.Steps, *step)
 	}
+	return nil
 }
 
 // ── Line Classifiers ─────────────────────────────────────────────────
@@ -417,6 +474,137 @@ func tryParseRequest(line string) (ok bool, method, reqURL string) {
 	return false, "", ""
 }
 
+// sqlVerbs are the statement openers that make a line a SQL step. SQL's
+// DELETE is always followed by FROM; HTTP's DELETE is always followed by
+// something with a scheme — that one word is the whole disambiguation.
+var sqlVerbs = []string{
+	"SELECT ", "INSERT ", "UPDATE ", "DELETE FROM ", "REPLACE ",
+	"WITH ", "CREATE ", "DROP ", "ALTER ",
+}
+
+func isSQLVerbLine(line string) bool {
+	u := strings.ToUpper(line)
+	for _, v := range sqlVerbs {
+		if strings.HasPrefix(u, v) {
+			return true
+		}
+	}
+	return false
+}
+
+var sqlNameRe = regexp.MustCompile(`^[a-zA-Z_]\w*`)
+
+// compileSQL turns $var references into :var named-parameter bindings and
+// returns the bind names in first-appearance order. A $var inside a single-
+// quoted SQL string literal is an error, not a best-effort splice: binding
+// can't reach inside a literal, so `LIKE '%$term%'` must become
+// `LIKE $pattern` with the caller supplying the wildcards.
+func compileSQL(raw string) (string, []string, error) {
+	var b strings.Builder
+	var names []string
+	seen := map[string]bool{}
+	inStr := false
+	for i := 0; i < len(raw); {
+		ch := raw[i]
+		if inStr {
+			if ch == '\'' {
+				if i+1 < len(raw) && raw[i+1] == '\'' { // '' escape
+					b.WriteString("''")
+					i += 2
+					continue
+				}
+				inStr = false
+				b.WriteByte(ch)
+				i++
+				continue
+			}
+			if ch == '$' {
+				if m := sqlNameRe.FindString(raw[i+1:]); m != "" {
+					return "", nil, fmt.Errorf("$%s is inside a SQL string literal; bind it outside instead (e.g. WHERE name LIKE $pattern, caller supplies the wildcards)", m)
+				}
+			}
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		switch ch {
+		case '\'':
+			inStr = true
+			b.WriteByte(ch)
+			i++
+		case '$':
+			if i+1 < len(raw) && raw[i+1] == '$' { // $$ → literal $
+				b.WriteByte('$')
+				i += 2
+				continue
+			}
+			m := sqlNameRe.FindString(raw[i+1:])
+			if m == "" {
+				return "", nil, fmt.Errorf("stray $ in SQL step")
+			}
+			b.WriteByte(':')
+			b.WriteString(m)
+			if !seen[m] {
+				seen[m] = true
+				names = append(names, m)
+			}
+			i += 1 + len(m)
+		default:
+			b.WriteByte(ch)
+			i++
+		}
+	}
+	return b.String(), names, nil
+}
+
+// rejectReservedParams refuses tools that reference $app_nonce themselves.
+// app_nonce is the parameter the SERVER synthesizes for default-target SQL
+// tools; a template's own use of the name would be silently shadowed, so
+// it's a load-time error instead.
+func rejectReservedParams(tool VirtualTool) error {
+	check := func(s string) error {
+		for _, m := range plainVarRe.FindAllStringSubmatch(s, -1) {
+			if m[1] == "app_nonce" {
+				return fmt.Errorf("$app_nonce is reserved (the server supplies it for database tools); rename the parameter")
+			}
+		}
+		return nil
+	}
+	for _, st := range tool.Steps {
+		for _, s := range []string{st.URL, st.Body, st.BodyRaw} {
+			if err := check(s); err != nil {
+				return err
+			}
+		}
+		for _, v := range st.Headers {
+			if err := check(v); err != nil {
+				return err
+			}
+		}
+		for _, name := range st.SQLNames {
+			if name == "app_nonce" {
+				return fmt.Errorf("$app_nonce is reserved (the server supplies it for database tools); rename the parameter")
+			}
+		}
+		for _, a := range st.Assignments {
+			if err := check(a.Expr); err != nil {
+				return err
+			}
+		}
+		for _, a := range st.Assertions {
+			if err := check(a.Expr); err != nil {
+				return err
+			}
+		}
+		for _, resp := range st.Responses {
+			if err := check(resp.Shaping); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func tryParseHTTPStatus(line string) (ok bool, code int) {
 	if !strings.HasPrefix(line, "HTTP ") {
 		return false, 0
@@ -449,6 +637,9 @@ func isPreRequestLine(line string) bool {
 		return true
 	}
 	if ok, _, _ := tryParseAssertion(line); ok {
+		return true
+	}
+	if isSQLVerbLine(line) {
 		return true
 	}
 	if ok, _, _ := tryParseRequest(line); ok {
@@ -930,9 +1121,17 @@ func VirtualToolSummaries(tools []VirtualTool) []map[string]string {
 	return out
 }
 
+// SQLRunner executes one compiled SQL statement (with :name bindings) and
+// its named parameters on behalf of a virtual tool, returning the result as
+// a scope-shaped map ("rows", "rowsAffected", …). It is a callback because
+// the formats package cannot know about databases; the server wires it to
+// the app-database core, deciding the target from the service's config.
+type SQLRunner func(sqlText string, params map[string]interface{}) (map[string]interface{}, error)
+
 // ExecuteVirtualTool runs a virtual tool's steps and returns the result.
-// The token comes from auth middleware context (or "" for unauthenticated calls).
-func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, token string) (interface{}, error) {
+// The token comes from auth middleware context (or "" for unauthenticated
+// calls); sqlRunner may be nil for tools that never touch a database.
+func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, token string, sqlRunner SQLRunner) (interface{}, error) {
 	tool := findVirtualTool(tools, toolName)
 	if tool == nil {
 		return nil, fmt.Errorf("tool %q not found", toolName)
@@ -960,6 +1159,46 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 			if err := evalAssertion(a.Expr, a.Msg, vars, scope, token); err != nil {
 				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
 			}
+		}
+
+		// SQL step: bind, run, feed the result into scope. A failing
+		// statement fails the tool — SQL has no status codes; the absence
+		// of a status line IS the signal.
+		if step.SQL != "" {
+			if sqlRunner == nil {
+				return nil, fmt.Errorf("step %d: SQL step but this service has no database target", stepIdx)
+			}
+			params := make(map[string]interface{}, len(step.SQLNames))
+			for _, name := range step.SQLNames {
+				if name == "token" {
+					params[name] = token
+					continue
+				}
+				if v, ok := vars[name]; ok {
+					params[name] = v
+					continue
+				}
+				if v, ok := scope[name]; ok {
+					params[name] = v
+					continue
+				}
+				return nil, fmt.Errorf("step %d: unresolved $%s in SQL", stepIdx, name)
+			}
+			result, err := sqlRunner(step.SQL, params)
+			if err != nil {
+				return nil, fmt.Errorf("step %d, sql: %w", stepIdx, err)
+			}
+			scope = result
+			if vr := step.Responses[0]; vr != nil && vr.Shaping != "" {
+				return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
+			}
+			continue
+		}
+
+		// Assignments-only step (post-processing for a previous step): its
+		// work is done, nothing to request.
+		if step.Method == "" {
+			continue
 		}
 
 		// Resolve URL, headers, body.
@@ -1057,19 +1296,26 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 
 		// Apply shaping if present.
 		if vr.Shaping != "" {
-			shaped, err := resolveTemplate(vr.Shaping, vars, scope, token, ResolveBody)
-			if err != nil {
-				return nil, fmt.Errorf("step %d, shaping: %w", stepIdx, err)
-			}
-			// Parse shaped output so we return structured data, not a string.
-			var shapedVal interface{}
-			if err := json.Unmarshal([]byte(shaped), &shapedVal); err != nil {
-				return nil, fmt.Errorf("step %d, shaping parse: %w", stepIdx, err)
-			}
-			return shapedVal, nil
+			return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
 		}
 	}
 
 	// No shaping on the final step — return raw scope (the last response body).
 	return scope, nil
+}
+
+// applyShaping resolves a shaping template against the current scope and
+// parses the result into structured data. Shaping terminates the tool —
+// it is the tool's return value.
+func applyShaping(shaping string, vars map[string]interface{}, scope interface{}, token string, stepIdx int) (interface{}, error) {
+	shaped, err := resolveTemplate(shaping, vars, scope, token, ResolveBody)
+	if err != nil {
+		return nil, fmt.Errorf("step %d, shaping: %w", stepIdx, err)
+	}
+	// Parse shaped output so we return structured data, not a string.
+	var shapedVal interface{}
+	if err := json.Unmarshal([]byte(shaped), &shapedVal); err != nil {
+		return nil, fmt.Errorf("step %d, shaping parse: %w", stepIdx, err)
+	}
+	return shapedVal, nil
 }
