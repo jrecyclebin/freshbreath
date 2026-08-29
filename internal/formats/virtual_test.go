@@ -20,7 +20,7 @@ func TestParseSharepoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tools, err := parseVirtualFile(data)
+	tools, err := ParseVirtualFile(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ HTTP 200
   "reply": $.reply
 }
 `
-	tools, err := parseVirtualFile([]byte(input))
+	tools, err := ParseVirtualFile([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ Authorization: Bearer $token
 
 HTTP 200
 `
-	tools, err := parseVirtualFile([]byte(input))
+	tools, err := ParseVirtualFile([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ HTTP 200
 ldskjasdjflksda
 sddslkfj;;;
 `
-	tools, err := parseVirtualFile([]byte(input))
+	tools, err := ParseVirtualFile([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ Authorization: Bearer $token
 
 HTTP 200
 `
-	tools, err := parseVirtualFile([]byte(input))
+	tools, err := ParseVirtualFile([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -820,7 +820,7 @@ func TestExecuteVirtualToolBasicGET(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[greet]
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[greet]
 GET %s/api/hello
 Authorization: Bearer $token
 HTTP 200
@@ -859,7 +859,7 @@ func TestExecuteVirtualToolPOSTWithBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[create]
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[create]
 POST %s/api/items
 Content-Type: application/json
 
@@ -887,7 +887,7 @@ func TestExecuteVirtualToolShaping(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[get-site]
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[get-site]
 GET %s/api/site
 HTTP 200
 {"name": $.displayName, "url": $.webUrl}
@@ -916,7 +916,7 @@ func TestExecuteVirtualToolUnexpectedStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[oof]
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[oof]
 GET %s/api/oops
 HTTP 200
 `, srv.URL)))
@@ -961,7 +961,7 @@ func TestExecuteVirtualToolAssignment(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[get-lists]
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[get-lists]
 GET %s/api/site
 HTTP 200
 $site_id = $.siteId
@@ -993,7 +993,7 @@ func TestExecuteVirtualToolAssertionFails(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[fetch]
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[fetch]
 GET %s/api/page
 HTTP 200
 assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
@@ -1039,7 +1039,7 @@ Authorization: Bearer $token
 
 HTTP 200
 `)
-	tools, err := parseVirtualFile(data)
+	tools, err := ParseVirtualFile(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1080,7 +1080,7 @@ Content-Type: application/json
 
 HTTP 200
 `)
-	tools, err := parseVirtualFile(data)
+	tools, err := ParseVirtualFile(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1108,7 +1108,7 @@ Content-Type: text/plain
 ...$content
 HTTP 200
 `
-	tools, err := parseVirtualFile([]byte(input))
+	tools, err := ParseVirtualFile([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1137,7 +1137,7 @@ Content-Type: image/png
 ...base64dec($content)
 HTTP 200
 `
-	tools, err := parseVirtualFile([]byte(input))
+	tools, err := ParseVirtualFile([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1154,7 +1154,7 @@ Content-Type: text/plain
 ...$content
 HTTP 200
 `)
-	tools, err := parseVirtualFile(data)
+	tools, err := ParseVirtualFile(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1213,7 +1213,7 @@ func TestExecuteVirtualToolRawBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
 PUT %s/files
 Content-Type: text/plain
 ...$content
@@ -1245,7 +1245,7 @@ func TestExecuteVirtualToolRawBodyBase64(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload-image] Upload image.
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload-image] Upload image.
 PUT %s/files
 Content-Type: image/png
 ...base64dec($content)
@@ -1276,7 +1276,7 @@ func TestExecuteVirtualToolRawBodyAssignment(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
 $payload = $content
 PUT %s/files
 Content-Type: text/plain
@@ -1302,7 +1302,7 @@ func TestExecuteVirtualToolRawBodyMissingContentType(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
 PUT %s/files
 ...$content
 HTTP 200
@@ -1321,7 +1321,7 @@ HTTP 200
 }
 
 func TestExecuteVirtualToolRawBodyNonStringFails(t *testing.T) {
-	tools, err := parseVirtualFile([]byte(`[upload] Upload.
+	tools, err := ParseVirtualFile([]byte(`[upload] Upload.
 PUT https://example.invalid/files
 Content-Type: text/plain
 ...$fields
@@ -1343,7 +1343,7 @@ HTTP 200
 // ── SQL steps ────────────────────────────────────────────────────────
 
 func TestParseSQLStep(t *testing.T) {
-	tools, err := parseVirtualFile([]byte(`[recent-tasks] The ten most recent tasks.
+	tools, err := ParseVirtualFile([]byte(`[recent-tasks] The ten most recent tasks.
 
 SELECT id, title, done
   FROM tasks
@@ -1405,7 +1405,7 @@ INSERT INTO tasks (title, done)
 }
 
 func TestParseSQLVersusHTTPDelete(t *testing.T) {
-	tools, err := parseVirtualFile([]byte(`[drop-task]
+	tools, err := ParseVirtualFile([]byte(`[drop-task]
 DELETE FROM tasks WHERE id = $id
 ---
 [delete-remote]
@@ -1423,14 +1423,14 @@ DELETE https://api.example.com/things/$id
 }
 
 func TestParseSQLStringLiteralError(t *testing.T) {
-	_, err := parseVirtualFile([]byte(`[search]
+	_, err := ParseVirtualFile([]byte(`[search]
 SELECT id FROM tasks WHERE name LIKE '%$term%'
 `))
 	if err == nil || !strings.Contains(err.Error(), "string literal") {
 		t.Errorf("want string-literal error, got %v", err)
 	}
 	// Correct form: bind the whole pattern.
-	_, err = parseVirtualFile([]byte(`[search]
+	_, err = ParseVirtualFile([]byte(`[search]
 SELECT id FROM tasks WHERE name LIKE $pattern
 `))
 	if err != nil {
@@ -1439,14 +1439,14 @@ SELECT id FROM tasks WHERE name LIKE $pattern
 }
 
 func TestParseSQLReservedAppNonce(t *testing.T) {
-	_, err := parseVirtualFile([]byte(`[bad]
+	_, err := ParseVirtualFile([]byte(`[bad]
 SELECT * FROM t WHERE x = $app_nonce
 `))
 	if err == nil || !strings.Contains(err.Error(), "app_nonce") {
 		t.Errorf("want app_nonce reserved error, got %v", err)
 	}
 	// Also refused in HTTP templates, not just SQL.
-	_, err = parseVirtualFile([]byte(`[bad]
+	_, err = ParseVirtualFile([]byte(`[bad]
 GET https://api.example.com/$app_nonce
 `))
 	if err == nil || !strings.Contains(err.Error(), "app_nonce") {
@@ -1457,7 +1457,7 @@ GET https://api.example.com/$app_nonce
 func TestParseSQLCompileDetails(t *testing.T) {
 	// $$ escape, duplicate names deduped, quoted literals untouched
 	// ($5 has no name so it stays literal; $name in a literal errors).
-	tools, err := parseVirtualFile([]byte(`[q]
+	tools, err := ParseVirtualFile([]byte(`[q]
 SELECT 'it''s $5, cheap' AS note, x
   FROM t WHERE a = $a AND b = $a AND c = $$
 `))
@@ -1485,7 +1485,7 @@ func TestExecuteSQLStepShapingAndAssignment(t *testing.T) {
 			"rows":    []interface{}{[]interface{}{float64(1), "one"}, []interface{}{float64(2), "two"}},
 		}, nil
 	}
-	tools, err := parseVirtualFile([]byte(`[recent]
+	tools, err := ParseVirtualFile([]byte(`[recent]
 SELECT id, title FROM tasks
   WHERE done = $done
 
@@ -1518,7 +1518,7 @@ SELECT id, title FROM tasks
 }
 
 func TestExecuteSQLStepUnresolvedVar(t *testing.T) {
-	tools, err := parseVirtualFile([]byte(`[q]
+	tools, err := ParseVirtualFile([]byte(`[q]
 SELECT * FROM t WHERE x = $nope
 `))
 	if err != nil {
@@ -1553,7 +1553,7 @@ func TestExecuteMixedHTTPAndSQL(t *testing.T) {
 		return map[string]interface{}{"rowsAffected": float64(1), "lastInsertId": float64(7)}, nil
 	}
 
-	tools, err := parseVirtualFile([]byte(fmt.Sprintf(`[import-issue] Fetch and file.
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[import-issue] Fetch and file.
 
 GET %s/issues/1
 
@@ -1582,5 +1582,75 @@ INSERT INTO issues (title, body, source)
 	m := result.(map[string]interface{})
 	if m["lastInsertId"] != float64(7) {
 		t.Errorf("result = %v", m)
+	}
+}
+
+func TestTypeAnnotationsOptionalAndMultiName(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[list] List issues.
+
+$state is string?
+$owner is string
+$host, $search is string?
+
+GET https://api.example.com/issues?state=$state&owner=$owner&host=$host&q=$search
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]struct {
+		typ      ParamType
+		optional bool
+	}{}
+	for _, p := range tools[0].Params {
+		params[p.Name] = struct {
+			typ      ParamType
+			optional bool
+		}{p.Type, p.Optional}
+	}
+	wantOptional := map[string]bool{"state": true, "host": true, "search": true, "owner": false}
+	for name, w := range wantOptional {
+		p, ok := params[name]
+		if !ok {
+			t.Fatalf("param %s missing: %+v", name, params)
+		}
+		if p.optional != w {
+			t.Errorf("%s optional = %v, want %v", name, p.optional, w)
+		}
+		if p.typ != ParamString {
+			t.Errorf("%s type = %v", name, p.typ)
+		}
+	}
+
+	// The `?` binds to the declaration: one line, both names optional.
+	if !params["host"].optional || !params["search"].optional {
+		t.Errorf("multi-name optionality: %+v", params)
+	}
+}
+
+func TestTypeAnnotationGrammar(t *testing.T) {
+	// All the shapes that must parse…
+	for _, line := range []string{
+		"$state is string?",
+		"$owner is string",
+		"$host, $search is string?",
+		"$a,$b,$c is number",
+		"$x is object",
+	} {
+		if !typeAnnotationRe.MatchString(line) {
+			t.Errorf("%q should match", line)
+		}
+	}
+	// …and all the shapes that must not.
+	for _, line := range []string{
+		"$x is widget",
+		"$x is string??",
+		"$x, is string",
+		"$x is string extra",
+		"host is string",
+		"$x are string",
+	} {
+		if typeAnnotationRe.MatchString(line) {
+			t.Errorf("%q should NOT match", line)
+		}
 	}
 }

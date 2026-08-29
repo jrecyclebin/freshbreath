@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -109,7 +110,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 		tool := &mcp.Tool{
 			Name:        vt.Name,
 			Description: vt.Description,
-			InputSchema: virtualToolInputSchema(vt),
+			InputSchema: virtualToolInputSchema(vt, svc.Descriptor.DatabaseTarget),
 		}
 		capturedName := vt.Name
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -119,6 +120,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 			// If no bearer token and the service uses API-key auth, fall back
 			// to the admin-configured key.
 			token := ""
+			var claims *freshbreathClaims
 			if req.Extra != nil && req.Extra.Header != nil {
 				if ah := req.Extra.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
 					raw := strings.TrimPrefix(ah, "Bearer ")
@@ -131,6 +133,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 					}
 					if wrapped != nil {
 						token = wrapped.UpstreamToken
+						claims = wrapped
 					} else {
 						token = raw
 					}
@@ -146,7 +149,8 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 				json.Unmarshal(req.Params.Arguments, &args)
 			}
 
-			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, token, nil) // SQL runner: Phase 4 wiring
+			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, token,
+				s.mcpSQLRunner(svc, claims, args))
 			if err != nil {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
@@ -164,18 +168,49 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 	return mcps, nil
 }
 
-// virtualToolInputSchema builds a JSON Schema input object for a virtual tool.
-// Parameters are inferred from $name references in the tool's templates that
-// aren't locally assigned — these are what the caller must supply.
-func virtualToolInputSchema(vt formats.VirtualTool) map[string]interface{} {
+// virtualToolInputSchema builds a JSON Schema input object for a virtual
+// tool. Parameters are inferred from $name references in the tool's templates
+// that aren't locally assigned — these are what the caller must supply.
+//
+// Every parameter is required unless its annotation carries `?` — a schema
+// where nothing is required teaches a model nothing. Tools with SQL steps on
+// a default-target service also expose app_nonce: the MCP path has no
+// ambient app context, so the caller must name the app whose data to touch.
+// Fixed targets (global / app:<nonce>) know their database already, and pure
+// HTTP tools have nothing to point at a database, so the property appears
+// exactly where it means something.
+func virtualToolInputSchema(vt formats.VirtualTool, dbTarget string) map[string]interface{} {
 	props := map[string]interface{}{}
+	required := []string{}
 	for _, p := range vt.Params {
 		props[p.Name] = map[string]interface{}{"type": string(p.Type)}
+		if !p.Optional {
+			required = append(required, p.Name)
+		}
 	}
+	if hasSQLSteps(vt) && dbTarget == "" {
+		props["app_nonce"] = map[string]interface{}{
+			"type":        "string",
+			"description": "App nonce whose database this tool should use",
+		}
+		required = append(required, "app_nonce")
+	}
+	sort.Strings(required)
 	return map[string]interface{}{
 		"type":       "object",
 		"properties": props,
+		"required":   required,
 	}
+}
+
+// hasSQLSteps reports whether any step in the tool runs SQL.
+func hasSQLSteps(vt formats.VirtualTool) bool {
+	for _, st := range vt.Steps {
+		if st.SQL != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ── Token Verification ───────────────────────────────────────────────

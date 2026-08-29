@@ -1228,7 +1228,7 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
       {(isNew || isEdit) && (
         <div className="field">
           <label>Service access</label>
-          <span className="help">Select which services this app can access.</span>
+          <span className="help">Select which services this app can access. Linking a service with SQL tools also grants this app's pages its database — the link is the grant.</span>
           {isEdit && loading ? <span className="muted">Loading…</span> : (
             <MultiSelect
               options={services.map(s=>({value:s.id,label:s.name}))}
@@ -1376,11 +1376,13 @@ function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools
       delete d.auth; delete d.api_key; delete d.header; delete d.proxied;
       delete d.client_id; delete d.client_secret; delete d.oauth_url;
       delete d.scopes; delete d.userinfo_url; delete d.userinfo_emails_url;
+      delete d.database_target; delete d.database_name;
     } else if (t === 'virtual') {
       delete d.proxied;
       delete d.auth_service_id; delete d.userinfo_url; delete d.userinfo_emails_url;
     } else {
       delete d.auth_service_id;
+      delete d.database_target; delete d.database_name;
     }
     setForm(f=>({...f, descriptor: d}));
   };
@@ -1484,6 +1486,35 @@ function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools
         <>
           <div className="field"><label>Userinfo URL</label><input className="input mono" value={form.descriptor.userinfo_url||''} onChange={e=>updDesc('userinfo_url',e.target.value)}/></div>
           <div className="field"><label>User Email URL</label><input className="input mono" value={form.descriptor.userinfo_emails_url||''} onChange={e=>updDesc('userinfo_emails_url',e.target.value)}/></div>
+        </>
+      )}
+      {isVirtual && (
+        <>
+          <div className="field-row">
+            <div className="field"><label>Database</label>
+              <select className="input" value={form.descriptor.database_target==='global'?'global':(form.descriptor.database_target||'').startsWith('app:')?'app':''} onChange={e=>{
+                const v = e.target.value;
+                const d = {...form.descriptor};
+                delete d.database_target;
+                if (v === 'global') d.database_target = 'global';
+                if (v === 'app') d.database_target = 'app:';
+                setForm(f=>({...f, descriptor: d}));
+              }}>
+                <option value="">Each app's own (default)</option>
+                <option value="global">Global (shared between apps)</option>
+                <option value="app">One app's data</option>
+              </select>
+              <span className="help">Which database SQL steps in this service's tools run against.</span>
+            </div>
+            <div className="field"><label>Database name</label>
+              <input className="input mono" value={form.descriptor.database_name||''} onChange={e=>updDesc('database_name',e.target.value)} placeholder="app"/>
+            </div>
+          </div>
+          {(form.descriptor.database_target||'').startsWith('app:') && (
+            <div className="field"><label>App nonce</label>
+              <input className="input mono" value={form.descriptor.database_target.slice(4)||''} onChange={e=>updDesc('database_target','app:'+e.target.value)} placeholder="nonce of the app whose data this service touches"/>
+            </div>
+          )}
         </>
       )}
       {isEdit && (isTasks || isVirtual) && (

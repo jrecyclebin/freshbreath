@@ -117,6 +117,13 @@ type ServiceDescriptor struct {
 	Scopes        string `json:"scopes,omitempty"`              // space-separated scopes (OIDC)
 	UserInfoURL   string `json:"userinfo_url,omitempty"`        // explicit userinfo endpoint returning {email,name,...} for providers that don't advertise one
 	UserEmailsURL string `json:"userinfo_emails_url,omitempty"` // fallback endpoint returning [{email,primary,verified}] when userinfo has no email
+
+	// App-database targeting for virtual services with SQL steps
+	// (design/app-databases.md). "" = each caller's own app.db (default);
+	// "global" = db/<name>.db shared between apps; "app:<nonce>" = pinned
+	// to one app's data. DatabaseName defaults to "app".
+	DatabaseTarget string `json:"database_target,omitempty"`
+	DatabaseName   string `json:"database_name,omitempty"`
 }
 
 // MarshalJSON serializes the descriptor, omitting zero-valued fields.
