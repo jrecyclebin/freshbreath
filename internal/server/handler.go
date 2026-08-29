@@ -1142,7 +1142,11 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 		token = strings.TrimPrefix(auth, "Bearer ")
 	}
 
-	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, token, nil) // SQL runner: Phase 4 wiring
+	// SQL steps run against the app's database (design/app-databases.md).
+	// No actor here — the app↔service link is the whole grant on this path.
+	sqlRunner := s.browserSQLRunner(svc, r.Header.Get("X-App-Nonce"), body.Args)
+
+	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, token, sqlRunner)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

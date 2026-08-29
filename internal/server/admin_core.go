@@ -284,6 +284,9 @@ func (s *Server) coreCreateService(actor *db.User, name, url string, d db.Servic
 	if url == "" {
 		return nil, cerr(http.StatusBadRequest, "url required")
 	}
+	if err := s.validateDBDescriptor(d); err != nil {
+		return nil, err
+	}
 	id, err := s.store.RegisterService(name, url, d)
 	if err != nil {
 		return nil, cerr(http.StatusInternalServerError, "%v", err)
@@ -315,6 +318,9 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	if existing.Descriptor.Type == "ssh" {
 		name = existing.Name
 		url = existing.URL
+	}
+	if err := s.validateDBDescriptor(d); err != nil {
+		return err
 	}
 	if err := s.store.UpdateService(id, name, url, d); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)

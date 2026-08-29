@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/mattn/go-sqlite3"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/formats"
 )
 
 // App databases — SQLite for every app, per design/app-databases.md.
@@ -421,6 +423,15 @@ func (s *Server) coreDBQuery(actor *db.User, target string, req dbQueryRequest, 
 	if err := s.gateDBTarget(actor, target); err != nil {
 		return nil, err
 	}
+	return s.runDBQuery(target, req, ro)
+}
+
+// runDBQuery executes without gateDBTarget — for callers whose access was
+// established by other means. Today that is the browser service path
+// (handleVirtualExec), where the app↔service link IS the grant and there is
+// no user for gateDBTarget to check against. Everything else — name
+// validation, path resolution, the pool — is identical.
+func (s *Server) runDBQuery(target string, req dbQueryRequest, ro bool) (*dbQueryResult, error) {
 	name := req.DB
 	if name == "" {
 		name = "app"
@@ -430,7 +441,7 @@ func (s *Server) coreDBQuery(actor *db.User, target string, req dbQueryRequest, 
 		return nil, err
 	}
 	if len(req.Batch) > 0 {
-		return s.coreDBBatch(actor, target, handle, req.Batch)
+		return s.coreDBBatch(handle, req.Batch)
 	}
 	return s.coreDBOneStmt(handle, req.SQL, req.Params)
 }
@@ -476,7 +487,7 @@ func (s *Server) coreDBOneStmt(handle *sql.DB, sqlText string, rawParams interfa
 // coreDBBatch runs a batch inside one transaction, all-or-nothing. A failing
 // statement rolls back the whole thing — "migrations mostly work" becomes
 // "migrations work."
-func (s *Server) coreDBBatch(actor *db.User, target string, handle *sql.DB, batch []dbStmtRequest) (*dbQueryResult, error) {
+func (s *Server) coreDBBatch(handle *sql.DB, batch []dbStmtRequest) (*dbQueryResult, error) {
 	tx, err := handle.BeginTx(context.Background(), nil)
 	if err != nil {
 		return nil, err
@@ -815,4 +826,127 @@ func quoteIdent(name string) string {
 	// Identifiers here come from sqlite_master (table names) or our own
 	// allowlisted pragmas, never user input. Quote defensively anyway.
 	return "'" + strings.ReplaceAll(name, "'", "''") + "'"
+}
+
+// ── Virtual-service faces ────────────────────────────────────────────
+
+// validateDBDescriptor checks a service descriptor's database targeting at
+// save time: target shape, database name, and — for app: targets — that the
+// app exists. A clear error at save beats a 400 on every tool call.
+func (s *Server) validateDBDescriptor(d db.ServiceDescriptor) error {
+	if d.DatabaseTarget == "" && d.DatabaseName == "" {
+		return nil
+	}
+	if d.DatabaseName != "" && !appDBNameRe.MatchString(d.DatabaseName) {
+		return cerr(http.StatusBadRequest, "invalid database name %q", d.DatabaseName)
+	}
+	switch {
+	case d.DatabaseTarget == "", d.DatabaseTarget == "global":
+	case strings.HasPrefix(d.DatabaseTarget, "app:"):
+		nonce := strings.TrimPrefix(d.DatabaseTarget, "app:")
+		if _, err := s.store.GetApp(nonce); err != nil {
+			return cerr(http.StatusBadRequest, "database target app:%s: unknown app", nonce)
+		}
+	default:
+		return cerr(http.StatusBadRequest, `database target must be "global" or "app:<nonce>" (or empty), got %q`, d.DatabaseTarget)
+	}
+	return nil
+}
+
+// virtualDBTarget resolves which database a virtual service's SQL steps
+// touch. Fixed targets come from the descriptor; the default target needs an
+// app nonce — the app_nonce argument when present, else the X-App-Nonce
+// header (browser path only; MCP clients send no such header, which is why
+// app_nonce is a required tool argument there).
+func (s *Server) virtualDBTarget(svc *db.Service, headerNonce, argNonce string) (string, error) {
+	switch t := svc.Descriptor.DatabaseTarget; {
+	case t == "global", strings.HasPrefix(t, "app:"):
+		return t, nil
+	case t == "":
+		nonce := argNonce
+		if nonce == "" {
+			nonce = headerNonce
+		}
+		if nonce == "" {
+			return "", cerr(http.StatusBadRequest, "this tool uses a database; pass app_nonce (the app whose data to touch)")
+		}
+		return "app:" + nonce, nil
+	default:
+		return "", cerr(http.StatusBadRequest, "service has invalid database target %q", svc.Descriptor.DatabaseTarget)
+	}
+}
+
+// browserSQLRunner is the SQLRunner for the /service/call path. There is no
+// user here — the app↔service link is the whole grant. The header nonce's
+// link was verified upstream; an app_nonce naming a different app must carry
+// its own link or it's a 403, so a public page can't aim a linked service at
+// someone else's data.
+func (s *Server) browserSQLRunner(svc *db.Service, headerNonce string, args map[string]interface{}) formats.SQLRunner {
+	return func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		argNonce, _ := args["app_nonce"].(string)
+		target, err := s.virtualDBTarget(svc, headerNonce, argNonce)
+		if err != nil {
+			return nil, err
+		}
+		if argNonce != "" && argNonce != headerNonce {
+			ok, err := s.store.IsServiceAllowedForApp(argNonce, svc.ID)
+			if err != nil || !ok {
+				return nil, cerr(http.StatusForbidden, "service is not linked to app %s", argNonce)
+			}
+		}
+		return s.execVirtualSQL(nil, target, svc.Descriptor.DatabaseName, sqlText, params, true)
+	}
+}
+
+// mcpSQLRunner is the SQLRunner for the /mcp/{slug} path, where a real token
+// names a real person. The target goes through gateDBTarget — an app_nonce
+// naming an app the user isn't a member of is a 403, which is the whole
+// difference between this and an ambient header anyone can read out of a
+// page's HTML.
+func (s *Server) mcpSQLRunner(svc *db.Service, claims *freshbreathClaims, args map[string]interface{}) formats.SQLRunner {
+	return func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		argNonce, _ := args["app_nonce"].(string)
+		target, err := s.virtualDBTarget(svc, "", argNonce)
+		if err != nil {
+			return nil, err
+		}
+		var actor *db.User
+		if claims != nil && claims.UserEmail != "" {
+			actor, _ = s.store.GetUserByEmail(claims.UserEmail)
+		}
+		if actor == nil {
+			return nil, cerr(http.StatusForbidden, "database tools require a Freshbreath user token")
+		}
+		return s.execVirtualSQL(actor, target, svc.Descriptor.DatabaseName, sqlText, params, false)
+	}
+}
+
+// execVirtualSQL runs one compiled statement for a virtual tool and returns
+// the result in the scope shape ($.rows, $.rowsAffected, …) — the same
+// object the HTTP endpoint returns, so shaping and assignments work the same
+// against either. ungated marks the browser path (see runDBQuery).
+func (s *Server) execVirtualSQL(actor *db.User, target, dbName, sqlText string, params map[string]interface{}, ungated bool) (map[string]interface{}, error) {
+	req := dbQueryRequest{DB: dbName, SQL: sqlText, Params: params}
+	var (
+		res *dbQueryResult
+		err error
+	)
+	if ungated {
+		res, err = s.runDBQuery(target, req, false)
+	} else {
+		res, err = s.coreDBQuery(actor, target, req, false)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// JSON round-trip: dbQueryResult's tags are the wire/scope contract.
+	b, err := json.Marshal(res)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }

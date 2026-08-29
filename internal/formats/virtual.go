@@ -34,8 +34,9 @@ const (
 
 // ToolParam describes an input parameter for a virtual tool.
 type ToolParam struct {
-	Name string
-	Type ParamType
+	Name     string
+	Type     ParamType
+	Optional bool // from a `?` annotation; parameters are required by default
 }
 
 // VirtualTool defines a single tool in a virtual service description.
@@ -48,8 +49,9 @@ type VirtualTool struct {
 }
 
 type typeAnnotation struct {
-	name string
-	typ  ParamType
+	names    []string // one or more: "$a, $b is number"
+	typ      ParamType
+	optional bool
 }
 
 // VirtualStep is one step within a tool's script — an HTTP request, a SQL
@@ -89,9 +91,9 @@ type VirtualResponse struct {
 var toolNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
 var plainVarRe = regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
 
-// parseVirtualFile parses a virtual service description file into tools.
+// ParseVirtualFile parses a virtual service description file into tools.
 // Tools are separated by --- delimiters and begin with [name] headers.
-func parseVirtualFile(data []byte) ([]VirtualTool, error) {
+func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 	var tools []VirtualTool
 	var cur *VirtualTool
 	var curLines []string
@@ -151,7 +153,8 @@ func parseVirtualFile(data []byte) ([]VirtualTool, error) {
 //   - Explicit type annotations (e.g. "$fields is object") override inference.
 //   - All other parameters default to "string".
 var spreadVarRe = regexp.MustCompile(`\.\.\.\$([a-zA-Z_]\w*)`)
-var typeAnnotationRe = regexp.MustCompile(`^\$([a-zA-Z_]\w*)\s+is\s+(string|object|number|boolean|array)$`)
+var typeAnnotationRe = regexp.MustCompile(
+	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array)(\?)?$`)
 
 func toolParams(tool VirtualTool) []ToolParam {
 	defined := map[string]bool{"token": true}
@@ -203,10 +206,18 @@ func toolParams(tool VirtualTool) []ToolParam {
 		}
 	}
 
-	// Apply explicit type annotations
+	// Apply explicit type annotations. The `?` binds to the declaration,
+	// so "$host, $search is string?" makes both optional; mixed optionality
+	// is two lines.
+	optional := map[string]bool{}
 	for _, ann := range tool.typeAnnotations {
-		if _, ok := seen[ann.name]; ok {
-			types[ann.name] = ann.typ
+		for _, name := range ann.names {
+			if _, ok := seen[name]; ok {
+				types[name] = ann.typ
+				if ann.optional {
+					optional[name] = true
+				}
+			}
 		}
 	}
 
@@ -216,7 +227,7 @@ func toolParams(tool VirtualTool) []ToolParam {
 		if pt, ok := types[name]; ok {
 			t = pt
 		}
-		params = append(params, ToolParam{Name: name, Type: t})
+		params = append(params, ToolParam{Name: name, Type: t, Optional: optional[name]})
 	}
 	sort.Slice(params, func(i, j int) bool { return params[i].Name < params[j].Name })
 	return params
@@ -291,7 +302,15 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 			} else if ok, ex, msg := tryParseAssertion(line); ok {
 				step.Assertions = append(step.Assertions, VirtualAssertion{Expr: ex, Msg: msg})
 			} else if m := typeAnnotationRe.FindStringSubmatch(line); m != nil {
-				tool.typeAnnotations = append(tool.typeAnnotations, typeAnnotation{name: m[1], typ: ParamType(m[2])})
+				var names []string
+				for _, part := range strings.Split(m[1], ",") {
+					names = append(names, strings.TrimPrefix(strings.TrimSpace(part), "$"))
+				}
+				tool.typeAnnotations = append(tool.typeAnnotations, typeAnnotation{
+					names:    names,
+					typ:      ParamType(m[2]),
+					optional: m[3] == "?",
+				})
 			} else if isSQLVerbLine(line) {
 				// SQL step: the verb line plus every indented continuation,
 				// against the RAW line (the loop's trim already happened).
@@ -1099,7 +1118,7 @@ func LoadVirtualTools(dir string, svcName string) ([]VirtualTool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("virtual file not found: %s: %w", path, err)
 	}
-	return parseVirtualFile(data)
+	return ParseVirtualFile(data)
 }
 
 // findVirtualTool looks up a tool by name (case-insensitive).

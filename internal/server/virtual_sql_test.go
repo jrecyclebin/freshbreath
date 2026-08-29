@@ -1,0 +1,314 @@
+package server
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/formats"
+)
+
+// newVirtualSvcServer returns a test server with a virtual service whose
+// tool file is written under a temp data dir, linked to the given app.
+func newVirtualSvcServer(t *testing.T, toolFile string, d db.ServiceDescriptor) (*Server, *db.Service, string) {
+	t.Helper()
+	srv := newAppDBServer(t)
+	if err := os.MkdirAll(filepath.Join(srv.config.DataDir, "virtual"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srv.config.DataDir, "virtual", "Keeper.txt"), []byte(toolFile), 0o644); err != nil {
+		t.Fatalf("write tool file: %v", err)
+	}
+	if d.Type == "" {
+		d.Type = "virtual"
+	}
+	if d.DatabaseName == "" {
+		d.DatabaseName = ""
+	}
+	svc, err := srv.coreCreateService(&db.User{ID: 1, Role: "Admin"}, "Keeper", "/mcp/keeper", d)
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.LinkAppService(nonce, svc.ID); err != nil {
+		t.Fatal(err)
+	}
+	return srv, svc, nonce
+}
+
+const sqlToolFile = `[ensure-schema] Create the tasks table if needed.
+
+CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, title TEXT)
+---
+[add-task] Add a task.
+
+INSERT INTO tasks (title)
+  VALUES ($title)
+---
+[recent-tasks] The ten most recent tasks.
+
+SELECT id, title
+  FROM tasks
+  ORDER BY id DESC
+  LIMIT 10
+
+{
+  "tasks": $.rows
+}
+`
+
+func TestBrowserSQLRunnerDefaultTarget(t *testing.T) {
+	srv, svc, nonce := newVirtualSvcServer(t, sqlToolFile, db.ServiceDescriptor{})
+
+	// Browser path: X-App-Nonce supplies the default target; the link is
+	// the grant — no user involved.
+	rr := testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "ensure-schema", "args": {}}`),
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ensure-schema: status %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "add-task", "args": {"title": "first"}}`),
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("add-task: status %d: %s", rr.Code, rr.Body.String())
+	}
+
+	rr = testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "recent-tasks", "args": {}}`),
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("recent-tasks: status %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"first"`) {
+		t.Errorf("recent-tasks body = %s", rr.Body.String())
+	}
+
+	// The data landed in the calling app's own database.
+	admin := &db.User{ID: 1, Role: "Admin"}
+	res, err := srv.coreDBQuery(admin, "app:"+nonce, dbQueryRequest{
+		SQL: "SELECT title FROM tasks"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0] != "first" {
+		t.Errorf("app db rows = %v", res.Rows)
+	}
+	_ = svc
+}
+
+func TestBrowserSQLRunnerAppNonceLinkCheck(t *testing.T) {
+	srv, svc, nonce := newVirtualSvcServer(t, sqlToolFile, db.ServiceDescriptor{})
+	_ = svc
+
+	// A second app, NOT linked to the service. An app_nonce naming it must
+	// be refused — a public page can't aim a linked service at someone
+	// else's data.
+	other, err := srv.store.CreateApp("other", "Development", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := srv.browserSQLRunner(&db.Service{ID: 1, Descriptor: db.ServiceDescriptor{}}, nonce,
+		map[string]interface{}{"app_nonce": other})
+	_, err = runner("SELECT 1", nil)
+	if err == nil || !strings.Contains(err.Error(), "not linked") {
+		t.Errorf("want not-linked error, got %v", err)
+	}
+
+	// The header nonce's own app needs no extra check (link verified upstream).
+	runner = srv.browserSQLRunner(&db.Service{ID: 1, Descriptor: db.ServiceDescriptor{}}, nonce,
+		map[string]interface{}{"app_nonce": nonce})
+	if _, err := runner("SELECT 1", nil); err != nil {
+		t.Errorf("own nonce: %v", err)
+	}
+
+	// No nonce at all → a helpful error, not a panic.
+	runner = srv.browserSQLRunner(&db.Service{ID: 1, Descriptor: db.ServiceDescriptor{}}, "",
+		map[string]interface{}{})
+	_, err = runner("SELECT 1", nil)
+	if err == nil || !strings.Contains(err.Error(), "app_nonce") {
+		t.Errorf("want app_nonce error, got %v", err)
+	}
+}
+
+func TestMCPSQLRunnerGatesByMembership(t *testing.T) {
+	srv, _, _ := newVirtualSvcServer(t, sqlToolFile, db.ServiceDescriptor{})
+
+	// A member of one app; a second app they don't belong to.
+	nonce1, err := srv.store.CreateApp("mine", "Development", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce2, err := srv.store.CreateApp("theirs", "Development", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := srv.store.CreateUser("Jo", "jo@example.com", "Member", "Active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.AddAppMember(nonce1, u.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{}}
+	claims := &freshbreathClaims{UserEmail: "jo@example.com"}
+
+	// Own app: passes the gate and runs.
+	runner := srv.mcpSQLRunner(svc, claims, map[string]interface{}{"app_nonce": nonce1})
+	if _, err := runner("CREATE TABLE t (x)", nil); err != nil {
+		t.Errorf("member app: %v", err)
+	}
+
+	// Someone else's app: 403 through gateDBTarget → gateApp.
+	runner = srv.mcpSQLRunner(svc, claims, map[string]interface{}{"app_nonce": nonce2})
+	if _, err := runner("SELECT 1", nil); err == nil || !strings.Contains(err.Error(), "forbidden") {
+		t.Errorf("non-member app: want forbidden, got %v", err)
+	}
+
+	// No wrapped-token claims (raw upstream token): database access refused.
+	runner = srv.mcpSQLRunner(svc, nil, map[string]interface{}{"app_nonce": nonce1})
+	if _, err := runner("SELECT 1", nil); err == nil || !strings.Contains(err.Error(), "Freshbreath user token") {
+		t.Errorf("no claims: want refusal, got %v", err)
+	}
+
+	// Global target: member refused, admin allowed — same gate as the API.
+	globalSvc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{DatabaseTarget: "global"}}
+	runner = srv.mcpSQLRunner(globalSvc, claims, nil)
+	if _, err := runner("SELECT 1", nil); err == nil {
+		t.Errorf("member on global: want forbidden")
+	}
+	admin, err := srv.store.CreateUser("Boss", "boss@example.com", "Admin", "Active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = admin
+	adminClaims := &freshbreathClaims{UserEmail: "boss@example.com"}
+	runner = srv.mcpSQLRunner(globalSvc, adminClaims, nil)
+	if _, err := runner("SELECT 1", nil); err != nil {
+		t.Errorf("admin on global: %v", err)
+	}
+}
+
+func TestBrowserSQLRunnerFixedTargets(t *testing.T) {
+	srv, _, nonce := newVirtualSvcServer(t, sqlToolFile,
+		db.ServiceDescriptor{DatabaseTarget: "global", DatabaseName: "shared"})
+
+	// No app_nonce needed; the service is pinned to the global database.
+	rr := testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "ensure-schema", "args": {}}`),
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ensure-schema: status %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "add-task", "args": {"title": "global row"}}`),
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("add-task: status %d: %s", rr.Code, rr.Body.String())
+	}
+	admin := &db.User{ID: 1, Role: "Admin"}
+	res, err := srv.coreDBQuery(admin, "global", dbQueryRequest{
+		DB:  "shared",
+		SQL: "SELECT title FROM tasks"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0] != "global row" {
+		t.Errorf("global db rows = %v", res.Rows)
+	}
+}
+
+func TestValidateDBDescriptor(t *testing.T) {
+	srv := newAppDBServer(t)
+	nonce, err := srv.store.CreateApp("real", "Development", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		d    db.ServiceDescriptor
+		want string // "" for ok, else substring of the error
+	}{
+		{db.ServiceDescriptor{}, ""},
+		{db.ServiceDescriptor{DatabaseTarget: "global", DatabaseName: "shared"}, ""},
+		{db.ServiceDescriptor{DatabaseTarget: "app:" + nonce}, ""},
+		{db.ServiceDescriptor{DatabaseTarget: "app:nope"}, "unknown app"},
+		{db.ServiceDescriptor{DatabaseTarget: "weird"}, `must be "global"`},
+		{db.ServiceDescriptor{DatabaseName: "BAD NAME"}, "invalid database name"},
+		{db.ServiceDescriptor{DatabaseName: "app"}, ""},
+	}
+	for i, c := range cases {
+		err := srv.validateDBDescriptor(c.d)
+		if c.want == "" && err != nil {
+			t.Errorf("case %d: unexpected error %v", i, err)
+		}
+		if c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("case %d: want %q, got %v", i, c.want, err)
+		}
+	}
+}
+
+func TestVirtualToolInputSchemaRequired(t *testing.T) {
+	tools, err := formats.ParseVirtualFile([]byte(`[q] Query.
+
+$state is string?
+$owner is string
+$host, $search is string?
+
+SELECT id FROM issues
+  WHERE state = $state AND owner = $owner AND host = $host AND search = $search
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Default target: app_nonce required alongside the non-optional params.
+	schema := virtualToolInputSchema(tools[0], "")
+	req, _ := schema["required"].([]string)
+	want := []string{"app_nonce", "owner"}
+	if strings.Join(req, ",") != strings.Join(want, ",") {
+		t.Errorf("required = %v, want %v", req, want)
+	}
+	props := schema["properties"].(map[string]interface{})
+	if _, ok := props["app_nonce"]; !ok {
+		t.Errorf("app_nonce property missing: %v", props)
+	}
+
+	// Fixed target: no app_nonce; same required params.
+	schema = virtualToolInputSchema(tools[0], "global")
+	req, _ = schema["required"].([]string)
+	if strings.Join(req, ",") != "owner" {
+		t.Errorf("fixed-target required = %v", req)
+	}
+	props = schema["properties"].(map[string]interface{})
+	if _, ok := props["app_nonce"]; ok {
+		t.Errorf("app_nonce property should be absent for fixed target")
+	}
+
+	// Pure HTTP tool: no app_nonce even on a default-target service.
+	httpTools, err := formats.ParseVirtualFile([]byte(`[get] Fetch.
+
+$state is string?
+GET https://api.example.com/issues?state=$state
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema = virtualToolInputSchema(httpTools[0], "")
+	req, _ = schema["required"].([]string)
+	if len(req) != 0 {
+		t.Errorf("http tool required = %v, want empty", req)
+	}
+	props = schema["properties"].(map[string]interface{})
+	if _, ok := props["app_nonce"]; ok {
+		t.Errorf("app_nonce on HTTP-only tool")
+	}
+}
