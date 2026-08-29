@@ -1733,3 +1733,44 @@ func TestDropEmptyOptionalPairs(t *testing.T) {
 		}
 	}
 }
+
+func TestOptionalParamSQLBindsNull(t *testing.T) {
+	src := `[search] Search tasks.
+
+$done is number?
+$owner is string?
+
+SELECT id
+  FROM tasks
+  WHERE done = $done AND owner = $owner
+`
+	tools, err := ParseVirtualFile([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var bound map[string]interface{}
+	runner := func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		bound = params
+		return map[string]interface{}{"rows": []interface{}{}}, nil
+	}
+
+	// Omitted optional binds NULL; required param binds its value.
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "search", map[string]interface{}{"owner": "j"}, "", runner); err != nil {
+		t.Fatal(err)
+	}
+	if bound["done"] != nil {
+		t.Errorf("omitted optional should bind NULL, got %v (%T)", bound["done"], bound["done"])
+	}
+	if bound["owner"] != "j" {
+		t.Errorf("owner binding = %v", bound["owner"])
+	}
+
+	// Explicitly supplied optional binds the value, even "".
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "search", map[string]interface{}{"owner": "j", "done": ""}, "", runner); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := bound["done"]; !ok || v != "" {
+		t.Errorf("explicit empty optional should bind \"\", got %v", bound["done"])
+	}
+}
