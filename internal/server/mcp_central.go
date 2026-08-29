@@ -149,6 +149,9 @@ Fresh Breath server URL: %q`, s.config.PublicBaseURL),
 	// ── Apps (mixed: list/get are all-roles; mutate is admin+) ────
 	s.registerAppTools(mcps, role)
 
+	// ── Databases (all roles; gateDBTarget decides per call) ──────────
+	s.registerDatabaseTools(mcps)
+
 	// ── Services (admin+) ─────────────────────────────────────────
 	if roleIn(role, rolesAdminPlus) {
 		s.registerServiceTools(mcps)
@@ -1914,12 +1917,15 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 			return mcpToolError("auth: %v", err), nil
 		}
 
-		result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil}
+		result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil, "mcp_database_mode": "read-only"}
 		if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
 			result["admin_auth_service"] = v
 		}
 		if v, err := s.store.GetSetting("default_app"); err == nil && v != "" {
 			result["default_app"] = v
+		}
+		if v, err := s.store.GetSetting("mcp_database_mode"); err == nil && v == "full-access" {
+			result["mcp_database_mode"] = v
 		}
 		return mcpToolResult(result)
 	})
@@ -1933,6 +1939,7 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{
 				"admin_auth_service": map[string]interface{}{"type": "string", "description": "Admin auth service ID (numeric, or empty to disable)"},
 				"default_app":        map[string]interface{}{"type": "string", "description": "Default app nonce or 'control'"},
+				"mcp_database_mode":  map[string]interface{}{"type": "string", "description": "Central MCP database writes: \"read-only\" (default) or \"full-access\"", "enum": []string{"read-only", "full-access"}},
 			},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1944,14 +1951,17 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 
-		var adminAuthService, defaultApp *string
+		var adminAuthService, defaultApp, mcpDBMode *string
 		if v, ok := args["admin_auth_service"].(string); ok {
 			adminAuthService = &v
 		}
 		if v, ok := args["default_app"].(string); ok {
 			defaultApp = &v
 		}
-		if err := s.coreUpdateSettings(user, adminAuthService, defaultApp); err != nil {
+		if v, ok := args["mcp_database_mode"].(string); ok {
+			mcpDBMode = &v
+		}
+		if err := s.coreUpdateSettings(user, adminAuthService, defaultApp, mcpDBMode); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "updated"})

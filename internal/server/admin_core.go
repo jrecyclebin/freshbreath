@@ -446,7 +446,7 @@ func (s *Server) coreDeleteSSHKey(actor, target *db.User) error {
 // ── Settings operations ─────────────────────────────────────────────
 
 // coreUpdateSettings applies the non-nil settings fields, validating each.
-func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp *string) error {
+func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp, mcpDBMode *string) error {
 	if err := s.gate(actor, rolesSuperuser); err != nil {
 		return err
 	}
@@ -469,6 +469,15 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 			return cerr(http.StatusInternalServerError, "%v", err)
 		}
 		s.audit(actor, "updated settings", "default_app")
+	}
+	if mcpDBMode != nil {
+		if *mcpDBMode != "read-only" && *mcpDBMode != "full-access" {
+			return cerr(http.StatusBadRequest, `mcp_database_mode must be "read-only" or "full-access"`)
+		}
+		if err := s.store.SetSetting("mcp_database_mode", *mcpDBMode); err != nil {
+			return cerr(http.StatusInternalServerError, "%v", err)
+		}
+		s.audit(actor, "updated settings", "mcp_database_mode")
 	}
 	return nil
 }

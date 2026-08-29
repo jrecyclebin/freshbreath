@@ -57,10 +57,11 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 	allAuditTools := []string{"list_audit"}
 	allPersonalTools := []string{"get_me", "get_my_ssh_key", "generate_my_ssh_key", "delete_my_ssh_key", "get_guide"} // available to every authenticated role
 	allSettingsTools := []string{"get_settings", "update_settings"}
+	allDBTools := []string{"db_list_databases", "db_schema", "db_query", "db_execute"} // all roles; gateDBTarget decides per call
 
-	wantSuperuser := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allSettingsTools)
-	wantAdmin := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools)
-	wantMember := concat(allAppTools, allRoleTools, allAuditTools, allPersonalTools)
+	wantSuperuser := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allSettingsTools, allDBTools)
+	wantAdmin := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
+	wantMember := concat(allAppTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
 
 	cases := []struct {
 		role     string
@@ -68,11 +69,11 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 		mustHave []string
 		mustLack []string
 	}{
-		{"Superuser", wantSuperuser, []string{"get_settings", "update_settings", "create_app", "delete_user", "list_services"}, nil},
-		{"Admin", wantAdmin, []string{"create_app", "list_users", "list_services", "delete_service"}, []string{"get_settings", "update_settings"}},
-		{"Member", wantMember, []string{"list_apps", "get_app", "get_app_members", "get_app_services", "list_roles", "list_audit", "get_me", "get_my_ssh_key"},
+		{"Superuser", wantSuperuser, []string{"get_settings", "update_settings", "create_app", "delete_user", "list_services", "db_query", "db_execute"}, nil},
+		{"Admin", wantAdmin, []string{"create_app", "list_users", "list_services", "delete_service", "db_query", "db_execute"}, []string{"get_settings", "update_settings"}},
+		{"Member", wantMember, []string{"list_apps", "get_app", "get_app_members", "get_app_services", "list_roles", "list_audit", "get_me", "get_my_ssh_key", "db_query"},
 			[]string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services", "list_services", "list_users", "create_user", "delete_user", "get_settings", "update_settings"}},
-		{"Read-only", wantMember, []string{"list_apps", "get_me", "list_roles"},
+		{"Read-only", wantMember, []string{"list_apps", "get_me", "list_roles", "db_query"},
 			[]string{"create_app", "delete_app", "list_users", "get_settings"}},
 	}
 
