@@ -3,7 +3,9 @@
 Virtual services are simply wrappers around API calls (or any kind of HTTP
 request) into a set of tools that can be used as an MCP or from the ServiceProxy
 `callTool` function. These tool scripts are a custom text format that describes
-a series of HTTP requests, followed by a response: usually a JSON object.
+a series of HTTP requests, followed by a response: usually a JSON object. They
+can also wrap SQL queries against a database — see the SQL Steps section
+below.
 
 Let's dig into a quick example for a Github tool script:
 
@@ -221,3 +223,164 @@ Since the spread takes an expression, you can use the `base64dec` and
 Here `$content` is the base64 text of the PNG; `base64dec($content)` decodes it
 and the raw PNG bytes are what hits the wire. (`base64enc` is the inverse — it
 encodes a string to base64 text.)
+
+## SQL Steps — Querying a Database
+
+A tool script step doesn't have to be an HTTP request. A step's verb can be a
+SQL keyword instead of an HTTP method, and the tool becomes a query against a
+SQLite database.
+
+By default, these SQL tools point to an app's built-in `app.db` database.
+In the service settings you can configure a global database - or a specific
+app's database - to be used. (Can be useful for when you want multiple apps
+to work out of the same database.)
+
+```
+[list-tasks] List tasks, newest first.
+
+SELECT id, title, done
+  FROM tasks
+  WHERE done = $done
+  ORDER BY created_at DESC
+  LIMIT 20
+---
+[add-task] Add a task to the list.
+
+INSERT INTO tasks (title, done)
+  VALUES ($title, 0)
+---
+[migrate] Create the necessary tables if they don't exist.
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  done INT DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')))
+```
+
+Recognized verbs: `SELECT`, `INSERT`, `UPDATE`, `DELETE FROM`, `REPLACE`,
+`WITH`, `CREATE`, `DROP`, `ALTER` (case-insensitive). A SQL step is the verb
+line plus any **indented** continuation lines beneath it — it ends at the
+first non-indented line, so indent your `WHERE` clauses and format the query
+however reads best. Blank lines and indented `#` comments inside a step are
+skipped.
+
+The `DELETE FROM` spelling is load-bearing: SQL's DELETE is always followed
+by `FROM`, and that's how the parser tells it apart from an HTTP
+`DELETE https://…` request. Both kinds of step can live in one file.
+
+There's no `HTTP 200`-style status line on a SQL step. SQL has no status code
+— a failing statement fails the tool, and the absence of the line is the
+signal.
+
+### Variables are bindings, not splices
+
+`$title` in a URL template is a string splice. `$title` in a SQL step is a
+**bound parameter** — compiled to a named SQLite binding at load time, so
+there is no injection surface. Pretty nice - and the syntax is familiar from
+the HTTP calls.
+
+Two rules keep this honest:
+
+- **No `$var` inside single-quoted string literals.** `WHERE name LIKE
+  '%$term%'` can't be a binding, so it's a load-time error with a suggestion.
+  Write `WHERE name LIKE $pattern` and let the caller pass `%frog%` — wildcards
+  and all.
+- **`$$` escapes a literal `$`** for the rare query that needs one.
+
+`$token` works here too, bound like any other variable. And `?`-annotated
+optional parameters behave sensibly: one the caller omits binds as `NULL`,
+while an explicit empty string stays `""` — the difference between "not
+given" and "given as nothing" survives the trip to the database.
+
+### Working with the result
+
+A SQL step's result is the same object the database API returns:
+
+```
+{
+  "columns": ["id", "title", "done"],
+  "rows": [[1, "Feed the frogs", 0]],
+  "rowsAffected": 0,
+  "lastInsertId": 0,
+  "truncated": false
+}
+```
+
+So `$.rows`, assignments, and `{...}` shaping blocks all work against it,
+exactly as they do after an HTTP response:
+
+```
+[recent-tasks] The ten most recent open tasks.
+
+SELECT id, title
+  FROM tasks
+  WHERE done = 0
+  ORDER BY created_at DESC
+  LIMIT 10
+
+{
+  "tasks": $.rows
+}
+```
+
+And because steps are steps, HTTP and SQL mix freely in one tool — fetch from
+anywhere, store locally:
+
+```
+[import-issue] Fetch a GitHub issue and file it locally.
+
+GET https://api.github.com/repos/$owner/$repo/issues/$number
+Authorization: Bearer $token
+
+HTTP 200
+
+$title = $.title
+$body = $.body
+
+INSERT INTO issues (title, body, source)
+  VALUES ($title, $body, 'github')
+```
+
+Great for adding logging and caching to your API call tools.
+
+### Which database does a service target?
+
+The database isn't declared in the tool script. It's service configuration,
+set in the control panel when creating the virtual service:
+
+| Database target | Meaning |
+|---|---|
+| *(unset)* | Each linked app gets its own database. The common case. |
+| `global` | A database shared across apps (name it in the database name field). |
+| `app:<nonce>` | Pinned to one specific app's database. |
+
+With the default (unset) target, one set of queries links to many apps and
+each app reads and writes its own file — reuse without sharing. The database
+name defaults to `app`, and databases are created on first touch, so there's
+no registration step: your `CREATE TABLE IF NOT EXISTS` tool is the migration.
+
+Two access facts worth knowing in plain words:
+
+- **Over MCP, default-target SQL tools gain a required `app_nonce` argument**
+  — the server adds it to the tool schema, because an MCP client has no
+  ambient app. (The name `$app_nonce` is therefore reserved in your scripts.)
+  Browser-side calls supply the app automatically.
+- **On the browser path, the app↔service link is the whole grant.** A public
+  page can run every SQL tool linked to its app — which is how a public
+  guestbook is supposed to work, but it means a `global`-target service
+  linked to an unsecured app hands its visitors the shared database. Link
+  global services sparingly.
+
+The engine behind these steps is hardened SQLite: ATTACH and extension
+loading are refused, PRAGMA is allowlisted to read-only schema inspection,
+statements run under a 5-second deadline, and results cap at 10,000 rows —
+reported honestly as `"truncated": true` rather than silently shortened.
+
+> ⚡ **YOUR TABLES BECOME MCP TOOLS**
+>
+> Virtual services are already mounted at `/mcp/{name}`, so a parameterized
+> SQL step is an MCP tool with no additional work — named, typed, bound. The
+> caller varies the bindings, never the query, so a model calling
+> `recent-tasks` can't be talked into `DROP TABLE` no matter how confidently
+> it asks.
