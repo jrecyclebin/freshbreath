@@ -61,6 +61,14 @@ type Server struct {
 	pendingArchives map[string]*pendingArchive // "feedID/ref" → built archive, one-shot
 	updateMu        sync.Mutex                 // guards pendingArchives + updateRate
 	updateRate      map[string]updateRateCount // per-IP limiter for anonymous check/apply
+
+	// App databases (design/app-databases.md). The pool is lazy; the watch
+	// registry fans change events from the per-connection update hook.
+	appDBPoolMu  sync.Mutex
+	appDBPool    map[dbPoolKey]*dbPoolEntry
+	appDBWatchMu sync.Mutex
+	appDBWatch   map[string]*appDBWatchHub
+	dbRowCap     int // 0 → appDBRowCapDefault; lowered in tests
 }
 
 // updateRateCount is one per-IP fixed-window counter for the anonymous
@@ -192,6 +200,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 			s.agentMgr.ExpireKeys()
 			s.sessionMgr.ExpireSessions()
 			s.store.DeleteExpiredRefreshFamilies(time.Now())
+			s.appDBSweep()
 		}
 	}()
 
