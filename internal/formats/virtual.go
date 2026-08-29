@@ -715,6 +715,32 @@ func resolveTemplate(tmpl string, vars map[string]interface{}, scope interface{}
 	return resolveTemplateInner(tmpl, vars, scope, token, mode)
 }
 
+// dropEmptyOptionalPairs removes `name=` pairs (empty value) for the
+// optional names from a resolved URL's query string. Pairs with values are
+// untouched, as are empty pairs for names not listed — a required param the
+// caller passed as "" stays visible, and literal pairs (page=1) never match.
+func dropEmptyOptionalPairs(rawURL string, optional map[string]bool) string {
+	qIdx := strings.Index(rawURL, "?")
+	if qIdx == -1 {
+		return rawURL
+	}
+	path, query := rawURL[:qIdx], rawURL[qIdx+1:]
+	var b strings.Builder
+	for _, pair := range strings.Split(query, "&") {
+		if i := strings.Index(pair, "="); i >= 0 && optional[pair[:i]] && pair[i+1:] == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString(pair)
+	}
+	if b.Len() == 0 {
+		return path
+	}
+	return path + "?" + b.String()
+}
+
 // resolveTemplateInner does the actual variable replacement.
 func resolveTemplateInner(tmpl string, vars map[string]interface{}, scope interface{}, token string, mode ResolveMode) (string, error) {
 	var b strings.Builder
@@ -1163,6 +1189,20 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 		scope[k] = v
 	}
 
+	// Optional params the caller didn't supply resolve as empty strings
+	// (so template resolution doesn't error), and their empty query pairs
+	// are dropped from resolved URLs: an optional filter the caller passed
+	// on should vanish from the query, not ride along as `state=`.
+	optionalNames := make(map[string]bool)
+	for _, p := range tool.Params {
+		if p.Optional {
+			optionalNames[p.Name] = true
+			if _, ok := scope[p.Name]; !ok {
+				scope[p.Name] = ""
+			}
+		}
+	}
+
 	for stepIdx, step := range tool.Steps {
 		// Execute assignments first.
 		for _, a := range step.Assignments {
@@ -1225,6 +1265,7 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 		if err != nil {
 			return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
 		}
+		resolvedURL = dropEmptyOptionalPairs(resolvedURL, optionalNames)
 
 		resolvedHeaders := make(map[string]string)
 		for k, v := range step.Headers {

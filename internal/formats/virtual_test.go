@@ -1654,3 +1654,82 @@ func TestTypeAnnotationGrammar(t *testing.T) {
 		}
 	}
 }
+
+func TestOptionalParamExecution(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.URL.RequestURI()
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	src := `[list] List things.
+
+$state is string?
+$owner, $path is string?
+
+GET ` + srv.URL + `/things?state=$state&owner=$owner&path=$path&page=1
+`
+	tools, err := ParseVirtualFile([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Omitted optionals vanish from the query; literals survive.
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{}, "", nil); err != nil {
+		t.Fatalf("omit optionals: %v", err)
+	}
+	if gotURI != "/things?page=1" {
+		t.Errorf("omit optionals: uri = %q, want /things?page=1", gotURI)
+	}
+
+	// An explicit empty string is the same as omitted: no filter.
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{"state": ""}, "", nil); err != nil {
+		t.Fatalf("explicit empty: %v", err)
+	}
+	if gotURI != "/things?page=1" {
+		t.Errorf("explicit empty: uri = %q, want /things?page=1", gotURI)
+	}
+
+	// Supplied optionals stay, in position.
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{"state": "open", "path": "cmd/x"}, "", nil); err != nil {
+		t.Fatalf("supplied: %v", err)
+	}
+	if gotURI != "/things?state=open&path=cmd%2Fx&page=1" {
+		t.Errorf("supplied: uri = %q", gotURI)
+	}
+
+	// Required params stay required: absent is an error.
+	reqSrc := `[get] Get one.
+
+GET ` + srv.URL + `/things/$name
+`
+	reqTools, err := ParseVirtualFile([]byte(reqSrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExecuteVirtualTool(http.DefaultClient, reqTools, "get", map[string]interface{}{}, "", nil); err == nil {
+		t.Error("missing required param should error")
+	}
+}
+
+func TestDropEmptyOptionalPairs(t *testing.T) {
+	cases := []struct {
+		url  string
+		want string
+	}{
+		{"http://x/t?state=&page=1", "http://x/t?page=1"},
+		{"http://x/t?page=1&state=", "http://x/t?page=1"},
+		{"http://x/t?state=", "http://x/t"},
+		{"http://x/t?state=open&page=1", "http://x/t?state=open&page=1"},
+		{"http://x/t?other=&page=1", "http://x/t?other=&page=1"}, // not optional
+		{"http://x/t", "http://x/t"},
+		{"http://x/t?state=%20", "http://x/t?state=%20"}, // escaped space, not empty
+	}
+	opt := map[string]bool{"state": true}
+	for _, c := range cases {
+		if got := dropEmptyOptionalPairs(c.url, opt); got != c.want {
+			t.Errorf("dropEmptyOptionalPairs(%q) = %q, want %q", c.url, got, c.want)
+		}
+	}
+}
