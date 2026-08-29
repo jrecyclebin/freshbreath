@@ -158,6 +158,12 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/apps/", s.authWrap(pipeline(s.handleAppDetail, anyRole)))
 	s.mux.HandleFunc("/api/services", s.authWrap(pipeline(s.handleServices, adminPlus)))
 	s.mux.HandleFunc("/api/services/", s.authWrap(pipeline(s.handleServiceDetail, adminPlus)))
+
+	// Global databases (design/app-databases.md) — the alias mount. Any
+	// authenticated role rides the mount; gateDBTarget decides who may touch
+	// a global database (admin+), so the permission lives in one place.
+	s.mux.HandleFunc("/api/db", s.authWrap(pipeline(s.handleGlobalDB, anyRole)))
+	s.mux.HandleFunc("/api/db/", s.authWrap(pipeline(s.handleGlobalDB, anyRole)))
 	s.mux.HandleFunc("/api/users", s.authWrap(pipeline(s.handleUsers, adminPlus)))
 	s.mux.HandleFunc("/api/users/", s.authWrap(pipeline(s.handleUserDetail, adminPlus)))
 	s.mux.HandleFunc("/api/roles", s.authWrap(pipeline(s.handleRoles, anyRole)))
@@ -1413,6 +1419,15 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 	// Sub-route: /api/apps/{nonce}/web
 	if len(parts) >= 4 && parts[3] == "web" {
 		s.handleAppWeb(w, r, nonce)
+		return
+	}
+
+	// Sub-route: /api/apps/{nonce}/db — query/watch/list/drop app databases
+	// (design/app-databases.md). Dispatched before the app lookup: the gate
+	// is gateDBTarget inside the core, and a database route shouldn't 404 on
+	// an unknown nonce before auth gets its say.
+	if len(parts) >= 4 && parts[3] == "db" {
+		s.handleAppDB(w, r, nonce)
 		return
 	}
 
