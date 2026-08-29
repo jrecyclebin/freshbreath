@@ -2654,12 +2654,15 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil}
+		result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil, "mcp_database_mode": "read-only"}
 		if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
 			result["admin_auth_service"] = v
 		}
 		if v, err := s.store.GetSetting("default_app"); err == nil && v != "" {
 			result["default_app"] = v
+		}
+		if v, err := s.store.GetSetting("mcp_database_mode"); err == nil && v == "full-access" {
+			result["mcp_database_mode"] = v
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
@@ -2667,12 +2670,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			AdminAuthService *string `json:"admin_auth_service"`
 			DefaultApp       *string `json:"default_app"`
+			McpDatabaseMode  *string `json:"mcp_database_mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := s.coreUpdateSettings(userFromContext(r.Context()), body.AdminAuthService, body.DefaultApp); err != nil {
+		if err := s.coreUpdateSettings(userFromContext(r.Context()), body.AdminAuthService, body.DefaultApp, body.McpDatabaseMode); err != nil {
 			writeErr(w, err)
 			return
 		}

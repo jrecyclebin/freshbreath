@@ -49,13 +49,13 @@ func TestCoreAuthority(t *testing.T) {
 	}
 
 	// Settings is Superuser-only: Member and Admin both forbidden, Superuser passes.
-	if err := srv.coreUpdateSettings(member, nil, nil); !forbidden(err) {
+	if err := srv.coreUpdateSettings(member, nil, nil, nil); !forbidden(err) {
 		t.Errorf("coreUpdateSettings as Member: got %v, want 403", err)
 	}
-	if err := srv.coreUpdateSettings(&db.User{ID: 2, Role: "Admin"}, nil, nil); !forbidden(err) {
+	if err := srv.coreUpdateSettings(&db.User{ID: 2, Role: "Admin"}, nil, nil, nil); !forbidden(err) {
 		t.Errorf("coreUpdateSettings as Admin: got %v, want 403", err)
 	}
-	if err := srv.coreUpdateSettings(&db.User{ID: 3, Role: "Superuser"}, nil, nil); err != nil {
+	if err := srv.coreUpdateSettings(&db.User{ID: 3, Role: "Superuser"}, nil, nil, nil); err != nil {
 		t.Errorf("coreUpdateSettings as Superuser: got %v, want pass", err)
 	}
 }

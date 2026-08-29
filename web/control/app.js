@@ -1740,6 +1740,7 @@ function SettingsView({ token, services, apps, user }) {
   const [selectedSvc, setSelectedSvc] = useState('');
   const [currentSvc, setCurrentSvc] = useState(null);
   const [defaultApp, setDefaultApp] = useState('');
+  const [dbMode, setDbMode] = useState('read-only');
   const [loading, setLoading] = useState(true);
   const [sshKey, setSSHKey] = useState(null);
   const [sshLoading, setSSHLoading] = useState(false);
@@ -1755,6 +1756,7 @@ function SettingsView({ token, services, apps, user }) {
         setSelectedSvc(id);
         setCurrentSvc(id ? (services.find(s => String(s.id) === id) || null) : null);
         setDefaultApp(d.default_app || '');
+        setDbMode(d.mcp_database_mode || 'read-only');
       })
       .catch(e => toast(e.message, true))
       .finally(() => setLoading(false));
@@ -1798,6 +1800,13 @@ function SettingsView({ token, services, apps, user }) {
     try {
       await api(token, 'PUT', '/api/settings', { default_app: defaultApp });
       toast('Landing page saved');
+    } catch(e) { toast(e.message, true); }
+  };
+
+  const saveDBMode = async () => {
+    try {
+      await api(token, 'PUT', '/api/settings', { mcp_database_mode: dbMode });
+      toast('Database mode saved');
     } catch(e) { toast(e.message, true); }
   };
 
@@ -1854,6 +1863,25 @@ function SettingsView({ token, services, apps, user }) {
       </div>
 
       <RemoteUpdates token={token} apps={apps} services={services} />
+
+      <div className="setting-section" style={{marginTop:32}}>
+        <h3 className="setting-heading">MCP database mode</h3>
+        <p className="muted" style={{marginBottom:20,fontSize:13}}>
+          Whether the central MCP server's <code>db_execute</code> tool may write to databases. <code>db_query</code> is read-only no matter what; this only governs <code>db_execute</code>. Not a privilege boundary — an admin could do the same via the HTTP API — just accident prevention for a model asked to “clean up the old rows.”
+        </p>
+        {loading ? <span className="muted">Loading…</span> : (
+          <div className="field" style={{maxWidth:380}}>
+            <label>Mode</label>
+            <select className="input" value={dbMode} onChange={e => setDbMode(e.target.value)}>
+              <option value="read-only">Read-only (default)</option>
+              <option value="full-access">Full access</option>
+            </select>
+            <div style={{display:'flex',gap:8,marginTop:16}}>
+              <button className="btn btn-primary" onClick={saveDBMode}>Save</button>
+            </div>
+          </div>
+        )}
+      </div>
 
       {user && user.id > 0 && (
       <div className="setting-section" style={{marginTop:32}}>
