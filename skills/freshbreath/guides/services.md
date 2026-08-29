@@ -38,9 +38,9 @@ The following service types are available:
   and calling the tools from an app.)
 
 - virtual: These are custom MCP endpoints that can be used to provide tools
-  (also available through `callTool` and `listTools`) that wrap API calls -
-  to give a nice MCP interface with discoverable auth. (See the 'virtuals'
-  guide for more on how to write these tool scripts.)
+  (also available through `callTool` and `listTools`) that wrap API calls or
+  SQL queries - to give a nice MCP interface with discoverable auth.
+  (See the 'virtuals' guide for more on how to write these tool scripts.)
 
 - ssh: Every Fresh Breath server has a single SSH service (URL: `ssh://`)
   that can be used for general authentication or for connecting to remote

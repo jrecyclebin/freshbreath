@@ -53,7 +53,8 @@ Aside from the request and response layouts, tool scripts can also include:
 
 - Comments: Lines starting with `#` are comments and are ignored by the parser.
 - Type annotations: Lines starting with `$arg is type` indicate that the argument
-  is expected to be of a certain type (string, object, number, boolean, array).
+  is expected to be of a certain type (string, object, number, boolean, array)
+  and whether it is optional with a question mark (`number?`).
 - Assignments: Lines starting with `$var = expression` assign a value to a
   variable. The expression can be a string, number, boolean, object, or array.
 - Assertions: Lines starting with `assert` can be used to assert that a variable is of
@@ -143,7 +144,7 @@ in expressions to extract the hostname and path from a URL stored in a variable.
 statement in the `get-list-next` tool.) Those custom variables can also be used
 in the JSON response - like arguments can.
 
-Variables that are assigned in the tool script are not treated as arguments - so
+Variables that are *assigned* in the tool script are not treated as arguments - so
 those names will be eliminated from the tool's argument list.
 
 We also have two examples of object output in the response JSON:
@@ -159,6 +160,14 @@ this service.
 
 Possible types for tool arguments are: 'string', 'object', 'number', 'boolean',
 and 'array'. The default type is 'string' if no type is specified.
+
+If multiple variables share a type, they can also share a definition:
+
+```
+$offset, $count is number?
+```
+
+This declares two optional numerical arguments for the tool.
 
 ## Object Traversal
 
