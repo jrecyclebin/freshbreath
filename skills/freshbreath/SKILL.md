@@ -19,6 +19,9 @@ Here's the toolkit available in this skill:
   (For further help with service types, there are 'guides/tasks.md' and
   'guides/virtuals.md')
 
+- If you want to use an app's SQL database from an app, that guidance is also
+  in 'guides/virtuals.md' - queries can be saved as individual tools.
+
 - If you want to read more specifically about managing SSH keys and how you can
   use Fresh Breath's API to log-in and start sessions with remote servers,
   transfer files or use Git, see the 'guides/ssh.md'.
