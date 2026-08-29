@@ -165,7 +165,28 @@ func main() {
 		cfg.PublicBaseURL = fmt.Sprintf("%s://%s", proto, host)
 	}
 
-	sqlDB, err := sql.Open("sqlite3", cfg.DBPath)
+	// SQLite tuning for the main store. Opened bare for a long time, which
+	// meant rollback-journal mode (writers block readers) and instant
+	// SQLITE_BUSY on any write contention — fine single-user, unkind under a
+	// couple of concurrent requests.
+	//
+	//	_journal_mode=WAL    readers run alongside the writer. Persistent:
+	//	                     this is a property of the file, set once.
+	//	_busy_timeout=5000   wait for a lock instead of failing instantly.
+	//	_foreign_keys=on     inert against today's schema (no FK declarations
+	//	                     anywhere in db.go) — here so the day someone adds
+	//	                     one, it's actually enforced.
+	//	_synchronous=NORMAL  the standard companion to WAL: durable across
+	//	                     process crashes, trades only power-loss fsyncs.
+	//
+	// Appended with a separator that respects a DBPath already carrying a
+	// query string (":memory:" and plain paths both land on "?").
+	sep := "?"
+	if strings.Contains(cfg.DBPath, "?") {
+		sep = "&"
+	}
+	dsn := cfg.DBPath + sep + "_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on&_synchronous=NORMAL"
+	sqlDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}

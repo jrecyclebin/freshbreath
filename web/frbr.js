@@ -501,30 +501,154 @@ export function load(jsonString) {
 // sseStream is the shared SSE-over-POST helper (fetch + ReadableStream;
 // EventSource is GET-only). The control panel reuses it via window.FrBr.
 
-export async function sseStream(path, { method = 'POST', body, token, onEvent } = {}) {
-  const opts = { method, headers: { 'Accept': 'text/event-stream' } };
-  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-  if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(`${res.status}: ${(await res.text().catch(() => '')) || res.statusText}`);
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n\n')) >= 0) {
-      const block = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
-      let ev = 'message', data = '';
-      for (const line of block.split('\n')) {
-        if (line.startsWith('event: ')) ev = line.slice(7);
-        else if (line.startsWith('data: ')) data += line.slice(6);
-      }
-      if (data) { try { onEvent && onEvent(ev, JSON.parse(data)); } catch {} }
+const SSE_BACKOFF_MIN = 1000;
+const SSE_BACKOFF_MAX = 30000;
+// A connection that survives this long counts as "real" — see sseStream's
+// attempt-reset rule below.
+const SSE_SETTLED_MS = 5000;
+
+// Exponential backoff with 50–100% jitter. A server-sent `retry:` overrides
+// our schedule (that's what the field is for), jitter still applies so a herd
+// of tabs doesn't reconnect in lockstep.
+function sseBackoff(attempt, retryHint) {
+  const base = retryHint ?? Math.min(SSE_BACKOFF_MAX, SSE_BACKOFF_MIN * 2 ** attempt);
+  return Math.round(base * (0.5 + Math.random() * 0.5));
+}
+
+function sseSleep(ms, signal) {
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+// Parse one SSE block into its fields. Handles the parts the old inline
+// parser skipped: `field:value` with no space, `:heartbeat` comment lines,
+// multi-line `data:` (joined with newlines, per spec — concatenating them
+// bare produced invalid JSON), and the `id:`/`retry:` fields that make
+// resumption possible.
+function parseSSEBlock(block) {
+  let event = 'message', data = null, id, retry;
+  for (const raw of block.split('\n')) {
+    if (!raw || raw.startsWith(':')) continue;
+    const c = raw.indexOf(':');
+    const field = c < 0 ? raw : raw.slice(0, c);
+    let value = c < 0 ? '' : raw.slice(c + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    switch (field) {
+      case 'event': event = value; break;
+      case 'data': data = data === null ? value : data + '\n' + value; break;
+      case 'id': id = value; break;
+      case 'retry': { const n = parseInt(value, 10); if (!Number.isNaN(n)) retry = n; break; }
     }
+  }
+  return { event, data, id, retry };
+}
+
+/**
+ * SSE over fetch + ReadableStream (EventSource is GET-only and can't set
+ * headers, which rules it out for anything behind bearer auth).
+ *
+ * Two modes, and the default matters:
+ *
+ *  - `reconnect: false` (default) — one connection. Resolves when the server
+ *    closes the stream, throws on any error. This is what a *finite* stream
+ *    wants: /updates/apply and /updates/{id}/build send their events, close,
+ *    and completion is the meaningful signal. Reconnecting those would loop
+ *    forever over a job that already succeeded.
+ *
+ *  - `reconnect: true` — an *infinite* stream, like a change subscription.
+ *    A closed connection is a failure to recover from, not a result. Retries
+ *    with jittered backoff, resumes via Last-Event-ID, and resolves only on
+ *    abort or a fatal (non-retryable) status.
+ *
+ * @param {Object}       [opts]
+ * @param {AbortSignal}  [opts.signal]       — abort to close; resolves, doesn't throw
+ * @param {boolean}      [opts.reconnect]    — retry on drop (default false)
+ * @param {string}       [opts.lastEventId]  — resume point for the first connect
+ * @param {Function}     [opts.onOpen]       — called on each successful connect
+ * @param {Function}     [opts.onError]      — called per retryable failure while reconnecting
+ */
+export async function sseStream(path, {
+  method = 'POST', body, token, onEvent,
+  reconnect = false, signal, onOpen, onError, lastEventId = null,
+} = {}) {
+  let attempt = 0;
+  let retryHint = null;
+  let lastId = lastEventId;
+
+  for (;;) {
+    if (signal?.aborted) return;
+
+    let fatal = false;
+    let gotEvent = false;
+    const openedAt = Date.now();
+
+    try {
+      const opts = { method, headers: { 'Accept': 'text/event-stream' }, signal };
+      if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+      if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
+      if (lastId != null) opts.headers['Last-Event-ID'] = lastId;
+
+      const res = await fetch(path, opts);
+      if (!res.ok) {
+        // 4xx won't fix itself by asking again — bad request, revoked token,
+        // deleted resource. 408/429 are the exceptions that mean "later".
+        fatal = res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429;
+        const err = new Error(`${res.status}: ${(await res.text().catch(() => '')) || res.statusText}`);
+        err.status = res.status;
+        throw err;
+      }
+
+      onOpen && onOpen();
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        // Normalize CRLF up front so block/line splitting stays simple.
+        buf = (buf + dec.decode(value, { stream: true })).replace(/\r\n/g, '\n');
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const { event, data, id, retry } = parseSSEBlock(block);
+          if (id !== undefined) lastId = id;
+          if (retry !== undefined) retryHint = retry;
+          if (data === null || data === '') continue;
+          let payload;
+          try {
+            payload = JSON.parse(data);
+          } catch {
+            continue;
+          }
+          gotEvent = true;
+          // A throwing handler shouldn't kill the stream, but it shouldn't
+          // vanish either — silent catch blocks around stream plumbing are
+          // where bugs go to hide.
+          try {
+            onEvent && onEvent(event, payload);
+          } catch (e) {
+            console.error('sseStream: onEvent handler threw', e);
+          }
+        }
+      }
+
+      if (!reconnect) return;
+    } catch (err) {
+      if (signal?.aborted) return;
+      if (!reconnect || fatal) throw err;
+      onError && onError(err);
+    }
+
+    if (signal?.aborted) return;
+    // Only credit a connection that actually did something. Otherwise a
+    // server that accepts and immediately closes would reset the backoff on
+    // every cycle and get hammered at the floor delay forever.
+    if (gotEvent || Date.now() - openedAt >= SSE_SETTLED_MS) attempt = 0;
+    await sseSleep(sseBackoff(attempt++, retryHint), signal);
   }
 }
 
