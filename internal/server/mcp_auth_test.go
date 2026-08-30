@@ -232,7 +232,7 @@ func TestVerifyTaskTokenMissingBearer(t *testing.T) {
 	srv := newTestServer(t)
 	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
 	req := httptest.NewRequest("GET", "/whatever", nil)
-	if _, err := srv.verifyTaskToken(req, svcID); err == nil {
+	if _, _, err := srv.verifyTaskToken(req, svcID); err == nil {
 		t.Fatal("expected error when Authorization header is absent")
 	}
 }
@@ -247,7 +247,7 @@ func TestVerifyTaskTokenIdentity(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/whatever", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	user, err := srv.verifyTaskToken(req, svcID)
+	user, _, err := srv.verifyTaskToken(req, svcID)
 	if err != nil {
 		t.Fatalf("verifyTaskToken: %v", err)
 	}

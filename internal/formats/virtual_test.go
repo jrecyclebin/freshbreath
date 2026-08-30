@@ -829,7 +829,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "greet", nil, "test-token", nil)
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "greet", nil, VirtualAuth{Token: "test-token"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -870,7 +870,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"name": "Ada"}, "", nil)
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"name": "Ada"}, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -896,7 +896,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-site", nil, "", nil)
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-site", nil, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -924,7 +924,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "oof", nil, "", nil)
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "oof", nil, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -973,7 +973,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-lists", nil, "", nil)
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "get-lists", nil, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1002,7 +1002,7 @@ assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "fetch", nil, "", nil)
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "fetch", nil, VirtualAuth{}, nil)
 	if err == nil {
 		t.Fatal("assertion should have failed")
 	}
@@ -1013,7 +1013,7 @@ assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
 
 func TestExecuteVirtualToolNotFound(t *testing.T) {
 	tools := []VirtualTool{{Name: "greet"}}
-	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "missing", nil, "", nil)
+	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "missing", nil, VirtualAuth{}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1225,7 +1225,7 @@ HTTP 200
 
 	// "hello $world" proves the body goes through verbatim: a $ in the
 	// file data must NOT be interpreted as a variable reference.
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, "", nil)
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1258,7 +1258,7 @@ HTTP 200
 	// A PNG signature — bytes that aren't legal inside a JSON string.
 	want := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
 	encoded := base64.StdEncoding.EncodeToString(want)
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload-image", map[string]interface{}{"content": encoded}, "", nil)
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload-image", map[string]interface{}{"content": encoded}, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1287,7 +1287,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "raw bytes here"}, "", nil)
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "raw bytes here"}, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1311,7 +1311,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hi"}, "", nil)
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hi"}, VirtualAuth{}, nil)
 	if err == nil {
 		t.Fatal("expected error for missing Content-Type")
 	}
@@ -1331,7 +1331,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, "", nil)
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, VirtualAuth{}, nil)
 	if err == nil {
 		t.Fatal("expected error for non-string raw body")
 	}
@@ -1498,7 +1498,7 @@ SELECT id, title FROM tasks
 		t.Fatal(err)
 	}
 	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "recent",
-		map[string]interface{}{"done": float64(0)}, "", runner)
+		map[string]interface{}{"done": float64(0)}, VirtualAuth{}, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1524,7 +1524,7 @@ SELECT * FROM t WHERE x = $nope
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "q", nil, "",
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "q", nil, VirtualAuth{},
 		func(string, map[string]interface{}) (map[string]interface{}, error) {
 			return map[string]interface{}{}, nil
 		})
@@ -1533,7 +1533,7 @@ SELECT * FROM t WHERE x = $nope
 	}
 
 	// No runner wired at all.
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "q", nil, "", nil)
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "q", nil, VirtualAuth{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no database target") {
 		t.Errorf("want no-runner error, got %v", err)
 	}
@@ -1568,7 +1568,7 @@ INSERT INTO issues (title, body, source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "import-issue", nil, "", runner)
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "import-issue", nil, VirtualAuth{}, runner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1676,7 +1676,7 @@ GET ` + srv.URL + `/things?state=$state&owner=$owner&path=$path&page=1
 	}
 
 	// Omitted optionals vanish from the query; literals survive.
-	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{}, "", nil); err != nil {
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{}, VirtualAuth{}, nil); err != nil {
 		t.Fatalf("omit optionals: %v", err)
 	}
 	if gotURI != "/things?page=1" {
@@ -1684,7 +1684,7 @@ GET ` + srv.URL + `/things?state=$state&owner=$owner&path=$path&page=1
 	}
 
 	// An explicit empty string is the same as omitted: no filter.
-	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{"state": ""}, "", nil); err != nil {
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{"state": ""}, VirtualAuth{}, nil); err != nil {
 		t.Fatalf("explicit empty: %v", err)
 	}
 	if gotURI != "/things?page=1" {
@@ -1692,7 +1692,7 @@ GET ` + srv.URL + `/things?state=$state&owner=$owner&path=$path&page=1
 	}
 
 	// Supplied optionals stay, in position.
-	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{"state": "open", "path": "cmd/x"}, "", nil); err != nil {
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list", map[string]interface{}{"state": "open", "path": "cmd/x"}, VirtualAuth{}, nil); err != nil {
 		t.Fatalf("supplied: %v", err)
 	}
 	if gotURI != "/things?state=open&path=cmd%2Fx&page=1" {
@@ -1708,7 +1708,7 @@ GET ` + srv.URL + `/things/$name
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExecuteVirtualTool(http.DefaultClient, reqTools, "get", map[string]interface{}{}, "", nil); err == nil {
+	if _, err := ExecuteVirtualTool(http.DefaultClient, reqTools, "get", map[string]interface{}{}, VirtualAuth{}, nil); err == nil {
 		t.Error("missing required param should error")
 	}
 }
@@ -1756,7 +1756,7 @@ SELECT id
 	}
 
 	// Omitted optional binds NULL; required param binds its value.
-	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "search", map[string]interface{}{"owner": "j"}, "", runner); err != nil {
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "search", map[string]interface{}{"owner": "j"}, VirtualAuth{}, runner); err != nil {
 		t.Fatal(err)
 	}
 	if bound["done"] != nil {
@@ -1767,10 +1767,134 @@ SELECT id
 	}
 
 	// Explicitly supplied optional binds the value, even "".
-	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "search", map[string]interface{}{"owner": "j", "done": ""}, "", runner); err != nil {
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "search", map[string]interface{}{"owner": "j", "done": ""}, VirtualAuth{}, runner); err != nil {
 		t.Fatal(err)
 	}
 	if v, ok := bound["done"]; !ok || v != "" {
 		t.Errorf("explicit empty optional should bind \"\", got %v", bound["done"])
+	}
+}
+
+func TestIdentityBuiltins(t *testing.T) {
+	var gotAuth, gotUserHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotUserHeader = r.Header.Get("X-User")
+		fmt.Fprintln(w, `{"ok": true}`)
+	}))
+	defer srv.Close()
+
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[whoami] Report the caller upstream.
+
+GET %s/api/whoami
+Authorization: Bearer $token
+X-User: $token_email
+
+HTTP 200
+
+{
+  "email": $token_email,
+  "sub": $token_sub,
+  "id": $token_id
+}
+`, srv.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	auth := VirtualAuth{Token: "tok", Email: "j@poggers.institute", Sub: "abc-123", UserID: int64(7)}
+	// The caller tries to spoof every identity built-in by argument name.
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "whoami",
+		map[string]interface{}{"token_email": "spoof@evil.example", "token_sub": "spoof", "token_id": float64(999)},
+		auth, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if gotUserHeader != "j@poggers.institute" {
+		t.Errorf("X-User = %q, want the injected email", gotUserHeader)
+	}
+	m := result.(map[string]interface{})
+	if m["email"] != "j@poggers.institute" {
+		t.Errorf("email = %v, want injected value", m["email"])
+	}
+	if m["sub"] != "abc-123" {
+		t.Errorf("sub = %v, want injected value", m["sub"])
+	}
+	if m["id"] != float64(7) {
+		t.Errorf("id = %v (%T), want 7", m["id"], m["id"])
+	}
+
+	// Anonymous caller: identity built-ins are required — referencing one
+	// without a verified identity fails, the same contract as $token.
+	tools2, err := ParseVirtualFile([]byte(fmt.Sprintf(`[whoami-anon] Report the caller upstream.
+
+GET %s/api/whoami
+X-User: $token_email
+
+HTTP 200
+
+{
+  "email": $token_email,
+  "sub": $token_sub,
+  "id": $token_id
+}
+`, srv.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools2, "whoami-anon", nil, VirtualAuth{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "undefined variable: $token_email") {
+		t.Errorf("anonymous caller: want undefined-variable error, got %v", err)
+	}
+
+	// Logged in upstream but no Fresh Breath account: $token_id is null,
+	// the email still stamps.
+	result, err = ExecuteVirtualTool(http.DefaultClient, tools2, "whoami-anon", nil,
+		VirtualAuth{Email: "ghost@example.com", Sub: "ghost@example.com"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = result.(map[string]interface{})
+	if m["email"] != "ghost@example.com" {
+		t.Errorf("ghost email = %v", m["email"])
+	}
+	if m["id"] != nil {
+		t.Errorf("ghost id = %v, want nil", m["id"])
+	}
+}
+
+func TestIdentityBuiltinsSQL(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[stamp] Record who ran this.
+
+INSERT INTO stamps (email, uid, sub)
+  VALUES ($token_email, $token_id, $token_sub)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var bound map[string]interface{}
+	runner := func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		bound = params
+		return map[string]interface{}{"rows": []interface{}{}}, nil
+	}
+
+	auth := VirtualAuth{Email: "kay@example.com", Sub: "kay@example.com", UserID: int64(3)}
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "stamp",
+		map[string]interface{}{"token_email": "spoof@evil.example", "token_id": float64(999)},
+		auth, runner); err != nil {
+		t.Fatal(err)
+	}
+	if bound["token_email"] != "kay@example.com" {
+		t.Errorf("email binding = %v, want injected value", bound["token_email"])
+	}
+	if bound["token_id"] != int64(3) {
+		t.Errorf("id binding = %v (%T), want 3", bound["token_id"], bound["token_id"])
+	}
+	if bound["token_sub"] != "kay@example.com" {
+		t.Errorf("sub binding = %v", bound["token_sub"])
 	}
 }

@@ -89,7 +89,7 @@ func (s *Server) verifyAdminTokenFromBearer(ctx context.Context, serviceID strin
 	if err != nil {
 		return nil, fmt.Errorf("admin auth service not found")
 	}
-	email, err := s.verifyIDToken(ctx, svc, idTokenRaw)
+	email, _, err := s.verifyIDToken(ctx, svc, idTokenRaw)
 	if err != nil {
 		return nil, err
 	}

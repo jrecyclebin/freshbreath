@@ -149,8 +149,8 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 				json.Unmarshal(req.Params.Arguments, &args)
 			}
 
-			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, token,
-				s.mcpSQLRunner(svc, claims, args))
+			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args,
+				s.virtualAuth(token, claims), s.mcpSQLRunner(svc, claims, args))
 			if err != nil {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
@@ -166,6 +166,23 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 	}
 
 	return mcps, nil
+}
+
+// virtualAuth builds the caller identity for a virtual tool execution from
+// the verified wrapped-token claims. UserID is the numerical Fresh Breath
+// user when the token's email maps to one; a caller with no Fresh Breath
+// account leaves it nil (and $token_id resolves to null).
+func (s *Server) virtualAuth(token string, claims *freshbreathClaims) formats.VirtualAuth {
+	auth := formats.VirtualAuth{Token: token}
+	if claims == nil {
+		return auth
+	}
+	auth.Email = claims.UserEmail
+	auth.Sub = claims.Subject
+	if u, err := s.store.GetUserByEmail(claims.UserEmail); err == nil {
+		auth.UserID = u.ID
+	}
+	return auth
 }
 
 // virtualToolInputSchema builds a JSON Schema input object for a virtual
