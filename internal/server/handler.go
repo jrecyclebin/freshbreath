@@ -1050,13 +1050,15 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ── Optional token auth via a referenced service ──────────────────
+	var authUser *db.User
+	var authSub string
 	if svc.Descriptor.AuthServiceID != "" {
 		authSvcID, err := strconv.ParseInt(svc.Descriptor.AuthServiceID, 10, 64)
 		if err != nil {
 			http.Error(w, "Invalid auth_service_id on service", http.StatusInternalServerError)
 			return
 		}
-		_, err = s.verifyTaskToken(r, authSvcID)
+		authUser, authSub, err = s.verifyTaskToken(r, authSvcID)
 		if err != nil {
 			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
@@ -1068,7 +1070,7 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	case "tasks":
 		s.handleTaskCallInner(w, r, svc)
 	case "virtual":
-		s.handleVirtualCallInner(w, r, svc)
+		s.handleVirtualCallInner(w, r, svc, authUser, authSub)
 	default:
 		http.Error(w, "Service type does not support /service/call", http.StatusBadRequest)
 	}
@@ -1097,7 +1099,7 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 	}
 }
 
-func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service) {
+func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, authUser *db.User, authSub string) {
 	switch r.Method {
 	case http.MethodGet:
 		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
@@ -1109,14 +1111,14 @@ func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, 
 		json.NewEncoder(w).Encode(map[string]interface{}{"tools": formats.VirtualToolSummaries(tools)})
 
 	case http.MethodPost:
-		s.handleVirtualExec(w, r, svc)
+		s.handleVirtualExec(w, r, svc, authUser, authSub)
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *db.Service) {
+func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *db.Service, authUser *db.User, authSub string) {
 	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1146,7 +1148,18 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 	// No actor here — the app↔service link is the whole grant on this path.
 	sqlRunner := s.browserSQLRunner(svc, r.Header.Get("X-App-Nonce"), body.Args)
 
-	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, token, sqlRunner)
+	// Identity built-ins come from the optional auth-service token: the
+	// verified user (email + numerical ID) and its sub claim. With no auth
+	// service configured there is no user on this path — the app link is
+	// the whole grant — and tools referencing the identity built-ins fail:
+	// they require a logged-in caller.
+	auth := formats.VirtualAuth{Token: token, Sub: authSub}
+	if authUser != nil {
+		auth.Email = authUser.Email
+		auth.UserID = authUser.ID
+	}
+
+	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, auth, sqlRunner)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2243,32 +2256,32 @@ func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*db.User, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid service ID in settings")
 	}
-	return s.verifyTaskToken(r, svcID)
+	user, _, err := s.verifyTaskToken(r, svcID)
+	return user, err
 }
 
 // verifyTaskToken verifies a Bearer token against a referenced auth service.
-// Used by tasks services that require token auth. Returns the authenticated
-// user on success.
-func (s *Server) verifyTaskToken(r *http.Request, authSvcID int64) (*db.User, error) {
+// Returns the authenticated user and the token's sub claim on success.
+func (s *Server) verifyTaskToken(r *http.Request, authSvcID int64) (*db.User, string, error) {
 	authHeader := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return nil, fmt.Errorf("missing bearer token")
+		return nil, "", fmt.Errorf("missing bearer token")
 	}
 	idTokenRaw := strings.TrimPrefix(authHeader, "Bearer ")
 
 	svc, err := s.store.GetService(authSvcID)
 	if err != nil {
-		return nil, fmt.Errorf("auth service not found")
+		return nil, "", fmt.Errorf("auth service not found")
 	}
-	email, err := s.verifyIDToken(r.Context(), svc, idTokenRaw)
+	email, sub, err := s.verifyIDToken(r.Context(), svc, idTokenRaw)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	user, err := s.store.GetUserByEmail(email)
 	if err != nil {
-		return nil, fmt.Errorf("user not found for %s", email)
+		return nil, "", fmt.Errorf("user not found for %s", email)
 	}
-	return user, nil
+	return user, sub, nil
 }
 
 func isFreshbreathToken(raw string) bool {
@@ -2317,14 +2330,14 @@ func (s *Server) setRefreshCookie(w http.ResponseWriter, r *http.Request, claims
 	s.makeRefreshCookie(w, refreshData)
 }
 
-func (s *Server) verifyIDToken(ctx context.Context, svc *db.Service, raw string) (string, error) {
+func (s *Server) verifyIDToken(ctx context.Context, svc *db.Service, raw string) (string, string, error) {
 	if isFreshbreathToken(raw) {
 		claims, err := s.verifyFreshbreathToken(raw)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if claims == nil {
-			return "", fmt.Errorf("not a freshbreath token")
+			return "", "", fmt.Errorf("not a freshbreath token")
 		}
 		// Service binding: an identity token is only valid against the service
 		// that minted it. Without this, a token issued by *any* OIDC service
@@ -2332,28 +2345,29 @@ func (s *Server) verifyIDToken(ctx context.Context, svc *db.Service, raw string)
 		// register an account at some other service under a victim's email
 		// impersonate that victim here (e.g. log into the admin MCP).
 		if claims.Kind != "identity" || claims.ServiceID != svc.ID {
-			return "", fmt.Errorf("token was not issued by this auth service")
+			return "", "", fmt.Errorf("token was not issued by this auth service")
 		}
-		return claims.UserEmail, nil
+		return claims.UserEmail, claims.Subject, nil
 	}
 	provider, err := s.getOIDCProvider(ctx, svc.ID, svc.URL)
 	if err != nil {
-		return "", fmt.Errorf("OIDC provider: %w", err)
+		return "", "", fmt.Errorf("OIDC provider: %w", err)
 	}
 	idToken, err := provider.Verifier(&oidc.Config{ClientID: svc.Descriptor.ClientID}).Verify(ctx, raw)
 	if err != nil {
-		return "", fmt.Errorf("token verification: %w", err)
+		return "", "", fmt.Errorf("token verification: %w", err)
 	}
 	var claims struct {
 		Email string `json:"email"`
+		Sub   string `json:"sub"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
-		return "", fmt.Errorf("claims extraction: %w", err)
+		return "", "", fmt.Errorf("claims extraction: %w", err)
 	}
 	if claims.Email == "" {
-		return "", fmt.Errorf("no email in token")
+		return "", "", fmt.Errorf("no email in token")
 	}
-	return claims.Email, nil
+	return claims.Email, claims.Sub, nil
 }
 
 func (s *Server) getOIDCProvider(ctx context.Context, serviceID int64, issuer string) (*oidc.Provider, error) {

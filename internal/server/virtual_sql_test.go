@@ -1,11 +1,15 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/formats"
@@ -310,5 +314,122 @@ GET https://api.example.com/issues?state=$state
 	props = schema["properties"].(map[string]interface{})
 	if _, ok := props["app_nonce"]; ok {
 		t.Errorf("app_nonce on HTTP-only tool")
+	}
+}
+
+func TestVirtualAuthFromClaims(t *testing.T) {
+	srv := newAppDBServer(t)
+
+	// No claims (raw upstream token): identity built-ins all empty.
+	auth := srv.virtualAuth("tok", nil)
+	if auth.Token != "tok" || auth.Email != "" || auth.Sub != "" || auth.UserID != nil {
+		t.Errorf("no-claims auth = %+v", auth)
+	}
+
+	// Claims for an email with no Fresh Breath account: email/sub carried,
+	// no numerical ID.
+	claims := &freshbreathClaims{Claims: josejwt.Claims{Subject: "ghost@example.com"}, UserEmail: "ghost@example.com"}
+	auth = srv.virtualAuth("tok", claims)
+	if auth.Email != "ghost@example.com" || auth.UserID != nil {
+		t.Errorf("unknown-user auth = %+v", auth)
+	}
+
+	// Claims for a real user: the numerical ID resolves.
+	kay, err := srv.store.CreateUser("Kay", "kay@example.com", "Member", "Active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims = &freshbreathClaims{Claims: josejwt.Claims{Subject: "kay@example.com"}, UserEmail: "kay@example.com"}
+	auth = srv.virtualAuth("tok", claims)
+	if auth.UserID != kay.ID {
+		t.Errorf("UserID = %v (%T), want %d", auth.UserID, auth.UserID, kay.ID)
+	}
+}
+
+func TestVirtualCallIdentityBuiltins(t *testing.T) {
+	srv := newAppDBServer(t)
+	if err := os.MkdirAll(filepath.Join(srv.config.DataDir, "virtual"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toolFile := `[ensure] Create the stamps table.
+
+CREATE TABLE IF NOT EXISTS stamps (email TEXT, uid INTEGER)
+---
+[stamp] Record who ran this.
+
+INSERT INTO stamps (email, uid)
+  VALUES ($token_email, $token_id)
+`
+	if err := os.WriteFile(filepath.Join(srv.config.DataDir, "virtual", "Keeper.txt"), []byte(toolFile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// An OIDC auth service gates the call; Kay holds an identity token for it.
+	idpID, err := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kay, err := srv.store.CreateUser("Kay", "kay@example.com", "Member", "Active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := srv.mintFreshbreathToken("identity", "kay@example.com", "Member", "Kay", idpID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := srv.coreCreateService(&db.User{ID: 1, Role: "Admin"}, "Keeper", "/mcp/keeper",
+		db.ServiceDescriptor{Type: "virtual", AuthServiceID: strconv.FormatInt(idpID, 10)})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.LinkAppService(nonce, svc.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	headers := map[string]string{
+		"X-App-Nonce":   nonce,
+		"Authorization": "Bearer " + tok,
+	}
+	rr := testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "ensure"}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ensure: status %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Stamp with spoofed identity arguments — the built-ins must win.
+	rr = testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "stamp", "args": {"token_email": "spoof@evil.example", "token_id": 999}}`),
+		headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("stamp: status %d: %s", rr.Code, rr.Body.String())
+	}
+
+	admin := &db.User{ID: 1, Role: "Admin"}
+	res, err := srv.coreDBQuery(admin, "app:"+nonce, dbQueryRequest{
+		SQL: "SELECT email, uid FROM stamps"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("stamps rows = %v, want one", res.Rows)
+	}
+	if res.Rows[0][0] != "kay@example.com" {
+		t.Errorf("stamp email = %v, want kay@example.com (injected, not spoofed)", res.Rows[0][0])
+	}
+	if got := fmt.Sprintf("%v", res.Rows[0][1]); got != strconv.FormatInt(kay.ID, 10) {
+		t.Errorf("stamp uid = %v (%T), want kay's numerical ID %d", res.Rows[0][1], res.Rows[0][1], kay.ID)
+	}
+
+	// No bearer token: the auth service rejects the call outright.
+	rr = testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+		strings.NewReader(`{"task": "stamp", "args": {}}`),
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous stamp: status %d, want 401", rr.Code)
 	}
 }

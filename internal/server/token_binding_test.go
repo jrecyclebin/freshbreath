@@ -41,7 +41,7 @@ func TestIdentityTokenServiceBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint admin-bound token: %v", err)
 	}
-	email, err := srv.verifyIDToken(ctx, adminSvc, tokAdmin)
+	email, _, err := srv.verifyIDToken(ctx, adminSvc, tokAdmin)
 	if err != nil {
 		t.Fatalf("admin-bound token should verify against admin service: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestIdentityTokenServiceBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint other-bound token: %v", err)
 	}
-	if _, err := srv.verifyIDToken(ctx, adminSvc, tokOther); err == nil {
+	if _, _, err := srv.verifyIDToken(ctx, adminSvc, tokOther); err == nil {
 		t.Fatal("SECURITY: token minted by other service was accepted against admin service")
 	}
 
@@ -80,7 +80,7 @@ func TestIdentityTokenServiceBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint wrapped token: %v", err)
 	}
-	if _, err := srv.verifyIDToken(ctx, adminSvc, tokWrapped); err == nil {
+	if _, _, err := srv.verifyIDToken(ctx, adminSvc, tokWrapped); err == nil {
 		t.Fatal("SECURITY: a wrapped token authenticated as an identity")
 	}
 }

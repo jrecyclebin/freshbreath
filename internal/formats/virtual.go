@@ -157,7 +157,8 @@ var typeAnnotationRe = regexp.MustCompile(
 	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array)(\?)?$`)
 
 func toolParams(tool VirtualTool) []ToolParam {
-	defined := map[string]bool{"token": true}
+	// token* are server-injected (auth token + identity claims), never caller params.
+	defined := map[string]bool{"token": true, "token_email": true, "token_sub": true, "token_id": true}
 	for _, step := range tool.Steps {
 		for _, a := range step.Assignments {
 			defined[a.VarName] = true
@@ -923,6 +924,14 @@ func parseIdent(s string) (string, int) {
 }
 
 func encodeValue(val interface{}, mode ResolveMode) (string, error) {
+	// A JSON null (or an unknown $token_id) renders as nothing in URLs and
+	// headers — "<nil>" is never what anyone wants.
+	if val == nil {
+		if mode == ResolveBody {
+			return "null", nil
+		}
+		return "", nil
+	}
 	switch mode {
 	case ResolveURL, resolvePath, ResolveHeader:
 		return fmt.Sprintf("%v", val), nil
@@ -1173,10 +1182,23 @@ func VirtualToolSummaries(tools []VirtualTool) []map[string]string {
 // the app-database core, deciding the target from the service's config.
 type SQLRunner func(sqlText string, params map[string]interface{}) (map[string]interface{}, error)
 
+// VirtualAuth carries the verified caller identity into tool execution.
+// Token backs the $token built-in; Email, Sub and UserID back $token_email,
+// $token_sub and $token_id. The server populates them from verified token
+// claims — they are injected ahead of caller arguments, so a caller can
+// never supply or shadow them.
+type VirtualAuth struct {
+	Token  string
+	Email  string
+	Sub    string
+	UserID interface{} // int64 when the caller maps to a Fresh Breath user; nil otherwise
+}
+
 // ExecuteVirtualTool runs a virtual tool's steps and returns the result.
-// The token comes from auth middleware context (or "" for unauthenticated
-// calls); sqlRunner may be nil for tools that never touch a database.
-func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, token string, sqlRunner SQLRunner) (interface{}, error) {
+// auth carries the upstream token and the caller's verified identity
+// (empty when unauthenticated); sqlRunner may be nil for tools that never
+// touch a database.
+func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, auth VirtualAuth, sqlRunner SQLRunner) (interface{}, error) {
 	tool := findVirtualTool(tools, toolName)
 	if tool == nil {
 		return nil, fmt.Errorf("tool %q not found", toolName)
@@ -1188,6 +1210,21 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 	for k, v := range args {
 		scope[k] = v
 	}
+
+	// Identity built-ins are server-injected claims, not inputs: namesake
+	// caller arguments are dropped outright. They're injected only when the
+	// caller has a verified identity — a tool referencing one without a
+	// logged-in caller fails with the same "undefined variable" error as
+	// $token, rather than stamping empty values into anything.
+	delete(scope, "token_email")
+	delete(scope, "token_sub")
+	delete(scope, "token_id")
+	if auth.Email != "" {
+		vars["token_email"] = auth.Email
+		vars["token_sub"] = auth.Sub
+		vars["token_id"] = auth.UserID
+	}
+	token := auth.Token
 
 	// Optional params the caller didn't supply resolve as empty strings
 	// (so template resolution doesn't error), and their empty query pairs

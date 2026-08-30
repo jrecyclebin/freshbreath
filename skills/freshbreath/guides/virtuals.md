@@ -95,6 +95,16 @@ Fresh Breath to the script using the user's creds for the upstream service.
 virtual service, and the virtual service unwraps that token to get the
 upstream creds - those creds are passed in as the `$token` variable.)
 
+A few other variables that come with token:
+
+* `$token_email`: the user's email address.
+* `$token_id`: the user's numeric ID in Fresh Breath.
+* `$token_sub`: the user's 'sub' claim.
+
+If a tool uses any of these, the caller must be logged in - the call fails
+otherwise. (`$token_id` is the one exception in spirit: a logged-in user
+without a Fresh Breath account gets `null` - see the SQL section below.)
+
 There are some additional ways to format JSON responses in tool scripts, which
 can be seen in the example below for a SharePoint virtual service:
 
@@ -263,7 +273,7 @@ Recognized verbs: `SELECT`, `INSERT`, `UPDATE`, `DELETE FROM`, `REPLACE`,
 line plus any **indented** continuation lines beneath it — it ends at the
 first non-indented line, so indent your `WHERE` clauses and format the query
 however reads best. Blank lines and indented `#` comments inside a step are
-skipped.
+skipped. (And ensure that all closing parentheses end up indented as well.)
 
 The `DELETE FROM` spelling is load-bearing: SQL's DELETE is always followed
 by `FROM`, and that's how the parser tells it apart from an HTTP
@@ -288,8 +298,14 @@ Two rules keep this honest:
   and all.
 - **`$$` escapes a literal `$`** for the rare query that needs one.
 
-`$token` works here too, bound like any other variable. And `?`-annotated
-optional parameters behave sensibly: one the caller omits binds as `NULL`,
+For auth, `$token` works here too, bound like any other variable. But it's
+much more useful to use `$token_id` - the user's Fresh Breath ID - to assign
+data to them in 'user_id' columns in your database. If you need a string
+version, use `$token_email` or `$token_sub` instead. Especially if you are
+storing heterogenous users from different systems. (Like if you need to store
+data for users that don't have Fresh Breath accounts!)
+
+As for `?`-annotated optional parameters, any omitted bind as `NULL`,
 while an explicit empty string stays `""` — the difference between "not
 given" and "given as nothing" survives the trip to the database.
 
