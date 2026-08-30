@@ -54,7 +54,7 @@ func TestActTokenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if p.Path != "/api/apps" || p.Method != http.MethodGet || p.UserEmail != "ada@example.com" {
+	if p.Path != "/api/apps" || p.Method != http.MethodGet || p.Subject != subjectForUser(ada) {
 		t.Fatalf("payload mismatch: %+v", p)
 	}
 }
@@ -93,10 +93,10 @@ func TestActTokenVerifyRejectsNonAPI(t *testing.T) {
 	// Hand-craft a /mcp/ payload (mintActToken would refuse it) and sign it
 	// correctly; verify must still reject it — the scope guard isn't only at mint.
 	p := actTokenPayload{
-		Path:      "/mcp/foo",
-		Method:    http.MethodGet,
-		Expiry:    time.Now().Add(5 * time.Minute).Unix(),
-		UserEmail: ada.Email,
+		Path:    "/mcp/foo",
+		Method:  http.MethodGet,
+		Expiry:  time.Now().Add(5 * time.Minute).Unix(),
+		Subject: subjectForUser(ada),
 	}
 	if _, err := srv.verifyActToken(mintRawActToken(srv, p)); err == nil {
 		t.Fatal("verify: expected scope rejection for /mcp/, got nil")

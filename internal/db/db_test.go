@@ -27,7 +27,7 @@ func newTestStore(t *testing.T) *Store {
 func TestStoreCreateApp(t *testing.T) {
 	store := newTestStore(t)
 
-	nonce, err := store.CreateApp("test-app", "", "", nil)
+	nonce, err := store.CreateApp("test-app", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -47,11 +47,11 @@ func TestStoreCreateApp(t *testing.T) {
 func TestStoreCreateAppDuplicateNonceRetries(t *testing.T) {
 	store := newTestStore(t)
 
-	n1, err := store.CreateApp("app-1", "", "", nil)
+	n1, err := store.CreateApp("app-1", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("first app: %v", err)
 	}
-	n2, err := store.CreateApp("app-2", "", "", nil)
+	n2, err := store.CreateApp("app-2", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("second app: %v", err)
 	}
@@ -71,8 +71,8 @@ func TestStoreGetAppNotFound(t *testing.T) {
 
 func TestStoreListApps(t *testing.T) {
 	store := newTestStore(t)
-	store.CreateApp("alpha", "", "", nil)
-	store.CreateApp("beta", "", "", nil)
+	store.CreateApp("alpha", "", "", nil, nil)
+	store.CreateApp("beta", "", "", nil, nil)
 
 	apps, err := store.ListApps()
 	if err != nil {
@@ -86,7 +86,7 @@ func TestStoreListApps(t *testing.T) {
 func TestStoreRegisterAndGetService(t *testing.T) {
 	store := newTestStore(t)
 
-	id, err := store.RegisterService("slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+	id, err := store.RegisterService("slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"}, nil, nil)
 	if err != nil {
 		t.Fatalf("register service: %v", err)
 	}
@@ -120,12 +120,12 @@ func TestStoreRegisterAndGetService(t *testing.T) {
 func TestStoreRegisterServiceSameURL(t *testing.T) {
 	store := newTestStore(t)
 
-	_, err := store.RegisterService("slack", "https://example/mcp", ServiceDescriptor{Type: "mcp"})
+	_, err := store.RegisterService("slack", "https://example/mcp", ServiceDescriptor{Type: "mcp"}, nil, nil)
 	if err != nil {
 		t.Fatalf("first register: %v", err)
 	}
 
-	_, err = store.RegisterService("slack2", "https://example/mcp", ServiceDescriptor{Type: "mcp"})
+	_, err = store.RegisterService("slack2", "https://example/mcp", ServiceDescriptor{Type: "mcp"}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for duplicate url")
 	}
@@ -133,7 +133,7 @@ func TestStoreRegisterServiceSameURL(t *testing.T) {
 
 func TestStoreGetServiceByURL(t *testing.T) {
 	store := newTestStore(t)
-	id, _ := store.RegisterService("slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"})
+	id, _ := store.RegisterService("slack", "https://slack.example/mcp", ServiceDescriptor{Type: "mcp"}, nil, nil)
 
 	svc, err := store.GetServiceByURL("https://slack.example/mcp")
 	if err != nil {
@@ -156,97 +156,60 @@ func TestStoreServiceDescriptorRoundTrip(t *testing.T) {
 	store := newTestStore(t)
 
 	desc := ServiceDescriptor{
-		Type:         "api",
-		Proxied:      true,
-		ClientID:     "my-client-id",
-		ClientSecret: "my-client-secret",
-		OAuthURL:     "https://github.com/login/oauth",
+		Type:           "virtual",
+		Proxied:        true,
+		DatabaseTarget: "global",
+		DatabaseName:   "scores",
 	}
-	_, err := store.RegisterService("github", "https://api.github.com", desc)
+	pb := int64(1)
+	aa := int64(2)
+	id, err := store.RegisterService("scores", "/mcp/scores", desc, &pb, &aa)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
 
-	services, _ := store.ListServices()
-	svc := services[0]
-	if svc.Descriptor.Type != "api" {
-		t.Errorf("type = %q, want api", svc.Descriptor.Type)
+	svc, err := store.GetService(id)
+	if err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if svc.Descriptor.Type != "virtual" {
+		t.Errorf("type = %q, want virtual", svc.Descriptor.Type)
 	}
 	if !svc.Descriptor.Proxied {
 		t.Error("proxied = false, want true")
 	}
-	if svc.Descriptor.ClientID != "my-client-id" {
-		t.Errorf("client_id = %q, want my-client-id", svc.Descriptor.ClientID)
+	if svc.Descriptor.DatabaseTarget != "global" || svc.Descriptor.DatabaseName != "scores" {
+		t.Errorf("database target/name = %q/%q", svc.Descriptor.DatabaseTarget, svc.Descriptor.DatabaseName)
 	}
-	if svc.Descriptor.ClientSecret != "my-client-secret" {
-		t.Errorf("client_secret = %q, want my-client-secret", svc.Descriptor.ClientSecret)
+	if svc.ProtectedBy == nil || *svc.ProtectedBy != 1 {
+		t.Errorf("protected_by = %v, want 1", svc.ProtectedBy)
 	}
-	if svc.Descriptor.OAuthURL != "https://github.com/login/oauth" {
-		t.Errorf("oauth_url = %q", svc.Descriptor.OAuthURL)
-	}
-}
-
-func TestStoreOIDCDescriptorRoundTrip(t *testing.T) {
-	store := newTestStore(t)
-
-	desc := ServiceDescriptor{
-		Type:         "oidc",
-		ClientID:     "xxx.apps.googleusercontent.com",
-		ClientSecret: "GOCSPF-xxx",
-		Scopes:       "openid profile email",
-	}
-	id, err := store.RegisterService("google", "https://accounts.google.com", desc)
-	if err != nil {
-		t.Fatalf("register: %v", err)
-	}
-
-	svc, err := store.GetService(id)
-	if err != nil {
-		t.Fatalf("get service: %v", err)
-	}
-	if svc.Descriptor.Type != "oidc" {
-		t.Errorf("type = %q, want oidc", svc.Descriptor.Type)
-	}
-	if svc.Descriptor.ClientID != "xxx.apps.googleusercontent.com" {
-		t.Errorf("client_id = %q", svc.Descriptor.ClientID)
-	}
-	if svc.Descriptor.Scopes != "openid profile email" {
-		t.Errorf("scopes = %q, want openid profile email", svc.Descriptor.Scopes)
-	}
-	// These should be zero-valued / omitted
-	if svc.Descriptor.Auth != "" {
-		t.Errorf("auth = %q, want empty", svc.Descriptor.Auth)
-	}
-	if svc.Descriptor.Proxied {
-		t.Error("proxied should be false")
+	if svc.ActsAs == nil || *svc.ActsAs != 2 {
+		t.Errorf("acts_as = %v, want 2", svc.ActsAs)
 	}
 }
 
-func TestStoreAPIKeyDescriptorRoundTrip(t *testing.T) {
+func TestStoreServiceSlotsNullable(t *testing.T) {
 	store := newTestStore(t)
-
-	desc := ServiceDescriptor{
-		Type:   "api",
-		Auth:   "key",
-		APIKey: "admin-secret-key",
-	}
-	id, err := store.RegisterService("weather", "https://api.weather.com", desc)
+	id, err := store.RegisterService("plain", "https://api.example.com", ServiceDescriptor{Type: "api"}, nil, nil)
 	if err != nil {
 		t.Fatalf("register: %v", err)
 	}
-
 	svc, err := store.GetService(id)
 	if err != nil {
-		t.Fatalf("get service: %v", err)
+		t.Fatalf("get: %v", err)
 	}
-	if svc.Descriptor.Type != "api" {
-		t.Errorf("type = %q, want api", svc.Descriptor.Type)
+	if svc.ProtectedBy != nil || svc.ActsAs != nil {
+		t.Errorf("slots = %v/%v, want nil/nil", svc.ProtectedBy, svc.ActsAs)
 	}
-	if svc.Descriptor.Auth != "key" {
-		t.Errorf("auth = %q, want key", svc.Descriptor.Auth)
+
+	pb := int64(3)
+	if err := store.UpdateService(id, "plain", "https://api.example.com", svc.Descriptor, &pb, nil); err != nil {
+		t.Fatalf("update: %v", err)
 	}
-	if svc.Descriptor.APIKey != "admin-secret-key" {
-		t.Errorf("api_key = %q, want admin-secret-key", svc.Descriptor.APIKey)
+	svc, _ = store.GetService(id)
+	if svc.ProtectedBy == nil || *svc.ProtectedBy != 3 || svc.ActsAs != nil {
+		t.Errorf("after update slots = %v/%v, want 3/nil", svc.ProtectedBy, svc.ActsAs)
 	}
 }
 
@@ -294,7 +257,7 @@ func TestStoreServiceDescriptorJSON(t *testing.T) {
 	if !contains(s, `"type":"mcp"`) {
 		t.Errorf("expected type:mcp in %s", s)
 	}
-	if contains(s, "auth") || contains(s, "proxied") || contains(s, "client_id") {
+	if contains(s, "proxied") || contains(s, "database_target") {
 		t.Errorf("expected omitted fields absent in %s", s)
 	}
 }
@@ -318,8 +281,8 @@ func TestRefreshFamilyCreateAndGet(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
 		ID:          GenNonce(),
-		UserEmail:   "test@example.com",
-		ServiceID:   1,
+		Subject:     "frbr:1",
+		AuthID:      1,
 		DeviceLabel: "test-device",
 		CurrentJTI:  "jti-initial",
 		ExpiresAt:   time.Now().Add(24 * time.Hour),
@@ -335,8 +298,8 @@ func TestRefreshFamilyCreateAndGet(t *testing.T) {
 	if !ok {
 		t.Fatal("expected family to exist")
 	}
-	if got.UserEmail != fam.UserEmail {
-		t.Errorf("email = %q, want %q", got.UserEmail, fam.UserEmail)
+	if got.Subject != fam.Subject {
+		t.Errorf("subject = %q, want %q", got.Subject, fam.Subject)
 	}
 	if got.CurrentJTI != fam.CurrentJTI {
 		t.Errorf("current_jti = %q, want %q", got.CurrentJTI, fam.CurrentJTI)
@@ -361,8 +324,8 @@ func TestRefreshFamilyRotate(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
 		ID:         GenNonce(),
-		UserEmail:  "a@x.co",
-		ServiceID:  1,
+		Subject:    "frbr:1",
+		AuthID:     1,
 		CurrentJTI: "old-jti",
 		ExpiresAt:  time.Now().Add(24 * time.Hour),
 	}
@@ -394,8 +357,8 @@ func TestRefreshFamilyRotateCAS(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
 		ID:         GenNonce(),
-		UserEmail:  "a@x.co",
-		ServiceID:  1,
+		Subject:    "frbr:1",
+		AuthID:     1,
 		CurrentJTI: "jti-1",
 		ExpiresAt:  time.Now().Add(24 * time.Hour),
 	}
@@ -421,8 +384,8 @@ func TestRefreshFamilyRotateConcurrent(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
 		ID:         GenNonce(),
-		UserEmail:  "a@x.co",
-		ServiceID:  1,
+		Subject:    "frbr:1",
+		AuthID:     1,
 		CurrentJTI: "jti-1",
 		ExpiresAt:  time.Now().Add(24 * time.Hour),
 	}
@@ -463,8 +426,8 @@ func TestRefreshFamilyRevoke(t *testing.T) {
 	store := newTestStore(t)
 	fam := &RefreshFamily{
 		ID:         GenNonce(),
-		UserEmail:  "a@x.co",
-		ServiceID:  1,
+		Subject:    "frbr:1",
+		AuthID:     1,
 		CurrentJTI: "jti-1",
 		ExpiresAt:  time.Now().Add(24 * time.Hour),
 	}
@@ -492,14 +455,14 @@ func TestRefreshFamilyRevoke(t *testing.T) {
 
 func TestRefreshFamilyRevokeUser(t *testing.T) {
 	store := newTestStore(t)
-	f1 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: time.Now().Add(24 * time.Hour)}
-	f2 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: time.Now().Add(24 * time.Hour)}
-	f3 := &RefreshFamily{ID: GenNonce(), UserEmail: "b@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: time.Now().Add(24 * time.Hour)}
+	f1 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:1", AuthID: 1, CurrentJTI: "j1", ExpiresAt: time.Now().Add(24 * time.Hour)}
+	f2 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:1", AuthID: 1, CurrentJTI: "j2", ExpiresAt: time.Now().Add(24 * time.Hour)}
+	f3 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:2", AuthID: 1, CurrentJTI: "j3", ExpiresAt: time.Now().Add(24 * time.Hour)}
 	store.CreateRefreshFamily(f1)
 	store.CreateRefreshFamily(f2)
 	store.CreateRefreshFamily(f3)
 
-	if err := store.RevokeUserRefreshFamilies("a@x.co"); err != nil {
+	if err := store.RevokeUserRefreshFamilies("frbr:1"); err != nil {
 		t.Fatalf("revoke user: %v", err)
 	}
 
@@ -507,25 +470,25 @@ func TestRefreshFamilyRevokeUser(t *testing.T) {
 	g2, _, _ := store.GetRefreshFamily(f2.ID)
 	g3, _, _ := store.GetRefreshFamily(f3.ID)
 	if !g1.Revoked || !g2.Revoked {
-		t.Error("expected a@x.co families revoked")
+		t.Error("expected frbr:1 families revoked")
 	}
 	if g3.Revoked {
-		t.Error("expected b@x.co family not revoked")
+		t.Error("expected frbr:2 family not revoked")
 	}
 }
 
 func TestRefreshFamilyList(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now()
-	f1 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(24 * time.Hour)}
-	f2 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(-1 * time.Hour)}
-	f3 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j3", ExpiresAt: now.Add(24 * time.Hour)}
+	f1 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:1", AuthID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(24 * time.Hour)}
+	f2 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:1", AuthID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(-1 * time.Hour)}
+	f3 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:1", AuthID: 1, CurrentJTI: "j3", ExpiresAt: now.Add(24 * time.Hour)}
 	store.CreateRefreshFamily(f1)
 	store.CreateRefreshFamily(f2)
 	store.CreateRefreshFamily(f3)
 	store.RevokeRefreshFamily(f3.ID)
 
-	list, err := store.ListRefreshFamilies("a@x.co")
+	list, err := store.ListRefreshFamilies("frbr:1")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -540,8 +503,8 @@ func TestRefreshFamilyList(t *testing.T) {
 func TestRefreshFamilyDeleteExpired(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now()
-	f1 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(-1 * time.Hour)}
-	f2 := &RefreshFamily{ID: GenNonce(), UserEmail: "a@x.co", ServiceID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(24 * time.Hour)}
+	f1 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:1", AuthID: 1, CurrentJTI: "j1", ExpiresAt: now.Add(-1 * time.Hour)}
+	f2 := &RefreshFamily{ID: GenNonce(), Subject: "frbr:1", AuthID: 1, CurrentJTI: "j2", ExpiresAt: now.Add(24 * time.Hour)}
 	store.CreateRefreshFamily(f1)
 	store.CreateRefreshFamily(f2)
 

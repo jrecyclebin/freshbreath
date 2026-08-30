@@ -29,13 +29,13 @@ func TestCoreAuthority(t *testing.T) {
 
 	// Admin+ operations: a Member must be forbidden.
 	adminPlusOps := map[string]func() error{
-		"coreCreateApp":      func() error { _, e := srv.coreCreateApp(member, "x", "", "", nil); return e },
-		"coreUpdateApp":      func() error { return srv.coreUpdateApp(member, "n", "x", "", "", nil) },
+		"coreCreateApp":      func() error { _, e := srv.coreCreateApp(member, "x", "", "", nil, nil); return e },
+		"coreUpdateApp":      func() error { return srv.coreUpdateApp(member, "n", "x", "", "", nil, nil) },
 		"coreDeleteApp":      func() error { return srv.coreDeleteApp(member, "n") },
 		"coreSetAppMembers":  func() error { return srv.coreSetAppMembers(member, "n", nil) },
 		"coreSetAppServices": func() error { return srv.coreSetAppServices(member, "n", nil) },
-		"coreCreateService":  func() error { _, e := srv.coreCreateService(member, "x", "http://x", db.ServiceDescriptor{}); return e },
-		"coreUpdateService":  func() error { return srv.coreUpdateService(member, 1, "x", "http://x", db.ServiceDescriptor{}) },
+		"coreCreateService":  func() error { _, e := srv.coreCreateService(member, "x", "http://x", db.ServiceDescriptor{}, nil, nil); return e },
+		"coreUpdateService":  func() error { return srv.coreUpdateService(member, 1, "x", "http://x", db.ServiceDescriptor{}, nil, nil) },
 		"coreDeleteService":  func() error { return srv.coreDeleteService(member, 1) },
 		"coreCreateUser":     func() error { _, e := srv.coreCreateUser(member, "n", "e@x", "Member", "Active"); return e },
 		"coreUpdateUser":     func() error { return srv.coreUpdateUser(member, 1, "n", "e@x", "Member", "Active", nil) },
@@ -91,7 +91,7 @@ func TestCoreServiceFilesAuthority(t *testing.T) {
 	member := &db.User{ID: 1, Role: "Member"}
 	admin := &db.User{ID: 2, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "tasksvc", "", db.ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "tasksvc", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create tasks service: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestServiceFileTasksCRUD(t *testing.T) {
 	srv.config.DataDir = t.TempDir()
 	admin := &db.User{ID: 1, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestServiceFileVirtualReload(t *testing.T) {
 	admin := &db.User{ID: 1, Role: "Admin"}
 
 	name := "greeter"
-	svc, err := srv.coreCreateService(admin, name, "", db.ServiceDescriptor{Type: "virtual"})
+	svc, err := srv.coreCreateService(admin, name, "", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestServiceFileUnsupportedType(t *testing.T) {
 	srv := newTestServer(t)
 	admin := &db.User{ID: 1, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", db.ServiceDescriptor{Type: "api"})
+	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", db.ServiceDescriptor{Type: "api"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestServiceFileNoZip(t *testing.T) {
 	srv.config.DataDir = t.TempDir()
 	admin := &db.User{ID: 1, Role: "Admin"}
 
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestGateApp(t *testing.T) {
 	member := &db.User{ID: 2, Role: "Member"}
 	outsider := &db.User{ID: 3, Role: "Member"}
 
-	nonce, err := srv.coreCreateApp(admin, "gate-test", "", "", nil)
+	nonce, err := srv.coreCreateApp(admin, "gate-test", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}

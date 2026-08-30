@@ -8,22 +8,23 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/formats"
 
-	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 )
 
-// virtualMCPEntry holds the MCP server and auth config for a virtual service.
+// virtualMCPEntry holds the MCP server for a virtual service. The gate is
+// NOT baked in: it resolves per request, so a changed protected_by (or a
+// changed admin auth record, which empty slots inherit) takes effect
+// without a remount.
 type virtualMCPEntry struct {
+	svc     *db.Service
 	mcps    *mcp.Server
-	handler http.Handler // final handler (with or without auth middleware)
-	prm     *oauthex.ProtectedResourceMetadata
+	handler http.Handler
 }
 
 // virtualMCPRegistry manages MCP server instances for virtual services.
@@ -51,26 +52,11 @@ func (r *virtualMCPRegistry) add(s *Server, svc *db.Service) {
 		return mcps
 	}, &mcp.StreamableHTTPOptions{Stateless: true})
 
-	hasAuth := svc.Descriptor.OAuthURL != "" || svc.Descriptor.ClientID != "" || svc.Descriptor.Auth == "key"
-	var finalHandler http.Handler
-	var prm *oauthex.ProtectedResourceMetadata
-
-	if hasAuth {
-		verifier := s.virtualTokenVerifier(svc)
-		prm = s.virtualPRM(svc)
-		prmURL := s.config.PublicBaseURL + "/.well-known/oauth-protected-resource/mcp/" + slug
-		finalHandler = auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{
-			ResourceMetadataURL: prmURL,
-		})(handler)
-	} else {
-		finalHandler = handler
-	}
-
 	r.mu.Lock()
 	r.entries[slug] = &virtualMCPEntry{
+		svc:     svc,
 		mcps:    mcps,
-		handler: finalHandler,
-		prm:     prm,
+		handler: s.requireMCPGate(svc, handler),
 	}
 	r.mu.Unlock()
 }
@@ -87,6 +73,31 @@ func (r *virtualMCPRegistry) remove(slug string) {
 	r.mu.Lock()
 	delete(r.entries, slug)
 	r.mu.Unlock()
+}
+
+// requireMCPGate enforces a mount's inbound gate. Every mount resolves its
+// protected_by per request — empty inherits the admin record — and demands
+// a bearer; the one exception is an explicit Anonymous record, which mounts
+// open. This inverts the old behavior where a service with no auth fields
+// mounted with no check at all.
+func (s *Server) requireMCPGate(svc *db.Service, next http.Handler) http.Handler {
+	slug := strings.TrimPrefix(svc.URL, "/mcp/")
+	prmURL := s.config.PublicBaseURL + "/.well-known/oauth-protected-resource/mcp/" + slug
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gate, err := s.resolveServiceGate(svc)
+		if err != nil {
+			http.Error(w, "gate resolution failed", http.StatusInternalServerError)
+			return
+		}
+		if !gateIsOpen(gate) {
+			if _, _, err := s.verifyGateHeader(gate, r.Header); err != nil {
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf("Bearer resource_metadata=%q", prmURL))
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ── MCP Server Factory ───────────────────────────────────────────────
@@ -114,33 +125,44 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 		}
 		capturedName := vt.Name
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			// Extract token from request header.
-			// If it's a Freshbreath-wrapped JWT (MCP OAuth flow), unwrap to get
-			// the real upstream token for $token in virtual scripts.
-			// If no bearer token and the service uses API-key auth, fall back
-			// to the admin-configured key.
-			token := ""
-			var claims *freshbreathClaims
+			// Re-resolve the gate and outbound credential per call: the
+			// middleware verified admission, but $token and the identity
+			// built-ins need the claims and the resolver's verdict here.
+			gate, err := s.resolveServiceGate(svc)
+			if err != nil {
+				return mcpAuthError("gate resolution: %v", err), nil
+			}
+
+			raw := ""
+			var header http.Header
 			if req.Extra != nil && req.Extra.Header != nil {
-				if ah := req.Extra.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
-					raw := strings.TrimPrefix(ah, "Bearer ")
-					wrapped, err := s.verifyAndUnwrapToken(raw, svc.ID)
-					if err != nil {
-						return &mcp.CallToolResult{
-							Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("auth error: %v", err)}},
-							IsError: true,
-						}, nil
-					}
-					if wrapped != nil {
-						token = wrapped.UpstreamToken
-						claims = wrapped
-					} else {
-						token = raw
-					}
+				header = req.Extra.Header
+				if ah := header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
+					raw = strings.TrimPrefix(ah, "Bearer ")
 				}
 			}
-			if token == "" && svc.Descriptor.Auth == "key" {
-				token = svc.Descriptor.APIKey
+
+			var claims *freshbreathClaims
+			var presentedKey string
+			if !gateIsOpen(gate) {
+				claims, _, err = s.verifyGateHeader(gate, header)
+				if err != nil {
+					return mcpAuthError("auth error: %v", err), nil
+				}
+				if gate.Kind == db.AuthAPIKey && header != nil {
+					presentedKey = headerGateKey(gate, header)
+				}
+			}
+
+			cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
+			if err != nil {
+				return mcpAuthError("%v", err), nil
+			}
+			token := cred.Token
+			if cred.Verbatim && !isFreshbreathToken(raw) {
+				// An open gate passes a caller's own upstream bearer
+				// through verbatim; a Fresh Breath token is not one.
+				token = raw
 			}
 
 			// Parse arguments from raw JSON.
@@ -168,10 +190,17 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 	return mcps, nil
 }
 
+func mcpAuthError(format string, a ...interface{}) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(format, a...)}},
+		IsError: true,
+	}
+}
+
 // virtualAuth builds the caller identity for a virtual tool execution from
-// the verified wrapped-token claims. UserID is the numerical Fresh Breath
-// user when the token's email maps to one; a caller with no Fresh Breath
-// account leaves it nil (and $token_id resolves to null).
+// the verified gate claims. UserID is the numerical Fresh Breath user when
+// the subject is a frbr: one; an ext: caller leaves it nil (and $token_id
+// resolves to null).
 func (s *Server) virtualAuth(token string, claims *freshbreathClaims) formats.VirtualAuth {
 	auth := formats.VirtualAuth{Token: token}
 	if claims == nil {
@@ -179,7 +208,7 @@ func (s *Server) virtualAuth(token string, claims *freshbreathClaims) formats.Vi
 	}
 	auth.Email = claims.UserEmail
 	auth.Sub = claims.Subject
-	if u, err := s.store.GetUserByEmail(claims.UserEmail); err == nil {
+	if u, _ := s.userFromSubject(claims.Subject); u != nil {
 		auth.UserID = u.ID
 	}
 	return auth
@@ -230,63 +259,6 @@ func hasSQLSteps(vt formats.VirtualTool) bool {
 	return false
 }
 
-// ── Token Verification ───────────────────────────────────────────────
-
-// virtualTokenVerifier returns a TokenVerifier that validates Bearer tokens
-// using the service's inline OIDC config.
-//
-// Tokens arrive in two forms:
-//  1. Freshbreath-wrapped JWT (from MCP OAuth flow) — contains upstream_token claim
-//  2. Direct upstream OIDC JWT — verified against the upstream issuer
-func (s *Server) virtualTokenVerifier(svc *db.Service) auth.TokenVerifier {
-	return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
-		// Try to unwrap a Freshbreath-wrapped JWT (MCP OAuth flow).
-		claims, err := s.verifyAndUnwrapToken(token, svc.ID)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
-		}
-		if claims != nil {
-			return &auth.TokenInfo{
-				UserID:     claims.Subject,
-				Scopes:     buildOIDCScopes(claims.UpstreamScopes),
-				Expiration: claims.Expiry.Time(),
-			}, nil
-		}
-
-		// Verify as an OIDC JWT against the service's issuer.
-		issuer := svc.Descriptor.OAuthURL
-		if issuer == "" {
-			return nil, fmt.Errorf("%w: no issuer configured for token verification", auth.ErrInvalidToken)
-		}
-		issuer = strings.TrimSuffix(issuer, "/authorize")
-
-		provider, err := s.getOIDCProvider(ctx, svc.ID, issuer)
-		if err != nil {
-			return nil, fmt.Errorf("%w: OIDC discovery failed: %v", auth.ErrInvalidToken, err)
-		}
-
-		idToken, err := provider.Verifier(&oidc.Config{ClientID: svc.Descriptor.ClientID}).Verify(ctx, token)
-		if err != nil {
-			return nil, fmt.Errorf("%w: token verification: %v", auth.ErrInvalidToken, err)
-		}
-
-		var oidcClaims struct {
-			Email string `json:"email"`
-			Sub   string `json:"sub"`
-			Exp   int64  `json:"exp"`
-		}
-		if err := idToken.Claims(&oidcClaims); err != nil {
-			return nil, fmt.Errorf("%w: claims: %v", auth.ErrInvalidToken, err)
-		}
-
-		return &auth.TokenInfo{
-			UserID:     firstNonEmpty(oidcClaims.Email, oidcClaims.Sub),
-			Scopes:     buildOIDCScopes(svc.Descriptor.Scopes),
-			Expiration: time.Unix(oidcClaims.Exp, 0),
-		}, nil
-	}
-}
-
 // ── Protected Resource Metadata ─────────────────────────────────────
 
 // virtualPRM builds the Protected Resource Metadata document for a virtual service.
@@ -294,12 +266,10 @@ func (s *Server) virtualTokenVerifier(svc *db.Service) auth.TokenVerifier {
 // acts as the OAuth authorization server for MCP clients.
 func (s *Server) virtualPRM(svc *db.Service) *oauthex.ProtectedResourceMetadata {
 	slug := strings.TrimPrefix(svc.URL, "/mcp/")
-	resourceURL := s.config.PublicBaseURL + "/mcp/" + slug
-
 	return &oauthex.ProtectedResourceMetadata{
-		Resource:               resourceURL,
+		Resource:               s.config.PublicBaseURL + "/mcp/" + slug,
 		AuthorizationServers:   []string{s.config.PublicBaseURL},
-		ScopesSupported:        buildOIDCScopes(svc.Descriptor.Scopes),
+		ScopesSupported:        []string{"openid", "email", "profile"},
 		BearerMethodsSupported: []string{"header"},
 		ResourceName:           svc.Name,
 	}
@@ -319,9 +289,9 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	entry.handler.ServeHTTP(w, r)
 }
 
-// handleMCPPRM is the single route handler for all
-// /.well-known/oauth-protected-resource/mcp/{name} requests.
-// It returns the Protected Resource Metadata for the given virtual service.
+// handleMCPPRM serves /.well-known/oauth-protected-resource/mcp/{name}.
+// An explicitly Anonymous mount advertises nothing; every other gate points
+// clients at Fresh Breath's own authorization server.
 func (s *Server) handleMCPPRM(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("name")
 	entry := s.virtualMCPs.get(slug)
@@ -329,11 +299,16 @@ func (s *Server) handleMCPPRM(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "virtual service not found", http.StatusNotFound)
 		return
 	}
-	if entry.prm == nil {
+	gate, err := s.resolveServiceGate(entry.svc)
+	if err != nil {
+		http.Error(w, "gate resolution failed", http.StatusInternalServerError)
+		return
+	}
+	if gateIsOpen(gate) {
 		http.Error(w, "no auth configured for this service", http.StatusNotFound)
 		return
 	}
-	auth.ProtectedResourceMetadataHandler(entry.prm).ServeHTTP(w, r)
+	auth.ProtectedResourceMetadataHandler(s.virtualPRM(entry.svc)).ServeHTTP(w, r)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

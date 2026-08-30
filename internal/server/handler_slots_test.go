@@ -300,7 +300,7 @@ func TestHostedAppUndeployedSlot404(t *testing.T) {
 	if _, err := srv.store.GetApp(nonce); err != nil {
 		t.Fatalf("GetApp: %v", err)
 	}
-	if err := srv.store.UpdateApp(nonce, "undeployed", "Production", "", nil); err != nil {
+	if err := srv.store.UpdateApp(nonce, "undeployed", "Production", "", nil, nil); err != nil {
 		t.Fatalf("UpdateApp: %v", err)
 	}
 	srv.rebuildHostedRoutes()

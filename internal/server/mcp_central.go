@@ -44,6 +44,32 @@ func parseID(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
+// argAuthID reads an optional auth-record reference from tool args.
+// present distinguishes "omitted" (keep existing) from an explicit 0 or
+// null (clear the slot).
+func argAuthID(args map[string]interface{}, key string) (id *int64, present bool) {
+	v, ok := args[key]
+	if !ok {
+		return nil, false
+	}
+	if n, ok := v.(float64); ok && n != 0 {
+		i := int64(n)
+		return &i, true
+	}
+	return nil, true
+}
+
+// serviceDescriptorSchema is the whole descriptor, and it is short now:
+// a service describes *what it is*, and the two auth slots beside it say
+// who may call and what goes upstream. The nine auth-ish properties that
+// used to live here moved out to auth records.
+var serviceDescriptorSchema = map[string]interface{}{
+	"type":            map[string]interface{}{"type": "string", "description": "Service type: mcp, api, tasks, virtual, ssh"},
+	"proxied":         map[string]interface{}{"type": "boolean", "description": "Route calls through Fresh Breath rather than direct from the browser"},
+	"database_target": map[string]interface{}{"type": "string", "description": "virtual only: '' (each app's own), 'global', or 'app:<nonce>'"},
+	"database_name":   map[string]interface{}{"type": "string", "description": "virtual only: which database SQL steps run against"},
+}
+
 const centralMCPResource = "/mcp"
 
 // ── Central MCP Token Verifier ──────────────────────────────────────
@@ -55,16 +81,12 @@ const centralMCPResource = "/mcp"
 
 func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 	return func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
-		svcIDStr, err := s.store.GetSetting("admin_auth_service")
-		if err != nil || svcIDStr == "" {
-			return nil, fmt.Errorf("%w: no admin auth service configured", auth.ErrInvalidToken)
-		}
-		// Every token — Fresh Breath identity JWTs and raw provider id_tokens
-		// alike — is verified against the admin auth service. verifyIDToken
-		// enforces the service binding (so a token minted by some other OIDC
-		// service can't authenticate here) and the user is re-resolved from
-		// the DB. The token's own role is never trusted.
-		user, err := s.verifyAdminTokenFromBearer(ctx, svcIDStr, token)
+		// Every token is verified against the admin auth record —
+		// verifyGateToken enforces the record binding (so a token minted
+		// under some other record can't authenticate here) and the user is
+		// re-resolved from the subject. The token's own role is never
+		// trusted.
+		user, err := s.verifyAdminTokenFromBearer(token)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", auth.ErrInvalidToken, err)
 		}
@@ -77,25 +99,23 @@ func (s *Server) centralMCPTokenVerifier() auth.TokenVerifier {
 	}
 }
 
-// verifyAdminTokenFromBearer verifies a raw Bearer token against the
-// admin auth service — extracted from verifyAdminToken to accept the
-// token string directly instead of parsing from the HTTP header.
-func (s *Server) verifyAdminTokenFromBearer(ctx context.Context, serviceID string, idTokenRaw string) (*db.User, error) {
-	svcID, err := parseID(serviceID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid service ID in settings")
-	}
-	svc, err := s.store.GetService(svcID)
-	if err != nil {
-		return nil, fmt.Errorf("admin auth service not found")
-	}
-	email, _, err := s.verifyIDToken(ctx, svc, idTokenRaw)
+// verifyAdminTokenFromBearer verifies a raw Bearer token against the admin
+// auth record. The token's subject must resolve to a real user row — an
+// ext: identity from the right provider is still nobody we know.
+func (s *Server) verifyAdminTokenFromBearer(idTokenRaw string) (*db.User, error) {
+	rec, err := s.adminAuthRecord()
 	if err != nil {
 		return nil, err
 	}
-	user, err := s.store.GetUserByEmail(email)
+	if rec == nil {
+		return nil, fmt.Errorf("no admin auth configured")
+	}
+	_, user, err := s.verifyGateToken(rec, idTokenRaw)
 	if err != nil {
-		return nil, fmt.Errorf("user not found for %s", email)
+		return nil, err
+	}
+	if user == nil {
+		return nil, fmt.Errorf("no matching user for token subject")
 	}
 	return user, nil
 }
@@ -155,6 +175,11 @@ Fresh Breath server URL: %q`, s.config.PublicBaseURL),
 	// ── Services (admin+) ─────────────────────────────────────────
 	if roleIn(role, rolesAdminPlus) {
 		s.registerServiceTools(mcps)
+	}
+
+	// ── Auth records (admin+) ─────────────────────────────────────
+	if roleIn(role, rolesAdminPlus) {
+		s.registerAuthTools(mcps)
 	}
 
 	// ── Users (admin+) ────────────────────────────────────────────
@@ -227,9 +252,8 @@ func addToolIf(allow bool, mcps *mcp.Server, t *mcp.Tool, h mcp.ToolHandler) {
 // the admin auth service OIDC. Returns a synthetic superuser if
 // auth is not configured.
 func (s *Server) mcpUser(req *mcp.CallToolRequest) (*db.User, error) {
-	// Check if auth is enabled.
-	svcIDStr, _ := s.store.GetSetting("admin_auth_service")
-	if svcIDStr == "" {
+	// Setup mode: no admin auth record configured yet.
+	if rec, err := s.adminAuthRecord(); err == nil && rec == nil {
 		return &db.User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"}, nil
 	}
 
@@ -243,16 +267,7 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*db.User, error) {
 	if token == "" {
 		return nil, fmt.Errorf("missing bearer token")
 	}
-
-	// Verify against the admin auth service. Both Fresh Breath identity JWTs
-	// and raw provider id_tokens funnel through verifyIDToken, which enforces
-	// the service binding; the user (existence + role) is re-resolved from
-	// the DB.
-	user, err := s.verifyAdminTokenFromBearer(context.Background(), svcIDStr, token)
-	if err != nil {
-		return nil, err
-	}
-	return user, nil
+	return s.verifyAdminTokenFromBearer(token)
 }
 
 // mcpInlineMaxBytes is the threshold above which a whole-file read result
@@ -420,9 +435,10 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		}
 
 		return mcpToolResult(map[string]interface{}{
-			"nonce": app.Nonce,
-			"name":  app.Name,
-			"url":   app.URL,
+			"nonce":        app.Nonce,
+			"name":         app.Name,
+			"url":          app.URL,
+			"protected_by": app.ProtectedBy,
 		})
 	})
 
@@ -433,10 +449,11 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"name":        map[string]interface{}{"type": "string", "description": "App name"},
-				"environment": map[string]interface{}{"type": "string", "description": "Environment (Development, Staging, Production)"},
-				"url":         map[string]interface{}{"type": "string", "description": "App URL"},
-				"owner_email": map[string]interface{}{"type": "string", "description": "Owner email address (optional)"},
+				"name":         map[string]interface{}{"type": "string", "description": "App name"},
+				"environment":  map[string]interface{}{"type": "string", "description": "Environment (Development, Staging, Production)"},
+				"url":          map[string]interface{}{"type": "string", "description": "App URL"},
+				"owner_email":  map[string]interface{}{"type": "string", "description": "Owner email address (optional)"},
+				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 or omitted = Anonymous (open)"},
 			},
 			"required": []string{"name"},
 		},
@@ -460,7 +477,8 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			return mcpToolError("%v", err), nil
 		}
 
-		nonce, err := s.coreCreateApp(user, name, env, appURL, ownerID)
+		protectedBy, _ := argAuthID(args, "protected_by")
+		nonce, err := s.coreCreateApp(user, name, env, appURL, ownerID, protectedBy)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -474,11 +492,12 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":       map[string]interface{}{"type": "string", "description": "App nonce"},
-				"name":        map[string]interface{}{"type": "string", "description": "New name"},
-				"environment": map[string]interface{}{"type": "string", "description": "New environment"},
-				"url":         map[string]interface{}{"type": "string", "description": "New URL"},
-				"owner_email": map[string]interface{}{"type": "string", "description": "New owner email address (optional)"},
+				"nonce":        map[string]interface{}{"type": "string", "description": "App nonce"},
+				"name":         map[string]interface{}{"type": "string", "description": "New name"},
+				"environment":  map[string]interface{}{"type": "string", "description": "New environment"},
+				"url":          map[string]interface{}{"type": "string", "description": "New URL"},
+				"owner_email":  map[string]interface{}{"type": "string", "description": "New owner email address (optional)"},
+				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 clears to inherit-admin, omitted keeps the current gate"},
 			},
 			"required": []string{"nonce", "name"},
 		},
@@ -503,7 +522,13 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			return mcpToolError("%v", err), nil
 		}
 
-		if err := s.coreUpdateApp(user, nonce, name, env, appURL, ownerID); err != nil {
+		protectedBy, present := argAuthID(args, "protected_by")
+		if !present {
+			if app, err := s.store.GetApp(nonce); err == nil {
+				protectedBy = app.ProtectedBy
+			}
+		}
+		if err := s.coreUpdateApp(user, nonce, name, env, appURL, ownerID, protectedBy); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "updated"})
@@ -1158,19 +1183,11 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 				"url":  map[string]interface{}{"type": "string", "description": "Service URL"},
 				"descriptor": map[string]interface{}{
 					"type":        "object",
-					"description": "Service descriptor",
-					"properties": map[string]interface{}{
-						"type":          map[string]interface{}{"type": "string", "description": "Service type: mcp, api, oidc, tasks, virtual, ssh"},
-						"auth":          map[string]interface{}{"type": "string", "description": "Auth type (e.g. 'key')"},
-						"api_key":       map[string]interface{}{"type": "string", "description": "API key for key-auth services"},
-						"header":        map[string]interface{}{"type": "string", "description": "Custom header name for API key"},
-						"proxied":       map[string]interface{}{"type": "boolean", "description": "Whether to proxy requests"},
-						"client_id":     map[string]interface{}{"type": "string", "description": "Pre-registered OAuth client ID"},
-						"client_secret": map[string]interface{}{"type": "string", "description": "Pre-registered OAuth client secret"},
-						"oauth_url":     map[string]interface{}{"type": "string", "description": "OAuth base URL override"},
-						"scopes":        map[string]interface{}{"type": "string", "description": "Space-separated scopes"},
-					},
+					"description": "Service descriptor — what the service *is*. Authentication is not in here; it lives in the two slots below.",
+					"properties":  serviceDescriptorSchema,
 				},
+				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id callers must clear; omitted or 0 = inherit the admin record (NOT open — use an anonymous record for open)"},
+				"acts_as":      map[string]interface{}{"type": "integer", "description": "Auth record id supplying the upstream credential; omitted or 0 = pass the caller's own"},
 			},
 			"required": []string{"name"},
 		},
@@ -1194,7 +1211,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			json.Unmarshal(descBytes, &desc)
 		}
 
-		svc, err := s.coreCreateService(user, name, svcURL, desc)
+		protectedBy, _ := argAuthID(args, "protected_by")
+		actsAs, _ := argAuthID(args, "acts_as")
+		svc, err := s.coreCreateService(user, name, svcURL, desc, protectedBy, actsAs)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -1215,19 +1234,11 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 				"url":      map[string]interface{}{"type": "string", "description": "New URL"},
 				"descriptor": map[string]interface{}{
 					"type":        "object",
-					"description": "Service descriptor",
-					"properties": map[string]interface{}{
-						"type":          map[string]interface{}{"type": "string"},
-						"auth":          map[string]interface{}{"type": "string"},
-						"api_key":       map[string]interface{}{"type": "string"},
-						"header":        map[string]interface{}{"type": "string"},
-						"proxied":       map[string]interface{}{"type": "boolean"},
-						"client_id":     map[string]interface{}{"type": "string"},
-						"client_secret": map[string]interface{}{"type": "string"},
-						"oauth_url":     map[string]interface{}{"type": "string"},
-						"scopes":        map[string]interface{}{"type": "string"},
-					},
+					"description": "Service descriptor — what the service *is*. Authentication is not in here; it lives in the two slots below.",
+					"properties":  serviceDescriptorSchema,
 				},
+				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id callers must clear; 0 clears the slot back to inheriting the admin record"},
+				"acts_as":      map[string]interface{}{"type": "integer", "description": "Auth record id supplying the upstream credential; 0 clears the slot back to the caller's own"},
 			},
 			"required": []string{"name"},
 		},
@@ -1264,7 +1275,15 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			json.Unmarshal(descBytes, &desc)
 		}
 
-		if err := s.coreUpdateService(user, existing.ID, newName, svcURL, desc); err != nil {
+		protectedBy, present := argAuthID(args, "protected_by")
+		if !present {
+			protectedBy = existing.ProtectedBy
+		}
+		actsAs, present := argAuthID(args, "acts_as")
+		if !present {
+			actsAs = existing.ActsAs
+		}
+		if err := s.coreUpdateService(user, existing.ID, newName, svcURL, desc, protectedBy, actsAs); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "updated"})
@@ -1331,6 +1350,208 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			return mcpToolError("db error: %v", err), nil
 		}
 		return mcpToolResult(map[string]interface{}{"apps": apps})
+	})
+}
+
+// ── Auth Record Tools ───────────────────────────────────────────────
+//
+// Slots point at auth records, so an agent that can fill a slot but not
+// create the record it names can only ever rewire what a human already
+// built. These four close that loop.
+
+// authRecordByName looks a record up by name, the handle an agent has.
+// Ambiguity and absence are both errors — the caller gates the role.
+func (s *Server) authRecordByName(name string) (*db.AuthRecord, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	records, err := s.store.ListAuthRecords()
+	if err != nil {
+		return nil, err
+	}
+	var found *db.AuthRecord
+	for _, rec := range records {
+		if strings.EqualFold(rec.Name, name) {
+			if found != nil {
+				return nil, fmt.Errorf("more than one auth record is named %q", name)
+			}
+			found = rec
+		}
+	}
+	if found == nil {
+		return nil, fmt.Errorf("auth record not found: %s", name)
+	}
+	return found, nil
+}
+
+// authDescriptorSchema mirrors db.AuthDescriptor. Which fields matter
+// depends entirely on the kind, which is why the descriptions say so
+// rather than pretending to a shape they don't have.
+var authDescriptorSchema = map[string]interface{}{
+	"issuer":              map[string]interface{}{"type": "string", "description": "oidc: issuer URL; endpoints are discovered from it"},
+	"authorize_url":       map[string]interface{}{"type": "string", "description": "oauth2: authorization endpoint"},
+	"token_url":           map[string]interface{}{"type": "string", "description": "oauth2: token endpoint"},
+	"userinfo_url":        map[string]interface{}{"type": "string", "description": "oauth2: profile endpoint"},
+	"userinfo_emails_url": map[string]interface{}{"type": "string", "description": "oauth2: email endpoint, when the provider keeps email off the profile"},
+	"client_id":           map[string]interface{}{"type": "string", "description": "oidc/oauth2: OAuth client id"},
+	"client_secret":       map[string]interface{}{"type": "string", "description": "oidc/oauth2: OAuth client secret. Never read back; omit on update to keep the stored one"},
+	"scopes":              map[string]interface{}{"type": "string", "description": "oidc/oauth2: space-separated scopes"},
+	"provider":            map[string]interface{}{"type": "string", "description": "oidc/oauth2: upstream slug (e.g. 'github'). Two records over the same upstream share a slug, and so share one identity for the people behind them"},
+	"key":                 map[string]interface{}{"type": "string", "description": "api_key: the stored key. ssh_key: an optional stored private key; empty checks passphrases against each user's own. Never read back"},
+	"header":              map[string]interface{}{"type": "string", "description": "api_key: header to send it under; empty means Authorization: Bearer"},
+}
+
+func (s *Server) registerAuthTools(mcps *mcp.Server) {
+	// list_auth
+	mcps.AddTool(&mcp.Tool{
+		Name: "list_auth",
+		Description: "List auth records — the credentials and login methods services and apps point at. " +
+			"Secrets are masked; has_secret says whether one is on file. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if _, err := s.mcpUser(req); err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		records, err := s.store.ListAuthRecords()
+		if err != nil {
+			return mcpToolError("db error: %v", err), nil
+		}
+		if records == nil {
+			records = []*db.AuthRecord{}
+		}
+		return mcpToolResult(map[string]interface{}{"auth": records})
+	})
+
+	// create_auth
+	mcps.AddTool(&mcp.Tool{
+		Name: "create_auth",
+		Description: "Create an auth record. Point a service or app at it with the protected_by " +
+			"(who may call in) or acts_as (what goes upstream) slots. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{"type": "string", "description": "Record name, unique across the instance"},
+				"kind": map[string]interface{}{
+					"type": "string",
+					"enum": []string{db.AuthAnonymous, db.AuthSSHKey, db.AuthOIDC, db.AuthOAuth2, db.AuthAPIKey},
+					"description": "anonymous (explicitly open) | ssh_key (a registered user's passphrase) | " +
+						"oidc (discovery) | oauth2 (explicit endpoints) | api_key (a stored key). " +
+						"Every kind is eligible in both slots; what it means is what changes",
+				},
+				"descriptor": map[string]interface{}{
+					"type":        "object",
+					"description": "Kind-specific configuration",
+					"properties":  authDescriptorSchema,
+				},
+			},
+			"required": []string{"name", "kind"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		name, _ := args["name"].(string)
+		kind, _ := args["kind"].(string)
+
+		var desc db.AuthDescriptor
+		if raw, ok := args["descriptor"].(map[string]interface{}); ok {
+			descBytes, _ := json.Marshal(raw)
+			json.Unmarshal(descBytes, &desc)
+		}
+		rec, err := s.coreCreateAuth(user, name, kind, desc)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(rec)
+	})
+
+	// update_auth
+	mcps.AddTool(&mcp.Tool{
+		Name: "update_auth",
+		Description: "Update an auth record. A patch: omitted fields keep their stored values, and an " +
+			"omitted client_secret or key keeps the stored secret. Built-in records keep their name " +
+			"and kind. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string", "description": "Current record name"},
+				"new_name": map[string]interface{}{"type": "string", "description": "New name"},
+				"kind":     map[string]interface{}{"type": "string", "description": "New kind; changing it usually means rewriting the descriptor too"},
+				"descriptor": map[string]interface{}{
+					"type":        "object",
+					"description": "Kind-specific configuration; replaces the stored one apart from omitted secrets",
+					"properties":  authDescriptorSchema,
+				},
+			},
+			"required": []string{"name"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		name, _ := args["name"].(string)
+
+		existing, err := s.authRecordByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		newName, _ := args["new_name"].(string)
+		if newName == "" {
+			newName = existing.Name
+		}
+		kind, _ := args["kind"].(string)
+		if kind == "" {
+			kind = existing.Kind
+		}
+		desc := existing.Descriptor
+		if raw, ok := args["descriptor"].(map[string]interface{}); ok {
+			descBytes, _ := json.Marshal(raw)
+			json.Unmarshal(descBytes, &desc)
+		}
+		if err := s.coreUpdateAuth(user, existing.ID, newName, kind, desc); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]string{"status": "updated"})
+	})
+
+	// delete_auth
+	mcps.AddTool(&mcp.Tool{
+		Name: "delete_auth",
+		Description: "Delete an auth record. Refused while any service or app still points at it, and " +
+			"for built-in records. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name": map[string]interface{}{"type": "string", "description": "Record name"},
+			},
+			"required": []string{"name"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		name, _ := args["name"].(string)
+
+		rec, err := s.authRecordByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		if err := s.coreDeleteAuth(user, rec.ID); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
 }
 

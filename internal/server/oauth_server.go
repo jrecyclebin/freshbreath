@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -93,20 +92,14 @@ type mcpPendingAuth struct {
 	state               string
 	codeChallenge       string
 	codeChallengeMethod string
-	resource            string // /mcp/{slug}
+	resource            string // /mcp/{slug} or /mcp
 
-	// The virtual service being accessed
-	serviceID  int64
-	serviceURL string
+	serviceID int64 // the mounted virtual service; 0 for the central MCP
 
-	// Populated after upstream callback
-	upstreamToken    string
-	upstreamRefresh  string
-	upstreamTokenURL string
-	upstreamExpiry   time.Time
-	userEmail        string
-	upstreamScopes   string
-	expiresAt        time.Time // pendingAuthTTL from creation; link usable until then
+	// Populated when the login legs finish.
+	fbToken     string
+	refreshData freshbreathRefreshData
+	expiresAt   time.Time // pendingAuthTTL from creation; link usable until then
 }
 
 // ── MCP Auth Code Store ─────────────────────────────────────────────
@@ -146,6 +139,16 @@ func (os *oauthServer) sweepExpiredCodes(now time.Time) {
 			delete(os.codes, k)
 		}
 	}
+}
+
+// issueCode mints a one-shot authorization code for a finished MCP login.
+func (os *oauthServer) issueCode(m *mcpPendingAuth) string {
+	code := rand.Text()
+	os.sweepExpiredCodes(time.Now())
+	os.codesMu.Lock()
+	os.codes[code] = &mcpAuthCode{pending: m, issued: time.Now()}
+	os.codesMu.Unlock()
+	return code
 }
 
 // ── Auth Server Metadata ────────────────────────────────────────────
@@ -215,11 +218,22 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 // to the appropriate login page (upstream provider, SSH form, or API key form).
 
 func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		os.handleAuthorizeStart(w, r)
+	case http.MethodPost:
+		os.handleAuthorizeContinue(w, r)
+	default:
 		oauthWriteError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
-		return
 	}
+}
 
+// handleAuthorizeStart validates the MCP client's request, resolves the
+// resource's inbound gate (and outbound leg, if any), and answers with the
+// leg-skip interstitial: a same-origin page that offers any frbr:auth:*
+// tokens this browser already holds before falling back to a fresh login.
+// A 302 can't read localStorage; a page can.
+func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
@@ -234,7 +248,7 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate client
-	clientSecret, clientRedirectURIs, clientOK, err := os.clients.get(clientID)
+	_, clientRedirectURIs, clientOK, err := os.clients.get(clientID)
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", "client lookup error")
 		return
@@ -254,7 +268,6 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		oauthWriteError(w, http.StatusBadRequest, "invalid_request", "invalid redirect_uri")
 		return
 	}
-	_ = clientSecret
 
 	// Resolve slug from resource parameter.
 	// resource is like "/mcp/sharepoint" or a full URL like "https://host/mcp/sharepoint".
@@ -272,127 +285,191 @@ func (os *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Resolve the service to authenticate against.
-	// Central (/mcp) uses the admin auth service; virtual (/mcp/{slug}) uses the named service.
+	// Resolve the gate: the admin record for the central MCP, the mounted
+	// service's inbound gate otherwise. This is the same authorization
+	// /service/login enforces — a flow can only target a resource that is
+	// actually exposed, against that resource's own gate.
+	var gate *db.AuthRecord
 	var svc *db.Service
-	var mcpServiceURL, serviceType string
+	var serviceID int64
 
 	if slug == "/mcp" {
-		svcIDStr, err := os.server.store.GetSetting("admin_auth_service")
-		if err != nil || svcIDStr == "" {
+		gate, err = os.server.adminAuthRecord()
+		if err != nil {
+			oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("admin auth: %v", err))
+			return
+		}
+		if gate == nil {
 			oauthWriteError(w, http.StatusForbidden, "invalid_scope", "admin auth not configured — log in to the control panel first")
 			return
 		}
-		svcID, err := parseID(svcIDStr)
-		if err != nil {
-			oauthWriteError(w, http.StatusInternalServerError, "server_error", "invalid admin auth service ID")
-			return
-		}
-		svc, err = os.server.store.GetService(svcID)
-		if err != nil {
-			oauthWriteError(w, http.StatusInternalServerError, "server_error", "admin auth service not found")
-			return
-		}
-		mcpServiceURL = "/mcp"
-		serviceType = "mcp-central"
 	} else {
 		svc, err = os.server.store.GetServiceByURL(slug)
-		if err != nil {
+		if err != nil || svc.Descriptor.Type != "virtual" {
 			oauthWriteError(w, http.StatusNotFound, "invalid_scope", "virtual service not found for resource")
 			return
 		}
-		mcpServiceURL = svc.URL
-		serviceType = "mcp-endpoint"
+		serviceID = svc.ID
+		gate, err = os.server.resolveServiceGate(svc)
+		if err != nil {
+			oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("gate resolution: %v", err))
+			return
+		}
 	}
 
-	// Store the MCP client's pending auth request.
-	mcpPendingKey := rand.Text()
-	os.server.putMCPPending(mcpPendingKey, &mcpPendingAuth{
+	legs, err := os.server.legsForLogin(gate, svc)
+	if err != nil {
+		oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("legs resolution: %v", err))
+		return
+	}
+	if len(legs) == 0 {
+		// An anonymous mount serves no PRM and needs no flow — a client
+		// that starts one anyway is confused.
+		oauthWriteError(w, http.StatusBadRequest, "invalid_request", "resource requires no authorization")
+		return
+	}
+
+	mcpKey := rand.Text()
+	os.server.putMCPPending(mcpKey, &mcpPendingAuth{
 		clientID:            clientID,
 		redirectURI:         redirectURI,
 		state:               state,
 		codeChallenge:       codeChallenge,
 		codeChallengeMethod: codeChallengeMethod,
 		resource:            resource,
-		serviceID:           svc.ID,
-		serviceURL:          mcpServiceURL,
+		serviceID:           serviceID,
 	})
 
-	callbackRedirectURI := os.server.config.PublicBaseURL + "/service/callback"
+	contState := db.GenNonce()
+	os.server.putPending(contState, &pendingAuth{
+		mcpKey:    mcpKey,
+		legs:      legs,
+		primaryID: legs[len(legs)-1].ID,
+	})
 
-	// SSH — redirect to passphrase form.
-	if svc.Descriptor.Type == "ssh" {
-		stateKey := rand.Text()
-		os.server.putPending(stateKey, &pendingAuth{
-			serviceID:   svc.ID,
-			serviceURL:  svc.URL,
-			appNonce:    mcpPendingKey,
-			appState:    mcpPendingKey,
-			serviceType: "ssh",
-		})
-		http.Redirect(w, r, fmt.Sprintf("%s/service/ssh-auth?state=%s&service_id=%d&mcp=1",
-			os.server.config.PublicBaseURL, stateKey, svc.ID), http.StatusFound)
-		return
+	var recIDs []string
+	for _, rec := range legs {
+		recIDs = append(recIDs, strconv.FormatInt(rec.ID, 10))
 	}
-
-	// API key — redirect to key entry form.
-	if svc.Descriptor.Auth == "key" {
-		stateKey := rand.Text()
-		os.server.putPending(stateKey, &pendingAuth{
-			serviceID:   svc.ID,
-			serviceURL:  svc.URL,
-			appNonce:    mcpPendingKey,
-			appState:    mcpPendingKey,
-			serviceType: "apikey",
-		})
-		http.Redirect(w, r, fmt.Sprintf("%s/service/apikey-auth?state=%s&service_id=%d&mcp=1",
-			os.server.config.PublicBaseURL, stateKey, svc.ID), http.StatusFound)
-		return
-	}
-
-	// OIDC or generic OAuth — begin upstream auth flow.
-	pa := &pendingAuth{
-		serviceID:   svc.ID,
-		serviceURL:  svc.URL,
-		appNonce:    mcpPendingKey,
-		appState:    mcpPendingKey,
-		scopes:      svc.Descriptor.Scopes,
-		proxied:     svc.Descriptor.Proxied,
-		serviceType: serviceType,
-	}
-
-	var authURL, oauthState string
-
-	if svc.Descriptor.Type == "oidc" {
-		au, st, vf, nc, tu, err := os.server.oidcBeginAuth(r.Context(), svc, callbackRedirectURI)
-		if err != nil {
-			oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("upstream OIDC auth failed: %v", err))
-			return
-		}
-		authURL, oauthState = au, st
-		pa.verifier = vf
-		pa.clientID = svc.Descriptor.ClientID
-		pa.clientSecret = svc.Descriptor.ClientSecret
-		pa.tokenEndpoint = tu
-		pa.oidcNonce = nc
-		pa.oidcIssuer = svc.URL
-	} else {
-		au, ci, cs, tu, st, vf, err := os.server.serviceBeginAuth(r.Context(), svc, callbackRedirectURI)
-		if err != nil {
-			oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("upstream auth failed: %v", err))
-			return
-		}
-		authURL, oauthState = au, st
-		pa.verifier = vf
-		pa.clientID = ci
-		pa.clientSecret = cs
-		pa.tokenEndpoint = tu
-	}
-
-	os.server.putPending(oauthState, pa)
-
-	http.Redirect(w, r, authURL, http.StatusFound)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	page := strings.Replace(authorizeInterstitialHTML, "{{STATE}}", contState, 1)
+	page = strings.Replace(page, "{{RECORD_IDS}}", strings.Join(recIDs, ","), 1)
+	w.Write([]byte(page))
 }
+
+// handleAuthorizeContinue receives the interstitial's POST: the state plus
+// any candidate tokens read from this browser's store. Tokens are claims,
+// not facts — each is re-verified and checked against the leg's record
+// binding before it skips anything. Whatever remains uncovered runs as a
+// fresh login flow.
+func (os *oauthServer) handleAuthorizeContinue(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		State  string   `json:"state"`
+		Tokens []string `json:"tokens"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		oauthWriteError(w, http.StatusBadRequest, "invalid_request", "invalid JSON")
+		return
+	}
+	p, ok, expired := os.server.getPending(req.State)
+	ok = ok && p.mcpKey != "" && p.at == 0 && len(p.done) == 0
+	if !ok {
+		msg := "unknown auth state"
+		if expired {
+			msg = "auth state expired — restart the login flow"
+		}
+		oauthWriteError(w, http.StatusBadRequest, "invalid_request", msg)
+		return
+	}
+
+	// Verify candidate tokens (cap: one per leg is all that's useful).
+	var verified []*freshbreathClaims
+	for i, raw := range req.Tokens {
+		if i >= 5 {
+			break
+		}
+		if claims, err := os.server.verifyFreshbreathToken(raw); err == nil && claims != nil {
+			verified = append(verified, claims)
+		}
+	}
+
+	var done []*completedLeg
+	var todo []*db.AuthRecord
+	for _, rec := range p.legs {
+		covered := false
+		for _, claims := range verified {
+			if legCovered(claims, rec) {
+				done = append(done, os.server.legFromClaims(rec, claims))
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			todo = append(todo, rec)
+		}
+	}
+	p.legs, p.at, p.done = todo, 0, done
+
+	w.Header().Set("Content-Type", "application/json")
+	if len(todo) == 0 {
+		redirect, err := os.server.finishLogin(w, r, p)
+		if err != nil || redirect == "" {
+			oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("login completion: %v", err))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"redirect": redirect})
+		return
+	}
+
+	next, err := os.server.beginLeg(r.Context(), p)
+	if err != nil {
+		oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("begin leg: %v", err))
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]string{"redirect": next})
+}
+
+// authorizeInterstitialHTML is the leg-skip page: same-origin, so it can
+// read the frbr:auth:* store that apps on this host share. It offers any
+// live tokens for the records this flow needs and follows the server's
+// verdict.
+const authorizeInterstitialHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Authorizing — Fresh Breath</title>
+<style>
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f11;color:#e4e4e7;display:grid;place-items:center;min-height:100vh}
+  .card{text-align:center;color:#a1a1aa;font-size:14px}
+</style></head><body>
+<div class="card"><p>Checking your session…</p></div>
+<script>
+(function(){
+  var state = "{{STATE}}";
+  var ids = "{{RECORD_IDS}}".split(",").filter(Boolean);
+  var tokens = [];
+  for (var i = 0; i < ids.length; i++) {
+    try {
+      var raw = localStorage.getItem("frbr:auth:" + ids[i]);
+      if (!raw) continue;
+      var entry = JSON.parse(raw);
+      if (entry && entry.v === 1 && entry.access_token &&
+          entry.expires_at && new Date(entry.expires_at) > new Date() &&
+          tokens.indexOf(entry.access_token) < 0) {
+        tokens.push(entry.access_token);
+      }
+    } catch (e) {}
+  }
+  fetch("/oauth/authorize", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({state: state, tokens: tokens})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d.redirect) { window.location.href = d.redirect; }
+    else { document.querySelector(".card").innerHTML = "<p>" + (d.error_description || "Authorization failed") + "</p>"; }
+  }).catch(function(){
+    document.querySelector(".card").innerHTML = "<p>Network error</p>";
+  });
+})();
+</script></body></html>`
 
 func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -484,47 +561,16 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Mint a Freshbreath access token for all cases.
-	var accessToken string
-	var refreshData freshbreathRefreshData
-	if isFreshbreathToken(pending.upstreamToken) {
-		// Token already issued by Freshbreath — pass it through.
-		accessToken = pending.upstreamToken
-		existing, _ := os.server.verifyFreshbreathToken(pending.upstreamToken)
-		refreshData = freshbreathRefreshData{
-			Kind:      "identity",
-			ServiceID: existing.ServiceID, // auth service the identity is bound to
-			UserEmail: pending.userEmail,
-			UserRole:  existing.UserRole,
-			UserName:  existing.UserName,
-		}
-	} else {
-		// External OAuth — wrap with sealed upstream data.
-		upstream := &sealedUpstreamData{
-			UpstreamToken:    pending.upstreamToken,
-			UpstreamRefresh:  pending.upstreamRefresh,
-			UpstreamTokenURL: pending.upstreamTokenURL,
-			UpstreamScopes:   pending.upstreamScopes,
-		}
-		jwt, err := os.server.mintFreshbreathToken("wrapped", pending.userEmail, "", "", pending.serviceID, upstream)
-		if err != nil {
-			oauthWriteError(w, http.StatusInternalServerError, "server_error", "token issuance failed")
-			return
-		}
-		accessToken = jwt
-		refreshData = freshbreathRefreshData{
-			Kind:             "wrapped",
-			ServiceID:        pending.serviceID,
-			UserEmail:        pending.userEmail,
-			UpstreamRefresh:  pending.upstreamRefresh,
-			UpstreamTokenURL: pending.upstreamTokenURL,
-			UpstreamScopes:   pending.upstreamScopes,
-		}
+	// The access token was minted when the login legs finished; the code
+	// grant just delivers it and opens a refresh family.
+	if pending.fbToken == "" {
+		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "login incomplete")
+		return
 	}
+	refreshData := pending.refreshData
 
-	// Create a refresh family for this login session.
 	deviceLabel := deviceLabelFromUA(r.UserAgent())
-	familyID, jti, err := os.server.newRefreshFamily(pending.userEmail, pending.serviceID, deviceLabel)
+	familyID, jti, err := os.server.newRefreshFamily(refreshData.Subject, refreshData.AuthID, deviceLabel)
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", "family creation failed")
 		return
@@ -532,10 +578,9 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 	refreshData.FamilyID = familyID
 	refreshData.JTI = jti
 
-	// Mint a refresh token and write the response. Initial issuance is consumed
-	// by the client exchanging the code (CLI/MCP), so the refresh token goes in
-	// the body.
-	os.writeTokenResponse(w, accessToken, refreshData, pending.upstreamScopes, true)
+	// Initial issuance is consumed by the client exchanging the code
+	// (CLI/MCP), so the refresh token goes in the body.
+	os.writeTokenResponse(w, pending.fbToken, refreshData, "", true)
 }
 
 // ── Refresh Token Grant ─────────────────────────────────────────────
@@ -637,60 +682,43 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh family expired")
 		return
 	}
-	// 🔒 Binding invariant: the family must match the token's bound service.
-	if fam.ServiceID != data.ServiceID {
-		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token service mismatch")
+	// 🔒 Binding invariant: the family must match the token's bound record.
+	if fam.AuthID != data.AuthID {
+		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token auth record mismatch")
 		return
 	}
 
 	// 🔒 Cookie-path authorization. The cookie is SameSite=None (file:// and
-	// foreign-origin apps need it), so it attaches to any cross-site request the
-	// browser makes to this path. The CORS origin allowlist gates *which origins*
-	// may call us at all, but a registered app is still allowed to call — so on
-	// its own the allowlist can't stop app A from harvesting a token issued for
-	// app A's connection to service X, or stop one app's page from refreshing
-	// another app's cookie. So on the cookie path only (CLI/MCP carry the token
-	// in the body and are authorized by possession), we bind the request's app
-	// to the token's sealed service: the app must be permitted that service.
-	// The token's own data.ServiceID is the source of truth — there is no
-	// service_id request parameter on this path to spoof.
+	// foreign-origin apps need it), so it attaches to any cross-site request
+	// the browser makes to this path. The CORS origin allowlist gates *which
+	// origins* may call us at all, but a registered app is still allowed to
+	// call — so on the cookie path only (CLI/MCP carry the token in the body
+	// and are authorized by possession), the requesting app must actually
+	// stand in some relation to the token's auth record: its own gate, or
+	// the gate/acts_as of a service it is allowed to use. The token's own
+	// data.AuthID is the source of truth — there is no request parameter on
+	// this path to spoof.
 	if !fromForm {
 		appNonce := r.Header.Get("X-App-Nonce")
 		if appNonce == "" {
 			oauthWriteError(w, http.StatusForbidden, "invalid_grant", "missing app for cookie refresh")
 			return
 		}
-		if appNonce == os.server.adminNonce {
-			// The admin control panel is the only consumer of the ephemeral
-			// adminNonce; it only ever holds an identity token for the
-			// configured admin auth service. Restrict it to that service
-			// rather than blanket-trusting it, so a leaked adminNonce can't
-			// refresh arbitrary services' tokens.
-			svcIDStr, _ := os.server.store.GetSetting("admin_auth_service")
-			adminSvcID, err := parseID(svcIDStr)
-			if err != nil || data.ServiceID != adminSvcID {
-				oauthWriteError(w, http.StatusForbidden, "invalid_grant", "admin refresh not bound to admin auth service")
-				return
-			}
-		} else {
-			allowed, err := os.server.store.IsServiceAllowedForApp(appNonce, data.ServiceID)
-			if err != nil || !allowed {
-				oauthWriteError(w, http.StatusForbidden, "invalid_grant", "app not permitted for this service")
-				return
-			}
+		if !os.server.appMayRefreshRecord(appNonce, data.AuthID) {
+			oauthWriteError(w, http.StatusForbidden, "invalid_grant", "app not permitted for this auth record")
+			return
 		}
 	}
 
-	// 🔒 Path/service binding (defense in depth). On the path-scoped route
-	// /oauth/token/{serviceID} the cookie jar routes the right cookie by path;
-	// the path segment must agree with the token's sealed service, so a stale
-	// legacy cookie (Path=/oauth/token, from before path-scoping) that leaks
-	// onto a /oauth/token/<id> request is rejected at the refresh step rather
-	// than minting a token for the wrong service.
-	if sidStr := r.PathValue("serviceID"); sidStr != "" {
-		pathSvc, err := strconv.ParseInt(sidStr, 10, 64)
-		if err != nil || pathSvc != data.ServiceID {
-			oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token service mismatch")
+	// 🔒 Path/record binding (defense in depth). On the path-scoped route
+	// /oauth/token/{authID} the cookie jar routes the right cookie by path;
+	// the path segment must agree with the token's sealed record, so a
+	// cookie that leaks onto another record's path is rejected at the
+	// refresh step rather than minting a token for the wrong record.
+	if aidStr := r.PathValue("authID"); aidStr != "" {
+		pathAuth, err := strconv.ParseInt(aidStr, 10, 64)
+		if err != nil || pathAuth != data.AuthID {
+			oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token auth record mismatch")
 			return
 		}
 	}
@@ -735,19 +763,7 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var accessToken string
-	var newRefreshData freshbreathRefreshData
-	var scope string
-
-	switch data.Kind {
-	case "wrapped":
-		accessToken, newRefreshData, scope, err = os.refreshWrapped(data)
-	case "identity":
-		accessToken, newRefreshData, err = os.refreshIdentity(data)
-	default:
-		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", fmt.Sprintf("unknown token kind: %s", data.Kind))
-		return
-	}
+	accessToken, newRefreshData, err := os.refreshLegs(data)
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
@@ -757,118 +773,108 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 	newRefreshData.FamilyID = fam.ID
 	newRefreshData.JTI = nextJTI
 
-	os.writeTokenResponse(w, accessToken, newRefreshData, scope, fromForm)
+	os.writeTokenResponse(w, accessToken, newRefreshData, "", fromForm)
 }
 
-// refreshWrapped refreshes the upstream OAuth token, then re-wraps it
-// into a new Freshbreath access token.
-func (os *oauthServer) refreshWrapped(data *freshbreathRefreshData) (string, freshbreathRefreshData, string, error) {
-	if data.UpstreamRefresh == "" {
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("no upstream refresh token available — re-login required")
-	}
-	svc, err := os.server.store.GetService(data.ServiceID)
-	if err != nil {
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("service not found: %w", err)
+// refreshLegs re-mints an access token from refresh data: the identity is
+// re-resolved from the subject (a deleted user can't extend a session; a
+// role change propagates within one cycle), and every upstream leg with a
+// refresh token is rotated against its record's provider. An upstream that
+// refuses costs the whole refresh — re-login is the honest answer.
+func (os *oauthServer) refreshLegs(data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
+	s := os.server
+
+	var email, role, name string
+	if strings.HasPrefix(data.Subject, "frbr:") {
+		user, err := s.userFromSubject(data.Subject)
+		if err != nil || user == nil {
+			return "", freshbreathRefreshData{}, fmt.Errorf("user not found for %s", data.Subject)
+		}
+		email, role, name = user.Email, user.Role, user.Name
+	} else {
+		email = data.UserEmail
 	}
 
-	// Resolve the upstream token endpoint.
-	tokenEndpoint, err := os.server.resolveTokenEndpoint(context.Background(), svc)
-	if err != nil {
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("resolve token endpoint: %w", err)
-	}
-	if data.UpstreamTokenURL != "" {
-		// Validate the stored endpoint matches the service config.
-		clientNorm := strings.TrimSuffix(data.UpstreamTokenURL, "/")
-		serverNorm := strings.TrimSuffix(tokenEndpoint, "/")
-		if clientNorm != serverNorm {
-			tokenEndpoint = data.UpstreamTokenURL
+	creds := sealedCreds{}
+	newUpstreams := map[string]upstreamRefreshLeg{}
+	for provider, leg := range data.Upstreams {
+		rec, err := s.store.GetAuthRecord(leg.AuthID)
+		if err != nil {
+			return "", freshbreathRefreshData{}, fmt.Errorf("auth record for %s: %w", provider, err)
+		}
+		tokenEndpoint := leg.TokenURL
+		if tokenEndpoint == "" {
+			tokenEndpoint = rec.Descriptor.TokenURL
+		}
+		if tokenEndpoint == "" {
+			return "", freshbreathRefreshData{}, fmt.Errorf("no token endpoint for %s — re-login required", provider)
+		}
+
+		form := url.Values{
+			"grant_type":    {"refresh_token"},
+			"refresh_token": {leg.RefreshToken},
+			"client_id":     {rec.Descriptor.ClientID},
+		}
+		if rec.Descriptor.ClientSecret != "" {
+			form.Set("client_secret", rec.Descriptor.ClientSecret)
+		}
+		if leg.Scopes != "" {
+			form.Set("scope", leg.Scopes)
+		}
+		resp, err := s.httpClient.PostForm(tokenEndpoint, form)
+		if err != nil {
+			return "", freshbreathRefreshData{}, fmt.Errorf("upstream refresh for %s: %w", provider, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", freshbreathRefreshData{}, fmt.Errorf("upstream refresh for %s returned %d: %s", provider, resp.StatusCode, string(body))
+		}
+		var tok struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			Scope        string `json:"scope"`
+		}
+		if err := json.Unmarshal(body, &tok); err != nil {
+			return "", freshbreathRefreshData{}, fmt.Errorf("decode upstream response for %s: %w", provider, err)
+		}
+
+		newRefresh := tok.RefreshToken
+		if newRefresh == "" {
+			newRefresh = leg.RefreshToken
+		}
+		scopes := tok.Scope
+		if scopes == "" {
+			scopes = leg.Scopes
+		}
+		creds[provider] = sealedUpstreamData{
+			UpstreamToken:    tok.AccessToken,
+			UpstreamRefresh:  newRefresh,
+			UpstreamTokenURL: tokenEndpoint,
+			UpstreamScopes:   scopes,
+		}
+		newUpstreams[provider] = upstreamRefreshLeg{
+			AuthID:       leg.AuthID,
+			RefreshToken: newRefresh,
+			TokenURL:     tokenEndpoint,
+			Scopes:       scopes,
 		}
 	}
 
-	clientID := svc.Descriptor.ClientID
-	if clientID == "" {
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("no client_id for service — re-login required")
-	}
-
-	form := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {data.UpstreamRefresh},
-		"client_id":     {clientID},
-	}
-	if svc.Descriptor.ClientSecret != "" {
-		form.Set("client_secret", svc.Descriptor.ClientSecret)
-	}
-	if data.UpstreamScopes != "" {
-		form.Set("scope", data.UpstreamScopes)
-	}
-
-	resp, err := os.server.httpClient.PostForm(tokenEndpoint, form)
+	accessToken, err := s.mintFreshbreathToken(data.Subject, email, role, name, data.AuthID, data.Legs, creds)
 	if err != nil {
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("upstream refresh failed: %w", err)
+		return "", freshbreathRefreshData{}, fmt.Errorf("mint access token: %w", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("upstream refresh returned %d: %s", resp.StatusCode, string(body))
+	newData := freshbreathRefreshData{
+		Subject:   data.Subject,
+		UserEmail: email,
+		AuthID:    data.AuthID,
+		Legs:      data.Legs,
 	}
-
-	var tok struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		Scope        string `json:"scope"`
-		ExpiresIn    int    `json:"expires_in"`
+	if len(newUpstreams) > 0 {
+		newData.Upstreams = newUpstreams
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("decode upstream response: %w", err)
-	}
-
-	// Re-wrap into a Freshbreath access token.
-	upstreamRefresh := tok.RefreshToken
-	if upstreamRefresh == "" {
-		upstreamRefresh = data.UpstreamRefresh
-	}
-	upstream := &sealedUpstreamData{
-		UpstreamToken:    tok.AccessToken,
-		UpstreamRefresh:  upstreamRefresh,
-		UpstreamTokenURL: tokenEndpoint,
-		UpstreamScopes:   tok.Scope,
-	}
-	jwt, err := os.server.mintFreshbreathToken("wrapped", data.UserEmail, "", "", data.ServiceID, upstream)
-	if err != nil {
-		return "", freshbreathRefreshData{}, "", fmt.Errorf("mint wrapped token: %w", err)
-	}
-
-	newRefreshData := freshbreathRefreshData{
-		Kind:             "wrapped",
-		ServiceID:        data.ServiceID,
-		UserEmail:        data.UserEmail,
-		UpstreamRefresh:  upstreamRefresh,
-		UpstreamTokenURL: tokenEndpoint,
-		UpstreamScopes:   tok.Scope,
-	}
-	return jwt, newRefreshData, tok.Scope, nil
-}
-
-// refreshIdentity re-mints an identity access token for the user. The user
-// must still exist — refresh re-resolves them from the DB, so a deleted user
-// can't extend their session, and a role change propagates within one cycle.
-func (os *oauthServer) refreshIdentity(data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
-	user, err := os.server.store.GetUserByEmail(data.UserEmail)
-	if err != nil {
-		return "", freshbreathRefreshData{}, fmt.Errorf("user not found: %w", err)
-	}
-	jwt, err := os.server.mintFreshbreathToken("identity", user.Email, user.Role, user.Name, data.ServiceID, nil)
-	if err != nil {
-		return "", freshbreathRefreshData{}, fmt.Errorf("mint identity token: %w", err)
-	}
-	newRefreshData := freshbreathRefreshData{
-		Kind:      "identity",
-		ServiceID: data.ServiceID, // preserve the auth-service binding across refresh
-		UserEmail: user.Email,
-		UserRole:  user.Role,
-		UserName:  user.Name,
-	}
-	return jwt, newRefreshData, nil
+	return accessToken, newData, nil
 }
 
 // ── Token Response Helper ───────────────────────────────────────────
@@ -918,31 +924,39 @@ func (os *oauthServer) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ── Token Issuance ────────────────────────────────────────────────
-//
-// handleToken issues access + refresh tokens for both authorization_code
-// and refresh_token grants. All Freshbreath tokens are unified under
-// freshbreathClaims, minted by mintFreshbreathToken.
-
-// verifyAndUnwrapToken checks if a Bearer token is a Freshbreath-wrapped JWT
-// for a specific virtual service. Returns the full claims (with Upstream*
-// fields populated) on success. Returns (nil, nil) if the token is not
-// a Freshbreath JWT — the caller should use the raw token as-is.
-func (s *Server) verifyAndUnwrapToken(raw string, expectedServiceID int64) (*freshbreathClaims, error) {
-	claims, err := s.verifyFreshbreathToken(raw)
+// appMayRefreshRecord reports whether an app stands in some relation to an
+// auth record: its own gate resolves to it, or one of its allowed services
+// carries it in either slot. The admin nonce answers only for the admin
+// record.
+func (s *Server) appMayRefreshRecord(appNonce string, authID int64) bool {
+	if appNonce == s.adminNonce {
+		rec, err := s.adminAuthRecord()
+		return err == nil && rec != nil && rec.ID == authID
+	}
+	app, err := s.store.GetApp(appNonce)
 	if err != nil {
-		return nil, err
+		return false
 	}
-	if claims == nil {
-		return nil, nil
+	if gate, err := s.resolveAppGate(app); err == nil && gate != nil && gate.ID == authID {
+		return true
 	}
-	if claims.Kind != "wrapped" {
-		return nil, fmt.Errorf("expected wrapped token, got kind=%s", claims.Kind)
+	links, err := s.store.GetAppServiceLinks(appNonce)
+	if err != nil {
+		return false
 	}
-	if claims.ServiceID != expectedServiceID {
-		return nil, fmt.Errorf("wrapped token service_id mismatch")
+	for _, link := range links {
+		if !link.Allowed {
+			continue
+		}
+		svc, err := s.store.GetService(link.ServiceID)
+		if err != nil {
+			continue
+		}
+		if (svc.ActsAs != nil && *svc.ActsAs == authID) || (svc.ProtectedBy != nil && *svc.ProtectedBy == authID) {
+			return true
+		}
 	}
-	return claims, nil
+	return false
 }
 
 // ── PKCE Verification ───────────────────────────────────────────────

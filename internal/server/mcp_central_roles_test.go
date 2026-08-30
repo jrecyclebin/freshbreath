@@ -53,14 +53,15 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 	allAppManageTools := []string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services"}
 	allServiceTools := []string{"list_services", "get_service", "create_service", "update_service", "delete_service", "get_service_apps", "list_service_files", "read_service_file", "write_service_file", "delete_service_file"}
 	allUserTools := []string{"list_users", "get_user", "create_user", "update_user", "delete_user", "get_user_apps", "set_user_apps", "get_user_ssh_key", "generate_user_ssh_key", "delete_user_ssh_key"}
+	allAuthTools := []string{"list_auth", "create_auth", "update_auth", "delete_auth"}
 	allRoleTools := []string{"list_roles"}
 	allAuditTools := []string{"list_audit"}
 	allPersonalTools := []string{"get_me", "get_my_ssh_key", "generate_my_ssh_key", "delete_my_ssh_key", "get_guide"} // available to every authenticated role
 	allSettingsTools := []string{"get_settings", "update_settings"}
 	allDBTools := []string{"db_list_databases", "db_schema", "db_query", "db_execute"} // all roles; gateDBTarget decides per call
 
-	wantSuperuser := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allSettingsTools, allDBTools)
-	wantAdmin := concat(allAppTools, allAppManageTools, allServiceTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
+	wantSuperuser := concat(allAppTools, allAppManageTools, allServiceTools, allAuthTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allSettingsTools, allDBTools)
+	wantAdmin := concat(allAppTools, allAppManageTools, allServiceTools, allAuthTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
 	wantMember := concat(allAppTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
 
 	cases := []struct {
@@ -69,12 +70,12 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 		mustHave []string
 		mustLack []string
 	}{
-		{"Superuser", wantSuperuser, []string{"get_settings", "update_settings", "create_app", "delete_user", "list_services", "db_query", "db_execute"}, nil},
-		{"Admin", wantAdmin, []string{"create_app", "list_users", "list_services", "delete_service", "db_query", "db_execute"}, []string{"get_settings", "update_settings"}},
+		{"Superuser", wantSuperuser, []string{"get_settings", "update_settings", "create_app", "delete_user", "list_services", "create_auth", "db_query", "db_execute"}, nil},
+		{"Admin", wantAdmin, []string{"create_app", "list_users", "list_services", "delete_service", "create_auth", "delete_auth", "db_query", "db_execute"}, []string{"get_settings", "update_settings"}},
 		{"Member", wantMember, []string{"list_apps", "get_app", "get_app_members", "get_app_services", "list_roles", "list_audit", "get_me", "get_my_ssh_key", "db_query"},
-			[]string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services", "list_services", "list_users", "create_user", "delete_user", "get_settings", "update_settings"}},
+			[]string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services", "list_services", "list_auth", "create_auth", "list_users", "create_user", "delete_user", "get_settings", "update_settings"}},
 		{"Read-only", wantMember, []string{"list_apps", "get_me", "list_roles", "db_query"},
-			[]string{"create_app", "delete_app", "list_users", "get_settings"}},
+			[]string{"create_app", "delete_app", "list_users", "list_auth", "create_auth", "get_settings"}},
 	}
 
 	for _, tc := range cases {

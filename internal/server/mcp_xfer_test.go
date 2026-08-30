@@ -76,7 +76,7 @@ func createAppFile(t *testing.T, srv *Server, nonce, path string, content []byte
 
 func TestMCPListAppFiles(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "list-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "list-app", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestMCPListAppFiles(t *testing.T) {
 
 func TestMCPReadAppFile(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-app", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestMCPReadAppFile(t *testing.T) {
 
 func TestMCPReadAppFileBinary(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-bin", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-bin", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestMCPReadAppFileBinary(t *testing.T) {
 
 func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-app", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 
 func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-missing", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-missing", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
 
 func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-dup", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "write-dup", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
 
 func TestMCPDeleteAppFile(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "delete-app", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "delete-app", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestMCPListServiceFiles(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
 	admin := &db.User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestMCPReadServiceFile(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
 	admin := &db.User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestMCPWriteServiceFile(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
 	admin := &db.User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestMCPDeleteServiceFile(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
 	admin := &db.User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"})
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestMCPDeleteServiceFile(t *testing.T) {
 func TestMCPServiceFileUnsupportedType(t *testing.T) {
 	srv := newTestServer(t)
 	admin := &db.User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", db.ServiceDescriptor{Type: "api"})
+	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", db.ServiceDescriptor{Type: "api"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -530,7 +530,7 @@ func dispatchActPathAsAdmin(t *testing.T, srv *Server, method, pathQuery string,
 
 func makeAppWithFile(t *testing.T, srv *Server, name, file string, content []byte) string {
 	t.Helper()
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, name, "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, name, "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -649,7 +649,7 @@ func TestMCPReadAppFileSmallStaysInline(t *testing.T) {
 
 func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "wapp", "", "", nil)
+	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "wapp", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -681,7 +681,7 @@ func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 
 func TestMCPWriteAppFileTransportHTTPRejectsPatch(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "wpapp", "", "", nil)
+	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "wpapp", "", "", nil, nil)
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
 		"nonce": nonce, "path": "x.txt", "content": "new", "old_text": "old", "transport": "http",
 	})
@@ -692,7 +692,7 @@ func TestMCPWriteAppFileTransportHTTPRejectsPatch(t *testing.T) {
 
 func TestMCPWriteAppFileLargeNoThreshold(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "bigw", "", "", nil)
+	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "bigw", "", "", nil, nil)
 	big := bytes.Repeat([]byte("M"), 12000)
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
 		"nonce": nonce, "path": "big.txt", "content": string(big), // default transport
@@ -712,7 +712,7 @@ func TestMCPWriteAppFileLargeNoThreshold(t *testing.T) {
 
 func TestMCPWriteAppFilePatchStaysInline(t *testing.T) {
 	srv := newTestServer(t)
-	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "patchapp", "", "", nil)
+	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "patchapp", "", "", nil, nil)
 	createAppFile(t, srv, nonce, "p.txt", []byte("hello old world"))
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
 		"nonce": nonce, "path": "p.txt", "content": "new", "old_text": "old",

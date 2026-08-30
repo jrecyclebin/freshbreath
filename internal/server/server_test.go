@@ -66,6 +66,31 @@ func newTestServer(t *testing.T) *Server {
 	return srv
 }
 
+// builtinAuth fetches one of the two seeded records (db.AuthSSHKey or
+// db.AuthAnonymous).
+func builtinAuth(t *testing.T, srv *Server, kind string) *db.AuthRecord {
+	t.Helper()
+	id, err := srv.store.BuiltinAuthID(kind)
+	if err != nil {
+		t.Fatalf("builtin %s record: %v", kind, err)
+	}
+	rec, err := srv.store.GetAuthRecord(id)
+	if err != nil {
+		t.Fatalf("get builtin %s record: %v", kind, err)
+	}
+	return rec
+}
+
+// newAuthRecord creates an auth record, failing the test on error.
+func newAuthRecord(t *testing.T, srv *Server, name, kind string, d db.AuthDescriptor) *db.AuthRecord {
+	t.Helper()
+	rec, err := srv.store.CreateAuthRecord(name, kind, d)
+	if err != nil {
+		t.Fatalf("create auth record %q: %v", name, err)
+	}
+	return rec
+}
+
 func testRequest(t *testing.T, srv *Server, method, path string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(method, path, body)
@@ -217,7 +242,9 @@ func TestCreateAndListServices(t *testing.T) {
 func TestCreateServiceWithDescriptor(t *testing.T) {
 	srv := newTestServer(t)
 
-	body := `{"name": "github", "url": "https://api.github.com", "descriptor": {"type": "api", "proxied": true, "client_id": "gh-client", "oauth_url": "https://github.com/login/oauth"}}`
+	// The descriptor keeps only Type/Proxied/DatabaseTarget/DatabaseName —
+	// auth fields moved to auth records and no longer round-trip here.
+	body := `{"name": "github", "url": "https://api.github.com", "descriptor": {"type": "api", "proxied": true, "database_target": "global", "database_name": "shared"}}`
 	rr := testRequest(t, srv, "POST", "/api/services", strings.NewReader(body), nil)
 	if rr.Code != 200 {
 		t.Fatalf("create service: status = %d, body = %s", rr.Code, rr.Body.String())
@@ -232,8 +259,11 @@ func TestCreateServiceWithDescriptor(t *testing.T) {
 	if desc["proxied"] != true {
 		t.Errorf("descriptor.proxied = %v, want true", desc["proxied"])
 	}
-	if desc["client_id"] != "gh-client" {
-		t.Errorf("descriptor.client_id = %v, want gh-client", desc["client_id"])
+	if desc["database_target"] != "global" {
+		t.Errorf("descriptor.database_target = %v, want global", desc["database_target"])
+	}
+	if desc["database_name"] != "shared" {
+		t.Errorf("descriptor.database_name = %v, want shared", desc["database_name"])
 	}
 }
 
@@ -526,6 +556,11 @@ func TestLoginWithMetadataFallback(t *testing.T) {
 		}
 	})
 
+	// No client_id: the record falls back to metadata discovery + DCR, and
+	// when even the metadata is missing, to default endpoint paths.
+	rec := newAuthRecord(t, srv, "GH Upstream", db.AuthOAuth2,
+		db.AuthDescriptor{AuthorizeURL: "https://gh.example/authorize"})
+	setAppGate(t, srv, nonce, rec.ID)
 	id := registerService(t, srv, "github", "https://gh.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 	linkServiceToApp(t, srv, nonce, id)
 
@@ -575,6 +610,11 @@ func TestLoginByServiceURL(t *testing.T) {
 	})
 
 	nonce := createApp(t, srv, "login-test")
+	// No client_id: the gate record discovers metadata and registers a
+	// client dynamically — the old upstream-MCP DCR path, now record-shaped.
+	rec := newAuthRecord(t, srv, "Slack Upstream", db.AuthOAuth2,
+		db.AuthDescriptor{AuthorizeURL: "https://slack.example/authorize"})
+	setAppGate(t, srv, nonce, rec.ID)
 	id := registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 	linkServiceToApp(t, srv, nonce, id)
 
@@ -594,13 +634,24 @@ func TestLoginByServiceURL(t *testing.T) {
 	}
 }
 
-func TestLoginMissingServiceURL(t *testing.T) {
+func TestLoginWithoutURLIsAppGateLogin(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "login-test")
+	// No url names the app's own gate; an open gate resolves instantly.
 	rr := testRequest(t, srv, "GET", "/service/login?state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
-	if rr.Code != 400 {
-		t.Errorf("status = %d, want 400", rr.Code)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var body map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &body)
+	if body["type"] != "anonymous" {
+		t.Errorf("type = %v, want anonymous (open gate, nothing to clear)", body["type"])
+	}
+	// Missing state is still an error.
+	if rr := testRequest(t, srv, "GET", "/service/login", nil,
+		map[string]string{"X-App-Nonce": nonce}); rr.Code != 400 {
+		t.Errorf("missing state: status = %d, want 400", rr.Code)
 	}
 }
 
@@ -617,6 +668,9 @@ func TestLoginUnknownServiceURL(t *testing.T) {
 func TestLoginViaQueryParam(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "login-test")
+	rec := newAuthRecord(t, srv, "Slack Upstream", db.AuthOAuth2,
+		db.AuthDescriptor{AuthorizeURL: "https://slack.example/authorize"})
+	setAppGate(t, srv, nonce, rec.ID)
 	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
 		switch {
 		case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
@@ -675,11 +729,14 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 		}
 	})
 
-	id := registerService(t, srv, "github", "https://api.github.com", db.ServiceDescriptor{
-		Type:     "api",
-		ClientID: "gh-pre-registered-client",
-		OAuthURL: "https://github.com",
+	rec := newAuthRecord(t, srv, "GitHub", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://github.com/login/oauth/authorize",
+		TokenURL:     "https://github.com/login/oauth/access_token",
+		ClientID:     "gh-pre-registered-client",
+		Provider:     "github",
 	})
+	setAppGate(t, srv, nonce, rec.ID)
+	id := registerService(t, srv, "github", "https://api.github.com", db.ServiceDescriptor{Type: "api"})
 	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.github.com&state=x", nil,
@@ -704,13 +761,12 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 
 // ── Login with API key auth ──
 
-func TestLoginWithAPIKey(t *testing.T) {
+func TestLoginWithAPIKeyGate(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "key-test")
-	id := registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
-		Type: "api",
-		Auth: "key",
-	})
+	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "s3cret"})
+	setAppGate(t, srv, nonce, rec.ID)
+	id := registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{Type: "api"})
 	linkServiceToApp(t, srv, nonce, id)
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
@@ -721,7 +777,8 @@ func TestLoginWithAPIKey(t *testing.T) {
 
 	var resp map[string]interface{}
 	json.Unmarshal(rr.Body.Bytes(), &resp)
-	// No admin key set → redirect to key entry form
+	// An api_key gate always redirects to the key entry form — the stored
+	// key is what the typed key is checked against, never handed out.
 	if resp["type"] != "redirect" {
 		t.Errorf("type = %v, want redirect", resp["type"])
 	}
@@ -731,40 +788,51 @@ func TestLoginWithAPIKey(t *testing.T) {
 	}
 }
 
-func TestLoginWithAPIKeyAdminSet(t *testing.T) {
+// The full api_key gate flow: login redirects to the form, the wrong key is
+// refused, the right key finishes with a store entry carrying what was typed.
+func TestAPIKeyAuthFlow(t *testing.T) {
 	srv := newTestServer(t)
-	nonce := createApp(t, srv, "key-admin-test")
-	id := registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
-		Type:   "api",
-		Auth:   "key",
-		APIKey: "admin-secret-key",
-	})
-	linkServiceToApp(t, srv, nonce, id)
+	nonce := createApp(t, srv, "key-flow-test")
+	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "s3cret", Header: "X-Weather-Key"})
+	setAppGate(t, srv, nonce, rec.ID)
 
-	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
+	rr := testRequest(t, srv, "GET", "/service/login?state=corr-1", nil,
 		map[string]string{"X-App-Nonce": nonce})
 	if rr.Code != 200 {
-		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+		t.Fatalf("login: status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-
 	var resp map[string]interface{}
 	json.Unmarshal(rr.Body.Bytes(), &resp)
-	if resp["type"] != "key-auth-complete" {
-		t.Errorf("type = %v, want key-auth-complete", resp["type"])
+	url, _ := resp["url"].(string)
+	i := strings.Index(url, "state=")
+	if i < 0 {
+		t.Fatalf("no state in redirect URL %q", url)
 	}
-	// Admin key is available in the response
-	if resp["apiKey"] != "admin-secret-key" {
-		t.Errorf("apiKey = %v, want admin-secret-key", resp["apiKey"])
+	state := url[i+len("state="):]
+
+	// Wrong key → 401, and the state survives for a retry.
+	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
+		strings.NewReader(`{"state":"`+state+`","api_key":"wrong"}`), nil)
+	if rr.Code != 401 {
+		t.Fatalf("wrong key: status = %d, want 401", rr.Code)
+	}
+
+	// Right key → the final page hands the typed key back as a store entry.
+	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+	if rr.Code != 200 {
+		t.Fatalf("right key: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"key":"s3cret"`) || !strings.Contains(body, `"kind":"api_key"`) {
+		t.Errorf("final page missing store entry fields: %s", body)
 	}
 }
 
 func TestLoginAppNotAllowed(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "no-link-test")
-	registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{
-		Type: "api",
-		Auth: "key",
-	})
+	registerService(t, srv, "weather", "https://api.weather.com", db.ServiceDescriptor{Type: "api"})
 
 	rr := testRequest(t, srv, "GET", "/service/login?url=https://api.weather.com&state=x", nil,
 		map[string]string{"X-App-Nonce": nonce})
@@ -776,33 +844,28 @@ func TestLoginAppNotAllowed(t *testing.T) {
 func TestLoginAdminNonceAllowed(t *testing.T) {
 	srv := newTestServer(t)
 	srv.adminNonce = db.GenNonce()
-	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
-		switch {
-		case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
-			return jsonResp(200, map[string]interface{}{
-				"issuer":                           "https://admin.example",
-				"authorization_endpoint":           "https://admin.example/authorize",
-				"token_endpoint":                   "https://admin.example/token",
-				"registration_endpoint":            "https://admin.example/register",
-				"code_challenge_methods_supported": []string{"S256"},
-			})
-		case req.URL.Path == "/register":
-			return jsonResp(201, map[string]string{"client_id": "mock-client"})
-		default:
-			return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
-		}
-	})
 
-	id := registerService(t, srv, "admin-idp", "https://admin.example", db.ServiceDescriptor{
-		Type:     "api",
-		OAuthURL: "https://admin.example",
+	// Fully-specified oauth2 record: no discovery, no DCR, no network.
+	rec := newAuthRecord(t, srv, "Admin IdP", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://admin.example/authorize",
+		TokenURL:     "https://admin.example/token",
+		ClientID:     "admin-client",
 	})
-	srv.store.SetSetting("admin_auth_service", id)
+	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10))
 
-	rr := testRequest(t, srv, "GET", "/service/login?url=https://admin.example&state=x", nil,
+	// The control panel's ephemeral nonce logs in to its own gate (no url).
+	rr := testRequest(t, srv, "GET", "/service/login?state=x", nil,
 		map[string]string{"X-App-Nonce": srv.adminNonce})
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var body map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &body)
+	if body["type"] != "redirect" {
+		t.Fatalf("expected redirect type, got %v", body["type"])
+	}
+	if loc, _ := body["url"].(string); !strings.Contains(loc, "client_id=admin-client") {
+		t.Errorf("redirect missing client_id: %v", body["url"])
 	}
 }
 
@@ -817,11 +880,9 @@ func TestProxyInjectsAdminAPIKey(t *testing.T) {
 
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "proxy-key-test")
-	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{
-		Type:   "api",
-		Auth:   "key",
-		APIKey: "admin-secret-key",
-	})
+	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "admin-secret-key"})
+	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{Type: "api"})
+	setServiceActsAs(t, srv, id, rec.ID)
 	linkServiceToApp(t, srv, nonce, id)
 
 	// Request WITHOUT Authorization header — proxy should inject the key
@@ -835,7 +896,7 @@ func TestProxyInjectsAdminAPIKey(t *testing.T) {
 	}
 }
 
-func TestProxyDoesNotOverrideUserAPIKey(t *testing.T) {
+func TestProxyXAPIKeyOverridesStoredKey(t *testing.T) {
 	var receivedAuth string
 	mockService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedAuth = r.Header.Get("Authorization")
@@ -846,24 +907,45 @@ func TestProxyDoesNotOverrideUserAPIKey(t *testing.T) {
 
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "proxy-user-key-test")
-	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{
-		Type:   "api",
-		Auth:   "key",
-		APIKey: "admin-secret-key",
-	})
+	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "admin-secret-key"})
+	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{Type: "api"})
+	setServiceActsAs(t, srv, id, rec.ID)
 	linkServiceToApp(t, srv, nonce, id)
 
-	// Request WITH Authorization header — user's key wins
+	// X-API-Key overrides the stored key when acts_as is an api_key record.
 	rr := testRequest(t, srv, "GET", "/service/"+id+"/forecast", nil,
 		map[string]string{
-			"X-App-Nonce":   nonce,
-			"Authorization": "Bearer user-own-key",
+			"X-App-Nonce": nonce,
+			"X-API-Key":   "user-own-key",
 		})
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	if receivedAuth != "Bearer user-own-key" {
-		t.Errorf("Authorization = %q, want Bearer user-own-key (user key should win)", receivedAuth)
+		t.Errorf("Authorization = %q, want Bearer user-own-key (X-API-Key should win)", receivedAuth)
+	}
+}
+
+func TestProxyXAPIKeyRejectedWithoutKeyRecord(t *testing.T) {
+	mockService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer mockService.Close()
+
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "proxy-stray-key-test")
+	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{Type: "api"})
+	linkServiceToApp(t, srv, nonce, id)
+
+	// No api_key acts_as record: a stray X-API-Key is a caller error, not
+	// silently swallowed like the old door did.
+	rr := testRequest(t, srv, "GET", "/service/"+id+"/forecast", nil,
+		map[string]string{
+			"X-App-Nonce": nonce,
+			"X-API-Key":   "user-own-key",
+		})
+	if rr.Code != 400 {
+		t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -958,6 +1040,34 @@ func registerService(t *testing.T, srv *Server, name, serviceURL string, descrip
 	return formatInt(int64(idf))
 }
 
+// setAppGate points an app's protected_by at an auth record.
+func setAppGate(t *testing.T, srv *Server, nonce string, recID int64) {
+	t.Helper()
+	app, err := srv.store.GetApp(nonce)
+	if err != nil {
+		t.Fatalf("get app: %v", err)
+	}
+	if err := srv.store.UpdateApp(nonce, app.Name, app.Environment, app.URL, app.OwnerID, &recID); err != nil {
+		t.Fatalf("set app gate: %v", err)
+	}
+}
+
+// setServiceActsAs points a service's acts_as at an auth record.
+func setServiceActsAs(t *testing.T, srv *Server, serviceID string, recID int64) {
+	t.Helper()
+	id, err := strconv.ParseInt(serviceID, 10, 64)
+	if err != nil {
+		t.Fatalf("parse service ID: %v", err)
+	}
+	svc, err := srv.store.GetService(id)
+	if err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if err := srv.store.UpdateService(id, svc.Name, svc.URL, svc.Descriptor, svc.ProtectedBy, &recID); err != nil {
+		t.Fatalf("set service acts_as: %v", err)
+	}
+}
+
 func linkServiceToApp(t *testing.T, srv *Server, appNonce string, serviceID string) {
 	t.Helper()
 	id, err := strconv.ParseInt(serviceID, 10, 64)
@@ -1010,16 +1120,20 @@ func formatInt(n int64) string {
 // ── Session Management API Tests ──
 
 // authTokenForUser mints a real Freshbreath identity token for the given
-// user by creating a synthetic auth service, wiring it as admin_auth_service,
+// user by creating a synthetic auth record, wiring it as admin_auth_service,
 // and signing a JWT. The caller must have already created the user in s.store.
 func authTokenForUser(t *testing.T, srv *Server, email, name, role string) string {
 	t.Helper()
-	svcID := registerService(t, srv, "test-auth", "http://localhost/mcp", db.ServiceDescriptor{Type: "mcp"})
-	sid, _ := strconv.ParseInt(svcID, 10, 64)
-	if err := srv.store.SetSetting("admin_auth_service", svcID); err != nil {
+	rec := newAuthRecord(t, srv, "test-auth", db.AuthOIDC,
+		db.AuthDescriptor{Issuer: "https://test-auth.example", Provider: "test-auth"})
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
-	token, err := srv.mintFreshbreathToken("identity", email, role, name, sid, nil)
+	user, err := srv.store.GetUserByEmail(email)
+	if err != nil {
+		t.Fatalf("user %s must exist before minting: %v", email, err)
+	}
+	token, err := srv.mintFreshbreathToken(subjectForUser(user), email, role, name, rec.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("mint identity token: %v", err)
 	}
@@ -1028,15 +1142,15 @@ func authTokenForUser(t *testing.T, srv *Server, email, name, role string) strin
 
 func TestGetMySessions(t *testing.T) {
 	srv := newTestServer(t)
-	_, err := srv.store.CreateUser("Session User", "session@example.com", "Member", "Active")
+	user, err := srv.store.CreateUser("Session User", "session@example.com", "Member", "Active")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	token := authTokenForUser(t, srv, "session@example.com", "Session User", "Member")
 	fam := &db.RefreshFamily{
 		ID:          "test-session-id",
-		UserEmail:   "session@example.com",
-		ServiceID:   1,
+		Subject:     subjectForUser(user),
+		AuthID:      1,
 		DeviceLabel: "Test Device",
 		CurrentJTI:  "test-jti",
 		CreatedAt:   time.Now(),
@@ -1065,15 +1179,15 @@ func TestGetMySessions(t *testing.T) {
 
 func TestRevokeAllSessions(t *testing.T) {
 	srv := newTestServer(t)
-	_, err := srv.store.CreateUser("Revoke User", "revoke@example.com", "Member", "Active")
+	user, err := srv.store.CreateUser("Revoke User", "revoke@example.com", "Member", "Active")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	token := authTokenForUser(t, srv, "revoke@example.com", "Revoke User", "Member")
 	fam := &db.RefreshFamily{
 		ID:          "revoke-session-id",
-		UserEmail:   "revoke@example.com",
-		ServiceID:   1,
+		Subject:     subjectForUser(user),
+		AuthID:      1,
 		DeviceLabel: "Test Device",
 		CurrentJTI:  "test-jti",
 		CreatedAt:   time.Now(),
@@ -1098,15 +1212,15 @@ func TestRevokeAllSessions(t *testing.T) {
 
 func TestRevokeSpecificSession(t *testing.T) {
 	srv := newTestServer(t)
-	_, err := srv.store.CreateUser("Revoke Single User", "single@example.com", "Member", "Active")
+	user, err := srv.store.CreateUser("Revoke Single User", "single@example.com", "Member", "Active")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	token := authTokenForUser(t, srv, "single@example.com", "Revoke Single User", "Member")
 	fam := &db.RefreshFamily{
 		ID:          "single-session-id",
-		UserEmail:   "single@example.com",
-		ServiceID:   1,
+		Subject:     subjectForUser(user),
+		AuthID:      1,
 		DeviceLabel: "Test Device",
 		CurrentJTI:  "test-jti",
 		CreatedAt:   time.Now(),
@@ -1142,5 +1256,128 @@ func TestRevokeSessionNotFound(t *testing.T) {
 	})
 	if rr.Code != 404 {
 		t.Fatalf("status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ── Login resolution (resolve=1) ──
+//
+// The browser cannot know which stored credential to present until it knows
+// the door's gate, so resolve=1 answers that as a pure query: no pending
+// state, no flow, just the bill.
+
+func TestLoginResolveListsLegs(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "resolve-legs")
+	gate := newAuthRecord(t, srv, "Staff", db.AuthOAuth2,
+		db.AuthDescriptor{AuthorizeURL: "https://gh.example/authorize", TokenURL: "https://gh.example/token", ClientID: "c", Provider: "github"})
+	setAppGate(t, srv, nonce, gate.ID)
+	out := newAuthRecord(t, srv, "Jira", db.AuthOAuth2,
+		db.AuthDescriptor{AuthorizeURL: "https://jira.example/authorize", TokenURL: "https://jira.example/token", ClientID: "j", Provider: "jira"})
+	id := registerService(t, srv, "tickets", "https://jira.example/mcp",
+		db.ServiceDescriptor{Type: "mcp", Proxied: true})
+	setServiceActsAs(t, srv, id, out.ID)
+	linkServiceToApp(t, srv, nonce, id)
+
+	rr := testRequest(t, srv, "GET", "/service/login?url=https://jira.example/mcp&resolve=1", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Type string `json:"type"`
+		Legs []struct {
+			AuthID   int64  `json:"auth_id"`
+			Kind     string `json:"kind"`
+			Provider string `json:"provider"`
+			Name     string `json:"name"`
+		} `json:"legs"`
+		Service struct {
+			ID      int64  `json:"id"`
+			URL     string `json:"url"`
+			Proxied bool   `json:"proxied"`
+		} `json:"service"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Type != "legs" {
+		t.Fatalf("type = %q, want legs", resp.Type)
+	}
+	if len(resp.Legs) != 2 {
+		t.Fatalf("legs = %+v, want gate then acts_as", resp.Legs)
+	}
+	if resp.Legs[0].AuthID != gate.ID || resp.Legs[1].AuthID != out.ID {
+		t.Errorf("leg order = %d,%d, want %d,%d (gate first)",
+			resp.Legs[0].AuthID, resp.Legs[1].AuthID, gate.ID, out.ID)
+	}
+	if resp.Legs[1].Provider != "jira" {
+		t.Errorf("outbound provider = %q, want jira", resp.Legs[1].Provider)
+	}
+	if formatInt(resp.Service.ID) != id || !resp.Service.Proxied {
+		t.Errorf("service = %+v, want id %s and proxied", resp.Service, id)
+	}
+}
+
+// resolve=1 needs no state because it starts nothing — and starting nothing
+// is the point: a resolve must not leave a pending login behind.
+func TestLoginResolveStartsNoFlow(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "resolve-clean")
+	gate := newAuthRecord(t, srv, "Keys", db.AuthAPIKey, db.AuthDescriptor{Key: "s3cret"})
+	setAppGate(t, srv, nonce, gate.ID)
+
+	rr := testRequest(t, srv, "GET", "/service/login?resolve=1", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp["type"] != "legs" {
+		t.Fatalf("type = %v, want legs", resp["type"])
+	}
+	if resp["url"] != nil {
+		t.Errorf("resolve returned a flow url %v — it must not begin a leg", resp["url"])
+	}
+	srv.pendingMu.Lock()
+	n := len(srv.pending)
+	srv.pendingMu.Unlock()
+	if n != 0 {
+		t.Errorf("resolve left %d pending logins behind, want 0", n)
+	}
+}
+
+func TestLoginAnonymousCarriesServiceInfo(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "anon-info")
+	anonID, err := srv.store.BuiltinAuthID(db.AuthAnonymous)
+	if err != nil {
+		t.Fatalf("builtin anonymous: %v", err)
+	}
+	setAppGate(t, srv, nonce, anonID)
+	id := registerService(t, srv, "open", "https://open.example/api",
+		db.ServiceDescriptor{Type: "api", Proxied: true})
+	linkServiceToApp(t, srv, nonce, id)
+
+	rr := testRequest(t, srv, "GET", "/service/login?url=https://open.example/api&state=x", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Type    string `json:"type"`
+		Service struct {
+			ID      int64 `json:"id"`
+			Proxied bool  `json:"proxied"`
+		} `json:"service"`
+	}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	if resp.Type != "anonymous" {
+		t.Fatalf("type = %q, want anonymous", resp.Type)
+	}
+	// Without this the browser has no service id and cannot build a proxied
+	// URL — an anonymous service would resolve to a proxy that can't call.
+	if formatInt(resp.Service.ID) != id || !resp.Service.Proxied {
+		t.Errorf("service = %+v, want id %s and proxied", resp.Service, id)
 	}
 }

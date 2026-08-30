@@ -204,14 +204,30 @@ func publicSSHInfo(k *sshkit.SSHKeyInfo) *sshkit.SSHKeyInfo {
 
 // ── App operations ──────────────────────────────────────────────────
 
-func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *int64) (string, error) {
+// validateAuthSlot checks that an optional slot reference points at a real
+// auth record. Every kind is eligible in both slots — what a kind means just
+// differs by slot — so existence is the whole check.
+func (s *Server) validateAuthSlot(slot string, id *int64) error {
+	if id == nil {
+		return nil
+	}
+	if _, err := s.store.GetAuthRecord(*id); err != nil {
+		return cerr(http.StatusBadRequest, "%s: %v", slot, err)
+	}
+	return nil
+}
+
+func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *int64, protectedBy *int64) (string, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return "", err
 	}
 	if name == "" {
 		return "", cerr(http.StatusBadRequest, "name required")
 	}
-	nonce, err := s.store.CreateApp(name, env, url, ownerID)
+	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
+		return "", err
+	}
+	nonce, err := s.store.CreateApp(name, env, url, ownerID, protectedBy)
 	if err != nil {
 		return "", cerr(http.StatusInternalServerError, "%v", err)
 	}
@@ -220,11 +236,14 @@ func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *i
 	return nonce, nil
 }
 
-func (s *Server) coreUpdateApp(actor *db.User, nonce, name, env, url string, ownerID *int64) error {
+func (s *Server) coreUpdateApp(actor *db.User, nonce, name, env, url string, ownerID *int64, protectedBy *int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
-	if err := s.store.UpdateApp(nonce, name, env, url, ownerID); err != nil {
+	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
+		return err
+	}
+	if err := s.store.UpdateApp(nonce, name, env, url, ownerID, protectedBy); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
 	s.rebuildHostedRoutes()
@@ -273,12 +292,15 @@ func (s *Server) coreSetAppServices(actor *db.User, nonce string, services []int
 
 // ── Service operations ──────────────────────────────────────────────
 
-func (s *Server) coreCreateService(actor *db.User, name, url string, d db.ServiceDescriptor) (*db.Service, error) {
+func (s *Server) coreCreateService(actor *db.User, name, url string, d db.ServiceDescriptor, protectedBy, actsAs *int64) (*db.Service, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, err
 	}
 	if name == "" {
 		return nil, cerr(http.StatusBadRequest, "name required")
+	}
+	if !db.ValidServiceType(d.Type) {
+		return nil, cerr(http.StatusBadRequest, "unknown service type %q", d.Type)
 	}
 	url = defaultServiceURL(url, name, d)
 	if url == "" {
@@ -287,11 +309,17 @@ func (s *Server) coreCreateService(actor *db.User, name, url string, d db.Servic
 	if err := s.validateDBDescriptor(d); err != nil {
 		return nil, err
 	}
-	id, err := s.store.RegisterService(name, url, d)
+	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
+		return nil, err
+	}
+	if err := s.validateAuthSlot("acts_as", actsAs); err != nil {
+		return nil, err
+	}
+	id, err := s.store.RegisterService(name, url, d, protectedBy, actsAs)
 	if err != nil {
 		return nil, cerr(http.StatusInternalServerError, "%v", err)
 	}
-	svc := &db.Service{ID: id, Name: name, URL: url, Descriptor: d}
+	svc := &db.Service{ID: id, Name: name, URL: url, Descriptor: d, ProtectedBy: protectedBy, ActsAs: actsAs}
 	s.syncVirtualMCP(svc, "")
 	s.audit(actor, "created service", name)
 	return svc, nil
@@ -300,7 +328,7 @@ func (s *Server) coreCreateService(actor *db.User, name, url string, d db.Servic
 // coreUpdateService replaces a service's fields. Callers wanting patch
 // semantics (fill blanks from the existing record) should resolve those
 // before calling. The built-in SSH service keeps its name and URL.
-func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d db.ServiceDescriptor) error {
+func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d db.ServiceDescriptor, protectedBy, actsAs *int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
@@ -310,6 +338,9 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	}
 	if name == "" {
 		return cerr(http.StatusBadRequest, "name required")
+	}
+	if !db.ValidServiceType(d.Type) {
+		return cerr(http.StatusBadRequest, "unknown service type %q", d.Type)
 	}
 	url = defaultServiceURL(url, name, d)
 	if url == "" {
@@ -322,11 +353,69 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	if err := s.validateDBDescriptor(d); err != nil {
 		return err
 	}
-	if err := s.store.UpdateService(id, name, url, d); err != nil {
+	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
+		return err
+	}
+	if err := s.validateAuthSlot("acts_as", actsAs); err != nil {
+		return err
+	}
+	if err := s.store.UpdateService(id, name, url, d, protectedBy, actsAs); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
-	s.syncVirtualMCP(&db.Service{ID: id, Name: name, URL: url, Descriptor: d}, existing.URL)
+	s.syncVirtualMCP(&db.Service{ID: id, Name: name, URL: url, Descriptor: d, ProtectedBy: protectedBy, ActsAs: actsAs}, existing.URL)
 	s.audit(actor, "updated service", name)
+	return nil
+}
+
+// ── Auth record operations ──────────────────────────────────────────
+
+func (s *Server) coreCreateAuth(actor *db.User, name, kind string, d db.AuthDescriptor) (*db.AuthRecord, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return nil, err
+	}
+	if name == "" {
+		return nil, cerr(http.StatusBadRequest, "name required")
+	}
+	if !db.ValidAuthKind(kind) {
+		return nil, cerr(http.StatusBadRequest, "unknown auth kind %q", kind)
+	}
+	rec, err := s.store.CreateAuthRecord(name, kind, d)
+	if err != nil {
+		return nil, cerr(http.StatusInternalServerError, "%v", err)
+	}
+	s.audit(actor, "created auth record", name)
+	return rec, nil
+}
+
+func (s *Server) coreUpdateAuth(actor *db.User, id int64, name, kind string, d db.AuthDescriptor) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	if name == "" {
+		return cerr(http.StatusBadRequest, "name required")
+	}
+	if !db.ValidAuthKind(kind) {
+		return cerr(http.StatusBadRequest, "unknown auth kind %q", kind)
+	}
+	if err := s.store.UpdateAuthRecord(id, name, kind, d); err != nil {
+		return cerr(http.StatusBadRequest, "%v", err)
+	}
+	s.audit(actor, "updated auth record", name)
+	return nil
+}
+
+func (s *Server) coreDeleteAuth(actor *db.User, id int64) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	rec, err := s.store.GetAuthRecord(id)
+	if err != nil {
+		return cerr(http.StatusNotFound, "%v", err)
+	}
+	if err := s.store.DeleteAuthRecord(id); err != nil {
+		return cerr(http.StatusConflict, "%v", err)
+	}
+	s.audit(actor, "deleted auth record", rec.Name)
 	return nil
 }
 
@@ -452,8 +541,18 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 	}
 	if adminAuthService != nil {
 		if *adminAuthService != "" {
-			if _, err := parseID(*adminAuthService); err != nil {
-				return cerr(http.StatusBadRequest, "admin_auth_service must be a numeric service ID")
+			id, err := parseID(*adminAuthService)
+			if err != nil {
+				return cerr(http.StatusBadRequest, "admin_auth_service must be a numeric auth record ID")
+			}
+			rec, err := s.store.GetAuthRecord(id)
+			if err != nil {
+				return cerr(http.StatusBadRequest, "admin_auth_service: %v", err)
+			}
+			// The admin gate must prove who is calling; kinds with no
+			// identity can't back it.
+			if rec.Kind == db.AuthAnonymous || rec.Kind == db.AuthAPIKey {
+				return cerr(http.StatusBadRequest, "admin_auth_service must be an identity-bearing auth record (ssh_key, oidc, or oauth2)")
 			}
 		}
 		if err := s.store.SetSetting("admin_auth_service", *adminAuthService); err != nil {

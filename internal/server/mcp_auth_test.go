@@ -32,14 +32,25 @@ func TestCentralMCPPRM(t *testing.T) {
 	}
 }
 
+// setAdminAuth points admin_auth_service at an OIDC auth record and
+// returns it.
+func setAdminAuth(t *testing.T, srv *Server) *db.AuthRecord {
+	t.Helper()
+	rec := newAuthRecord(t, srv, "Admin IdP", db.AuthOIDC,
+		db.AuthDescriptor{Issuer: "https://admin.example", Provider: "admin-idp"})
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
+	return rec
+}
+
 // ── Central MCP: bearer enforcement at the HTTP layer ───────────────
 
 func TestCentralMCPRequiresBearer(t *testing.T) {
 	srv := newTestServer(t)
-	// admin auth service configured so the verifier reaches token validation,
+	// admin auth record configured so the verifier reaches token validation,
 	// not the "not configured" short-circuit.
-	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcID, 10))
+	setAdminAuth(t, srv)
 
 	rr := testRequest(t, srv, "POST", "/mcp", nil, map[string]string{"Accept": "application/json"})
 	if rr.Code != 401 {
@@ -52,8 +63,7 @@ func TestCentralMCPRequiresBearer(t *testing.T) {
 
 func TestCentralMCPRejectsBadToken(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcID, 10))
+	setAdminAuth(t, srv)
 
 	rr := testRequest(t, srv, "POST", "/mcp", nil, map[string]string{
 		"Accept":        "application/json",
@@ -77,13 +87,10 @@ func TestCentralMCPTokenVerifierNoAdminService(t *testing.T) {
 
 func TestCentralMCPTokenVerifierValid(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, err := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
-	if err != nil {
-		t.Fatalf("register service: %v", err)
-	}
-	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcID, 10))
+	rec := setAdminAuth(t, srv)
 	// The DB user is a Member.
-	if _, err := srv.store.CreateUser("Grace Hopper", "grace@example.com", "Member", "Active"); err != nil {
+	grace, err := srv.store.CreateUser("Grace Hopper", "grace@example.com", "Member", "Active")
+	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
@@ -92,7 +99,7 @@ func TestCentralMCPTokenVerifierValid(t *testing.T) {
 	// token could escalate. Minting with a role that disagrees with the DB is
 	// the whole point — a test that minted "Member" too would pass even if the
 	// verifier wrongly trusted the token.
-	tok, err := srv.mintFreshbreathToken("identity", "grace@example.com", "Superuser", "Grace Hopper", svcID, nil)
+	tok, err := srv.mintFreshbreathToken(subjectForUser(grace), "grace@example.com", "Superuser", "Grace Hopper", rec.ID, nil, nil)
 	if err != nil {
 		t.Fatalf("mint token: %v", err)
 	}
@@ -112,33 +119,88 @@ func TestCentralMCPTokenVerifierValid(t *testing.T) {
 	}
 }
 
-// ── Virtual MCP token verifier (direct) ─────────────────────────────
+// ── Virtual MCP mounts: the door owns the gate ──────────────────────
 
-func TestVirtualTokenVerifierWrapped(t *testing.T) {
+// mountVirtual writes a minimal tool file and registers svc in the
+// virtual MCP registry.
+func mountVirtual(t *testing.T, srv *Server, svc *db.Service) {
+	t.Helper()
+	dataDir := t.TempDir()
+	srv.config.DataDir = dataDir
+	if err := os.MkdirAll(filepath.Join(dataDir, "virtual"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	toolFile := "[hello] Say hello\nGET https://up.example/greet/$name\nAuthorization: Bearer $token\n"
+	if err := os.WriteFile(filepath.Join(dataDir, "virtual", svc.Name+".txt"), []byte(toolFile), 0o644); err != nil {
+		t.Fatalf("write tool file: %v", err)
+	}
+	srv.virtualMCPs.add(srv, svc)
+}
+
+// A mount's gate is its protected_by record: no bearer 401s with a PRM
+// challenge, a token bound to a different record 401s, a bound token
+// clears the door.
+func TestVirtualMCPGateBinding(t *testing.T) {
 	srv := newTestServer(t)
-	svc := &db.Service{ID: 7, Name: "up", URL: "/mcp/up", Descriptor: db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
+	gate := newAuthRecord(t, srv, "Upstream IdP", db.AuthOAuth2,
+		db.AuthDescriptor{AuthorizeURL: "https://up.example/authorize", TokenURL: "https://up.example/token", Provider: "up"})
+	other := newAuthRecord(t, srv, "Other IdP", db.AuthOIDC,
+		db.AuthDescriptor{Issuer: "https://other.example", Provider: "other"})
 
-	tok, err := srv.mintFreshbreathToken("wrapped", "user@example.com", "", "", svc.ID,
-		&sealedUpstreamData{UpstreamToken: "upstream-xyz", UpstreamScopes: "openid email"})
+	svc := &db.Service{ID: 7, Name: "Upstream", URL: "/mcp/upstream",
+		Descriptor: db.ServiceDescriptor{Type: "virtual"}, ProtectedBy: &gate.ID}
+	mountVirtual(t, srv, svc)
+
+	hdr := map[string]string{"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+	rr := testRequest(t, srv, "POST", "/mcp/upstream", nil, hdr)
+	if rr.Code != 401 {
+		t.Fatalf("no bearer: status = %d, want 401", rr.Code)
+	}
+	if wa := rr.Header().Get("WWW-Authenticate"); wa == "" {
+		t.Error("expected WWW-Authenticate challenge with PRM URL")
+	}
+
+	// Bound to the wrong record → still 401.
+	tokOther, err := srv.mintFreshbreathToken(extSubject("other", "sub-1"), "", "", "", other.ID, nil, nil)
 	if err != nil {
-		t.Fatalf("mint wrapped: %v", err)
+		t.Fatalf("mint: %v", err)
+	}
+	hdrOther := map[string]string{"Accept": hdr["Accept"], "Content-Type": hdr["Content-Type"], "Authorization": "Bearer " + tokOther}
+	if rr := testRequest(t, srv, "POST", "/mcp/upstream", nil, hdrOther); rr.Code != 401 {
+		t.Fatalf("foreign-record token: status = %d, want 401", rr.Code)
 	}
 
-	verify := srv.virtualTokenVerifier(svc)
-	req := httptest.NewRequest("POST", "/mcp/up", nil)
-
-	info, err := verify(context.Background(), tok, req)
+	// Bound to the gate record → past the door (the MCP layer may still
+	// reject the empty body, but not with a 401).
+	tokGate, err := srv.mintFreshbreathToken(extSubject("up", "sub-2"), "", "", "", gate.ID, nil, nil)
 	if err != nil {
-		t.Fatalf("verify wrapped: %v", err)
+		t.Fatalf("mint: %v", err)
 	}
-	if info.UserID != "user@example.com" {
-		t.Errorf("UserID = %q, want user@example.com", info.UserID)
+	hdrGate := map[string]string{"Accept": hdr["Accept"], "Content-Type": hdr["Content-Type"], "Authorization": "Bearer " + tokGate}
+	if rr := testRequest(t, srv, "POST", "/mcp/upstream", nil, hdrGate); rr.Code == 401 {
+		t.Fatalf("bound token: status = 401, want admission; body = %s", rr.Body.String())
+	}
+}
+
+// An empty protected_by slot inherits the admin gate — the old open-mount
+// hole must stay closed.
+func TestVirtualMCPEmptySlotInheritsAdmin(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+
+	svc := &db.Service{ID: 9, Name: "Inherit", URL: "/mcp/inherit",
+		Descriptor: db.ServiceDescriptor{Type: "virtual"}}
+	mountVirtual(t, srv, svc)
+
+	rr := testRequest(t, srv, "POST", "/mcp/inherit", nil,
+		map[string]string{"Accept": "application/json, text/event-stream", "Content-Type": "application/json"})
+	if rr.Code != 401 {
+		t.Fatalf("empty slot with admin auth set: status = %d, want 401 (must NOT mount open)", rr.Code)
 	}
 
-	// A token wrapped for a different service must be rejected.
-	otherSvc := &db.Service{ID: 99, Name: "other", URL: "/mcp/other", Descriptor: db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
-	if _, err := srv.virtualTokenVerifier(otherSvc)(context.Background(), tok, req); err == nil {
-		t.Error("expected wrapped token bound to svc 7 to be rejected by svc 99")
+	// And the PRM advertises the authorization server.
+	if rr := testRequest(t, srv, "GET", "/.well-known/oauth-protected-resource/mcp/inherit", nil, nil); rr.Code != 200 {
+		t.Errorf("PRM status = %d, want 200", rr.Code)
 	}
 }
 
@@ -146,20 +208,11 @@ func TestVirtualTokenVerifierWrapped(t *testing.T) {
 
 func TestVirtualMCPPRM(t *testing.T) {
 	srv := newTestServer(t)
-
-	// Hermetic virtual tool file under a temp data dir.
-	dataDir := t.TempDir()
-	srv.config.DataDir = dataDir
-	if err := os.MkdirAll(filepath.Join(dataDir, "virtual"), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	toolFile := "[hello] Say hello\nGET https://up.example/greet/$name\nAuthorization: Bearer $token\n"
-	if err := os.WriteFile(filepath.Join(dataDir, "virtual", "Upstream.txt"), []byte(toolFile), 0o644); err != nil {
-		t.Fatalf("write tool file: %v", err)
-	}
-
-	svc := &db.Service{ID: 7, Name: "Upstream", URL: "/mcp/upstream", Descriptor: db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"}}
-	srv.virtualMCPs.add(srv, svc)
+	gate := newAuthRecord(t, srv, "Upstream IdP", db.AuthOAuth2,
+		db.AuthDescriptor{AuthorizeURL: "https://up.example/authorize", TokenURL: "https://up.example/token", Provider: "up"})
+	svc := &db.Service{ID: 7, Name: "Upstream", URL: "/mcp/upstream",
+		Descriptor: db.ServiceDescriptor{Type: "virtual"}, ProtectedBy: &gate.ID}
+	mountVirtual(t, srv, svc)
 
 	rr := testRequest(t, srv, "GET", "/.well-known/oauth-protected-resource/mcp/upstream", nil, nil)
 	if rr.Code != 200 {
@@ -187,23 +240,26 @@ func TestVirtualMCPNotFound(t *testing.T) {
 	}
 }
 
-// ── Virtual MCP without auth → no PRM ────────────────────────────────
+// ── Explicit Anonymous mount → open, and no PRM ─────────────────────
 
-func TestVirtualMCPNoAuthHasNoPRM(t *testing.T) {
+func TestVirtualMCPAnonymousHasNoPRM(t *testing.T) {
 	srv := newTestServer(t)
-	dataDir := t.TempDir()
-	srv.config.DataDir = dataDir
-	os.MkdirAll(filepath.Join(dataDir, "virtual"), 0o755)
-	os.WriteFile(filepath.Join(dataDir, "virtual", "Open.txt"),
-		[]byte("[ping] Ping\nGET https://open.example/ping\n"), 0o644)
+	anon := builtinAuth(t, srv, db.AuthAnonymous)
 
-	// No OAuthURL / ClientID / key auth → unauthenticated virtual service.
-	svc := &db.Service{ID: 8, Name: "Open", URL: "/mcp/open", Descriptor: db.ServiceDescriptor{Type: "mcp"}}
-	srv.virtualMCPs.add(srv, svc)
+	svc := &db.Service{ID: 8, Name: "Open", URL: "/mcp/open",
+		Descriptor: db.ServiceDescriptor{Type: "virtual"}, ProtectedBy: &anon.ID}
+	mountVirtual(t, srv, svc)
 
 	rr := testRequest(t, srv, "GET", "/.well-known/oauth-protected-resource/mcp/open", nil, nil)
 	if rr.Code != 404 {
-		t.Errorf("status = %d, want 404 (no auth configured → no PRM)", rr.Code)
+		t.Errorf("status = %d, want 404 (Anonymous gate advertises nothing)", rr.Code)
+	}
+
+	// And the door admits a bare request.
+	rr = testRequest(t, srv, "POST", "/mcp/open", nil,
+		map[string]string{"Accept": "application/json, text/event-stream", "Content-Type": "application/json"})
+	if rr.Code == 401 {
+		t.Errorf("Anonymous mount answered 401; body = %s", rr.Body.String())
 	}
 }
 
@@ -211,7 +267,7 @@ func TestVirtualMCPNoAuthHasNoPRM(t *testing.T) {
 
 func TestIsFreshbreathToken(t *testing.T) {
 	srv := newTestServer(t)
-	tok, err := srv.mintFreshbreathToken("identity", "u@example.com", "Admin", "U", 1, nil)
+	tok, err := srv.mintFreshbreathToken("frbr:1", "u@example.com", "Admin", "U", 1, nil, nil)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -225,33 +281,5 @@ func TestIsFreshbreathToken(t *testing.T) {
 	// Valid 3-part shape but foreign issuer.
 	if isFreshbreathToken("aaa.bbb.ccc") {
 		t.Error("garbage payload should not be recognized")
-	}
-}
-
-func TestVerifyTaskTokenMissingBearer(t *testing.T) {
-	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	req := httptest.NewRequest("GET", "/whatever", nil)
-	if _, _, err := srv.verifyTaskToken(req, svcID); err == nil {
-		t.Fatal("expected error when Authorization header is absent")
-	}
-}
-
-func TestVerifyTaskTokenIdentity(t *testing.T) {
-	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("Kay", "kay@example.com", "Member", "Active"); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	tok, _ := srv.mintFreshbreathToken("identity", "kay@example.com", "Member", "Kay", svcID, nil)
-
-	req := httptest.NewRequest("GET", "/whatever", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	user, _, err := srv.verifyTaskToken(req, svcID)
-	if err != nil {
-		t.Fatalf("verifyTaskToken: %v", err)
-	}
-	if user.Email != "kay@example.com" {
-		t.Errorf("email = %q, want kay@example.com", user.Email)
 	}
 }

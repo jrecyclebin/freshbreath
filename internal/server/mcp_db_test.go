@@ -16,7 +16,7 @@ func callDBTool(t *testing.T, srv *Server, name string, args map[string]interfac
 
 func TestMCPDatabaseToolsReadOnly(t *testing.T) {
 	srv := newAppDBServer(t)
-	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestMCPDatabaseToolsReadOnly(t *testing.T) {
 
 func TestMCPDatabaseToolsFullAccess(t *testing.T) {
 	srv := newAppDBServer(t)
-	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestMCPDatabaseToolsGate(t *testing.T) {
 	if err := srv.gateDBTarget(member, "global"); err == nil {
 		t.Error("member on global: want 403")
 	}
-	nonce, err := srv.store.CreateApp("mine", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("mine", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

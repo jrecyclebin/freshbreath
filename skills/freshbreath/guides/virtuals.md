@@ -89,11 +89,29 @@ const prs = await githubService.callTool('list-pull-requests', {
 });
 ```
 
-The `$token` variable is a special case: it is passed in automatically by
-Fresh Breath to the script using the user's creds for the upstream service.
-(Technically Fresh Breath delivers the user a Fresh Breath token to access the
-virtual service, and the virtual service unwraps that token to get the
-upstream creds - those creds are passed in as the `$token` variable.)
+The `$token` variable is a special case: Fresh Breath fills it in with the
+credential that should go upstream, and *which* credential that is depends on
+the service's **acts as** slot:
+
+* **A stored record** (api_key, ssh_key) — that credential, the same for every
+  caller. This is the one that works with nobody present.
+* **An interactive record** (oidc, oauth2) — the caller's own credential for
+  that provider, unsealed from their Fresh Breath token. The caller has to have
+  logged in to that record.
+* **Empty** — the caller's own credential, whatever their gate yielded. Behind
+  an open gate the caller's `Authorization` simply rides through untouched;
+  behind a passphrase gate there is no upstream credential at all, so `$token`
+  is empty.
+
+(Technically the browser holds a Fresh Breath token with upstream credentials
+sealed inside it, unreadable there; the server unseals the right one on the way
+out. The same resolution feeds the HTTP proxy, so the two can't drift.)
+
+**Unattended callers.** A Scheduled Task, or anything else running with nobody
+in front of it, has no interactive credential to offer. If a tool needs to reach
+upstream unattended, its service must **act as a stored record** — an api_key or
+ssh_key. An interactive record fails the call rather than silently sending
+nothing, and the error says which record needs the login.
 
 A few other variables that come with token:
 

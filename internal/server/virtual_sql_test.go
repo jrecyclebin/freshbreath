@@ -32,11 +32,11 @@ func newVirtualSvcServer(t *testing.T, toolFile string, d db.ServiceDescriptor) 
 	if d.DatabaseName == "" {
 		d.DatabaseName = ""
 	}
-	svc, err := srv.coreCreateService(&db.User{ID: 1, Role: "Admin"}, "Keeper", "/mcp/keeper", d)
+	svc, err := srv.coreCreateService(&db.User{ID: 1, Role: "Admin"}, "Keeper", "/mcp/keeper", d, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
-	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestBrowserSQLRunnerAppNonceLinkCheck(t *testing.T) {
 	// A second app, NOT linked to the service. An app_nonce naming it must
 	// be refused — a public page can't aim a linked service at someone
 	// else's data.
-	other, err := srv.store.CreateApp("other", "Development", "", nil)
+	other, err := srv.store.CreateApp("other", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,11 +146,11 @@ func TestMCPSQLRunnerGatesByMembership(t *testing.T) {
 	srv, _, _ := newVirtualSvcServer(t, sqlToolFile, db.ServiceDescriptor{})
 
 	// A member of one app; a second app they don't belong to.
-	nonce1, err := srv.store.CreateApp("mine", "Development", "", nil)
+	nonce1, err := srv.store.CreateApp("mine", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	nonce2, err := srv.store.CreateApp("theirs", "Development", "", nil)
+	nonce2, err := srv.store.CreateApp("theirs", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestBrowserSQLRunnerFixedTargets(t *testing.T) {
 
 func TestValidateDBDescriptor(t *testing.T) {
 	srv := newAppDBServer(t)
-	nonce, err := srv.store.CreateApp("real", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("real", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,20 +326,20 @@ func TestVirtualAuthFromClaims(t *testing.T) {
 		t.Errorf("no-claims auth = %+v", auth)
 	}
 
-	// Claims for an email with no Fresh Breath account: email/sub carried,
-	// no numerical ID.
-	claims := &freshbreathClaims{Claims: josejwt.Claims{Subject: "ghost@example.com"}, UserEmail: "ghost@example.com"}
+	// Claims for an ext: subject (no Fresh Breath account): email/sub
+	// carried, no numerical ID.
+	claims := &freshbreathClaims{Claims: josejwt.Claims{Subject: extSubject("idp", "ghost")}, UserEmail: "ghost@example.com"}
 	auth = srv.virtualAuth("tok", claims)
 	if auth.Email != "ghost@example.com" || auth.UserID != nil {
 		t.Errorf("unknown-user auth = %+v", auth)
 	}
 
-	// Claims for a real user: the numerical ID resolves.
+	// Claims for a real user: the numerical ID resolves from the frbr: subject.
 	kay, err := srv.store.CreateUser("Kay", "kay@example.com", "Member", "Active")
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims = &freshbreathClaims{Claims: josejwt.Claims{Subject: "kay@example.com"}, UserEmail: "kay@example.com"}
+	claims = &freshbreathClaims{Claims: josejwt.Claims{Subject: subjectForUser(kay)}, UserEmail: "kay@example.com"}
 	auth = srv.virtualAuth("tok", claims)
 	if auth.UserID != kay.ID {
 		t.Errorf("UserID = %v (%T), want %d", auth.UserID, auth.UserID, kay.ID)
@@ -364,26 +364,24 @@ INSERT INTO stamps (email, uid)
 		t.Fatal(err)
 	}
 
-	// An OIDC auth service gates the call; Kay holds an identity token for it.
-	idpID, err := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// An OIDC auth record gates the app door; Kay holds a token bound to it.
+	idp := newAuthRecord(t, srv, "IdP", db.AuthOIDC,
+		db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
 	kay, err := srv.store.CreateUser("Kay", "kay@example.com", "Member", "Active")
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := srv.mintFreshbreathToken("identity", "kay@example.com", "Member", "Kay", idpID, nil)
+	tok, err := srv.mintFreshbreathToken(subjectForUser(kay), "kay@example.com", "Member", "Kay", idp.ID, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	svc, err := srv.coreCreateService(&db.User{ID: 1, Role: "Admin"}, "Keeper", "/mcp/keeper",
-		db.ServiceDescriptor{Type: "virtual", AuthServiceID: strconv.FormatInt(idpID, 10)})
+		db.ServiceDescriptor{Type: "virtual"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
-	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil, &idp.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

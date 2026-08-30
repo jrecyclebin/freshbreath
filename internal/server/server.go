@@ -86,23 +86,33 @@ type hostedApp struct {
 	environment string
 }
 
+// pendingAuth is one login in progress: the auth records still to clear
+// (legs), a cursor, and the legs already done. One object travels the whole
+// flow — each leg re-keys it under a fresh state, so retries stay possible
+// until the TTL. Browser flows carry appNonce/appState for the postMessage
+// hand-back; MCP flows carry mcpKey into the mcpAuthPending map instead.
 type pendingAuth struct {
-	serviceID     int64
-	serviceURL    string
-	appNonce      string
-	appState      string
+	appNonce string // requesting app (or adminNonce); "" for MCP flows
+	appState string // opener's correlation state (browser flows)
+	mcpKey   string // key into mcpAuthPending; "" for browser flows
+
+	legs      []*db.AuthRecord // records still to clear, in order
+	at        int              // cursor into legs
+	done      []*completedLeg  // cleared legs (including any pre-covered by a presented token)
+	primaryID int64            // record the finished token is minted under
+
+	// Active-leg OAuth state (interactive kinds only).
 	verifier      string
 	clientID      string
 	clientSecret  string
 	tokenEndpoint string
-	scopes        string
-	proxied       bool
-	serviceType   string // descriptor type: "oidc", "ssh", "mcp", "api"
-	// OIDC fields
-	oidcNonce  string
-	oidcIssuer string
-	expiresAt  time.Time
+	oidcNonce     string
+
+	expiresAt time.Time
 }
+
+// current returns the leg the flow is waiting on.
+func (p *pendingAuth) current() *db.AuthRecord { return p.legs[p.at] }
 
 // putPending registers a login-in-progress state, stamped with pendingAuthTTL.
 // State is only removed by expiry (or its own retrieval of an expired entry) —

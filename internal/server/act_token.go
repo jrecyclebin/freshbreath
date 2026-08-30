@@ -39,10 +39,10 @@ const actTokenTTL = 10 * time.Minute
 // capability can't be widened after minting — no swapping path, method, or
 // user. Path is a full path+query under /api/*.
 type actTokenPayload struct {
-	Path      string `json:"path"`
-	Method    string `json:"method"`
-	Expiry    int64  `json:"expiry"` // unix seconds
-	UserEmail string `json:"user_email"`
+	Path    string `json:"path"`
+	Method  string `json:"method"`
+	Expiry  int64  `json:"expiry"`  // unix seconds
+	Subject string `json:"subject"` // "frbr:<user_id>" — act tokens act as real users only
 }
 
 // mintActToken issues a short-lived capability token letting an anonymous
@@ -55,10 +55,10 @@ func (s *Server) mintActToken(user *db.User, method, pathQuery string, ttl time.
 		return "", fmt.Errorf("act token path must be under /api/: %q", pathQuery)
 	}
 	p := actTokenPayload{
-		Path:      pathQuery,
-		Method:    method,
-		Expiry:    time.Now().Add(ttl).Unix(),
-		UserEmail: user.Email,
+		Path:    pathQuery,
+		Method:  method,
+		Expiry:  time.Now().Add(ttl).Unix(),
+		Subject: subjectForUser(user),
 	}
 	plain, err := json.Marshal(&p)
 	if err != nil {
@@ -135,7 +135,7 @@ func (s *Server) handleAct(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	user, err := s.store.GetUserByEmail(payload.UserEmail)
+	user, err := s.userFromSubject(payload.Subject)
 	if err != nil || user == nil || user.Status != "Active" {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return

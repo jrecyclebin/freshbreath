@@ -1,24 +1,46 @@
 /**
- * Fresh Breath Service Proxy client SDK.
+ * Fresh Breath client SDK.
  *
- * User-provided API keys and OAuth tokens are stored in the browser's
- * localStorage. The server's OAuth client_secret is never exposed to
- * the client — token exchange and refresh run server-side.
+ * One verb: `login(serviceURL)`. It resolves what the door asks for, spends
+ * a credential the browser already holds when one fits, and prompts only
+ * when nothing does. What comes back is a ServiceProxy you can call.
+ *
+ * What the browser holds is always a Fresh Breath token — an identity with
+ * any upstream credentials sealed inside it, unreadable here and unsealed
+ * by the proxy on the way out. Refresh tokens live in HttpOnly cookies and
+ * the OAuth client_secret never leaves the server, so the worst a page can
+ * read out of localStorage is a token that expires.
  */
-import { McpClient, StreamableHTTPClientTransport, EventEmitter } from "/control/vendor/frbr-deps-1.29.0.js";
+import { McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.29.0.js";
 
-const API = window.__HOMESLICE_CONFIG?.apiBase ?? "";
-const APP_NONCE = window.__HOMESLICE_CONFIG?.appNonce ?? null;
+const CFG = window.__HOMESLICE_CONFIG ?? {};
+const API = CFG.apiBase ?? "";
+const APP_NONCE = CFG.appNonce ?? null;
+// The auth record guarding this page. 0 when the door is open — an app
+// behind the Anonymous record, or an instance still in setup.
+const GATE_ID = CFG.authRecordID ?? 0;
 
-// Peek at a JWT's iss claim to check if it was issued by Freshbreath.
-function isFreshbreathToken(raw) {
-  if (!raw || typeof raw !== 'string') return false;
-  const parts = raw.split('.');
-  if (parts.length !== 3) return false;
+// The origin our callback page will post from. The page posts to "*"
+// because it cannot know its opener's origin; the listener is the half
+// that can be strict, so this is where strictness goes.
+const FRBR_ORIGIN = new URL(API || window.location.href, window.location.href).origin;
+
+// Peek at a JWT payload without verifying anything. Verification is the
+// server's job — this is only ever used to read a claim we already trust
+// the shape of.
+function jwtPayload(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const parts = raw.split(".");
+  if (parts.length !== 3) return null;
   try {
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-    return payload.iss === 'freshbreath';
-  } catch { return false; }
+    return JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+  } catch { return null; }
+}
+
+// Whether a bearer was minted here. The twin of this check lives in
+// services.go — keep them in step.
+function isFreshbreathToken(raw) {
+  return jwtPayload(raw)?.iss === "freshbreath";
 }
 
 function uuidv4() {
@@ -31,331 +53,377 @@ function uuidv4() {
   return [...b].map((x, i) => (i === 4 || i === 6 || i === 8 || i === 10 ? "-" : "") + x.toString(16).padStart(2, "0")).join("");
 }
 
-// ── static login flow ──
-/**
-  * Open an OAuth popup for the given service URL.
-  * On success returns a ServiceProxy instance with token data loaded.
-  */
-export function login(svc) {
-  const serviceURL = svc.serviceURL || svc;
-  const actualState = svc.state || uuidv4();
-  return new Promise(async (resolve, reject) => {
-    // If we already know it's key-auth (have an apiKey), skip the popup
-    const url = `${API}/service/login?url=${encodeURIComponent(serviceURL)}&state=${encodeURIComponent(actualState)}`;
-    const res = await fetch(url, { headers: { "X-App-Nonce": APP_NONCE } });
-    const data = await res.json();
+// ── The store ───────────────────────────────────────────────────────
+//
+// One entry per cleared auth record at localStorage["frbr:auth:<id>"].
+// frbr.js is the sole writer; apps never touch these keys. Because apps
+// share an origin they also share the store — deliberate, and the reason
+// two apps behind one gate prompt once between them. Spending is still
+// bounded by X-App-Nonce and the app's service links, not by who can read
+// a key.
 
-    if (data.type !== "redirect") {
-      try {
-        if (data.type === "key-auth-complete") {
-          resolve(new ServiceProxy({
-            serviceURL: data.serviceURL,
-            serviceID: data.serviceID,
-            apiKey: svc.apiKey || data.apiKey,
-            apiHeader: data.apiHeader,
-            proxied: data.proxied,
-          }));
-          return;
-        }
-        // Not key-auth? Fall through to popup flow
-      } catch (e) {
-        reject(e);
+const STORE_PREFIX = "frbr:auth:";
+const STORE_V = 1;
+// Refresh this far ahead of expiry, so a request never races the clock.
+const REFRESH_MARGIN_MS = 5 * 60_000;
+
+const storeKey = (authID) => STORE_PREFIX + authID;
+
+// Read an entry, live or lapsed — a lapsed token entry is still worth
+// having, since the refresh cookie can revive it. An entry from a schema
+// we don't recognize is discarded outright: re-logging in is cheap, and
+// guessing at an unknown shape is not.
+function readEntry(authID) {
+  if (!authID) return null;
+  let e = null;
+  try { e = JSON.parse(localStorage.getItem(storeKey(authID)) || "null"); } catch {}
+  if (!e || typeof e !== "object") return null;
+  if (e.v !== STORE_V) { evictEntry(authID); return null; }
+  return e;
+}
+
+function writeEntry(entry) {
+  entry.written_at = new Date().toISOString();
+  try { localStorage.setItem(storeKey(entry.auth_id), JSON.stringify(entry)); } catch {}
+  return entry;
+}
+
+function evictEntry(authID) {
+  try { localStorage.removeItem(storeKey(authID)); } catch {}
+}
+
+// expires_at is required, so it is always derived from something: the
+// token response's expires_in, or failing that the token's own exp claim.
+// A response offering neither yields an entry that is already expired —
+// loud and self-correcting. The old client wrote null here instead, and
+// expiry simply never fired again.
+function expiryFrom(tokenResponse) {
+  if (tokenResponse.expires_in) {
+    return new Date(Date.now() + tokenResponse.expires_in * 1000).toISOString();
+  }
+  const exp = jwtPayload(tokenResponse.access_token)?.exp;
+  return new Date(exp ? exp * 1000 : 0).toISOString();
+}
+
+// Thrown when a refresh is refused: the family is gone and only a fresh
+// login will do. Callers catch this to decide when to offer one — frbr.js
+// never opens a popup on its own, because a popup with no click behind it
+// is a popup the browser blocks.
+export class SessionExpired extends Error {
+  constructor(authID) {
+    super("Session expired — log in again");
+    this.name = "SessionExpired";
+    this.authID = authID;
+  }
+}
+
+// ── AuthSession ─────────────────────────────────────────────────────
+//
+// One per auth record, held in a registry keyed by id. Two proxies behind
+// the same gate get the same session: one credential, one refresh mutex,
+// one storage slot. When a refresh lands, every proxy riding that session
+// recovers together.
+
+const sessions = new Map();
+
+export class AuthSession {
+  #entry;
+  #refreshing = null;
+
+  constructor(entry) { this.#entry = entry; }
+
+  static for(entry) {
+    const existing = sessions.get(entry.auth_id);
+    if (existing) { existing.#entry = entry; return existing; }
+    const session = new AuthSession(entry);
+    sessions.set(entry.auth_id, session);
+    return session;
+  }
+
+  static get(authID) { return sessions.get(authID) ?? null; }
+
+  get authID()    { return this.#entry.auth_id; }
+  get kind()      { return this.#entry.kind; }
+  get provider()  { return this.#entry.provider ?? null; }
+  get subject()   { return this.#entry.subject ?? null; }
+  get legs()      { return this.#entry.legs ?? []; }
+  get token()     { return this.#entry.access_token ?? null; }
+  get expiresAt() { return this.#entry.expires_at ? new Date(this.#entry.expires_at) : null; }
+
+  // Whether this session already clears a given record — directly, or as
+  // one of the legs sealed into a merged two-leg token.
+  covers(authID) {
+    return this.authID === authID || this.legs.includes(authID);
+  }
+
+  // Set whatever header this record's kind implies, and report whether the
+  // credential is one a refresh could renew. A typed key is not.
+  addAuth(headers) {
+    const e = this.#entry;
+    if (e.access_token) {
+      headers.set("Authorization", `${e.token_type || "Bearer"} ${e.access_token}`);
+      return true;
+    }
+    if (e.key) {
+      if (e.header) headers.set(e.header, e.key);
+      else headers.set("Authorization", `Bearer ${e.key}`);
+    }
+    return false;
+  }
+
+  // Live enough to spend? A key entry always is; a token entry is until it
+  // comes within the refresh margin of its stated expiry.
+  get live() {
+    const e = this.#entry;
+    if (!e.access_token) return !!e.key;
+    const t = Date.parse(e.expires_at);
+    return Number.isFinite(t) && t - Date.now() > REFRESH_MARGIN_MS;
+  }
+
+  async check() {
+    if (!this.live) await this.refresh();
+  }
+
+  async refresh() {
+    if (this.#refreshing) return this.#refreshing;
+    this.#refreshing = this.#doRefresh();
+    try { return await this.#refreshing; }
+    finally { this.#refreshing = null; }
+  }
+
+  async #doRefresh() {
+    const e = this.#entry;
+    if (!e.access_token) return; // nothing to rotate
+
+    // The refresh token rides an HttpOnly cookie scoped to this exact path,
+    // which is why the route carries the record id: a browser holding
+    // several records' refresh tokens keeps them in distinct cookie slots.
+    const r = await fetch(`${API}/oauth/token/${e.auth_id}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-App-Nonce": APP_NONCE,
+      },
+      credentials: "include",
+      body: new URLSearchParams({ grant_type: "refresh_token" }),
+    });
+    if (!r.ok) {
+      if (r.status === 400 || r.status === 401) {
+        // Refused: the refresh family is gone. Keeping the entry would only
+        // let a dead token ride along on the next request.
+        this.forget();
+        throw new SessionExpired(e.auth_id);
+      }
+      throw new Error(`Token refresh failed (${r.status})`);
+    }
+    const t = await r.json();
+    delete t.refresh_token; // browser flows ride the cookie; never store one
+    this.#entry = writeEntry({
+      ...e,
+      access_token: t.access_token,
+      token_type: t.token_type || e.token_type || "Bearer",
+      expires_at: expiryFrom(t),
+    });
+  }
+
+  // Drop this session and its stored entry. The server keeps no session to
+  // end — the refresh family dies with the next attempt to use it.
+  forget() {
+    evictEntry(this.authID);
+    sessions.delete(this.authID);
+  }
+}
+
+// ── login ───────────────────────────────────────────────────────────
+
+// Ask the door what a login would cost. A pure query: it starts no flow
+// and leaves no state, which is what makes it safe to call before we know
+// whether we can pay.
+async function resolveDoor(serviceURL) {
+  const q = new URLSearchParams({ resolve: "1" });
+  if (serviceURL) q.set("url", serviceURL);
+  const r = await fetch(`${API}/service/login?${q}`, {
+    headers: { "X-App-Nonce": APP_NONCE },
+  });
+  if (!r.ok) {
+    throw new Error(`Login resolution failed (${r.status}): ${await r.text().catch(() => "")}`);
+  }
+  return r.json();
+}
+
+// Commit to a login, presenting whatever we found. The server re-verifies
+// it: a browser saying "I'm already logged in" is a claim, not a fact.
+async function beginLogin(serviceURL, state, session) {
+  const q = new URLSearchParams({ state });
+  if (serviceURL) q.set("url", serviceURL);
+  const headers = { "X-App-Nonce": APP_NONCE };
+  if (session?.token) headers["Authorization"] = `Bearer ${session.token}`;
+  const r = await fetch(`${API}/service/login?${q}`, { headers });
+  if (!r.ok) {
+    throw new Error(`Login failed (${r.status}): ${await r.text().catch(() => "")}`);
+  }
+  return r.json();
+}
+
+// The stored entry worth presenting is the one covering the most of what
+// this door asks for. A two-leg login is stored under its outbound record
+// with the inbound listed in `legs`, so that entry beats the gate-only one
+// and skips the popup entirely.
+async function candidateSession(legIDs) {
+  let best = null, bestCount = 0;
+  for (const id of legIDs) {
+    const e = readEntry(id);
+    if (!e) continue;
+    const covered = legIDs.filter(l => l === e.auth_id || (e.legs || []).includes(l)).length;
+    if (covered > bestCount) { best = e; bestCount = covered; }
+  }
+  if (!best) return null;
+  const session = AuthSession.for(best);
+  try { await session.check(); } catch { return null; }
+  return session;
+}
+
+function popupLogin(url, state) {
+  return new Promise((resolve, reject) => {
+    const popup = window.open(url, "frbrAuth", "width=520,height=720");
+    if (!popup) { reject(new Error("The login window was blocked")); return; }
+
+    const finish = (fn, arg) => {
+      window.removeEventListener("message", onMessage);
+      clearInterval(watch);
+      popup.close();
+      fn(arg);
+    };
+    const onMessage = (e) => {
+      // Origin first, then correlation. Correlating on state alone let any
+      // frame that guessed it hand us a credential.
+      if (e.origin !== FRBR_ORIGIN) return;
+      const msg = e.data;
+      if (!msg || msg.type !== "auth-complete" || msg.state !== state) return;
+      if (!msg.entry?.auth_id) {
+        finish(reject, new Error("Login finished without a credential"));
         return;
       }
-    }
-
-    // OAuth / OIDC popup flow
-    const popup = window.open(data.url, "serviceAuth", "width=520,height=720");
-
-    const handler = (e) => {
-      const msg = e.data;
-      if (msg.state !== actualState) return;
-      window.removeEventListener("message", handler);
-      clearInterval(check);
-      popup?.close();
-
-      if (msg?.type !== "auth-complete") return;
-      try {
-        delete msg?.data?.refresh_token; // Kept in an HttpOnly cookie
-        if (msg?.data?.expires_at) {
-          msg.data.expires_at = new Date(msg.data.expires_at);
-        }
-        const proxy = new ServiceProxy({ serviceURL: msg.serviceURL, serviceID: msg.serviceID, data: msg.data, proxied: msg.data?.proxied });
-        resolve(proxy);
-      } catch (err) {
-        reject(err);
-      }
+      finish(resolve, msg.entry);
     };
-    window.addEventListener("message", handler);
-
-    const check = setInterval(() => {
-      if (popup?.closed) {
-        clearInterval(check);
-        window.removeEventListener("message", handler);
-        reject(new Error("Popup closed"));
-      }
+    window.addEventListener("message", onMessage);
+    const watch = setInterval(() => {
+      if (popup.closed) finish(reject, new Error("Login window closed"));
     }, 500);
   });
 }
 
-export class ServiceProxy extends EventEmitter {
+/**
+ * Log in to a service and get back a proxy for it.
+ *
+ * With no argument it clears this page's own gate and returns nothing —
+ * the "sign in" verb for a gated app. Either way the app's gate is part of
+ * the bill, so logging in to a service signs you in to the app too.
+ *
+ * A door that asks for nothing resolves instantly. A door already covered
+ * by the store resolves with no popup. Only a genuinely missing credential
+ * opens a window, so call this from a click.
+ *
+ * @param {string} [serviceURL] — a registered service URL, or omitted for
+ *                                the app's own gate
+ * @returns {Promise<ServiceProxy|AuthSession|null>}
+ */
+export async function login(serviceURL) {
+  const door = await resolveDoor(serviceURL);
+  const proxyFor = (service, session) =>
+    serviceURL ? new ServiceProxy({ serviceURL, service, session }) : session;
+
+  if (door.type === "anonymous") return proxyFor(door.service, null);
+
+  const legIDs = (door.legs || []).map(l => l.auth_id);
+  let session = await candidateSession(legIDs);
+
+  const state = uuidv4();
+  const d = await beginLogin(serviceURL, state, session);
+  const service = d.service ?? door.service;
+
+  if (d.type === "anonymous") return proxyFor(service, null);
+  if (d.type === "ok") return proxyFor(service, session);
+
+  session = AuthSession.for(writeEntry(await popupLogin(d.url, state)));
+  return proxyFor(service, session);
+}
+
+/**
+ * The session for this page's own gate, if the store already holds one.
+ * Never prompts and never touches the network — this is the "am I signed
+ * in?" question, asked at boot, not the verb that signs you in.
+ */
+export function currentSession() {
+  if (!GATE_ID) return null;
+  const e = readEntry(GATE_ID);
+  return e ? AuthSession.for(e) : null;
+}
+
+/** Forget a cleared record — this page's gate unless told otherwise. */
+export function signOut(authID = GATE_ID) {
+  if (!authID) return;
+  (AuthSession.get(authID) ?? new AuthSession({ auth_id: authID })).forget();
+}
+
+// ── ServiceProxy ────────────────────────────────────────────────────
+
+export class ServiceProxy {
   #serviceURL;
   #serviceID;
-  #data;
-  #apiKey;
-  #apiHeader;
   #proxied;
-  #authService;
+  #session;
   #client = null;
-  #refreshPromise = null;
 
   /**
    * @param {Object} opts
-   * @param {string} opts.serviceURL   — registered service URL
-   * @param {number} [opts.serviceID]  — known service id (from prior loginPopup)
-   * @param {Object} [opts.data]       — OAuth credentials from callback
-   * @param {string} [opts.apiKey]     — API key for key-auth services
-   * @param {string} [opts.apiHeader]  — header name for the API key (from ServiceDescriptor.Header)
-   * @param {boolean} [opts.proxied]   — whether to route through freshbreath proxy
+   * @param {string} opts.serviceURL — the URL login was asked for
+   * @param {Object} [opts.service]  — {id, url, proxied} from the server
+   * @param {AuthSession} [opts.session] — null for an anonymous door
    */
-  constructor({ serviceURL, serviceID, data, apiKey, apiHeader, proxied, authService }) {
-    if (!serviceURL) {
-      throw new Error("ServiceProxy requires serviceURL");
-    }
-    super();
-    this.#serviceURL = serviceURL ?? null;
-    this.#serviceID = serviceID ?? null;
-    this.#data = data ?? null;
-    this.#apiKey = apiKey ?? null;
-    this.#apiHeader = apiHeader || null;
-    this.#proxied = proxied ?? false;
-    this.#authService = authService ?? null;
-
-    for (const [event, handler] of ServiceProxy._defaults) {
-      this.on(event, handler);
-    }
+  constructor({ serviceURL, service, session }) {
+    this.#serviceURL = service?.url || serviceURL;
+    if (!this.#serviceURL) throw new Error("ServiceProxy requires a service URL");
+    this.#serviceID = service?.id ?? null;
+    this.#proxied = !!service?.proxied;
+    this.#session = session ?? null;
   }
 
   get serviceURL() { return this.#serviceURL; }
   get serviceID()  { return this.#serviceID; }
-  get data()       { return this.#data; }
-  get apiKey()     { return this.#apiKey; }
-  get apiHeader()  { return this.#apiHeader; }
-  get proxied()    { return this.#proxied; }
-  get authService() { return this.#authService; }
+  get session()    { return this.#session; }
 
-  static fromJSON(jsonString) {
-    let data = JSON.parse(jsonString, (key, value) => {
-      if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
-        return new Date(value);
-      }
-      return value;
-    });
-    return new ServiceProxy(data);
+  // The slug for task and virtual services, which answer at /service/call
+  // rather than over MCP transport; null for everything else.
+  #serviceSlug() {
+    if (this.#serviceURL?.startsWith("tasks://")) return this.#serviceURL.slice("tasks://".length);
+    if (this.#serviceURL?.startsWith("/mcp/")) return this.#serviceURL.slice("/mcp/".length);
+    return null;
   }
 
-  toJSON() {
-    return JSON.stringify({
-      serviceURL: this.#serviceURL,
-      serviceID: this.#serviceID,
-      data: this.#data,
-      apiKey: this.#apiKey,
-      apiHeader: this.#apiHeader,
-      proxied: this.#proxied,
-    });
-  }
-
-  //
-  // Default event handlers for all ServiceProxy instances (e.g. for token refresh)
-  //
-  static _defaults = new Map();
-
-  static on(event, handler) {
-    this._defaults.set(event, handler);
-  }
-
-  #isExpired() {
-    const exp = this.#data?.expires_at;
-    if (!exp) return false;
-    return Date.now() > exp.getTime() - 300_000;
-  }
-
-  // Returns true if this ServiceProxy was obtained via OIDC identity login
-  // (has claims + id_token from an IdP, not an MCP/API service).
-  get isIdentity() {
-    return !!this.#data?.claims && !!this.#data?.id_token;
-  }
-
-  async checkToken() {
-    if (this.#isExpired()) {
-      await this.refresh();
+  // The single choke point: every request out of this proxy is stamped
+  // with the app nonce and carries the session's credential. One 401 buys
+  // one refresh and one retry — after that the caller hears about it.
+  async #fetch(url, init = {}) {
+    const headers = new Headers(init.headers);
+    headers.set("X-App-Nonce", APP_NONCE);
+    const renewable = this.#session ? this.#session.addAuth(headers) : false;
+    let res = await fetch(url, { ...init, headers });
+    if (res.status === 401 && renewable) {
+      await this.#session.refresh();
+      this.#session.addAuth(headers);
+      res = await fetch(url, { ...init, headers });
     }
+    return res;
   }
 
-  // Returns true if we're maintaining the auth and can refresh.
-  addAuth(headers) {
-    if (this.#authService) {
-      return this.#authService.addAuth(headers);
+  async #connect() {
+    const headers = new Headers();
+    if (this.#session) {
+      await this.#session.check();
+      this.#session.addAuth(headers);
     }
-    if (this.#apiKey) {
-      if (this.#apiHeader) {
-        headers.set(this.#apiHeader, this.#apiKey);
-      } else {
-        headers.set('Authorization', `Bearer ${this.#apiKey}`);
-      }
-      return false
-    } else if (this.#data) {
-      headers.set('Authorization', `${this.#data.token_type || "Bearer"} ${this.#data.access_token}`);
-      return true
-    }
-    return false
-  }
-
-  async refresh() {
-    if (this.#refreshPromise) return this.#refreshPromise;
-    this.#refreshPromise = this.#doRefresh();
-    try {
-      return await this.#refreshPromise;
-    } finally {
-      this.#refreshPromise = null;
-    }
-  }
-
-  async #doRefresh() {
-    let t;
-    if (this.#authService) {
-      // Delegate refresh to the authService (e.g. OIDC identity)
-      try {
-        return await this.#authService.refresh();
-      } catch (e) {
-        // Auth service refresh failed — auto re-login
-        const fresh = await login(this);
-        this.#adoptCredentials(fresh);
-        return;
-      }
-    } else if (isFreshbreathToken(this.#data?.access_token)) {
-      // Freshbreath-issued token — refresh through /oauth/token.
-      // The refresh token is in an HttpOnly cookie auto-attached to this path.
-      // The path is scoped by service id so that refresh tokens for several
-      // services live in separate cookie slots instead of overwriting each
-      // other; the cookie's Path is set by the server to match.
-      const body = new URLSearchParams({ grant_type: "refresh_token" });
-      const r = await fetch(`${API}/oauth/token/${this.#serviceID}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-App-Nonce": APP_NONCE
-        },
-        credentials: "include",
-        body,
-      });
-      if (!r.ok) {
-        if (r.status === 400) {
-          // Refresh token expired or invalid — auto re-login
-          const fresh = await login(this);
-          this.#adoptCredentials(fresh);
-          return;
-        }
-        throw new Error(`Token refresh failed (${r.status})`);
-      }
-      t = await r.json();
-      delete t?.refresh_token; // Kept in an HttpOnly cookie
-    } else if (!this.#data?.refresh_token) {
-      // No refresh token — auto re-login
-      const fresh = await login(this);
-      this.#adoptCredentials(fresh);
-      return;
-    } else if (this.#proxied && this.#serviceID) {
-      // Proxied refresh: server-side with stored client_secret
-      const body = {
-        refresh_token: this.#data.refresh_token,
-        service_id: this.#serviceID,
-      };
-      if (this.#data.client_id) body.client_id = this.#data.client_id;
-      if (this.#data.token_endpoint) body.token_endpoint = this.#data.token_endpoint;
-
-      const r = await fetch(`${API}/service/refresh`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-App-Nonce": APP_NONCE
-        },
-        body: JSON.stringify(body),
-      });
-      if (!r.ok) {
-        if (r.status === 400) {
-          // Refresh token expired — auto re-login
-          const fresh = await login(this);
-          this.#adoptCredentials(fresh);
-          return;
-        }
-        throw new Error(`Token refresh failed (${r.status})`);
-      }
-      t = await r.json();
-    } else {
-      // Direct refresh: full OAuth client credentials in body
-      const body = new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: this.#data.refresh_token,
-        client_id: this.#data.client_id,
-      });
-      if (this.#data.scopes) {
-        const scopes = this.#data.scopes.split(" ");
-        if (this.#data.id_token && !scopes.includes("openid")) {
-          scopes.unshift("openid");
-        }
-        body.set("scope", scopes.join(" "));
-      } else if (this.#data.id_token) {
-        body.set("scope", "openid");
-      }
-      const r = await fetch(this.#data.token_endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body,
-      });
-      if (!r.ok) {
-        if (r.status === 400) {
-          // Refresh token expired — auto re-login
-          const fresh = await login(this);
-          this.#adoptCredentials(fresh);
-          return;
-        }
-        throw new Error(`Token refresh failed (${r.status})`);
-      }
-      t = await r.json();
-    }
-
-    this.#data = {
-      ...this.#data,
-      access_token: t.access_token,
-      refresh_token: t.refresh_token ?? this.#data.refresh_token,
-      id_token:     t.id_token ?? this.#data.id_token,
-      expires_at:   t.expires_in ? new Date(Date.now() + (t.expires_in * 1000)) : null,
-    };
-    this.emit("refresh", this);
-  }
-
-  // Adopt credentials from a fresh ServiceProxy (after re-login)
-  #adoptCredentials(fresh) {
-    this.#data = fresh.#data;
-    this.#apiKey = fresh.#apiKey;
-    this.#apiHeader = fresh.#apiHeader;
-    this.#serviceID = fresh.#serviceID;
-    this.#proxied = fresh.#proxied;
-    this.emit("refresh", this);
-  }
-
-  async connect() {
-    if (this.isIdentity) {
-      throw new Error("This ServiceProxy was obtained from an OIDC identity provider. Use .data.claims instead of MCP methods.");
-    }
-    if (this.#serviceURL?.startsWith('tasks://')) {
-      throw new Error("Tasks services don't use MCP connect. Use listTools/callTool directly.");
-    }
-    await this.checkToken();
-    const headers = new Headers({});
-    this.addAuth(headers);
-    const transport = new StreamableHTTPClientTransport(new URL(this.#serviceURL), {
+    const transport = new StreamableHTTPClientTransport(new URL(this.#serviceURL, window.location.href), {
       requestInit: { headers },
     });
     this.#client = new McpClient({ name: "mcp-client", version: "1.0.0" });
@@ -364,46 +432,19 @@ export class ServiceProxy extends EventEmitter {
 
   async #withReconnect(fn) {
     try {
-      if (!this.#client) {
-        await this.connect();
-      }
+      if (!this.#client) await this.#connect();
       return await fn();
     } catch (e) {
       if (!String(e).includes("401")) throw e;
-      await this.refresh();
-      await this.connect();
+      await this.#session?.refresh();
+      await this.#connect();
       return await fn();
     }
   }
 
-  async #fetch(url, init = {}) {
-    const headers = new Headers(init.headers);
-    headers.set('X-App-Nonce', APP_NONCE);
-    const canRefresh = this.addAuth(headers);
-    let res = await fetch(url, { ...init, headers });
-    if (canRefresh && res.status === 401) {
-      await this.refresh();
-      this.addAuth(headers);
-      res = await fetch(url, { ...init, headers });
-    }
-    return res;
-  }
-
-  // Returns the slug for task or virtual services, or null.
-  #serviceSlug() {
-    if (this.#serviceURL?.startsWith('tasks://')) {
-      return this.#serviceURL.replace('tasks://', '');
-    }
-    if (this.#serviceURL?.startsWith('/mcp/')) {
-      return this.#serviceURL.replace('/mcp/', '');
-    }
-    return null;
-  }
-
   async listTools() {
-    const slug = this.#serviceSlug();
-    if (slug) {
-      const r = await this.#fetch(`${API}/service/call/${slug}`);
+    if (this.#serviceSlug()) {
+      const r = await this.#fetch(`${API}/service/call/${this.#serviceSlug()}`);
       if (!r.ok) throw new Error(`listTools failed (${r.status})`);
       const { tools } = await r.json();
       return tools;
@@ -415,13 +456,13 @@ export class ServiceProxy extends EventEmitter {
   }
 
   async callTool(name, args = {}) {
-    const result = this.#serviceSlug() ?
-      await this.#callTask(name, args) :
-      await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
+    const result = this.#serviceSlug()
+      ? await this.#callTask(name, args)
+      : await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
     const text = result.content
-      .filter(c => c.type === 'text')
+      .filter(c => c.type === "text")
       .map(c => c.text)
-      .join('\n');
+      .join("\n");
     if (result.isError) throw new Error(`Tool error: ${text}`);
     try {
       return JSON.parse(text);
@@ -431,66 +472,49 @@ export class ServiceProxy extends EventEmitter {
   }
 
   /**
-   * Call a tasks-service tool. If any arg value is a File or Blob,
-   * the request is sent as multipart/form-data with file uploads.
-   * All other args are JSON-serialized into a single "args" field.
+   * Call a task or virtual tool. If any argument is a File or Blob the
+   * request goes out as multipart, with everything else JSON-encoded into
+   * its own field.
    */
   async #callTask(name, args) {
+    const url = `${API}/service/call/${this.#serviceSlug()}`;
     const hasFiles = Object.values(args).some(v => v instanceof File || v instanceof Blob);
-    const slug = this.#serviceSlug();
-    const url = `${API}/service/call/${slug}`;
 
+    let init;
     if (hasFiles) {
       const fd = new FormData();
-      fd.append('task', name);
+      fd.append("task", name);
       for (const [k, v] of Object.entries(args)) {
-        if (v instanceof File || v instanceof Blob) {
-          fd.append(k, v, v instanceof File ? v.name : k);
-        } else {
-          fd.append(k, JSON.stringify(v));
-        }
+        if (v instanceof File || v instanceof Blob) fd.append(k, v, v instanceof File ? v.name : k);
+        else fd.append(k, JSON.stringify(v));
       }
-      const r = await this.#fetch(url, { method: 'POST', body: fd });
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`Task call failed (${r.status}): ${text}`);
-      }
-      return r.json();
+      init = { method: "POST", body: fd }; // the browser sets the boundary
+    } else {
+      init = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: name, args }),
+      };
     }
 
-    const headers = {'Content-Type': 'application/json'};
-    const r = await this.#fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ task: name, args }),
-    });
-    if (!r.ok) {
-      const text = await r.text();
-      throw new Error(`Task call failed (${r.status}): ${text}`);
-    }
+    const r = await this.#fetch(url, init);
+    if (!r.ok) throw new Error(`Task call failed (${r.status}): ${await r.text()}`);
     return r.json();
   }
 
   /**
-   * Make a proxied API call to the service.
-   * For key-auth services with a server-side key, just pass the path.
-   * For user-provided keys, the Authorization header is set automatically.
-   * @param {string} path   — path relative to the service URL (e.g. "/v1/users")
-   * @param {RequestInit} [init] — fetch options (method, body, headers, etc.)
+   * A proxied HTTP call to the service. The session attaches whatever auth
+   * the gate wants; the server decides what actually goes upstream.
+   * @param {string} path — relative to the service URL, e.g. "/v1/users"
+   * @param {RequestInit} [init]
    */
   async fetch(path, init = {}) {
     let url = `${this.#serviceURL}${path}`;
-
-    if ((this.#proxied || window.location.protocol !== 'file:') && this.#serviceID) {
+    if (this.#serviceID && (this.#proxied || window.location.protocol !== "file:")) {
       url = `${API}/service/${this.#serviceID}/${path.replace(/^\//, "")}`;
     }
-
     return this.#fetch(url, init);
   }
-}
-
-export function load(jsonString) {
-  return ServiceProxy.fromJSON(jsonString);
 }
 
 // ── Remote updates ──────────────────────────────────────────────
@@ -569,9 +593,10 @@ function parseSSEBlock(block) {
  * @param {string}       [opts.lastEventId]  — resume point for the first connect
  * @param {Function}     [opts.onOpen]       — called on each successful connect
  * @param {Function}     [opts.onError]      — called per retryable failure while reconnecting
+ * @param {AuthSession}  [opts.session]      — attaches this page's credential
  */
 export async function sseStream(path, {
-  method = 'POST', body, token, onEvent,
+  method = 'POST', body, session, onEvent,
   reconnect = false, signal, onOpen, onError, lastEventId = null,
 } = {}) {
   let attempt = 0;
@@ -586,10 +611,11 @@ export async function sseStream(path, {
     const openedAt = Date.now();
 
     try {
-      const opts = { method, headers: { 'Accept': 'text/event-stream' }, signal };
-      if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-      if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
-      if (lastId != null) opts.headers['Last-Event-ID'] = lastId;
+      const headers = new Headers({ 'Accept': 'text/event-stream' });
+      const opts = { method, headers, signal };
+      if (body) { headers.set('Content-Type', 'application/json'); opts.body = JSON.stringify(body); }
+      session?.addAuth(headers);
+      if (lastId != null) headers.set('Last-Event-ID', lastId);
 
       const res = await fetch(path, opts);
       if (!res.ok) {
@@ -937,7 +963,7 @@ export default ServiceProxy;
 // Expose to window for non-module consumers (e.g. the admin panel)
 if (typeof window !== 'undefined') {
   window.FreshBreath = window.FrBr = {
-    login, load, ServiceProxy, Svc: ServiceProxy,
+    login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
     sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
   };
 }

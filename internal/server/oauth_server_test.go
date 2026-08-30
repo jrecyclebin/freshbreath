@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,16 +23,23 @@ import (
 
 // ── helpers ─────────────────────────────────────────────────────────
 
+// oidcRecord creates a plain OIDC auth record — the workhorse gate for
+// refresh tests that never touch the network.
+func oidcRecord(t *testing.T, srv *Server, name string) *db.AuthRecord {
+	t.Helper()
+	return newAuthRecord(t, srv, name, db.AuthOIDC,
+		db.AuthDescriptor{Issuer: "https://" + slugify(name) + ".example", Provider: slugify(name)})
+}
+
 // createRefreshFamily creates a RefreshFamily in the store and returns
-// its id. Useful when setting up refresh-token tests that now require a
-// backing family record.
-func createRefreshFamily(t *testing.T, store *db.Store, email string, svcID int64, currentJTI string) string {
+// its id. Refresh-token tests need a backing family record.
+func createRefreshFamily(t *testing.T, store *db.Store, subject string, authID int64, currentJTI string) string {
 	t.Helper()
 	famID := db.GenNonce()
 	fam := &db.RefreshFamily{
 		ID:         famID,
-		UserEmail:  email,
-		ServiceID:  svcID,
+		Subject:    subject,
+		AuthID:     authID,
 		CurrentJTI: currentJTI,
 		ExpiresAt:  time.Now().Add(24 * time.Hour),
 	}
@@ -181,7 +189,8 @@ func TestOAuthAuthorizeMissingParams(t *testing.T) {
 
 func TestOAuthAuthorizeMethodNotAllowed(t *testing.T) {
 	srv := newTestServer(t)
-	rr := testRequest(t, srv, "POST", "/oauth/authorize", nil, nil)
+	// POST is the interstitial's continue path now; PUT is nobody's.
+	rr := testRequest(t, srv, "PUT", "/oauth/authorize", nil, nil)
 	if rr.Code != 405 {
 		t.Errorf("status = %d, want 405", rr.Code)
 	}
@@ -230,30 +239,62 @@ func TestOAuthAuthorizeInvalidRedirect(t *testing.T) {
 	}
 }
 
-// A full authorize against a generic OAuth service should redirect the
-// browser upstream and stash pending state keyed by the upstream state.
-func TestOAuthAuthorizeRedirectsUpstream(t *testing.T) {
+// The authorization check handleAuthorize never had: a flow against the
+// central /mcp resource demands a configured admin gate — with none, the
+// flow is refused instead of proceeding unauthenticated.
+func TestOAuthAuthorizeCentralRequiresAdminAuth(t *testing.T) {
 	srv := newTestServer(t)
-	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
-		switch {
-		case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
-			return jsonResp(200, map[string]interface{}{
-				"issuer":                           "https://up.example",
-				"authorization_endpoint":           "https://up.example/authorize",
-				"token_endpoint":                   "https://up.example/token",
-				"registration_endpoint":            "https://up.example/register",
-				"code_challenge_methods_supported": []string{"S256"},
-			})
-		case req.URL.Path == "/register":
-			return jsonResp(201, map[string]string{"client_id": "up-client"})
-		default:
-			return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
-		}
-	})
+	clientID, _ := registerOAuthClient(t, srv, "https://client.example/callback")
+	_, challenge := pkcePair()
+	q := url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://client.example/callback"},
+		"state":                 {"st"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"resource":              {"/mcp"},
+	}
+	rr := testRequest(t, srv, "GET", "/oauth/authorize?"+q.Encode(), nil, nil)
+	if rr.Code != 403 {
+		t.Fatalf("status = %d, want 403 (no admin auth configured)", rr.Code)
+	}
+}
 
-	// The MCP resource resolves to a service by its URL (the slug path);
-	// OAuthURL points discovery at the upstream auth server.
-	registerService(t, srv, "up", "/mcp/up", db.ServiceDescriptor{Type: "mcp", OAuthURL: "https://up.example"})
+// mountAuthorizeTarget registers a gated virtual service at /mcp/up and
+// returns its gate record. The gate is a fully-specified oauth2 record, so
+// beginning its leg needs no discovery and no network.
+func mountAuthorizeTarget(t *testing.T, srv *Server) *db.AuthRecord {
+	t.Helper()
+	gate := newAuthRecord(t, srv, "Upstream IdP", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://up.example/authorize",
+		TokenURL:     "https://up.example/token",
+		ClientID:     "up-client",
+		Provider:     "up",
+	})
+	if _, err := srv.store.RegisterService("up", "/mcp/up",
+		db.ServiceDescriptor{Type: "virtual"}, &gate.ID, nil); err != nil {
+		t.Fatalf("register service: %v", err)
+	}
+	return gate
+}
+
+// interstitialState pulls the continue-state out of the leg-skip page.
+func interstitialState(t *testing.T, page string) string {
+	t.Helper()
+	m := regexp.MustCompile(`var state = "([^"]+)"`).FindStringSubmatch(page)
+	if m == nil {
+		t.Fatalf("no state in interstitial page: %s", page)
+	}
+	return m[1]
+}
+
+// A full authorize against a gated mount: GET answers with the leg-skip
+// interstitial (a page, not a 302 — a redirect can't read localStorage),
+// and the POST continue with no stored tokens begins the first leg and
+// hands back the upstream authorize URL.
+func TestOAuthAuthorizeInterstitialFlow(t *testing.T) {
+	srv := newTestServer(t)
+	gate := mountAuthorizeTarget(t, srv)
 
 	clientID, _ := registerOAuthClient(t, srv, "https://client.example/callback")
 	_, challenge := pkcePair()
@@ -266,21 +307,38 @@ func TestOAuthAuthorizeRedirectsUpstream(t *testing.T) {
 		"resource":              {"https://localhost:9009/mcp/up"},
 	}
 	rr := testRequest(t, srv, "GET", "/oauth/authorize?"+q.Encode(), nil, nil)
-	if rr.Code != 302 {
-		t.Fatalf("status = %d, want 302; body = %s", rr.Code, rr.Body.String())
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200 interstitial; body = %s", rr.Code, rr.Body.String())
 	}
-	loc := rr.Header().Get("Location")
+	page := rr.Body.String()
+	if !strings.Contains(page, "frbr:auth:") {
+		t.Error("interstitial must read the frbr:auth:* store")
+	}
+	if !strings.Contains(page, strconv.FormatInt(gate.ID, 10)) {
+		t.Error("interstitial must name the gate record id")
+	}
+	contState := interstitialState(t, page)
+
+	// Continue with no stored tokens: the flow begins the gate leg and
+	// sends the browser upstream.
+	rr2 := testRequest(t, srv, "POST", "/oauth/authorize",
+		strings.NewReader(`{"state":"`+contState+`","tokens":[]}`), nil)
+	if rr2.Code != 200 {
+		t.Fatalf("continue status = %d, body = %s", rr2.Code, rr2.Body.String())
+	}
+	var cont map[string]string
+	json.Unmarshal(rr2.Body.Bytes(), &cont)
+	loc := cont["redirect"]
 	if !strings.HasPrefix(loc, "https://up.example/authorize") {
-		t.Errorf("Location = %q, want upstream authorize URL", loc)
+		t.Fatalf("redirect = %q, want upstream authorize URL", loc)
 	}
 	if !strings.Contains(loc, "client_id=up-client") {
-		t.Errorf("Location missing upstream client_id: %s", loc)
+		t.Errorf("redirect missing upstream client_id: %s", loc)
 	}
 
-	// The point of handleAuthorize isn't the redirect URL — it's that the
-	// MCP client's original request got stashed so the upstream callback can
-	// resume it. Pull the upstream `state` out of the redirect and confirm
-	// pending state exists under it, carrying the MCP client's own state.
+	// The MCP request must be stashed for the callback to resume: pending
+	// state keyed by the upstream OAuth state, linked to the MCP pending
+	// entry through mcpKey.
 	u, err := url.Parse(loc)
 	if err != nil {
 		t.Fatalf("parse redirect: %v", err)
@@ -295,13 +353,95 @@ func TestOAuthAuthorizeRedirectsUpstream(t *testing.T) {
 	if !ok {
 		t.Fatal("no pending auth stored under the upstream state")
 	}
-	// appNonce links back to the stored mcpPendingAuth (keyed separately),
-	// which is what carries the MCP client's redirect_uri/state/PKCE forward.
-	if pa.appNonce == "" {
-		t.Error("pending auth missing appNonce link to the MCP request")
+	if pa.mcpKey == "" {
+		t.Fatal("pending auth missing mcpKey link to the MCP request")
 	}
-	if _, mcpOK := srv.mcpAuthPending.Load(pa.appNonce); !mcpOK {
+	if _, mcpOK := srv.mcpAuthPending.Load(pa.mcpKey); !mcpOK {
 		t.Error("MCP pending request not stored for the callback to resume")
+	}
+}
+
+// The leg-skip path: a browser holding a live token bound to the gate
+// record posts it back, the server re-verifies it (a browser asserting
+// "logged in" is a claim, not a fact), and the flow finishes single-leg —
+// straight back to the MCP client with a code.
+func TestOAuthAuthorizeLegSkip(t *testing.T) {
+	srv := newTestServer(t)
+	gate := mountAuthorizeTarget(t, srv)
+
+	clientID, secret := registerOAuthClient(t, srv, "https://client.example/callback")
+	verifier, challenge := pkcePair()
+	q := url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://client.example/callback"},
+		"state":                 {"mcp-state"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"resource":              {"/mcp/up"},
+	}
+	rr := testRequest(t, srv, "GET", "/oauth/authorize?"+q.Encode(), nil, nil)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	contState := interstitialState(t, rr.Body.String())
+
+	// A live token bound to the gate, carrying its provider credential.
+	tok, err := srv.mintFreshbreathToken(extSubject("up", "u-1"), "user@example.com", "", "", gate.ID, nil,
+		sealedCreds{"up": {UpstreamToken: "upstream-xyz"}})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{"state": contState, "tokens": []string{tok}})
+	rr2 := testRequest(t, srv, "POST", "/oauth/authorize", bytes.NewReader(body), nil)
+	if rr2.Code != 200 {
+		t.Fatalf("continue status = %d, body = %s", rr2.Code, rr2.Body.String())
+	}
+	var cont map[string]string
+	json.Unmarshal(rr2.Body.Bytes(), &cont)
+	loc := cont["redirect"]
+	if !strings.HasPrefix(loc, "https://client.example/callback") {
+		t.Fatalf("redirect = %q, want the MCP client's redirect_uri (leg skipped)", loc)
+	}
+	u, _ := url.Parse(loc)
+	code := u.Query().Get("code")
+	if code == "" || u.Query().Get("state") != "mcp-state" {
+		t.Fatalf("redirect missing code/state: %s", loc)
+	}
+
+	// The code exchanges for a token that still carries the original
+	// upstream credential.
+	rr3 := postForm(t, srv, "/oauth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {code},
+		"code_verifier": {verifier},
+		"client_id":     {clientID},
+		"client_secret": {secret},
+	})
+	if rr3.Code != 200 {
+		t.Fatalf("token status = %d, body = %s", rr3.Code, rr3.Body.String())
+	}
+	at, _ := decodeMap(rr3)["access_token"].(string)
+	claims, err := srv.verifyAndUnwrapToken(at, gate.ID)
+	if err != nil || claims == nil {
+		t.Fatalf("unwrap: claims=%v err=%v", claims, err)
+	}
+	if claims.Creds["up"].UpstreamToken != "upstream-xyz" {
+		t.Errorf("upstream cred = %q, want upstream-xyz", claims.Creds["up"].UpstreamToken)
+	}
+
+	// A garbage token in the same POST must not be able to skip a leg.
+	rrG := testRequest(t, srv, "GET", "/oauth/authorize?"+q.Encode(), nil, nil)
+	gState := interstitialState(t, rrG.Body.String())
+	rr4 := testRequest(t, srv, "POST", "/oauth/authorize",
+		strings.NewReader(`{"state":"`+gState+`","tokens":["garbage.token.here"]}`), nil)
+	if rr4.Code != 200 {
+		t.Fatalf("continue status = %d", rr4.Code)
+	}
+	var cont2 map[string]string
+	json.Unmarshal(rr4.Body.Bytes(), &cont2)
+	if !strings.HasPrefix(cont2["redirect"], "https://up.example/authorize") {
+		t.Errorf("garbage token skipped a leg: redirect = %q", cont2["redirect"])
 	}
 }
 
@@ -374,15 +514,20 @@ func TestOAuthAuthCodeGrantUnknownCode(t *testing.T) {
 	}
 }
 
-// Full authorization_code exchange for an external (wrapped) token. This
-// drives PKCE verification, token minting, sealing of upstream data, and
-// the refresh-cookie response.
-func TestOAuthAuthCodeGrantWrappedHappyPath(t *testing.T) {
+// Full authorization_code exchange. The login legs already minted the
+// token; the grant verifies PKCE, delivers it, and opens a refresh family.
+func TestOAuthAuthCodeGrantHappyPath(t *testing.T) {
 	srv := newTestServer(t)
 	clientID, secret := registerOAuthClient(t, srv)
 	verifier, challenge := pkcePair()
-	svcID := registerService(t, srv, "up", "/mcp/up", db.ServiceDescriptor{Type: "mcp"})
-	sid, _ := strconv.ParseInt(svcID, 10, 64)
+	gate := oidcRecord(t, srv, "Up IdP")
+
+	subject := extSubject("up-idp", "u-77")
+	fbToken, err := srv.mintFreshbreathToken(subject, "user@example.com", "", "", gate.ID, nil,
+		sealedCreds{"up-idp": {UpstreamToken: "real-upstream-token", UpstreamRefresh: "real-upstream-refresh"}})
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
 
 	code := "fb-auth-code-xyz"
 	srv.oauthSrv.codesMu.Lock()
@@ -392,12 +537,15 @@ func TestOAuthAuthCodeGrantWrappedHappyPath(t *testing.T) {
 			clientID:            clientID,
 			codeChallenge:       challenge,
 			codeChallengeMethod: "S256",
-			serviceID:           sid,
-			userEmail:           "user@example.com",
-			upstreamToken:       "real-upstream-token",
-			upstreamRefresh:     "real-upstream-refresh",
-			upstreamTokenURL:    "https://up.example/token",
-			upstreamScopes:      "openid email",
+			fbToken:             fbToken,
+			refreshData: freshbreathRefreshData{
+				Subject:   subject,
+				UserEmail: "user@example.com",
+				AuthID:    gate.ID,
+				Upstreams: map[string]upstreamRefreshLeg{
+					"up-idp": {AuthID: gate.ID, RefreshToken: "real-upstream-refresh", TokenURL: "https://up.example/token"},
+				},
+			},
 		},
 	}
 	srv.oauthSrv.codesMu.Unlock()
@@ -413,8 +561,7 @@ func TestOAuthAuthCodeGrantWrappedHappyPath(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	resp := decodeMap(rr)
 	at, _ := resp["access_token"].(string)
 	if at == "" {
 		t.Fatal("expected access_token")
@@ -426,17 +573,14 @@ func TestOAuthAuthCodeGrantWrappedHappyPath(t *testing.T) {
 		t.Error("expected refresh_token")
 	}
 
-	// The minted access token must be a wrapped Freshbreath token that
-	// unwraps to the original upstream token for this service.
-	claims, err := srv.verifyAndUnwrapToken(at, sid)
-	if err != nil {
-		t.Fatalf("verifyAndUnwrapToken: %v", err)
+	// The delivered token is bound to the gate record and unseals to the
+	// original upstream credential.
+	claims, err := srv.verifyAndUnwrapToken(at, gate.ID)
+	if err != nil || claims == nil {
+		t.Fatalf("verifyAndUnwrapToken: claims=%v err=%v", claims, err)
 	}
-	if claims == nil {
-		t.Fatal("expected wrapped claims, got nil")
-	}
-	if claims.UpstreamToken != "real-upstream-token" {
-		t.Errorf("UpstreamToken = %q, want real-upstream-token", claims.UpstreamToken)
+	if claims.Creds["up-idp"].UpstreamToken != "real-upstream-token" {
+		t.Errorf("upstream cred = %q, want real-upstream-token", claims.Creds["up-idp"].UpstreamToken)
 	}
 	if claims.UserEmail != "user@example.com" {
 		t.Errorf("UserEmail = %q, want user@example.com", claims.UserEmail)
@@ -461,19 +605,18 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 	srv := newTestServer(t)
 	clientID, secret := registerOAuthClient(t, srv)
 	verifier, challenge := pkcePair()
-	svcID := registerService(t, srv, "up", "/mcp/up", db.ServiceDescriptor{Type: "mcp"})
-	sid, _ := strconv.ParseInt(svcID, 10, 64)
+	gate := oidcRecord(t, srv, "Family IdP")
 
-	// Create a user so the identity-refresh path can re-resolve them.
-	if _, err := srv.store.CreateUser("Family User", "family@example.com", "Member", "Active"); err != nil {
+	// A real user, so the refresh path can re-resolve them from the subject.
+	user, err := srv.store.CreateUser("Family User", "family@example.com", "Member", "Active")
+	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	subject := subjectForUser(user)
 
-	// Mint a Freshbreath identity token as the upstream — this makes the
-	// authz_code grant take the identity path (no upstream refresh needed).
-	idToken, err := srv.mintFreshbreathToken("identity", "family@example.com", "Member", "Family User", sid, nil)
+	fbToken, err := srv.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, gate.ID, nil, nil)
 	if err != nil {
-		t.Fatalf("mint identity token: %v", err)
+		t.Fatalf("mint: %v", err)
 	}
 
 	code := "fb-auth-code-family-test"
@@ -484,9 +627,8 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 			clientID:            clientID,
 			codeChallenge:       challenge,
 			codeChallengeMethod: "S256",
-			serviceID:           sid,
-			userEmail:           "family@example.com",
-			upstreamToken:       idToken,
+			fbToken:             fbToken,
+			refreshData:         freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: gate.ID},
 		},
 	}
 	srv.oauthSrv.codesMu.Unlock()
@@ -502,9 +644,7 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
-	rt, _ := resp["refresh_token"].(string)
+	rt, _ := decodeMap(rr)["refresh_token"].(string)
 	if rt == "" {
 		t.Fatal("expected refresh_token in body")
 	}
@@ -521,7 +661,7 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 		t.Fatal("expected refresh token to have jti")
 	}
 
-	// A family record must exist in the store.
+	// A family record must exist in the store, bound to subject + record.
 	fam, ok, err := srv.store.GetRefreshFamily(data.FamilyID)
 	if err != nil {
 		t.Fatalf("get family: %v", err)
@@ -532,11 +672,11 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 	if fam.CurrentJTI != data.JTI {
 		t.Errorf("family current_jti = %q, want %q", fam.CurrentJTI, data.JTI)
 	}
-	if fam.UserEmail != "family@example.com" {
-		t.Errorf("family user_email = %q, want family@example.com", fam.UserEmail)
+	if fam.Subject != subject {
+		t.Errorf("family subject = %q, want %q", fam.Subject, subject)
 	}
-	if fam.ServiceID != sid {
-		t.Errorf("family service_id = %d, want %d", fam.ServiceID, sid)
+	if fam.AuthID != gate.ID {
+		t.Errorf("family auth_id = %d, want %d", fam.AuthID, gate.ID)
 	}
 	if fam.Revoked {
 		t.Error("family should not be revoked")
@@ -551,9 +691,7 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 		t.Fatalf("refresh status = %d, body = %s", rr2.Code, rr2.Body.String())
 	}
 
-	var resp2 map[string]interface{}
-	json.Unmarshal(rr2.Body.Bytes(), &resp2)
-	rt2, _ := resp2["refresh_token"].(string)
+	rt2, _ := decodeMap(rr2)["refresh_token"].(string)
 	data2, err := srv.verifyRefreshToken(rt2)
 	if err != nil {
 		t.Fatalf("verify rotated refresh: %v", err)
@@ -585,7 +723,6 @@ func TestOAuthAuthCodeGrantPKCEMismatch(t *testing.T) {
 			clientID:            clientID,
 			codeChallenge:       challenge,
 			codeChallengeMethod: "S256",
-			userEmail:           "user@example.com",
 		},
 	}
 	srv.oauthSrv.codesMu.Unlock()
@@ -633,26 +770,24 @@ func TestOAuthRefreshGrantInvalidToken(t *testing.T) {
 	}
 }
 
-// An identity refresh token re-mints an identity access token. The user is
-// re-resolved from the DB, so this also covers refreshIdentity's lookup.
+// A refresh with no upstream legs re-mints an access token from the
+// subject. The user is re-resolved from the DB, so this also covers
+// refreshLegs' identity lookup.
 func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, err := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
+	rec := oidcRecord(t, srv, "Admin IdP")
+	ada, err := srv.store.CreateUser("Ada Lovelace", "ada@example.com", "Admin", "Active")
 	if err != nil {
-		t.Fatalf("register service: %v", err)
-	}
-	if _, err := srv.store.CreateUser("Ada Lovelace", "ada@example.com", "Admin", "Active"); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	subject := subjectForUser(ada)
 
 	jti := db.GenNonce()
-	famID := createRefreshFamily(t, srv.store, "ada@example.com", svcID, jti)
+	famID := createRefreshFamily(t, srv.store, subject, rec.ID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind:      "identity",
-		ServiceID: svcID,
+		Subject:   subject,
 		UserEmail: "ada@example.com",
-		UserRole:  "Admin",
-		UserName:  "Ada Lovelace",
+		AuthID:    rec.ID,
 		FamilyID:  famID,
 		JTI:       jti,
 	})
@@ -667,9 +802,7 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
-	at, _ := resp["access_token"].(string)
+	at, _ := decodeMap(rr)["access_token"].(string)
 	if at == "" {
 		t.Fatal("expected access_token")
 	}
@@ -677,28 +810,28 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 	if err != nil || claims == nil {
 		t.Fatalf("verify minted token: claims=%v err=%v", claims, err)
 	}
-	if claims.Kind != "identity" {
-		t.Errorf("Kind = %q, want identity", claims.Kind)
+	if claims.Subject != subject {
+		t.Errorf("Subject = %q, want %q", claims.Subject, subject)
 	}
 	if claims.UserEmail != "ada@example.com" {
 		t.Errorf("UserEmail = %q, want ada@example.com", claims.UserEmail)
 	}
-	if claims.ServiceID != svcID {
-		t.Errorf("ServiceID = %d, want %d (binding must survive refresh)", claims.ServiceID, svcID)
+	if claims.AuthID != rec.ID {
+		t.Errorf("AuthID = %d, want %d (record binding must survive refresh)", claims.AuthID, rec.ID)
 	}
 }
 
-// A deleted user must not be able to refresh — refreshIdentity re-resolves
-// the user from the DB and fails closed.
-func TestOAuthRefreshIdentityDeletedUser(t *testing.T) {
+// A deleted user must not be able to refresh — the frbr: subject is
+// re-resolved from the DB and fails closed.
+func TestOAuthRefreshDeletedUser(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("admin-idp", "https://admin.example", db.ServiceDescriptor{Type: "oidc"})
+	rec := oidcRecord(t, srv, "Admin IdP")
 	jti := db.GenNonce()
-	famID := createRefreshFamily(t, srv.store, "ghost@example.com", svcID, jti)
+	famID := createRefreshFamily(t, srv.store, "frbr:9999", rec.ID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind:      "identity",
-		ServiceID: svcID,
+		Subject:   "frbr:9999",
 		UserEmail: "ghost@example.com",
+		AuthID:    rec.ID,
 		FamilyID:  famID,
 		JTI:       jti,
 	})
@@ -714,50 +847,42 @@ func TestOAuthRefreshIdentityDeletedUser(t *testing.T) {
 	}
 }
 
-// A wrapped refresh token refreshes the upstream OAuth token, then re-wraps
-// it into a fresh Freshbreath access token. This drives refreshWrapped +
-// resolveTokenEndpoint + the upstream PostForm.
-func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
+// A refresh with an upstream leg rotates the upstream token against its
+// record's endpoint, then re-seals it into a fresh access token. This
+// drives refreshLegs' upstream PostForm and the credential map rebuild.
+func TestOAuthRefreshUpstreamLegHappyPath(t *testing.T) {
 	srv := newTestServer(t)
 	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
-		switch {
-		case strings.HasSuffix(req.URL.Path, "/.well-known/oauth-authorization-server"):
-			return jsonResp(200, map[string]interface{}{
-				"issuer":         "https://up.example",
-				"token_endpoint": "https://up.example/token",
-			})
-		case req.URL.Path == "/token" && req.Method == "POST":
+		if req.URL.Path == "/token" && req.Method == "POST" {
 			return jsonResp(200, map[string]interface{}{
 				"access_token":  "new-upstream-token",
 				"refresh_token": "new-upstream-refresh",
 				"scope":         "openid email",
 				"expires_in":    3600,
 			})
-		default:
-			return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
 		}
+		return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
 	})
 
-	svcID, err := srv.store.RegisterService("up", "/mcp/up", db.ServiceDescriptor{
-		Type:     "mcp",
-		OAuthURL: "https://up.example",
-		ClientID: "up-client",
+	rec := newAuthRecord(t, srv, "Up IdP", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://up.example/authorize",
+		TokenURL:     "https://up.example/token",
+		ClientID:     "up-client",
+		Provider:     "up",
 	})
-	if err != nil {
-		t.Fatalf("register service: %v", err)
-	}
 
+	subject := extSubject("up", "u-42")
 	jti := db.GenNonce()
-	famID := createRefreshFamily(t, srv.store, "user@example.com", svcID, jti)
+	famID := createRefreshFamily(t, srv.store, subject, rec.ID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind:             "wrapped",
-		ServiceID:        svcID,
-		UserEmail:        "user@example.com",
-		UpstreamRefresh:  "old-upstream-refresh",
-		UpstreamTokenURL: "https://up.example/token",
-		UpstreamScopes:   "openid email",
-		FamilyID:         famID,
-		JTI:              jti,
+		Subject:   subject,
+		UserEmail: "user@example.com",
+		AuthID:    rec.ID,
+		Upstreams: map[string]upstreamRefreshLeg{
+			"up": {AuthID: rec.ID, RefreshToken: "old-upstream-refresh", TokenURL: "https://up.example/token", Scopes: "openid email"},
+		},
+		FamilyID: famID,
+		JTI:      jti,
 	})
 	if err != nil {
 		t.Fatalf("mint refresh token: %v", err)
@@ -770,18 +895,91 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
-	at, _ := resp["access_token"].(string)
+	at, _ := decodeMap(rr)["access_token"].(string)
 	if at == "" {
 		t.Fatal("expected access_token")
 	}
-	claims, err := srv.verifyAndUnwrapToken(at, svcID)
+	claims, err := srv.verifyAndUnwrapToken(at, rec.ID)
 	if err != nil || claims == nil {
 		t.Fatalf("unwrap re-minted token: claims=%v err=%v", claims, err)
 	}
-	if claims.UpstreamToken != "new-upstream-token" {
-		t.Errorf("UpstreamToken = %q, want new-upstream-token", claims.UpstreamToken)
+	if claims.Creds["up"].UpstreamToken != "new-upstream-token" {
+		t.Errorf("upstream cred = %q, want new-upstream-token", claims.Creds["up"].UpstreamToken)
+	}
+	if claims.Creds["up"].UpstreamRefresh != "new-upstream-refresh" {
+		t.Errorf("upstream refresh = %q, want new-upstream-refresh", claims.Creds["up"].UpstreamRefresh)
+	}
+}
+
+// A two-leg refresh rotates EVERY upstream leg — the gate's credential and
+// the acts_as credential both come back fresh in one token.
+func TestOAuthRefreshRotatesEveryLeg(t *testing.T) {
+	srv := newTestServer(t)
+	var refreshed []string
+	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+		if strings.HasSuffix(req.URL.Path, "/token") && req.Method == "POST" {
+			req.ParseForm()
+			refreshed = append(refreshed, req.URL.Host)
+			return jsonResp(200, map[string]interface{}{
+				"access_token":  "fresh-from-" + req.URL.Host,
+				"refresh_token": "next-" + req.PostForm.Get("refresh_token"),
+			})
+		}
+		return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader("not found"))}
+	})
+
+	gate := newAuthRecord(t, srv, "Company IdP", db.AuthOIDC,
+		db.AuthDescriptor{Issuer: "https://company.example", Provider: "company", ClientID: "c1"})
+	acts := newAuthRecord(t, srv, "GitHub", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://github.example/authorize",
+		TokenURL:     "https://github.example/token",
+		ClientID:     "gh1", Provider: "github",
+	})
+
+	subject := extSubject("company", "u-2")
+	jti := db.GenNonce()
+	famID := createRefreshFamily(t, srv.store, subject, acts.ID, jti)
+	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
+		Subject:   subject,
+		UserEmail: "user@example.com",
+		AuthID:    acts.ID,
+		Legs:      []int64{gate.ID},
+		Upstreams: map[string]upstreamRefreshLeg{
+			"company": {AuthID: gate.ID, RefreshToken: "company-r1", TokenURL: "https://company.example/token"},
+			"github":  {AuthID: acts.ID, RefreshToken: "github-r1", TokenURL: "https://github.example/token"},
+		},
+		FamilyID: famID,
+		JTI:      jti,
+	})
+	if err != nil {
+		t.Fatalf("mint refresh token: %v", err)
+	}
+
+	rr := postForm(t, srv, "/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {rt},
+	})
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if len(refreshed) != 2 {
+		t.Fatalf("upstream refreshes = %v, want both providers", refreshed)
+	}
+
+	at, _ := decodeMap(rr)["access_token"].(string)
+	claims, err := srv.verifyAndUnwrapToken(at, acts.ID)
+	if err != nil || claims == nil {
+		t.Fatalf("unwrap: claims=%v err=%v", claims, err)
+	}
+	if claims.Creds["company"].UpstreamToken != "fresh-from-company.example" {
+		t.Errorf("company cred = %q", claims.Creds["company"].UpstreamToken)
+	}
+	if claims.Creds["github"].UpstreamToken != "fresh-from-github.example" {
+		t.Errorf("github cred = %q", claims.Creds["github"].UpstreamToken)
+	}
+	// The legs binding survives the refresh.
+	if !claims.boundTo(gate.ID) {
+		t.Error("refreshed token lost its gate-leg binding")
 	}
 }
 
@@ -791,47 +989,38 @@ func TestOAuthRefreshWrappedHappyPath(t *testing.T) {
 //
 // This models the control panel's own identity session: the cookie path
 // requires an app identity, and the console is the sole consumer of the
-// ephemeral adminNonce, which is restricted to the configured admin auth
-// service. The token's sealed ServiceID must equal that service.
+// ephemeral adminNonce, restricted to the configured admin auth record.
 func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("Web User", "web@example.com", "Member", "Active"); err != nil {
+	rec := oidcRecord(t, srv, "IdP")
+	web, err := srv.store.CreateUser("Web User", "web@example.com", "Member", "Active")
+	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	srv.adminNonce = db.GenNonce() // production sets this in NewServer; tests build the literal directly
-	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcID, 10)); err != nil {
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
-	jti := db.GenNonce()
-	famID := createRefreshFamily(t, srv.store, "web@example.com", svcID, jti)
-	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "web@example.com",
-		FamilyID: famID, JTI: jti,
-	})
-	if err != nil {
-		t.Fatalf("mint refresh token: %v", err)
-	}
+	rt := mintIdentityRefresh(t, srv, web, rec.ID)
 
-	rr := cookieRefresh(srv, svcID, rt, srv.adminNonce)
+	rr := cookieRefresh(srv, rec.ID, rt, srv.adminNonce)
 
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	resp := decodeMap(rr)
 	if resp["access_token"] == nil || resp["access_token"] == "" {
 		t.Error("expected access_token in body")
 	}
 	if _, present := resp["refresh_token"]; present {
 		t.Error("cookie-based (browser) refresh must NOT echo refresh_token in the body")
 	}
-	// A rotated refresh token must still be issued — as a fresh cookie, scoped
-	// to this service's token path.
+	// A rotated refresh token must still be issued — as a fresh cookie,
+	// scoped to this record's token path.
 	if !hasRefreshCookie(rr) {
 		t.Error("expected a rotated refresh_token Set-Cookie")
 	}
-	if got, want := refreshCookiePath(rr), "/oauth/token/"+strconv.FormatInt(svcID, 10); got != want {
+	if got, want := refreshCookiePath(rr), "/oauth/token/"+strconv.FormatInt(rec.ID, 10); got != want {
 		t.Errorf("rotated cookie Path = %q, want %q", got, want)
 	}
 }
@@ -841,16 +1030,12 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 // returning refresh_token, per the OAuth token-response contract.
 func TestRefreshGrantFormKeepsBodyToken(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("CLI User", "cli@example.com", "Member", "Active"); err != nil {
+	rec := oidcRecord(t, srv, "IdP")
+	cli, err := srv.store.CreateUser("CLI User", "cli@example.com", "Member", "Active")
+	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	jti := db.GenNonce()
-	famID := createRefreshFamily(t, srv.store, "cli@example.com", svcID, jti)
-	rt, _ := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "cli@example.com",
-		FamilyID: famID, JTI: jti,
-	})
+	rt := mintIdentityRefresh(t, srv, cli, rec.ID)
 
 	rr := postForm(t, srv, "/oauth/token", url.Values{
 		"grant_type":    {"refresh_token"},
@@ -859,31 +1044,30 @@ func TestRefreshGrantFormKeepsBodyToken(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	var resp map[string]interface{}
-	json.Unmarshal(rr.Body.Bytes(), &resp)
+	resp := decodeMap(rr)
 	if resp["refresh_token"] == nil || resp["refresh_token"] == "" {
 		t.Error("form-based (CLI) refresh must include refresh_token in the body")
 	}
 }
 
-// ── Cookie-path app/service authorization ─────────────────────────────
+// ── Cookie-path app/record authorization ────────────────────────────
 //
 // The cookie is SameSite=None (file:// and foreign-origin apps need it), so
 // it attaches cross-site. The CORS origin allowlist gates which origins may
 // call at all, but a registered app is still allowed — so on its own the
-// allowlist can't stop one app's page from refreshing another app's cookie, or
-// stop an app from harvesting a token for a service it was never granted. On
-// the cookie path we therefore bind the request's app (X-App-Nonce) to the
-// token's sealed service. The form path (CLI/MCP) is authorized by possession
-// and is exempt.
+// allowlist can't stop one app's page from refreshing another app's cookie.
+// On the cookie path we therefore bind the request's app (X-App-Nonce) to
+// the token's auth record: the app's own gate, or a slot of a service it is
+// allowed to use. The form path (CLI/MCP) is authorized by possession and
+// is exempt.
 
 // cookieRefresh simulates a browser POSTing to the path-scoped token
 // endpoint with the HttpOnly refresh_token cookie attached and the given
-// app identity in X-App-Nonce. The cookie is added directly (path-matching is
-// the browser's job); the request URL carries the service id the path is
+// app identity in X-App-Nonce. The cookie is added directly (path-matching
+// is the browser's job); the request URL carries the record id the path is
 // scoped to.
-func cookieRefresh(srv *Server, svcID int64, rt, appNonce string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest("POST", "/oauth/token/"+strconv.FormatInt(svcID, 10),
+func cookieRefresh(srv *Server, authID int64, rt, appNonce string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", "/oauth/token/"+strconv.FormatInt(authID, 10),
 		strings.NewReader(url.Values{"grant_type": {"refresh_token"}}.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if appNonce != "" {
@@ -895,14 +1079,16 @@ func cookieRefresh(srv *Server, svcID int64, rt, appNonce string) *httptest.Resp
 	return rr
 }
 
-// mintIdentityRefresh mints a refresh token for a service backed by a real
-// refresh family, the minimal setup the cookie path needs to reach rotation.
-func mintIdentityRefresh(t *testing.T, srv *Server, email string, svcID int64) string {
+// mintIdentityRefresh mints a refresh token for a user bound to an auth
+// record, backed by a real refresh family — the minimal setup the cookie
+// path needs to reach rotation.
+func mintIdentityRefresh(t *testing.T, srv *Server, user *db.User, authID int64) string {
 	t.Helper()
+	subject := subjectForUser(user)
 	jti := db.GenNonce()
-	famID := createRefreshFamily(t, srv.store, email, svcID, jti)
+	famID := createRefreshFamily(t, srv.store, subject, authID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: email,
+		Subject: subject, UserEmail: user.Email, AuthID: authID,
 		FamilyID: famID, JTI: jti,
 	})
 	if err != nil {
@@ -917,124 +1103,160 @@ func mintIdentityRefresh(t *testing.T, srv *Server, email string, svcID int64) s
 // the header is the only app signal, so absence must mean deny.
 func TestRefreshGrantCookieRequiresAppNonce(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.CreateUser("No-Nonce User", "nn@example.com", "Member", "Active")
-	rt := mintIdentityRefresh(t, srv, "nn@example.com", svcID)
+	rec := oidcRecord(t, srv, "IdP")
+	nn, _ := srv.store.CreateUser("No-Nonce User", "nn@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, nn, rec.ID)
 
-	rr := cookieRefresh(srv, svcID, rt, "")
+	rr := cookieRefresh(srv, rec.ID, rt, "")
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", rr.Code, rr.Body.String())
 	}
 }
 
-// A registered app that was never granted the token's service cannot refresh
-// that service's cookie — the cross-app / cross-service harvest is refused.
+// A registered app with no relation to the token's record cannot refresh
+// its cookie — the cross-app / cross-record harvest is refused.
 func TestRefreshGrantCookieAppNotPermitted(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.CreateUser("Unauth User", "unauth@example.com", "Member", "Active")
-	rt := mintIdentityRefresh(t, srv, "unauth@example.com", svcID)
-	appNonce := createApp(t, srv, "outsider-app") // no service link granted
+	rec := oidcRecord(t, srv, "IdP")
+	un, _ := srv.store.CreateUser("Unauth User", "unauth@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, un, rec.ID)
+	appNonce := createApp(t, srv, "outsider-app") // no gate, no service carrying the record
 
-	rr := cookieRefresh(srv, svcID, rt, appNonce)
+	rr := cookieRefresh(srv, rec.ID, rt, appNonce)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", rr.Code, rr.Body.String())
 	}
 }
 
-// A registered app that IS granted the token's service refreshes its cookie
-// happily — the hosted-app happy path.
+// An app whose allowed service carries the token's record in a slot
+// refreshes its cookie happily — the hosted-app happy path.
 func TestRefreshGrantCookieAppPermitted(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.CreateUser("Hosted User", "hosted@example.com", "Member", "Active")
-	rt := mintIdentityRefresh(t, srv, "hosted@example.com", svcID)
+	rec := oidcRecord(t, srv, "IdP")
+	hosted, _ := srv.store.CreateUser("Hosted User", "hosted@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, hosted, rec.ID)
 	appNonce := createApp(t, srv, "hosted-app")
-	linkServiceToApp(t, srv, appNonce, strconv.FormatInt(svcID, 10))
+	svcID := registerService(t, srv, "gated", "https://gated.example", db.ServiceDescriptor{Type: "api"})
+	setServiceActsAs(t, srv, svcID, rec.ID)
+	linkServiceToApp(t, srv, appNonce, svcID)
 
-	rr := cookieRefresh(srv, svcID, rt, appNonce)
+	rr := cookieRefresh(srv, rec.ID, rt, appNonce)
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 	}
 	if _, present := decodeMap(rr)["refresh_token"]; present {
 		t.Error("cookie-based refresh must NOT echo refresh_token in the body")
 	}
-	if got, want := refreshCookiePath(rr), "/oauth/token/"+strconv.FormatInt(svcID, 10); got != want {
+	if got, want := refreshCookiePath(rr), "/oauth/token/"+strconv.FormatInt(rec.ID, 10); got != want {
 		t.Errorf("rotated cookie Path = %q, want %q", got, want)
 	}
 }
 
-// The admin console's ephemeral nonce may only refresh the configured admin
-// auth service — not any other service's cookie. A leaked adminNonce must not
-// become a universal refresh credential.
-func TestRefreshGrantAdminNonceWrongService(t *testing.T) {
+// So is an app whose own gate is the token's record — two apps behind one
+// gate share a session, and either may keep it fresh.
+func TestRefreshGrantCookieAppGatePermitted(t *testing.T) {
 	srv := newTestServer(t)
-	authSvc, _ := srv.store.RegisterService("auth-idp", "https://auth.example", db.ServiceDescriptor{Type: "oidc"})
-	otherSvc, _ := srv.store.RegisterService("other-idp", "https://other.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.CreateUser("Admin User", "admin@example.com", "Admin", "Active")
+	rec := oidcRecord(t, srv, "IdP")
+	gated, _ := srv.store.CreateUser("Gated User", "gated@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, gated, rec.ID)
+	appNonce := createApp(t, srv, "gated-app")
+	setAppGate(t, srv, appNonce, rec.ID)
+
+	rr := cookieRefresh(srv, rec.ID, rt, appNonce)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// The admin console's ephemeral nonce may only refresh the configured admin
+// auth record — not any other record's cookie. A leaked adminNonce must not
+// become a universal refresh credential.
+func TestRefreshGrantAdminNonceWrongRecord(t *testing.T) {
+	srv := newTestServer(t)
+	authRec := oidcRecord(t, srv, "Auth IdP")
+	otherRec := oidcRecord(t, srv, "Other IdP")
+	admin, _ := srv.store.CreateUser("Admin User", "admin@example.com", "Admin", "Active")
 	srv.adminNonce = db.GenNonce()
-	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(authSvc, 10)); err != nil {
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(authRec.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
-	// A refresh token bound to *other*Svc, presented with the admin nonce.
-	rt := mintIdentityRefresh(t, srv, "admin@example.com", otherSvc)
+	// A refresh token bound to the *other* record, presented with the admin nonce.
+	rt := mintIdentityRefresh(t, srv, admin, otherRec.ID)
 
-	rr := cookieRefresh(srv, otherSvc, rt, srv.adminNonce)
+	rr := cookieRefresh(srv, otherRec.ID, rt, srv.adminNonce)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403; body = %s", rr.Code, rr.Body.String())
 	}
 }
 
-// The clobber fix: two services' refresh cookies get distinct, service-scoped
+// The clobber fix: two records' refresh cookies get distinct, record-scoped
 // Paths so the browser's jar keeps both slots instead of one overwriting the
 // other. (The jar's path-matching itself is the browser's job; this pins the
-// server's side of the contract — distinct services → distinct cookie Paths.)
-func TestRefreshCookiePathScopedByService(t *testing.T) {
+// server's side of the contract — distinct records → distinct cookie Paths.)
+func TestRefreshCookiePathScopedByRecord(t *testing.T) {
 	srv := newTestServer(t)
-	svcA, _ := srv.store.RegisterService("idp-a", "https://a.example", db.ServiceDescriptor{Type: "oidc"})
-	svcB, _ := srv.store.RegisterService("idp-b", "https://b.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.CreateUser("Scope User", "scope@example.com", "Admin", "Active")
+	recA := oidcRecord(t, srv, "IdP A")
+	recB := oidcRecord(t, srv, "IdP B")
+	scope, _ := srv.store.CreateUser("Scope User", "scope@example.com", "Admin", "Active")
 	srv.adminNonce = db.GenNonce()
-	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcA, 10)); err != nil {
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(recA.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
 
-	rtA := mintIdentityRefresh(t, srv, "scope@example.com", svcA)
-	rrA := cookieRefresh(srv, svcA, rtA, srv.adminNonce)
+	rtA := mintIdentityRefresh(t, srv, scope, recA.ID)
+	rrA := cookieRefresh(srv, recA.ID, rtA, srv.adminNonce)
 	if rrA.Code != 200 {
-		t.Fatalf("svcA refresh = %d, body = %s", rrA.Code, rrA.Body.String())
+		t.Fatalf("recA refresh = %d, body = %s", rrA.Code, rrA.Body.String())
 	}
 
-	// Second service: re-point admin_auth_service at svcB so the admin nonce is
-	// valid for it too, then refresh.
-	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(svcB, 10))
-	rtB := mintIdentityRefresh(t, srv, "scope@example.com", svcB)
-	rrB := cookieRefresh(srv, svcB, rtB, srv.adminNonce)
+	// Second record: re-point admin_auth_service at recB so the admin nonce
+	// is valid for it too, then refresh.
+	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(recB.ID, 10))
+	rtB := mintIdentityRefresh(t, srv, scope, recB.ID)
+	rrB := cookieRefresh(srv, recB.ID, rtB, srv.adminNonce)
 	if rrB.Code != 200 {
-		t.Fatalf("svcB refresh = %d, body = %s", rrB.Code, rrB.Body.String())
+		t.Fatalf("recB refresh = %d, body = %s", rrB.Code, rrB.Body.String())
 	}
 
 	pathA := refreshCookiePath(rrA)
 	pathB := refreshCookiePath(rrB)
-	if pathA != "/oauth/token/"+strconv.FormatInt(svcA, 10) {
-		t.Errorf("svcA cookie Path = %q", pathA)
+	if pathA != "/oauth/token/"+strconv.FormatInt(recA.ID, 10) {
+		t.Errorf("recA cookie Path = %q", pathA)
 	}
-	if pathB != "/oauth/token/"+strconv.FormatInt(svcB, 10) {
-		t.Errorf("svcB cookie Path = %q", pathB)
+	if pathB != "/oauth/token/"+strconv.FormatInt(recB.ID, 10) {
+		t.Errorf("recB cookie Path = %q", pathB)
 	}
 	if pathA == pathB {
-		t.Errorf("expected distinct cookie Paths for distinct services, both %q", pathA)
+		t.Errorf("expected distinct cookie Paths for distinct records, both %q", pathA)
+	}
+}
+
+// The path-scoped route rejects a cookie whose token binds a different
+// record — a cookie that leaks onto another record's path must not mint.
+func TestRefreshGrantPathRecordMismatch(t *testing.T) {
+	srv := newTestServer(t)
+	recA := oidcRecord(t, srv, "IdP A")
+	recB := oidcRecord(t, srv, "IdP B")
+	leak, _ := srv.store.CreateUser("Leak User", "leak@example.com", "Member", "Active")
+	appNonce := createApp(t, srv, "leak-app")
+	setAppGate(t, srv, appNonce, recA.ID)
+	rt := mintIdentityRefresh(t, srv, leak, recA.ID)
+
+	// recA's token presented on recB's path.
+	rr := cookieRefresh(srv, recB.ID, rt, appNonce)
+	if rr.Code != 400 {
+		t.Fatalf("status = %d, want 400 (path/record mismatch); body = %s", rr.Code, rr.Body.String())
 	}
 }
 
 // The form path (CLI/MCP) carries the token in the body and is authorized by
 // possession — no X-App-Nonce, no app/service grant, no admin_auth_service.
-// The app/service check must be skipped there entirely.
+// The app/record check must be skipped there entirely.
 func TestRefreshGrantFormPathSkipsAppAuth(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	srv.store.CreateUser("CLI User", "form@example.com", "Member", "Active")
-	rt := mintIdentityRefresh(t, srv, "form@example.com", svcID)
+	rec := oidcRecord(t, srv, "IdP")
+	form, _ := srv.store.CreateUser("CLI User", "form@example.com", "Member", "Active")
+	rt := mintIdentityRefresh(t, srv, form, rec.ID)
 
 	// No X-App-Nonce, no admin_auth_service, no app — form body only.
 	rr := postForm(t, srv, "/oauth/token", url.Values{
@@ -1059,11 +1281,9 @@ func decodeMap(rr *httptest.ResponseRecorder) map[string]interface{} {
 func TestRefreshTokenClaimsRoundtrip(t *testing.T) {
 	srv := newTestServer(t)
 	data := freshbreathRefreshData{
-		Kind:      "identity",
-		ServiceID: 99,
+		Subject:   "frbr:99",
 		UserEmail: "claims@example.com",
-		UserRole:  "Member",
-		UserName:  "Claims Tester",
+		AuthID:    7,
 		FamilyID:  "fam-abc-123",
 		JTI:       "jti-first-xyz",
 	}
@@ -1081,6 +1301,9 @@ func TestRefreshTokenClaimsRoundtrip(t *testing.T) {
 	}
 	if got.JTI != data.JTI {
 		t.Errorf("JTI = %q, want %q", got.JTI, data.JTI)
+	}
+	if got.Subject != data.Subject || got.AuthID != data.AuthID {
+		t.Errorf("payload roundtrip: got subject=%q auth=%d", got.Subject, got.AuthID)
 	}
 
 	// The family_id and jti are also readable directly from the JWT (so the
@@ -1114,8 +1337,8 @@ func hasRefreshCookie(rr *httptest.ResponseRecorder) bool {
 }
 
 // refreshCookiePath returns the Path of the rotated refresh_token Set-Cookie,
-// or "" if none was set. The path is scoped by service id so that refresh
-// tokens for several services occupy distinct cookie slots.
+// or "" if none was set. The path is scoped by auth record id so that refresh
+// tokens for several records occupy distinct cookie slots.
 func refreshCookiePath(rr *httptest.ResponseRecorder) string {
 	for _, c := range rr.Result().Cookies() {
 		if c.Name == "refresh_token" {
@@ -1127,35 +1350,35 @@ func refreshCookiePath(rr *httptest.ResponseRecorder) string {
 
 // ── Refresh token rotation (token families) ─────────────────────────
 
-// A normal refresh with the current jti rotates the family to a new jti
-// and issues a fresh token pair.
-func TestOAuthRefreshRotationHappyPath(t *testing.T) {
-	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("Rot User", "rot@example.com", "Member", "Active"); err != nil {
+// refreshFixture is a user + record + family + refresh token, the standard
+// setup for the rotation tests.
+func refreshFixture(t *testing.T, srv *Server, email string) (rec *db.AuthRecord, famID string, rt string) {
+	t.Helper()
+	rec = oidcRecord(t, srv, "IdP")
+	user, err := srv.store.CreateUser("Rotation User", email, "Member", "Active")
+	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-
-	famID := db.GenNonce()
-	jti1 := db.GenNonce()
-	fam := &db.RefreshFamily{
-		ID:         famID,
-		UserEmail:  "rot@example.com",
-		ServiceID:  svcID,
-		CurrentJTI: jti1,
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-	}
-	if err := srv.store.CreateRefreshFamily(fam); err != nil {
-		t.Fatalf("create family: %v", err)
-	}
-
-	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "rot@example.com",
-		FamilyID: famID, JTI: jti1,
+	subject := subjectForUser(user)
+	jti := db.GenNonce()
+	famID = createRefreshFamily(t, srv.store, subject, rec.ID, jti)
+	rt, err = srv.mintRefreshToken(freshbreathRefreshData{
+		Subject: subject, UserEmail: email, AuthID: rec.ID,
+		FamilyID: famID, JTI: jti,
 	})
 	if err != nil {
 		t.Fatalf("mint refresh token: %v", err)
 	}
+	return rec, famID, rt
+}
+
+// A normal refresh with the current jti rotates the family to a new jti
+// and issues a fresh token pair.
+func TestOAuthRefreshRotationHappyPath(t *testing.T) {
+	srv := newTestServer(t)
+	_, famID, rt := refreshFixture(t, srv, "rot@example.com")
+	fam0, _, _ := srv.store.GetRefreshFamily(famID)
+	jti1 := fam0.CurrentJTI
 
 	rr := postForm(t, srv, "/oauth/token", url.Values{
 		"grant_type":    {"refresh_token"},
@@ -1179,25 +1402,7 @@ func TestOAuthRefreshRotationHappyPath(t *testing.T) {
 // idempotently — no second rotate, no revoke.
 func TestOAuthRefreshRotationGraceWindow(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("Grace User", "grace@example.com", "Member", "Active"); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	famID := db.GenNonce()
-	jti1 := db.GenNonce()
-	srv.store.CreateRefreshFamily(&db.RefreshFamily{
-		ID:         famID,
-		UserEmail:  "grace@example.com",
-		ServiceID:  svcID,
-		CurrentJTI: jti1,
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-	})
-
-	rt1, _ := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "grace@example.com",
-		FamilyID: famID, JTI: jti1,
-	})
+	_, famID, rt1 := refreshFixture(t, srv, "grace@example.com")
 
 	// First refresh: normal rotation.
 	rr1 := postForm(t, srv, "/oauth/token", url.Values{
@@ -1211,7 +1416,7 @@ func TestOAuthRefreshRotationGraceWindow(t *testing.T) {
 	fam, _, _ := srv.store.GetRefreshFamily(famID)
 	jti2 := fam.CurrentJTI
 
-	// Second refresh with the original token (jti1 is now prev_jti).
+	// Second refresh with the original token (its jti is now prev_jti).
 	rr2 := postForm(t, srv, "/oauth/token", url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {rt1},
@@ -1233,25 +1438,7 @@ func TestOAuthRefreshRotationGraceWindow(t *testing.T) {
 // reuse → the entire family is revoked and subsequent attempts fail.
 func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("Reuse User", "reuse@example.com", "Member", "Active"); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	famID := db.GenNonce()
-	jti1 := db.GenNonce()
-	srv.store.CreateRefreshFamily(&db.RefreshFamily{
-		ID:         famID,
-		UserEmail:  "reuse@example.com",
-		ServiceID:  svcID,
-		CurrentJTI: jti1,
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-	})
-
-	rt1, _ := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "reuse@example.com",
-		FamilyID: famID, JTI: jti1,
-	})
+	rec, famID, rt1 := refreshFixture(t, srv, "reuse@example.com")
 
 	// First refresh rotates jti-1 → jti-2.
 	rr1 := postForm(t, srv, "/oauth/token", url.Values{
@@ -1267,7 +1454,7 @@ func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
 		"UPDATE refresh_families SET rotated_at = datetime('now', '-60 seconds') WHERE id = ?", famID,
 	)
 
-	// Replay with the old token (jti-1 is now prev_jti, but outside grace).
+	// Replay with the old token (its jti is now prev_jti, but outside grace).
 	rr2 := postForm(t, srv, "/oauth/token", url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {rt1},
@@ -1284,7 +1471,7 @@ func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
 	// Even a correct current-jti refresh must now fail.
 	fam2, _, _ := srv.store.GetRefreshFamily(famID)
 	rtCurrent, _ := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "reuse@example.com",
+		Subject: fam2.Subject, UserEmail: "reuse@example.com", AuthID: rec.ID,
 		FamilyID: famID, JTI: fam2.CurrentJTI,
 	})
 	rr3 := postForm(t, srv, "/oauth/token", url.Values{
@@ -1299,26 +1486,9 @@ func TestOAuthRefreshRotationReuseOutsideGrace(t *testing.T) {
 // A revoked family rejects all refresh attempts immediately.
 func TestOAuthRefreshRotationRevokedFamily(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("Revoked User", "rev@example.com", "Member", "Active"); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	famID := db.GenNonce()
-	jti1 := db.GenNonce()
-	srv.store.CreateRefreshFamily(&db.RefreshFamily{
-		ID:         famID,
-		UserEmail:  "rev@example.com",
-		ServiceID:  svcID,
-		CurrentJTI: jti1,
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-	})
+	_, famID, rt := refreshFixture(t, srv, "rev@example.com")
 	srv.store.RevokeRefreshFamily(famID)
 
-	rt, _ := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "rev@example.com",
-		FamilyID: famID, JTI: jti1,
-	})
 	rr := postForm(t, srv, "/oauth/token", url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {rt},
@@ -1333,19 +1503,20 @@ func TestOAuthRefreshRotationRevokedFamily(t *testing.T) {
 	}
 }
 
-// A token missing family_id (legacy stateless) is treated as having no
-// family and fails gracefully — the client must re-login.
-func TestOAuthRefreshLegacyNoFamily(t *testing.T) {
+// A token missing family_id is treated as having no family and fails
+// gracefully — the client must re-login.
+func TestOAuthRefreshNoFamily(t *testing.T) {
 	srv := newTestServer(t)
-	svcID, _ := srv.store.RegisterService("idp", "https://idp.example", db.ServiceDescriptor{Type: "oidc"})
-	if _, err := srv.store.CreateUser("Legacy User", "leg@example.com", "Member", "Active"); err != nil {
+	rec := oidcRecord(t, srv, "IdP")
+	user, err := srv.store.CreateUser("Legacy User", "leg@example.com", "Member", "Active")
+	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	// Mint a refresh token with empty family_id (as legacy tokens have).
+	// Mint a refresh token with an empty family_id.
 	rt, _ := srv.mintRefreshToken(freshbreathRefreshData{
-		Kind: "identity", ServiceID: svcID, UserEmail: "leg@example.com",
-		// FamilyID and JTI intentionally empty — this is a legacy token.
+		Subject: subjectForUser(user), UserEmail: user.Email, AuthID: rec.ID,
+		// FamilyID and JTI intentionally empty.
 	})
 	rr := postForm(t, srv, "/oauth/token", url.Values{
 		"grant_type":    {"refresh_token"},
@@ -1390,9 +1561,9 @@ func TestTokenSubkeySeparation(t *testing.T) {
 		t.Error("subkey derivation must be deterministic")
 	}
 
-	// A wrapped token must still mint → verify → unseal correctly.
-	tok, err := srv.mintFreshbreathToken("wrapped", "u@example.com", "", "", 5,
-		&sealedUpstreamData{UpstreamToken: "up"})
+	// A credential-carrying token must still mint → verify → unseal correctly.
+	tok, err := srv.mintFreshbreathToken("ext:up:1", "u@example.com", "", "", 5, nil,
+		sealedCreds{"up": {UpstreamToken: "up"}})
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -1400,8 +1571,8 @@ func TestTokenSubkeySeparation(t *testing.T) {
 	if err != nil || claims == nil {
 		t.Fatalf("roundtrip broke after subkey split: claims=%v err=%v", claims, err)
 	}
-	if claims.UpstreamToken != "up" {
-		t.Errorf("UpstreamToken = %q, want up", claims.UpstreamToken)
+	if claims.Creds["up"].UpstreamToken != "up" {
+		t.Errorf("unsealed cred = %q, want up", claims.Creds["up"].UpstreamToken)
 	}
 }
 
@@ -1420,36 +1591,36 @@ func TestVerifyPKCE(t *testing.T) {
 
 func TestVerifyAndUnwrapToken(t *testing.T) {
 	srv := newTestServer(t)
-	const sid int64 = 42
+	const recID int64 = 42
 
-	wrapped, err := srv.mintFreshbreathToken("wrapped", "u@example.com", "", "", sid,
-		&sealedUpstreamData{UpstreamToken: "secret-upstream"})
+	tok, err := srv.mintFreshbreathToken("ext:up:9", "u@example.com", "", "", recID, nil,
+		sealedCreds{"up": {UpstreamToken: "secret-upstream"}})
 	if err != nil {
-		t.Fatalf("mint wrapped: %v", err)
+		t.Fatalf("mint: %v", err)
 	}
 
-	// Correct service → unwraps.
-	claims, err := srv.verifyAndUnwrapToken(wrapped, sid)
+	// Correct record → unseals.
+	claims, err := srv.verifyAndUnwrapToken(tok, recID)
 	if err != nil {
 		t.Fatalf("unwrap: %v", err)
 	}
-	if claims == nil || claims.UpstreamToken != "secret-upstream" {
-		t.Fatalf("expected unwrapped upstream token, got %+v", claims)
+	if claims == nil || claims.Creds["up"].UpstreamToken != "secret-upstream" {
+		t.Fatalf("expected unsealed upstream token, got %+v", claims)
 	}
 
-	// Wrong service ID → rejected (token binding).
-	if _, err := srv.verifyAndUnwrapToken(wrapped, sid+1); err == nil {
-		t.Error("expected service_id mismatch to fail")
+	// Wrong record → rejected (token binding).
+	if _, err := srv.verifyAndUnwrapToken(tok, recID+1); err == nil {
+		t.Error("expected record mismatch to fail")
 	}
 
-	// Identity token (not wrapped) → rejected by verifyAndUnwrapToken.
-	identity, _ := srv.mintFreshbreathToken("identity", "u@example.com", "Admin", "U", sid, nil)
-	if _, err := srv.verifyAndUnwrapToken(identity, sid); err == nil {
-		t.Error("expected non-wrapped token to be rejected")
+	// A record carried in Legs also satisfies the binding.
+	legged, _ := srv.mintFreshbreathToken("ext:up:9", "u@example.com", "", "", recID, []int64{7}, nil)
+	if _, err := srv.verifyAndUnwrapToken(legged, 7); err != nil {
+		t.Errorf("legs binding rejected: %v", err)
 	}
 
 	// A non-Freshbreath token → (nil, nil): caller uses the raw token as-is.
-	claims, err = srv.verifyAndUnwrapToken("not.a.freshbreathtoken", sid)
+	claims, err = srv.verifyAndUnwrapToken("not.a.freshbreathtoken", recID)
 	if err != nil || claims != nil {
 		t.Errorf("non-fb token: got claims=%v err=%v, want nil,nil", claims, err)
 	}

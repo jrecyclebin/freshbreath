@@ -21,6 +21,17 @@ func NewStore(database *sql.DB) *Store { return &Store{db: database} }
 func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) Migrate() error {
+	// Pre-auth-rework refresh_families used user_email/service_id columns.
+	// The table only holds live sessions, so the cheap path is a drop:
+	// everyone re-logs in once and the new shape is created below.
+	var oldFamilies bool
+	s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('refresh_families') WHERE name='user_email'").Scan(&oldFamilies)
+	if oldFamilies {
+		if _, err := s.db.Exec("DROP TABLE refresh_families"); err != nil {
+			return err
+		}
+	}
+
 	_, err := s.db.Exec(`
     CREATE TABLE IF NOT EXISTS apps (
       id          INTEGER PRIMARY KEY,
@@ -111,10 +122,19 @@ func (s *Store) Migrate() error {
     CREATE INDEX IF NOT EXISTS idx_app_service_svc ON app_service_links(service_id);
     CREATE INDEX IF NOT EXISTS idx_oauth_clients_id ON oauth_clients(client_id);
 
+    CREATE TABLE IF NOT EXISTS auth_records (
+      id         INTEGER PRIMARY KEY,
+      name       TEXT NOT NULL UNIQUE,
+      kind       TEXT NOT NULL,
+      descriptor TEXT NOT NULL DEFAULT '{}',
+      builtin    INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+    );
+
     CREATE TABLE IF NOT EXISTS refresh_families (
       id           TEXT PRIMARY KEY,
-      user_email   TEXT NOT NULL,
-      service_id   INTEGER NOT NULL,
+      subject      TEXT NOT NULL,
+      auth_id      INTEGER NOT NULL,
       device_label TEXT,
       current_jti  TEXT NOT NULL,
       prev_jti     TEXT,
@@ -124,7 +144,7 @@ func (s *Store) Migrate() error {
       last_used_at TEXT,
       revoked      INTEGER NOT NULL DEFAULT 0
     );
-    CREATE INDEX IF NOT EXISTS idx_refresh_families_user_email ON refresh_families(user_email);
+    CREATE INDEX IF NOT EXISTS idx_refresh_families_subject ON refresh_families(subject);
     CREATE INDEX IF NOT EXISTS idx_refresh_families_expires_at ON refresh_families(expires_at);
 
     CREATE TABLE IF NOT EXISTS update_feeds (
@@ -180,7 +200,40 @@ func (s *Store) Migrate() error {
 		if err != nil {
 			return err
 		}
-		if _, err = s.db.Exec("UPDATE update_feeds SET last_etag = '', last_modified = '"); err != nil {
+		if _, err = s.db.Exec("UPDATE update_feeds SET last_etag = '', last_modified = ''"); err != nil {
+			return err
+		}
+	}
+
+	// Auth slot columns (design/decoupled-auth.md): protected_by is the
+	// inbound gate, acts_as the outbound credential. Real columns, not
+	// descriptor keys — they're validated on write and joined on read.
+	for _, col := range []struct{ table, name string }{
+		{"services", "protected_by"},
+		{"services", "acts_as"},
+		{"apps", "protected_by"},
+	} {
+		var has bool
+		s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info(?) WHERE name=?", col.table, col.name).Scan(&has)
+		if !has {
+			if _, err := s.db.Exec("ALTER TABLE " + col.table + " ADD COLUMN " + col.name + " INTEGER"); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Seed the built-in auth records: the passphrase login and the explicit
+	// "open to anyone on the LAN" record. Undeletable; name/kind frozen.
+	for _, rec := range []struct{ name, kind string }{
+		{"Built-in", "ssh_key"},
+		{"Anonymous", "anonymous"},
+	} {
+		_, err := s.db.Exec(`
+      INSERT INTO auth_records (name, kind, builtin)
+      SELECT ?, ?, 1
+      WHERE NOT EXISTS (SELECT 1 FROM auth_records WHERE kind = ? AND builtin = 1)`,
+			rec.name, rec.kind, rec.kind)
+		if err != nil {
 			return err
 		}
 	}
@@ -206,13 +259,26 @@ func (s *Store) Migrate() error {
 	return nil
 }
 
-func (s *Store) CreateApp(name, env string, url string, ownerID *int64) (string, error) {
+// CreateApp registers an app. A nil protectedBy defaults to the builtin
+// Anonymous record — most apps are open on creation, and the gate is an
+// explicit choice either way (empty would mean inherit-admin, which is the
+// wrong default for a fresh dashboard).
+func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protectedBy *int64) (string, error) {
 	if env == "" {
 		env = "Development"
 	}
+	if protectedBy == nil {
+		anonID, err := s.BuiltinAuthID(AuthAnonymous)
+		if err != nil {
+			return "", err
+		}
+		protectedBy = &anonID
+	}
 	nonce := GenNonce()
 	for {
-		_, err := s.db.Exec("INSERT INTO apps (nonce, name, environment, url, owner_id) VALUES (?, ?, ?, ?, ?)", nonce, name, env, url, ownerID)
+		_, err := s.db.Exec(
+			"INSERT INTO apps (nonce, name, environment, url, owner_id, protected_by) VALUES (?, ?, ?, ?, ?, ?)",
+			nonce, name, env, url, ownerID, nullableID(protectedBy))
 		if err == nil {
 			return nonce, nil
 		}
@@ -226,7 +292,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64) (string,
 
 func (s *Store) ListApps() ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(`
-    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details,
+    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details, a.protected_by,
            u.id, u.name,
            (SELECT COUNT(DISTINCT user_id) FROM app_members WHERE app_nonce = a.nonce) as member_count,
            (SELECT COUNT(DISTINCT service_id) FROM app_service_links WHERE app_nonce = a.nonce AND allowed = 1) as service_count
@@ -242,10 +308,10 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 	var apps []map[string]interface{}
 	for rows.Next() {
 		var nonce, name, env, url, created, detailsStr string
-		var ownerID sql.NullInt64
+		var ownerID, protectedBy sql.NullInt64
 		var ownerName sql.NullString
 		var memberCount, serviceCount int
-		if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
+		if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &protectedBy, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
 			return nil, err
 		}
 		app := map[string]interface{}{
@@ -256,6 +322,9 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 			"created_at":    created,
 			"member_count":  memberCount,
 			"service_count": serviceCount,
+		}
+		if protectedBy.Valid {
+			app["protected_by"] = protectedBy.Int64
 		}
 		if ownerID.Valid {
 			app["owner_id"] = ownerID.Int64
@@ -275,7 +344,7 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 
 func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(`
-    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details,
+    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details, a.protected_by,
            u.id, u.name,
            (SELECT COUNT(DISTINCT user_id) FROM app_members WHERE app_nonce = a.nonce) as member_count,
            (SELECT COUNT(DISTINCT service_id) FROM app_service_links WHERE app_nonce = a.nonce AND allowed = 1) as service_count
@@ -292,10 +361,10 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 	var apps []map[string]interface{}
 	for rows.Next() {
 		var nonce, name, env, url, created, detailsStr string
-		var ownerID sql.NullInt64
+		var ownerID, protectedBy sql.NullInt64
 		var ownerName sql.NullString
 		var memberCount, serviceCount int
-		if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
+		if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &protectedBy, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
 			return nil, err
 		}
 		app := map[string]interface{}{
@@ -306,6 +375,9 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 			"created_at":    created,
 			"member_count":  memberCount,
 			"service_count": serviceCount,
+		}
+		if protectedBy.Valid {
+			app["protected_by"] = protectedBy.Int64
 		}
 		if ownerID.Valid {
 			app["owner_id"] = ownerID.Int64
@@ -325,13 +397,13 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 
 func (s *Store) GetApp(nonce string) (*App, error) {
 	row := s.db.QueryRow(
-		"SELECT id, nonce, name, url, environment, owner_id, details FROM apps WHERE nonce = ?",
+		"SELECT id, nonce, name, url, environment, owner_id, details, protected_by FROM apps WHERE nonce = ?",
 		nonce,
 	)
 	a := &App{}
 	var detailsStr string
-	var ownerID sql.NullInt64
-	err := row.Scan(&a.ID, &a.Nonce, &a.Name, &a.URL, &a.Environment, &ownerID, &detailsStr)
+	var ownerID, protectedBy sql.NullInt64
+	err := row.Scan(&a.ID, &a.Nonce, &a.Name, &a.URL, &a.Environment, &ownerID, &detailsStr, &protectedBy)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("app not found")
 	}
@@ -340,6 +412,9 @@ func (s *Store) GetApp(nonce string) (*App, error) {
 	}
 	if ownerID.Valid {
 		a.OwnerID = &ownerID.Int64
+	}
+	if protectedBy.Valid {
+		a.ProtectedBy = &protectedBy.Int64
 	}
 	if detailsStr != "" && detailsStr != "{}" {
 		a.Details = &AppDetails{}
@@ -384,10 +459,10 @@ func (s *Store) ListHostedApps() ([]*App, error) {
 	return apps, rows.Err()
 }
 
-func (s *Store) UpdateApp(nonce string, name, env string, url string, ownerID *int64) error {
+func (s *Store) UpdateApp(nonce string, name, env string, url string, ownerID *int64, protectedBy *int64) error {
 	_, err := s.db.Exec(
-		"UPDATE apps SET name = ?, environment = ?, url = ?, owner_id = ? WHERE nonce = ?",
-		name, env, url, ownerID, nonce,
+		"UPDATE apps SET name = ?, environment = ?, url = ?, owner_id = ?, protected_by = ? WHERE nonce = ?",
+		name, env, url, ownerID, nullableID(protectedBy), nonce,
 	)
 	return err
 }
@@ -620,14 +695,45 @@ func (s *Store) ListAudit(limit int) ([]*AuditEntry, error) {
 
 // ── Services ──
 
-func (s *Store) RegisterService(name, serviceURL string, descriptor ServiceDescriptor) (int64, error) {
+const serviceCols = "id, name, url, descriptor, protected_by, acts_as"
+
+// nullableID converts an optional record reference for binding: nil stays
+// NULL in the database rather than 0.
+func nullableID(id *int64) interface{} {
+	if id == nil {
+		return nil
+	}
+	return *id
+}
+
+func scanService(row interface{ Scan(...any) error }) (*Service, error) {
+	svc := &Service{}
+	var descStr string
+	var protectedBy, actsAs sql.NullInt64
+	err := row.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr, &protectedBy, &actsAs)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(descStr), &svc.Descriptor); err != nil {
+		return nil, err
+	}
+	if protectedBy.Valid {
+		svc.ProtectedBy = &protectedBy.Int64
+	}
+	if actsAs.Valid {
+		svc.ActsAs = &actsAs.Int64
+	}
+	return svc, nil
+}
+
+func (s *Store) RegisterService(name, serviceURL string, descriptor ServiceDescriptor, protectedBy, actsAs *int64) (int64, error) {
 	descJSON, err := json.Marshal(descriptor)
 	if err != nil {
 		return 0, err
 	}
 	res, err := s.db.Exec(
-		"INSERT INTO services (name, url, descriptor) VALUES (?, ?, ?)",
-		name, serviceURL, string(descJSON),
+		"INSERT INTO services (name, url, descriptor, protected_by, acts_as) VALUES (?, ?, ?, ?, ?)",
+		name, serviceURL, string(descJSON), nullableID(protectedBy), nullableID(actsAs),
 	)
 	if err != nil {
 		if isUnique(err) {
@@ -639,75 +745,42 @@ func (s *Store) RegisterService(name, serviceURL string, descriptor ServiceDescr
 }
 
 func (s *Store) GetService(serviceID int64) (*Service, error) {
-	row := s.db.QueryRow(
-		"SELECT id, name, url, descriptor FROM services WHERE id = ?",
-		serviceID,
-	)
-	svc := &Service{}
-	var descStr string
-	err := row.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr)
+	svc, err := scanService(s.db.QueryRow(
+		"SELECT "+serviceCols+" FROM services WHERE id = ?", serviceID))
 	if err == sql.ErrNoRows {
 		return nil, errors.New("service not found")
 	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(descStr), &svc.Descriptor); err != nil {
-		return nil, err
-	}
-	return svc, nil
+	return svc, err
 }
 
 func (s *Store) GetServiceByURL(serviceURL string) (*Service, error) {
-	row := s.db.QueryRow(
-		"SELECT id, name, url, descriptor FROM services WHERE rtrim(url, '/') = rtrim(?, '/')",
-		serviceURL,
-	)
-	svc := &Service{}
-	var descStr string
-	err := row.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr)
+	svc, err := scanService(s.db.QueryRow(
+		"SELECT "+serviceCols+" FROM services WHERE rtrim(url, '/') = rtrim(?, '/')", serviceURL))
 	if err == sql.ErrNoRows {
 		return nil, errors.New("service not found")
 	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(descStr), &svc.Descriptor); err != nil {
-		return nil, err
-	}
-	return svc, nil
+	return svc, err
 }
 
 // GetServiceByName looks up a service by name. It returns an error if no
 // service has the name or if more than one shares it.
 func (s *Store) GetServiceByName(name string) (*Service, error) {
-	row := s.db.QueryRow(
-		"SELECT id, name, url, descriptor FROM services WHERE name = ?",
-		name,
-	)
-	svc := &Service{}
-	var descStr string
-	err := row.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr)
+	svc, err := scanService(s.db.QueryRow(
+		"SELECT "+serviceCols+" FROM services WHERE name = ?", name))
 	if err == sql.ErrNoRows {
 		return nil, errors.New("service not found")
 	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(descStr), &svc.Descriptor); err != nil {
-		return nil, err
-	}
-	return svc, nil
+	return svc, err
 }
 
-func (s *Store) UpdateService(id int64, name, serviceURL string, descriptor ServiceDescriptor) error {
+func (s *Store) UpdateService(id int64, name, serviceURL string, descriptor ServiceDescriptor, protectedBy, actsAs *int64) error {
 	descJSON, err := json.Marshal(descriptor)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(
-		"UPDATE services SET name = ?, url = ?, descriptor = ? WHERE id = ?",
-		name, serviceURL, string(descJSON), id,
+		"UPDATE services SET name = ?, url = ?, descriptor = ?, protected_by = ?, acts_as = ? WHERE id = ?",
+		name, serviceURL, string(descJSON), nullableID(protectedBy), nullableID(actsAs), id,
 	)
 	return err
 }
@@ -924,21 +997,15 @@ func (s *Store) IsServiceAllowedForApp(appNonce string, serviceID int64) (bool, 
 }
 
 func (s *Store) ListServices() ([]*Service, error) {
-	rows, err := s.db.Query(
-		"SELECT id, name, url, descriptor FROM services ORDER BY name",
-	)
+	rows, err := s.db.Query("SELECT " + serviceCols + " FROM services ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*Service
 	for rows.Next() {
-		svc := &Service{}
-		var descStr string
-		if err := rows.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal([]byte(descStr), &svc.Descriptor); err != nil {
+		svc, err := scanService(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, svc)
@@ -970,7 +1037,7 @@ func (s *Store) EnsureSSHService() (int64, error) {
 	if err == nil {
 		return svc.ID, nil
 	}
-	id, err := s.RegisterService("SSH", "ssh://", ServiceDescriptor{Type: "ssh"})
+	id, err := s.RegisterService("SSH", "ssh://", ServiceDescriptor{Type: "ssh"}, nil, nil)
 	if err != nil {
 		return 0, fmt.Errorf("seed SSH service: %w", err)
 	}
@@ -1097,8 +1164,8 @@ func (s *Store) GetOAuthClient(clientID string) (clientSecret string, redirectUR
 
 type RefreshFamily struct {
 	ID          string
-	UserEmail   string
-	ServiceID   int64
+	Subject     string // "frbr:<user_id>" or "ext:<provider>:<sub>"
+	AuthID      int64  // auth record the session is bound to
 	DeviceLabel string
 	CurrentJTI  string
 	PrevJTI     string
@@ -1117,16 +1184,16 @@ func parseTime(s string) time.Time {
 func (s *Store) CreateRefreshFamily(fam *RefreshFamily) error {
 	_, err := s.db.Exec(
 		`INSERT INTO refresh_families
-      (id, user_email, service_id, device_label, current_jti, expires_at)
+      (id, subject, auth_id, device_label, current_jti, expires_at)
       VALUES (?, ?, ?, ?, ?, ?)`,
-		fam.ID, fam.UserEmail, fam.ServiceID, fam.DeviceLabel, fam.CurrentJTI, fam.ExpiresAt.Format(time.RFC3339),
+		fam.ID, fam.Subject, fam.AuthID, fam.DeviceLabel, fam.CurrentJTI, fam.ExpiresAt.Format(time.RFC3339),
 	)
 	return err
 }
 
 func (s *Store) GetRefreshFamily(id string) (*RefreshFamily, bool, error) {
 	row := s.db.QueryRow(
-		`SELECT id, user_email, service_id, device_label, current_jti, prev_jti,
+		`SELECT id, subject, auth_id, device_label, current_jti, prev_jti,
             created_at, expires_at, rotated_at, last_used_at, revoked
      FROM refresh_families WHERE id = ?`, id,
 	)
@@ -1135,7 +1202,7 @@ func (s *Store) GetRefreshFamily(id string) (*RefreshFamily, bool, error) {
 	var c, e string
 	var prev sql.NullString
 	var rot, lu sql.NullString
-	err := row.Scan(&f.ID, &f.UserEmail, &f.ServiceID, &f.DeviceLabel, &f.CurrentJTI, &prev, &c, &e, &rot, &lu, &r)
+	err := row.Scan(&f.ID, &f.Subject, &f.AuthID, &f.DeviceLabel, &f.CurrentJTI, &prev, &c, &e, &rot, &lu, &r)
 	if err == sql.ErrNoRows {
 		return nil, false, nil
 	}
@@ -1178,21 +1245,21 @@ func (s *Store) RevokeRefreshFamily(id string) error {
 	return err
 }
 
-func (s *Store) RevokeUserRefreshFamilies(email string) error {
+func (s *Store) RevokeUserRefreshFamilies(subject string) error {
 	_, err := s.db.Exec(
-		"UPDATE refresh_families SET revoked = 1 WHERE user_email = ?", email,
+		"UPDATE refresh_families SET revoked = 1 WHERE subject = ?", subject,
 	)
 	return err
 }
 
-func (s *Store) ListRefreshFamilies(email string) ([]RefreshFamily, error) {
+func (s *Store) ListRefreshFamilies(subject string) ([]RefreshFamily, error) {
 	rows, err := s.db.Query(
-		`SELECT id, user_email, service_id, device_label, current_jti, prev_jti,
+		`SELECT id, subject, auth_id, device_label, current_jti, prev_jti,
             created_at, expires_at, rotated_at, last_used_at, revoked
      FROM refresh_families
-     WHERE user_email = ? AND revoked = 0 AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+     WHERE subject = ? AND revoked = 0 AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
      ORDER BY created_at DESC`,
-		email,
+		subject,
 	)
 	if err != nil {
 		return nil, err
@@ -1206,7 +1273,7 @@ func (s *Store) ListRefreshFamilies(email string) ([]RefreshFamily, error) {
 		var c, e string
 		var prev sql.NullString
 		var rot, lu sql.NullString
-		if err := rows.Scan(&f.ID, &f.UserEmail, &f.ServiceID, &f.DeviceLabel, &f.CurrentJTI, &prev, &c, &e, &rot, &lu, &r); err != nil {
+		if err := rows.Scan(&f.ID, &f.Subject, &f.AuthID, &f.DeviceLabel, &f.CurrentJTI, &prev, &c, &e, &rot, &lu, &r); err != nil {
 			return nil, err
 		}
 		if prev.Valid {

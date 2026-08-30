@@ -8,7 +8,11 @@ import (
 	"poggers.institute/freshbreath/internal/db"
 )
 
-func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request) (*http.Response, error) {
+// serviceDoProxy forwards a proxied request upstream, applying the resolved
+// outbound credential. The caller's own Authorization only survives on a
+// Verbatim verdict — anything else at the door was the gate credential,
+// which is never valid upstream.
+func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request, cred outboundCred) (*http.Response, error) {
 	target, err := url.Parse(svc.URL)
 	if err != nil {
 		return nil, err
@@ -29,32 +33,24 @@ func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request) (*http.Respons
 		return nil, err
 	}
 
-	// Forward all headers from the browser (including Authorization)
-	// but strip hop-by-hop and internal headers.
-	hasAuth := false
-	apiKey := svc.Descriptor.APIKey
+	// Forward headers, stripping hop-by-hop and internal ones. The gate
+	// credential (Authorization or X-API-Key) is consumed at the door.
 	for k, v := range r.Header {
 		kl := strings.ToLower(k)
-		if kl == "host" || kl == "connection" || kl == "x-app-nonce" || kl == "content-length" || kl == "origin" || kl == "access-control-request-method" || kl == "access-control-request-headers" || kl == "user-agent" {
+		if kl == "host" || kl == "connection" || kl == "x-app-nonce" || kl == "content-length" || kl == "origin" || kl == "access-control-request-method" || kl == "access-control-request-headers" || kl == "user-agent" || kl == "x-api-key" {
 			continue
 		}
-		if kl == "authorization" {
-			hasAuth = true
-		}
-		if kl == "x-api-key" {
-			apiKey = v[0]
-			continue // consumed — will be re-emitted as the proper auth header below
+		if kl == "authorization" && !cred.Verbatim {
+			continue
 		}
 		proxyReq.Header[k] = v
 	}
 
-	// Inject API key if no Authorization header was provided.
-	// x-api-key from the client takes precedence over the descriptor key.
-	if !hasAuth && svc.Descriptor.Auth == "key" && apiKey != "" {
-		if svc.Descriptor.Header != "" {
-			proxyReq.Header.Set(svc.Descriptor.Header, apiKey)
+	if cred.Token != "" {
+		if cred.Header != "" {
+			proxyReq.Header.Set(cred.Header, cred.Token)
 		} else {
-			proxyReq.Header.Set("Authorization", "Bearer "+apiKey)
+			proxyReq.Header.Set("Authorization", "Bearer "+cred.Token)
 		}
 	}
 
