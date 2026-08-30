@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,7 +45,7 @@ func TestMCPCreateAppWithOwnerEmail(t *testing.T) {
 func TestMCPUpdateAppWithOwnerEmail(t *testing.T) {
 	srv := newTestServer(t)
 	admin := &db.User{ID: 1, Role: "Superuser"}
-	nonce, err := srv.coreCreateApp(admin, "update-owner", "", "", nil)
+	nonce, err := srv.coreCreateApp(admin, "update-owner", "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestMCPServiceToolsByName(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
 	admin := &db.User{ID: 1, Role: "Superuser"}
-	svc, err := srv.coreCreateService(admin, "named-svc", "http://example.com", db.ServiceDescriptor{Type: "api"})
+	svc, err := srv.coreCreateService(admin, "named-svc", "http://example.com", db.ServiceDescriptor{Type: "api"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -149,5 +150,93 @@ func TestMCPCreateAppUnknownOwnerEmail(t *testing.T) {
 	}
 	if !strings.Contains(toolResultText(t, res), "owner not found") {
 		t.Errorf("error = %q, want owner not found", toolResultText(t, res))
+	}
+}
+
+// ── Auth record tools ──
+//
+// Slots are only useful if an agent can also create what they point at.
+
+func TestMCPAuthRecordLifecycle(t *testing.T) {
+	srv := newTestServer(t)
+	admin := &db.User{ID: 1, Email: "admin@example.com", Role: "Superuser"}
+
+	rec, err := srv.coreCreateAuth(admin, "GitHub App", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://github.com/login/oauth/authorize",
+		ClientID:     "cid", ClientSecret: "shh", Provider: "github",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	found, err := srv.authRecordByName("github app")
+	if err != nil {
+		t.Fatalf("lookup by name is case-insensitive: %v", err)
+	}
+	if found.ID != rec.ID {
+		t.Errorf("found id %d, want %d", found.ID, rec.ID)
+	}
+	if _, err := srv.authRecordByName("nope"); err == nil {
+		t.Error("expected an error for an unknown name")
+	}
+	if _, err := srv.authRecordByName(""); err == nil {
+		t.Error("expected an error for an empty name")
+	}
+
+	// The patch shape update_auth relies on: an omitted secret keeps the
+	// stored one rather than blanking it.
+	desc := found.Descriptor
+	desc.Scopes = "repo"
+	desc.ClientSecret = ""
+	if err := srv.coreUpdateAuth(admin, rec.ID, "GitHub App", db.AuthOAuth2, desc); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	after, _ := srv.store.GetAuthRecord(rec.ID)
+	if after.Descriptor.ClientSecret != "shh" {
+		t.Errorf("client secret = %q, want the stored one kept", after.Descriptor.ClientSecret)
+	}
+	if after.Descriptor.Scopes != "repo" {
+		t.Errorf("scopes = %q, want repo", after.Descriptor.Scopes)
+	}
+
+	// A record in use cannot be deleted out from under the thing using it.
+	id := registerService(t, srv, "gh", "https://api.github.com", db.ServiceDescriptor{Type: "api"})
+	setServiceActsAs(t, srv, id, rec.ID)
+	if err := srv.coreDeleteAuth(admin, rec.ID); err == nil {
+		t.Error("expected delete to be refused while a service points at the record")
+	}
+
+	// Unassign it (a pointer to 0 is still a reference — the slot has to
+	// go back to nil) and the delete goes through.
+	sid, _ := strconv.ParseInt(id, 10, 64)
+	svc, _ := srv.store.GetService(sid)
+	if err := srv.store.UpdateService(sid, svc.Name, svc.URL, svc.Descriptor, nil, nil); err != nil {
+		t.Fatalf("clear slots: %v", err)
+	}
+	if err := srv.coreDeleteAuth(admin, rec.ID); err != nil {
+		t.Fatalf("delete after unassigning: %v", err)
+	}
+}
+
+func TestMCPAuthToolsGatedToAdmins(t *testing.T) {
+	srv := newTestServer(t)
+	member := &db.User{ID: 2, Email: "member@example.com", Role: "Member"}
+	if _, err := srv.coreCreateAuth(member, "Sneaky", db.AuthAPIKey, db.AuthDescriptor{Key: "k"}); err == nil {
+		t.Error("a Member must not be able to create auth records")
+	}
+}
+
+// The descriptor schema is what an agent reads to decide what to send, so
+// a stale property there is a lie that costs a round trip.
+func TestMCPServiceDescriptorSchemaHasNoAuthFields(t *testing.T) {
+	for _, dead := range []string{"auth", "api_key", "header", "client_id", "client_secret", "oauth_url", "scopes"} {
+		if _, ok := serviceDescriptorSchema[dead]; ok {
+			t.Errorf("service descriptor schema still advertises %q — auth lives in the slots now", dead)
+		}
+	}
+	for _, live := range []string{"type", "proxied", "database_target", "database_name"} {
+		if _, ok := serviceDescriptorSchema[live]; !ok {
+			t.Errorf("service descriptor schema is missing %q", live)
+		}
 	}
 }

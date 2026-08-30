@@ -78,7 +78,7 @@ func TestGateDBTarget(t *testing.T) {
 	}
 
 	// app: requires membership (or admin+).
-	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

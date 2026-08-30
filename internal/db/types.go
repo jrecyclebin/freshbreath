@@ -15,6 +15,7 @@ type App struct {
 	OwnerID     *int64      `json:"owner_id,omitempty"`
 	Environment string      `json:"environment,omitempty"`
 	Details     *AppDetails `json:"details,omitempty"`
+	ProtectedBy *int64      `json:"protected_by,omitempty"` // inbound gate auth record
 	CreatedAt   time.Time
 }
 
@@ -77,10 +78,12 @@ type AuditEntry struct {
 }
 
 type Service struct {
-	ID         int64             `json:"id"`
-	Name       string            `json:"name"`
-	URL        string            `json:"url"`
-	Descriptor ServiceDescriptor `json:"descriptor"`
+	ID          int64             `json:"id"`
+	Name        string            `json:"name"`
+	URL         string            `json:"url"`
+	Descriptor  ServiceDescriptor `json:"descriptor"`
+	ProtectedBy *int64            `json:"protected_by"` // inbound gate auth record; nil = inherit admin
+	ActsAs      *int64            `json:"acts_as"`      // outbound credential record; nil = caller's own
 }
 
 // UpdateFeed is one remote-updates entry: either a receive feed (a remote URL
@@ -104,19 +107,12 @@ type UpdateFeed struct {
 	LastErrorAt        *time.Time `json:"last_error_at"`
 }
 
+// ServiceDescriptor describes what a service IS. Auth lives elsewhere: the
+// protected_by / acts_as columns reference auth_records
+// (design/decoupled-auth.md).
 type ServiceDescriptor struct {
-	Type          string `json:"type"`                          // "mcp", "api", "oidc", "tasks", or "ssh"
-	Auth          string `json:"auth,omitempty"`                // "key" for API-key auth
-	AuthServiceID string `json:"auth_service_id,omitempty"`     // service ID used for token verification (tasks)
-	APIKey        string `json:"api_key,omitempty"`             // admin-set API key (injected by proxy)
-	Header        string `json:"header,omitempty"`              // custom header for API key; empty = Bearer
-	Proxied       bool   `json:"proxied,omitempty"`             // needs server-side proxy
-	ClientID      string `json:"client_id,omitempty"`           // pre-registered client_id
-	ClientSecret  string `json:"client_secret,omitempty"`       // pre-registered client_secret
-	OAuthURL      string `json:"oauth_url,omitempty"`           // OAuth base URL override
-	Scopes        string `json:"scopes,omitempty"`              // space-separated scopes (OIDC)
-	UserInfoURL   string `json:"userinfo_url,omitempty"`        // explicit userinfo endpoint returning {email,name,...} for providers that don't advertise one
-	UserEmailsURL string `json:"userinfo_emails_url,omitempty"` // fallback endpoint returning [{email,primary,verified}] when userinfo has no email
+	Type    string `json:"type"`              // "mcp", "api", "tasks", "virtual", or "ssh"
+	Proxied bool   `json:"proxied,omitempty"` // needs server-side proxy
 
 	// App-database targeting for virtual services with SQL steps
 	// (design/app-databases.md). "" = each caller's own app.db (default);
@@ -125,6 +121,14 @@ type ServiceDescriptor struct {
 	DatabaseTarget string `json:"database_target,omitempty"`
 	DatabaseName   string `json:"database_name,omitempty"`
 }
+
+// serviceTypes is the closed set of descriptor types.
+var serviceTypes = map[string]bool{
+	"mcp": true, "api": true, "tasks": true, "virtual": true, "ssh": true,
+}
+
+// ValidServiceType reports whether t names a known service type.
+func ValidServiceType(t string) bool { return serviceTypes[t] }
 
 // MarshalJSON serializes the descriptor, omitting zero-valued fields.
 // We use a custom marshal so that `Proxied: false` is omitted (omitempty on bool
@@ -136,9 +140,11 @@ func (d ServiceDescriptor) MarshalJSON() ([]byte, error) {
 }
 
 type ServiceUpdate struct {
-	Name       string            `json:"name"`
-	URL        string            `json:"url"`
-	Descriptor ServiceDescriptor `json:"descriptor"`
+	Name        string            `json:"name"`
+	URL         string            `json:"url"`
+	Descriptor  ServiceDescriptor `json:"descriptor"`
+	ProtectedBy *int64            `json:"protected_by"`
+	ActsAs      *int64            `json:"acts_as"`
 }
 
 type OAuthData struct {

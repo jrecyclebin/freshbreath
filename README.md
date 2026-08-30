@@ -42,13 +42,18 @@ creds are kept in their browser - no sessions are kept in Fresh Breath's databas
 
 ## Rundown of Features
 
-- Set up MCP, OIDC or OAuth connections for your apps to use. (Fresh Breath will
+- Set up MCP, OAuth and API connections for your apps to use. (Fresh Breath will
   handle the login and callback redirects for you - and it even tries to avoid
   needing client IDs and client secrets.)
 
-  - Creds are stored in the browser and can be encrypted using each app's
-    unique seed. (To prevent static HTML files from seeing each other's
-    sensitive data.)
+  - Auth lives in its own **auth records**, separate from the services that use
+    them. A service names one for "who may call in" and one for "what goes
+    upstream", and two services naming the same record share a login - so a
+    coworker signs in once and every dashboard behind that gate just works.
+
+  - Creds are stored in the browser, and what's stored is always a Fresh Breath
+    token with any upstream credentials sealed inside it. The server unseals
+    them on the way out; a static HTML file never holds a provider's token.
 
 - Mark services as "proxied" if you need to ensure that connections get through.
 
@@ -291,10 +296,11 @@ Tokens are automatically refreshed in these calls, if possible.
 Visit `/control` in a browser to open the admin panel.
 
 - Register **apps** (static HTML projects that use the SDK)
-- Register **services** (OAuth/OIDC providers, MCP servers, or API-key services)
+- Register **services** (MCP servers, HTTP APIs, task runners, virtual endpoints)
+- Register **auth records** and point services and apps at them, from either slot
 - Link services to apps so only permitted services work with each app
 - Manage **users** and assign them roles
-- Set which service acts as the admin auth provider
+- Set which auth record gates the panel - and which every empty slot inherits
 - Review the **audit log**
 
 ## Project layout

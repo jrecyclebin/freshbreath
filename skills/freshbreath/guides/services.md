@@ -1,54 +1,51 @@
 # Services Guide for Fresh Breath Apps
 
-Fresh Breath provides simple JavaScript calls for authenticating users and
-calling third-party APIs from your HTML/JS apps.
+Fresh Breath gives your HTML/JS app one JavaScript verb for authentication and a
+small proxy object for everything after it. There is no session plumbing to
+write: the library owns the store, the refresh, and the sharing between apps.
 
-In order to use these calls, you must have an app setup:
+To use any of it you need an app registered on the server:
 
-- If the app doesn't exist in your list, create one - an admin will need to do this.
-  Hang on to the *nonce* - it's used throughout this guide.
+- If the app isn't in your list, create one — an admin will need to do this.
+  Hang on to the *nonce*; it's used throughout this guide.
 
-- Add the necessary services to the app - if it needs storage providers, OIDC,
-  SSH access, or any other third-party integrations (MCPs or APIs), they can
-  be added from the control panel or MCP. The important thing to hang on to
-  here is the *service URL*.
+- Add the services the app needs, from the control panel or over MCP. The thing
+  to hang on to here is the *service URL*.
 
-The following service types are available:
+If you aren't an admin you must also be the owner or a member of the app. (You
+don't have to be a member to *use* the app, just to maintain it.)
 
-- api: URL to an API service, along with some hints about how to log-in.
-  Use the `fetch` call (#6 below) to access these.
+## Service types
 
-- mcp: URL to a public MCP server. Use `callTool` and `listTools` from JS.
+- **api** — an HTTP API. Call it with `fetch` (§5).
+- **mcp** — an MCP server. Call it with `listTools` / `callTool` (§4).
+- **tasks** — custom tools wrapping shell scripts, for system work: upload a
+  file to a tool that moves it onto a network share, that sort of thing. Called
+  with `listTools` / `callTool` like any MCP service. (See the 'tasks' guide for
+  writing the scripts.)
+- **virtual** — custom MCP endpoints you define, wrapping API calls or SQL
+  queries. Also `listTools` / `callTool`. (See the 'virtuals' guide.)
+- **ssh** — every server has exactly one SSH service (URL `ssh://`) for
+  connecting to remote machines.
 
-- oidc: URL to a public OIDC server. Login only — it proves *who* the user is
-  and nothing more. Fresh Breath verifies the provider login, then issues its
-  own identity token (it does **not** hand back the provider's access token, so
-  you can't call the provider's API through an oidc service — use an `api` or
-  `mcp` service for that). Fresh Breath refreshes that identity token locally,
-  so the user doesn't have to keep checking back in with the provider.
+## How auth works now
 
-- tasks: A set of custom tools (use `callTool` and `listTools` from JavaScript)
-  that can be called and are wrappers for shell scripts that perform system
-  functions. (For instance, you could upload a file to a tool that can move
-  the file onto a network share for processing.) One key note about tasks:
-  they have no auth of their own, so the `login` function shouldn't be used -
-  instead, the `authService` property to the `ServiceProxy` constructor can
-  receive another `ServiceProxy` object for any service that it depends on. (See
-  the 'tasks' guide for details on writing the file content - the tool scripts -
-  and calling the tools from an app.)
+A service no longer carries its own login configuration. Two slots do that work,
+and both point at an **auth record** — a credential or login method standing on
+its own, shared by everything that names it:
 
-- virtual: These are custom MCP endpoints that can be used to provide tools
-  (also available through `callTool` and `listTools`) that wrap API calls or
-  SQL queries - to give a nice MCP interface with discoverable auth.
-  (See the 'virtuals' guide for more on how to write these tool scripts.)
+- **Protected by** — who may call in. Empty means *inherit the admin record*,
+  not *open*; only an explicit Anonymous record means open.
+- **Acts as** — what credential goes upstream. Empty means *the caller's own*.
 
-- ssh: Every Fresh Breath server has a single SSH service (URL: `ssh://`)
-  that can be used for general authentication or for connecting to remote
-  machines. Honestly, this is a great option for managing passwords
-  directly from Fresh Breath.
+Two consequences worth internalizing, because they're what make `login()` so
+quiet in practice:
 
-If you aren't an admin, you also must be listed as the owner or member of the
-app. (You don't have to be a member to use the app, just to maintain it.)
+1. **The door owns the gate.** A service reached through your app answers to
+   *your app's* gate, not its own. So clearing the app's gate is most of what
+   any login does.
+2. **Credentials are shared by gate.** Two apps behind the same record find the
+   same stored credential, and the second one prompts zero times.
 
 ---
 
@@ -58,231 +55,190 @@ Every Fresh Breath app starts with a module import:
 
 ```html
 <script type="module">
-  import { login, ServiceProxy } from "[Fresh Breath URL]/frbr.js?[Your App Nonce]";
+  import { login } from "[Fresh Breath URL]/frbr.js?[Your App Nonce]";
   // ...
 </script>
 ```
 
-This can also be done as a script tag - for example, if your Fresh Breath server
-is running HTTPS locally on port 9009:
+Or as a plain script tag — say your server is on HTTPS port 9009:
 
 ```html
-  <script type="module" src="https://localhost:9009/frbr.js?[Your App Nonce]"></script>
+<script type="module" src="https://localhost:9009/frbr.js?[Your App Nonce]"></script>
 ```
 
-You can then access `login` and `ServiceProxy` from the global `window.FreshBreath` object:
+which puts everything on `window.FreshBreath` (aliased `window.FrBr`):
 
 ```js
-const { login, ServiceProxy } = window.FreshBreath;
+const { login, currentSession, signOut } = window.FreshBreath;
 ```
 
-For `file://` apps, use the full server URL (e.g. `https://localhost:9009/...`).
-For hosted apps on the same origin as the server, `/frbr.js` works fine.
+For `file://` apps use the full server URL. For apps hosted on the server's own
+origin, `/frbr.js` is enough.
 
 ---
 
 ## 2. login()
 
-Opens an OAuth popup (or skips it for API key access) and returns a `ServiceProxy`.
+One verb, every service.
 
 ```js
-const service = await login("https://mcp.example.com/mcp"); // registered service URL
+const svc = await login("https://mcp.example.com/mcp");  // a registered service URL
 ```
 
-If you need more control, you can pass an options object instead of a string:
+It takes a string and nothing else. Before it prompts for anything it asks the
+server what this door actually requires, then looks in the store for a
+credential that satisfies it. So:
+
+- An anonymous service resolves instantly, with no popup and no session.
+- A service behind a gate you already cleared — in this app or another one —
+  resolves with no popup either.
+- Only a genuinely missing credential opens a window.
+
+**Call it from a click.** A popup with no user gesture behind it is a popup the
+browser blocks. `login` never opens one on its own for this reason: when a
+session lapses beyond recovery you get a `SessionExpired`, and offering the
+re-login is your call to make at a moment the user is looking.
+
+Called with **no argument**, it clears your app's own gate and returns the
+`AuthSession` rather than a proxy — the "sign in" verb for a gated app:
 
 ```js
-const service = await login({
-  serviceURL: "https://mcp.example.com/mcp",  // required — registered service URL
-  state: "optional-custom-state",  // optional — defaults to crypto.randomUUID()
-  apiKey: "sk-...",             // optional — only for key-auth services
-});
+await login();   // the app's gate, nothing else
 ```
 
-**Returns:** `Promise<ServiceProxy>`
+You rarely need it. Logging in to any service clears the app's gate on the way
+past, because the app's gate is the first leg of that login.
 
-**Flow:**
-- For most services: opens a popup, returns when the user has logged in.
-- If a default API key is set: no popup, resolves immediately
-- Throws `"Popup closed"` if the user closes the window early
-
-**After login**, persist the session:
-```js
-localStorage.setItem("my-auth-key", service.toJSON());
-```
-
-If you are storing several services, you can key by service URL.
+**Throws:** `"Login window closed"` if the user gives up, `"The login window was
+blocked"` if there was no gesture behind the call.
 
 ---
 
-## 3. Restore a Session (ServiceProxy from localStorage)
+## 3. Sessions
 
-On page load, restore a prior session without re-prompting:
+`svc.session` is the `AuthSession` behind a proxy — `null` for an anonymous
+service. One session exists per auth record, shared by every proxy riding it, so
+a refresh on one heals them all.
 
 ```js
-const saved = localStorage.getItem("my-auth-key");
-service = ServiceProxy.fromJSON(saved);
+svc.session.subject     // "frbr:3" for a known user, "ext:github:12345" otherwise
+svc.session.kind        // "oidc" | "oauth2" | "api_key" | "ssh_key"
+svc.session.provider    // "github" — the upstream slug, when there is one
+svc.session.expiresAt   // Date
 ```
 
-For more custom needs, here's the full `ServiceProxy` constructor:
-`new ServiceProxy({ serviceURL, serviceID, data, apiKey, apiHeader, proxied })`
+`subject` is the honest answer to "who is this?" — display it, or send it to
+your own backend.
+
+**Persistence is not your problem.** The library stores one entry per cleared
+record under `localStorage["frbr:auth:<id>"]`, writes on login, rewrites on every
+refresh, and evicts when the server refuses one. There is nothing to serialize,
+no event to subscribe to, and no key for your app to choose. Don't write to
+`frbr:auth:*` yourself.
+
+To ask whether you're already signed in — at boot, before any network call:
+
+```js
+const session = currentSession();   // null when the store holds nothing live
+```
+
+To sign out:
+
+```js
+signOut();   // forgets this app's gate
+```
+
+What's stored is always a Fresh Breath token, never a provider's. Upstream
+credentials ride sealed inside it and are unsealed by the server on the way out,
+so the worst thing readable out of localStorage is a token that expires.
 
 ---
 
-## 4. Auto-Refresh Tokens
+## 4. listTools() and callTool()
 
-Generally, you just want all of your services to auto-refresh and persist new
-tokens when they do. To do that, listen for the `refresh` event on the
-`ServiceProxy`:
+For MCP, tasks, and virtual services:
 
 ```js
-ServiceProxy.on('refresh', svc => {
-  console.log("Access token refreshed.");
-  localStorage.setItem("my-auth-key", svc.toJSON()); // or key by service URL,
-                                                     // if you have several
-});
+const tools = await svc.listTools();
+// Array<{ name, description, inputSchema }>
+
+const result = await svc.callTool("tool_name", { arg1: "value", arg2: 42 });
 ```
 
-You can set this up right after ServiceProxy is imported, so that it'll apply
-to all the services you create.
+Both connect on first use, refresh a credential that's near expiry, and retry
+once on a 401. `callTool` parses a JSON result for you and throws on a tool
+error, so what you get back is the value, not an envelope.
+
+Pass a `File` or `Blob` as any argument and the call goes out as multipart:
+
+```js
+await svc.callTool("ingest", { file: fileInput.files[0], label: "invoices" });
+```
 
 ---
 
-## 5. listTools() and callTool()
+## 5. fetch()
 
-For MCP services, after login:
-
-```js
-// List all available tools
-const tools = await service.listTools();
-// tools: Array<{ name: string, description: string, inputSchema: object }>
-
-// Call a tool
-const result = await service.callTool("tool_name", { arg1: "value", arg2: 42 });
-// result: { content: [...], isError?: boolean }
-```
-
-Both methods:
-- Auto-connect on first call (no need to call `connect()` manually)
-- Auto-refresh the token if it's expired or near expiry (5-minute buffer)
-- Auto-retry once on 401
-
-`callTool` throws if the MCP server returns an error — check `result.isError` for
-soft tool-level failures vs. thrown errors for transport/auth failures.
-
-Non-MCP ServiceProxy objects won't work with these methods.
-
----
-
-## 6. fetch()
-
-For REST/HTTP services, `service.fetch()` wraps the standard `fetch` API:
+For HTTP services, `svc.fetch()` wraps the standard `fetch`:
 
 ```js
-// GET
-const res = await service.fetch("/v1/users");
+const res  = await svc.fetch("/v1/users");
 const data = await res.json();
 
-// POST with body
-const res = await service.fetch("/v1/items", {
+await svc.fetch("/v1/items", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ name: "thing" }),
 });
 ```
 
-**What it does automatically:**
-- Sets `X-App-Nonce` header
-- Sets any auth headers
-- For proxied services (or `file://` apps): routes through `/service/{serviceID}/{path}`
-- For non-proxied same-origin calls: hits the service URL directly
-
-The `path` parameter is relative to the service's registered URL (leading slash optional).
+It stamps `X-App-Nonce`, attaches the session's credential, and retries once
+after a refresh on a 401. For proxied services (and any `file://` app) it routes
+through `/service/{id}/{path}`, where the server decides what actually goes
+upstream — your stored key, your sealed provider token, or nothing. The path is
+relative to the service's registered URL; the leading slash is optional.
 
 ---
 
-## 7. Accessing Tokens Directly
-
-The full token payload lives on `service.data`:
-
-```js
-service.data.access_token   // Bearer token string
-service.data.refresh_token  // Refresh token string
-service.data.token_type     // "Bearer" or similar
-service.data.token_endpoint // Token refresh URL
-service.data.expires_at     // Expiration date for this token
-service.data.scopes         // Space-separated scopes string
-service.data.client_id      // OAuth client ID
-```
-
-For OIDC identity services (login via an identity provider like Google):
-
-```js
-service.isIdentity          // true if this is an IdP login
-service.data.claims         // { sub, email, name, ... } — provider profile, for display
-service.data.id_token       // Fresh Breath identity token (a JWT issued by Fresh Breath)
-service.data.access_token   // same value as id_token
-```
-
-Unlike `api`/`mcp` services, an OIDC service does **not** expose the provider's
-own access or refresh token — `access_token` and `id_token` are one and the
-same Fresh Breath-issued identity JWT, and it auto-refreshes locally (no
-`token_endpoint` / `scopes` to manage). So there's no provider token to call
-the provider's API with; an oidc service is purely for login.
-
-Identity proxies cannot use `listTools()` / `callTool()` / `connect()` — they're
-for authentication only, not MCP. Use `.data.claims` to get user info, and pass
-`.data.id_token` to your own backend (verify it against Fresh Breath, not the
-provider — it's a Fresh Breath JWT).
-
----
-
-## 8. Full Minimal Example
+## 6. Full minimal example
 
 ```html
 <!DOCTYPE html>
 <html>
 <body>
-  <button id="login">Connect</button>
+  <button id="connect">Connect</button>
   <pre id="out"></pre>
 
   <script type="module">
-    import { login, ServiceProxy } from "https://localhost:9009/frbr.js?your-app-nonce-here";
+    import { login, currentSession, SessionExpired }
+      from "https://localhost:9009/frbr.js?your-app-nonce-here";
 
     const SERVICE_URL = "https://mcp.example.com/mcp";
-    const AUTH_KEY   = "my-app-auth";
-
-    let service = null;
-    ServiceProxy.on('refresh', svc => {
-      console.log("Token refreshed.");
-      localStorage.setItem(AUTH_KEY, svc.toJSON());
-    });
-
-    async function startLogin() {
-      service = await login(SERVICE_URL);
-      localStorage.setItem(AUTH_KEY, service.toJSON());
-      showTools();
-    }
+    let svc = null;
 
     async function showTools() {
-      const tools = await service.listTools();
+      const tools = await svc.listTools();
       document.getElementById("out").textContent =
         tools.map(t => `${t.name}: ${t.description}`).join("\n");
     }
 
-    // Restore on load
-    const saved = localStorage.getItem(AUTH_KEY);
-    if (saved) {
-      try {
-        service = new ServiceProxy(JSON.parse(saved));
-        showTools().catch(() => {
-          localStorage.removeItem(AUTH_KEY);
-          service = null;
-        });
-      } catch { localStorage.removeItem(AUTH_KEY); }
+    async function connect() {
+      svc = await login(SERVICE_URL);
+      await showTools();
     }
 
-    document.getElementById("login").onclick = startLogin;
+    document.getElementById("connect").onclick = () =>
+      connect().catch(e => { document.getElementById("out").textContent = e.message; });
+
+    // Already signed in from an earlier visit — or from a sibling app behind
+    // the same gate? Then this needs no popup and no click.
+    if (currentSession()) {
+      connect().catch(e => {
+        // A lapsed session is not an error to shout about: the button is
+        // still there, and clicking it is the fix.
+        if (!(e instanceof SessionExpired)) console.error(e);
+      });
+    }
   </script>
 </body>
 </html>
@@ -292,14 +248,16 @@ provider — it's a Fresh Breath JWT).
 
 ## Notes
 
-- **App nonce** comes from the `/api/apps` endpoint on the Fresh Breath server —
-  it's a 48-char hex string. Use it in the URL for frbr.js.
-- **Service URL** must match a service registered in that app on the server.
-  Exact URL match — trailing slashes matter.
-- **`file://` apps**: the server must be running and CORS must allow `null` origin
-  (Fresh Breath echoes back the `Origin` header, so `file://` origin works fine).
-  If a service gives you CORS errors, you can turn the `proxies` setting on in
-  the Fresh Breath admin panel to route all calls through the server.
-- **Token storage**: all tokens can live in `localStorage`. Nothing is stored server-side
-  after the OAuth exchange. The server's `client_secret` is never sent to the browser.
-- **Sign out**: `localStorage.removeItem("my-auth-key"); service = null;`
+- **App nonce** comes from `/api/apps` — a 48-char hex string. Put it in the
+  frbr.js URL.
+- **Service URL** must match a service registered *and linked to your app*.
+  Exact match; trailing slashes matter.
+- **`file://` apps**: the server must be running, and CORS must allow the `null`
+  origin (Fresh Breath echoes the `Origin` header back, so it does). If a
+  service gives you CORS errors, switch it to proxied in the control panel and
+  every call routes through the server instead.
+- **Sharing the store**: apps served from the Fresh Breath origin share one
+  store, which is what lets a second app skip the prompt. Apps served from their
+  own origins don't, and will prompt separately.
+- **Client secrets** never reach the browser. Token exchange and refresh run on
+  the server, and refresh tokens live in HttpOnly cookies your code can't read.

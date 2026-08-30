@@ -69,14 +69,15 @@ Breath can't recover it, so don't lose it.
 
 ## 2. Log In (load the key into the agent)
 
-The key sits encrypted until someone proves the passphrase. That happens through
-the normal `login()` flow (see `guides/auth.md`), pointed at your app's **ssh**
-service:
+The key sits encrypted until someone proves the passphrase. Proving it is a
+*login method*, not a property of the SSH service: gate your app with the
+built-in **SSH Key** auth record (its "Protected by" slot), and the ordinary
+login flow runs the passphrase form.
 
 ```js
 import { login } from "https://localhost:9009/frbr.js?app-nonce";
 
-const service = await login("ssh://"); // the global ssh service
+const session = await login();   // the app's own gate — here, SSH Key
 ```
 
 This pops a small form asking for the user's **email + passphrase**. On success,
@@ -85,28 +86,29 @@ two things happen at once:
 - The decrypted key is loaded into the server's in-memory **agent** with a
   **1-hour TTL**. That's the window in which the server can open SSH connections
   for this user.
-- Your app receives a `ServiceProxy` carrying a Fresh Breath access token at
-  `service.data.access_token`. **This is the bearer token for every `/ssh` and
-  `/sync` call below.**
+- Your app holds an `AuthSession` carrying a Fresh Breath access token.
+  **That's the bearer for every `/ssh` and `/sync` call below.**
+
+The `ssh://` service still exists and your app still needs it linked — that's
+what grants access to the `/ssh` and `/sync` endpoints. It just no longer
+carries the login; the auth record does.
 
 > Note: the agent TTL (1h) is deliberately decoupled from the web token and from
 > open sessions. If the agent key expires you can still hold a valid token and an
 > already-open SSH session — but you won't be able to open a *new* session until
 > the user logs in again (you'll get `401 no active SSH key`).
 
-A small helper to keep the boilerplate down:
+A small helper to keep the boilerplate down. Ask the session to set the header
+rather than reading the token out of it — the session knows what its own kind
+implies, and it keeps working when the app's gate changes:
 
 ```js
-const TOKEN = service.data.access_token;
-const sshFetch = (path, init = {}) =>
-  fetch(path, {
-    ...init,
-    headers: {
-      "X-App-Nonce": APP_NONCE,
-      Authorization: `Bearer ${TOKEN}`,
-      ...(init.headers || {}),
-    },
-  });
+const sshFetch = (path, init = {}) => {
+  const headers = new Headers(init.headers);
+  headers.set("X-App-Nonce", APP_NONCE);
+  session.addAuth(headers);
+  return fetch(path, { ...init, headers });
+};
 ```
 
 ---
@@ -253,20 +255,16 @@ it skips every byte that's already in place.
 ```js
 import { login } from "https://localhost:9009/frbr.js?your-app-nonce";
 
-const SSH_SERVICE_URL = "ssh://"; // your ssh service
+// The app is gated by the built-in SSH Key record, so this is the
+// passphrase form — and it loads the key into the agent on the way through.
+const session = await login();
 
-const service = await login(SSH_SERVICE_URL);
-const TOKEN = service.data.access_token;
-
-const sshFetch = (path, init = {}) =>
-  fetch(path, {
-    ...init,
-    headers: {
-      "X-App-Nonce": APP_NONCE,
-      Authorization: `Bearer ${TOKEN}`,
-      ...(init.headers || {}),
-    },
-  });
+const sshFetch = (path, init = {}) => {
+  const headers = new Headers(init.headers);
+  headers.set("X-App-Nonce", APP_NONCE);
+  session.addAuth(headers);
+  return fetch(path, { ...init, headers });
+};
 
 // open
 const { sessionId } = await (await sshFetch("/ssh/sessions", {

@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -115,7 +114,6 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/frbr.js", s.handleFrbr)
 	s.mux.HandleFunc("/service/login", s.handleLogin)
 	s.mux.HandleFunc("/service/callback", s.handleCallback)
-	s.mux.HandleFunc("/service/refresh", s.handleRefresh)
 	s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
 	s.mux.HandleFunc("/service/apikey-auth", s.handleAPIKeyAuth)
 	s.mux.HandleFunc("/service/{id}/", s.handleServiceProxy)
@@ -138,11 +136,11 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/oauth/token", s.oauthSrv.handleToken)
 	// Path-scoped token endpoint for browser cookie refresh. The advertised
 	// /oauth/token above stays the OAuth-standard endpoint (CLI/MCP code grant
-	// + form-body refresh); this variant scopes the refresh_token cookie by the
-	// service id so a browser holding several services' refresh tokens keeps
+	// + form-body refresh); this variant scopes the refresh_token cookie by
+	// auth record so a browser holding several records' refresh tokens keeps
 	// them in distinct cookie slots (see makeRefreshCookie). Both routes share
-	// the handler; the path service id is only consulted on the cookie path.
-	s.mux.HandleFunc("/oauth/token/{serviceID}", s.oauthSrv.handleToken)
+	// the handler; the path record id is only consulted on the cookie path.
+	s.mux.HandleFunc("/oauth/token/{authID}", s.oauthSrv.handleToken)
 	s.mux.HandleFunc("/oauth/jwks", s.oauthSrv.handleJWKS)
 
 	// Admin API — role-gated
@@ -158,6 +156,8 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/apps/", s.authWrap(pipeline(s.handleAppDetail, anyRole)))
 	s.mux.HandleFunc("/api/services", s.authWrap(pipeline(s.handleServices, adminPlus)))
 	s.mux.HandleFunc("/api/services/", s.authWrap(pipeline(s.handleServiceDetail, adminPlus)))
+	s.mux.HandleFunc("/api/auth", s.authWrap(pipeline(s.handleAuthRecords, adminPlus)))
+	s.mux.HandleFunc("/api/auth/", s.authWrap(pipeline(s.handleAuthRecordDetail, adminPlus)))
 
 	// Global databases (design/app-databases.md) — the alias mount. Any
 	// authenticated role rides the mount; gateDBTarget decides who may touch
@@ -413,22 +413,28 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 		appNonce = s.adminNonce
 	}
 
-	authRequired := false
-	authServiceName := ""
-	authServiceURL := ""
-	authServiceType := ""
-	if svcIDStr, _ := s.store.GetSetting("admin_auth_service"); svcIDStr != "" {
-		if svcID, err := strconv.ParseInt(svcIDStr, 10, 64); err == nil {
-			if svc, err := s.store.GetService(svcID); err == nil {
-				authRequired = true
-				authServiceName = svc.Name
-				authServiceURL = svc.URL
-				authServiceType = svc.Descriptor.Type
-			}
-		}
+	// The gate for this door: the admin record for the control panel, the
+	// app's own for a hosted app. The id matters as much as the name —
+	// it is the store key, so a page can tell whether it already holds a
+	// live credential for its gate without asking the server.
+	var gate *db.AuthRecord
+	if app, err := s.store.GetApp(appNonce); err == nil {
+		gate, _ = s.resolveAppGate(app)
+	} else {
+		gate, _ = s.adminAuthRecord()
 	}
-	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authServiceName: %q, authServiceURL: %q, authServiceType: %q, appNonce: %q, version: %q, commit: %q };\n",
-		apiBase, authRequired, authServiceName, authServiceURL, authServiceType, appNonce, s.version, s.commit))
+	authRequired := false
+	authRecordID := int64(0)
+	authRecordName := ""
+	authKind := ""
+	if gate != nil && gate.Kind != db.AuthAnonymous {
+		authRequired = true
+		authRecordID = gate.ID
+		authRecordName = gate.Name
+		authKind = gate.Kind
+	}
+	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authRecordID: %d, authRecordName: %q, authKind: %q, appNonce: %q, version: %q, commit: %q };\n",
+		apiBase, authRequired, authRecordID, authRecordName, authKind, appNonce, s.version, s.commit))
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
@@ -446,469 +452,6 @@ func (s *Server) handleFrbr(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Write(s.renderEnvJS(r))
 	w.Write(data)
-}
-
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	appState := r.URL.Query().Get("state")
-	if appState == "" {
-		http.Error(w, "Missing state parameter", http.StatusBadRequest)
-		return
-	}
-
-	nonce := r.Header.Get("X-App-Nonce")
-	if nonce == "" {
-		nonce = r.URL.Query().Get("app_nonce")
-	}
-	if nonce == "" {
-		http.Error(w, "Missing X-App-Nonce", http.StatusBadRequest)
-		return
-	}
-
-	// Admin nonce is ephemeral (not in the apps table).
-	// Regular app nonces must resolve to a registered app.
-	isAdmin := nonce == s.adminNonce
-	if !isAdmin {
-		if _, err := s.store.GetApp(nonce); err != nil {
-			http.Error(w, "Unknown app nonce", http.StatusUnauthorized)
-			return
-		}
-	}
-
-	serviceURL := r.URL.Query().Get("url")
-	if serviceURL == "" {
-		http.Error(w, "Missing url parameter", http.StatusBadRequest)
-		return
-	}
-
-	svc, err := s.store.GetServiceByURL(serviceURL)
-	if err != nil {
-		http.Error(w, "Service not registered", http.StatusForbidden)
-		return
-	}
-
-	// Tasks services don't use login
-	if svc.Descriptor.Type == "tasks" {
-		http.Error(w, "Task services don't login - instead pass in an `authService` object to ServiceProxy.", http.StatusForbidden)
-		return
-	}
-
-	// Browser logins require an explicit app/service link. The admin panel
-	// may only log in to the configured admin auth service.
-	if !s.canLoginToService(nonce, svc.ID) {
-		http.Error(w, "Service not approved for this app", http.StatusForbidden)
-		return
-	}
-
-	// SSH auth — return a URL to the passphrase form
-	if svc.Descriptor.Type == "ssh" {
-		state := db.GenNonce()
-		s.putPending(state, &pendingAuth{
-			serviceID:   svc.ID,
-			serviceURL:  svc.URL,
-			appNonce:    nonce,
-			appState:    appState,
-			serviceType: "ssh",
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"type": "ssh",
-			"url":  fmt.Sprintf(s.config.PublicBaseURL+"/service/ssh-auth?state=%s&service_id=%d", state, svc.ID),
-		})
-		return
-	}
-
-	redirectURI := s.config.PublicBaseURL + "/service/callback"
-
-	if svc.Descriptor.Type == "oidc" {
-		authURL, state, verifier, oidcNonce, tokenURL, err := s.oidcBeginAuth(r.Context(), svc, redirectURI)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to begin OIDC auth: %v", err), http.StatusInternalServerError)
-			return
-		}
-		s.putPending(state, &pendingAuth{
-			serviceID:     svc.ID,
-			serviceURL:    svc.URL,
-			appNonce:      nonce,
-			appState:      appState,
-			verifier:      verifier,
-			clientID:      svc.Descriptor.ClientID,
-			clientSecret:  svc.Descriptor.ClientSecret,
-			tokenEndpoint: tokenURL,
-			scopes:        svc.Descriptor.Scopes,
-			proxied:       svc.Descriptor.Proxied,
-			serviceType:   "oidc",
-			oidcNonce:     oidcNonce,
-			oidcIssuer:    svc.URL,
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"type": "redirect",
-			"url":  authURL,
-		})
-		return
-	}
-
-	// API-key auth — no OAuth flow, just return service info as JSON
-	if svc.Descriptor.Auth == "key" {
-		if svc.Descriptor.APIKey != "" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"type":       "key-auth-complete",
-				"state":      appState,
-				"appNonce":   nonce,
-				"apiKey":     svc.Descriptor.APIKey,
-				"apiHeader":  svc.Descriptor.Header,
-				"serviceID":  svc.ID,
-				"serviceURL": svc.URL,
-				"auth":       "key",
-				"proxied":    svc.Descriptor.Proxied,
-			})
-			return
-		}
-
-		// Services with no default API-key — redirect to key entry form
-		state := db.GenNonce()
-		s.putPending(state, &pendingAuth{
-			serviceID:   svc.ID,
-			serviceURL:  svc.URL,
-			appNonce:    nonce,
-			appState:    appState,
-			serviceType: "apikey",
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"type": "redirect",
-			"url":  fmt.Sprintf(s.config.PublicBaseURL+"/service/apikey-auth?state=%s&service_id=%d", state, svc.ID),
-		})
-		return
-	}
-
-	authURL, clientID, clientSecret, tokenURL, state, verifier, err := s.serviceBeginAuth(r.Context(), svc, redirectURI)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to begin auth: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	s.putPending(state, &pendingAuth{
-		serviceID:     svc.ID,
-		serviceURL:    svc.URL,
-		appNonce:      nonce,
-		appState:      appState,
-		verifier:      verifier,
-		clientID:      clientID,
-		clientSecret:  clientSecret,
-		tokenEndpoint: tokenURL,
-		scopes:        svc.Descriptor.Scopes,
-		proxied:       svc.Descriptor.Proxied,
-		serviceType:   svc.Descriptor.Type,
-	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"type": "redirect",
-		"url":  authURL,
-	})
-}
-
-// canLoginToService decides whether the app identified by nonce may initiate
-// a browser login for svc. The admin nonce is restricted to the configured
-// admin auth service; regular apps must have an allowed app_service_links row.
-func (s *Server) canLoginToService(nonce string, svcID int64) bool {
-	if nonce == s.adminNonce {
-		svcIDStr, _ := s.store.GetSetting("admin_auth_service")
-		adminSvcID, err := parseID(svcIDStr)
-		return err == nil && adminSvcID == svcID
-	}
-	allowed, err := s.store.IsServiceAllowedForApp(nonce, svcID)
-	return err == nil && allowed
-}
-
-// completeAuth writes the postMessage callback page for a completed auth flow.
-// Used by both OIDC and SSH callback paths. If the token is Freshbreath-issued,
-// it also mints a refresh token and sets the HttpOnly cookie.
-func (s *Server) completeAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, oauth *db.OAuthData) {
-	// If the access token is Freshbreath-issued, set the refresh cookie.
-	if isFreshbreathToken(oauth.AccessToken) {
-		if claims, _ := s.verifyFreshbreathToken(oauth.AccessToken); claims != nil {
-			s.setRefreshCookie(w, r, claims)
-		}
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	writeCallbackPage(w, pending.appState, pending.appNonce, pending.serviceID, pending.serviceURL, oauth)
-}
-
-// completeMCPAuth handles the callback for MCP OAuth flows.
-// Exchanges the upstream code, stores the upstream token in the mcpPendingAuth,
-// generates a Freshbreath auth code, and redirects to the MCP client's redirect_uri.
-func (s *Server) completeMCPAuth(w http.ResponseWriter, r *http.Request, pending *pendingAuth, code string) {
-	mcpPending, ok, _ := s.getMCPPending(pending.appNonce)
-	if !ok {
-		http.Error(w, "MCP auth session expired", http.StatusBadRequest)
-		return
-	}
-
-	redirectURI := s.config.PublicBaseURL + "/service/callback"
-
-	// Exchange upstream code for token.
-	// Virtual services with OIDC providers use the OIDC path;
-	// others use the generic OAuth path.
-	var upstreamToken, upstreamRefresh, upstreamTokenURL string
-	var upstreamExpiry time.Time
-	var userEmail string
-	var upstreamScopes string
-
-	svc, err := s.store.GetService(pending.serviceID)
-	if err != nil {
-		http.Error(w, "Service not found", http.StatusInternalServerError)
-		return
-	}
-
-	if svc.Descriptor.Type == "oidc" {
-		claims, accessToken, refreshToken, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("OIDC exchange failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-		upstreamToken = accessToken
-		upstreamRefresh = refreshToken
-		upstreamTokenURL = pending.tokenEndpoint
-		upstreamExpiry = time.Unix(claims.Expiry, 0)
-		userEmail = firstNonEmpty(claims.Email, claims.Subject)
-		upstreamScopes = pending.scopes
-	} else {
-		// Generic OAuth (GitHub, etc.)
-		oauth, err := s.serviceExchangeCode(r.Context(), pending.tokenEndpoint, code, pending.verifier, pending.clientID, pending.clientSecret, redirectURI)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Token exchange failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-		upstreamToken = oauth.AccessToken
-		upstreamRefresh = oauth.RefreshToken
-		upstreamTokenURL = oauth.TokenEndpoint
-		upstreamExpiry = oauth.ExpiresAt
-		upstreamScopes = oauth.Scopes
-
-		// Try to extract email from the upstream token's claims or userinfo.
-		// For non-OIDC providers, the access token is opaque — resolve via service login.
-		if oauth.Claims != nil {
-			if email, ok := oauth.Claims["email"].(string); ok && email != "" {
-				userEmail = email
-			}
-			if sub, ok := oauth.Claims["sub"].(string); ok && userEmail == "" {
-				userEmail = sub
-			}
-		}
-	}
-
-	if userEmail == "" {
-		userEmail = "mcp-user"
-	}
-
-	// For the central MCP, mint a central JWT that carries the user's role.
-	if pending.serviceType == "mcp-central" {
-		user, err := s.store.GetUserByEmail(userEmail)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("User not found: %s", userEmail), http.StatusForbidden)
-			return
-		}
-		centralJWT, err := s.mintFreshbreathToken("identity", user.Email, user.Role, "", svc.ID, nil)
-		if err != nil {
-			http.Error(w, "Token generation failed", http.StatusInternalServerError)
-			return
-		}
-		// Generate a Freshbreath auth code that maps to a pending auth
-		// where the upstream token IS the central JWT.
-		mcpPending.upstreamToken = centralJWT
-		mcpPending.upstreamRefresh = ""
-		mcpPending.upstreamTokenURL = ""
-		mcpPending.upstreamExpiry = upstreamExpiry
-		mcpPending.userEmail = userEmail
-		mcpPending.upstreamScopes = ""
-	} else {
-		// Populate the MCP pending auth with the upstream token
-		mcpPending.upstreamToken = upstreamToken
-		mcpPending.upstreamRefresh = upstreamRefresh
-		mcpPending.upstreamTokenURL = upstreamTokenURL
-		mcpPending.upstreamExpiry = upstreamExpiry
-		mcpPending.userEmail = userEmail
-		mcpPending.upstreamScopes = upstreamScopes
-	}
-
-	// Generate a Freshbreath auth code and store it
-	fbCode := rand.Text()
-	s.oauthSrv.sweepExpiredCodes(time.Now())
-	s.oauthSrv.codesMu.Lock()
-	s.oauthSrv.codes[fbCode] = &mcpAuthCode{
-		pending: mcpPending,
-		issued:  time.Now(),
-	}
-	s.oauthSrv.codesMu.Unlock()
-
-	// Redirect to the MCP client's redirect_uri with the code and their original state
-	redirectURL := fmt.Sprintf("%s?code=%s&state=%s", mcpPending.redirectURI, fbCode, mcpPending.state)
-	http.Redirect(w, r, redirectURL, http.StatusFound)
-}
-
-// completeMCPDirectAuth finalises an MCP flow for credential types that skip upstream OAuth
-// (SSH, API key). Returns the redirect URL the browser should navigate to, or writes an
-// error response and returns ("", false).
-func (s *Server) completeMCPDirectAuth(w http.ResponseWriter, appNonce, token, email, scopes string, expiry time.Time) (string, bool) {
-	mcp, ok, _ := s.getMCPPending(appNonce)
-	if !ok {
-		http.Error(w, "MCP auth session expired", http.StatusBadRequest)
-		return "", false
-	}
-	mcp.upstreamToken = token
-	mcp.userEmail = email
-	mcp.upstreamExpiry = expiry
-	mcp.upstreamScopes = scopes
-
-	code := rand.Text()
-	s.oauthSrv.sweepExpiredCodes(time.Now())
-	s.oauthSrv.codesMu.Lock()
-	s.oauthSrv.codes[code] = &mcpAuthCode{pending: mcp, issued: time.Now()}
-	s.oauthSrv.codesMu.Unlock()
-
-	return fmt.Sprintf("%s?code=%s&state=%s", mcp.redirectURI, code, mcp.state), true
-}
-
-func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
-	if code == "" || state == "" {
-		http.Error(w, "Missing code or state", http.StatusBadRequest)
-		return
-	}
-
-	pending, ok, expired := s.getPending(state)
-
-	if !ok && expired {
-		http.Error(w, "Auth state expired — restart the login flow", http.StatusBadRequest)
-		return
-	}
-	if !ok {
-		http.Error(w, "Unknown auth state", http.StatusBadRequest)
-		return
-	}
-
-	// SSH auth never reaches /service/callback — it completes via /service/ssh-auth.
-	if pending.serviceType == "ssh" {
-		http.Error(w, "Unexpected callback for SSH auth", http.StatusBadRequest)
-		return
-	}
-
-	// MCP auth flows — after upstream exchange, redirect to the MCP client's redirect_uri
-	if pending.serviceType == "mcp-endpoint" || pending.serviceType == "mcp-central" {
-		s.completeMCPAuth(w, r, pending, code)
-		return
-	}
-
-	redirectURI := s.config.PublicBaseURL + "/service/callback"
-
-	if pending.serviceType == "oidc" {
-		svc, err := s.store.GetService(pending.serviceID)
-		if err != nil {
-			http.Error(w, "Service not found", http.StatusInternalServerError)
-			return
-		}
-		// OIDC is an identity proof: exchange the code to learn who the user
-		// is, then mint a Fresh Breath identity token. The provider's
-		// access/refresh tokens are deliberately discarded — the identity
-		// token refreshes locally and never calls the provider again.
-		//
-		// We mint even when there's no matching Fresh Breath user yet: the
-		// token is a usable identity (apps read .data.claims) but bounces off
-		// the admin gates, which re-resolve the user from the DB. Role/name
-		// come from the user record when it exists — never from the provider's
-		// claims, which must not be trusted for authorization.
-		claims, _, _, err := s.oidcExchangeCode(r.Context(), svc, code, pending.verifier, pending.oidcNonce, redirectURI)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("OIDC exchange failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		userEmail := firstNonEmpty(claims.Email, claims.Subject)
-		role, name := "", claims.Name
-		if user, err := s.store.GetUserByEmail(userEmail); err == nil {
-			role, name = user.Role, firstNonEmpty(user.Name, claims.Name)
-		}
-
-		idToken, err := s.mintFreshbreathToken("identity", userEmail, role, name, pending.serviceID, nil)
-		if err != nil {
-			http.Error(w, "Token generation failed", http.StatusInternalServerError)
-			return
-		}
-
-		// Provider profile claims remain handy for display.
-		mergedClaims := make(map[string]interface{})
-		for k, v := range claims.Raw {
-			mergedClaims[k] = v
-		}
-		mergedClaims["sub"] = claims.Subject
-		mergedClaims["iss"] = claims.Issuer
-		if claims.Email != "" {
-			mergedClaims["email"] = claims.Email
-		}
-		if claims.Name != "" {
-			mergedClaims["name"] = claims.Name
-		}
-		if claims.Picture != "" {
-			mergedClaims["picture"] = claims.Picture
-		}
-
-		s.completeAuth(w, r, pending, &db.OAuthData{
-			ClientID:    pending.clientID,
-			AccessToken: idToken,
-			TokenType:   "Bearer",
-			ExpiresAt:   time.Now().Add(accessTokenTTL),
-			Claims:      mergedClaims,
-			IDToken:     idToken,
-		})
-		return
-	}
-
-	// Generic OAuth (MCP, API) — exchange code for token
-	oauth, err := s.serviceExchangeCode(r.Context(), pending.tokenEndpoint, code, pending.verifier, pending.clientID, pending.clientSecret, redirectURI)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Token exchange failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	oauth.ClientID = pending.clientID
-	oauth.TokenEndpoint = pending.tokenEndpoint
-	oauth.Proxied = pending.proxied
-	oauth.Scopes = pending.scopes
-
-	s.completeAuth(w, r, pending, oauth)
-}
-
-func writeCallbackPage(w io.Writer, appState, appNonce string, serviceID int64, serviceURL string, oauth *db.OAuthData) {
-	dataJSON, _ := json.Marshal(oauth)
-	fmt.Fprintf(w, `<!doctype html>
-<html>
-<body>
-  <p>Logged in. You can close this window.</p>
-  <script>
-    window.opener?.postMessage({
-      type: "auth-complete",
-      state: %q,
-      appNonce: %q,
-      serviceID: %d,
-      serviceURL: %q,
-      data: %s,
-    }, "*");
-  </script>
-</body>
-</html>
-`, appState, appNonce, serviceID, serviceURL, string(dataJSON))
 }
 
 func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
@@ -943,11 +486,41 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Browser sends its own Authorization header — forward it through.
-	// Token management (refresh, retry) is handled client-side.
-	// If the service has an admin-set API key and the request doesn't
-	// already have an Authorization header, inject it.
-	resp, err := s.serviceDoProxy(svc, r)
+	// The door owns the gate: this is the app door, so the app's
+	// protected_by governs — the service's own gate does not stack.
+	gate, err := s.resolveAppGate(app)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Gate resolution failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	claims, _, err := s.verifyGateRequest(gate, r)
+	if err != nil {
+		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	var presentedKey string
+	if gate != nil && gate.Kind == db.AuthAPIKey {
+		presentedKey = presentedGateKey(gate, r)
+	}
+	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// X-API-Key is meaningful only against an api_key acts_as record,
+	// where it overrides the stored key; anywhere else it's a caller error.
+	if xkey := r.Header.Get("X-API-Key"); xkey != "" {
+		rec, ok := s.actsAsRecord(svc)
+		if !ok || rec.Kind != db.AuthAPIKey {
+			http.Error(w, "X-API-Key is only valid when the service acts as an api_key auth record", http.StatusBadRequest)
+			return
+		}
+		cred.Token, cred.Header = xkey, rec.Descriptor.Header
+	}
+
+	resp, err := s.serviceDoProxy(svc, r, cred)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Proxy error: %v", err), http.StatusBadGateway)
 		return
@@ -1049,34 +622,72 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Optional token auth via a referenced service ──────────────────
-	var authUser *db.User
-	var authSub string
-	if svc.Descriptor.AuthServiceID != "" {
-		authSvcID, err := strconv.ParseInt(svc.Descriptor.AuthServiceID, 10, 64)
-		if err != nil {
-			http.Error(w, "Invalid auth_service_id on service", http.StatusInternalServerError)
-			return
-		}
-		authUser, authSub, err = s.verifyTaskToken(r, authSvcID)
-		if err != nil {
-			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
-			return
-		}
+	// ── The app door's gate ─────────────────────────────────────────
+	gate, err := s.resolveAppGate(app)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Gate resolution failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	claims, authUser, err := s.verifyGateRequest(gate, r)
+	if err != nil {
+		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	var presentedKey string
+	if gate != nil && gate.Kind == db.AuthAPIKey {
+		presentedKey = presentedGateKey(gate, r)
+	}
+	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	token := cred.Token
+	if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); cred.Verbatim && !isFreshbreathToken(raw) {
+		// An open gate passes a caller's own upstream bearer through
+		// verbatim; a Fresh Breath token is not one.
+		token = raw
+	}
+
+	// Identity built-ins come from the verified gate claims: the resolved
+	// user (email + numerical ID) and the token subject. An anonymous gate
+	// leaves them empty — tools referencing $token_email and friends then
+	// fail, because they require a logged-in caller.
+	auth := formats.VirtualAuth{Token: token}
+	if claims != nil {
+		auth.Email = claims.UserEmail
+		auth.Sub = claims.Subject
+	}
+	if authUser != nil {
+		auth.Email = authUser.Email
+		auth.UserID = authUser.ID
 	}
 
 	// ── Dispatch by service type ────────────────────────────────────
 	switch svc.Descriptor.Type {
 	case "tasks":
-		s.handleTaskCallInner(w, r, svc)
+		s.handleTaskCallInner(w, r, svc, token)
 	case "virtual":
-		s.handleVirtualCallInner(w, r, svc, authUser, authSub)
+		s.handleVirtualCallInner(w, r, svc, auth)
 	default:
 		http.Error(w, "Service type does not support /service/call", http.StatusBadRequest)
 	}
 }
 
-func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service) {
+// actsAsRecord fetches a service's outbound record, if set.
+func (s *Server) actsAsRecord(svc *db.Service) (*db.AuthRecord, bool) {
+	if svc.ActsAs == nil {
+		return nil, false
+	}
+	rec, err := s.store.GetAuthRecord(*svc.ActsAs)
+	if err != nil {
+		return nil, false
+	}
+	return rec, true
+}
+
+func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, token string) {
 	switch r.Method {
 	case http.MethodGet:
 		tasks, err := s.loadTasksForService(svc)
@@ -1092,14 +703,14 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 		json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
 
 	case http.MethodPost:
-		s.handleTaskExec(w, r, svc)
+		s.handleTaskExec(w, r, svc, token)
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, authUser *db.User, authSub string) {
+func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, auth formats.VirtualAuth) {
 	switch r.Method {
 	case http.MethodGet:
 		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
@@ -1111,14 +722,14 @@ func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, 
 		json.NewEncoder(w).Encode(map[string]interface{}{"tools": formats.VirtualToolSummaries(tools)})
 
 	case http.MethodPost:
-		s.handleVirtualExec(w, r, svc, authUser, authSub)
+		s.handleVirtualExec(w, r, svc, auth)
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *db.Service, authUser *db.User, authSub string) {
+func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *db.Service, auth formats.VirtualAuth) {
 	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1138,26 +749,8 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 		return
 	}
 
-	// Extract bearer token if present.
-	token := ""
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		token = strings.TrimPrefix(auth, "Bearer ")
-	}
-
 	// SQL steps run against the app's database (design/app-databases.md).
-	// No actor here — the app↔service link is the whole grant on this path.
 	sqlRunner := s.browserSQLRunner(svc, r.Header.Get("X-App-Nonce"), body.Args)
-
-	// Identity built-ins come from the optional auth-service token: the
-	// verified user (email + numerical ID) and its sub claim. With no auth
-	// service configured there is no user on this path — the app link is
-	// the whole grant — and tools referencing the identity built-ins fail:
-	// they require a logged-in caller.
-	auth := formats.VirtualAuth{Token: token, Sub: authSub}
-	if authUser != nil {
-		auth.Email = authUser.Email
-		auth.UserID = authUser.ID
-	}
 
 	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, auth, sqlRunner)
 	if err != nil {
@@ -1169,7 +762,7 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 	json.NewEncoder(w).Encode(result)
 }
 
-func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.Service) {
+func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.Service, token string) {
 	tasks, err := s.loadTasksForService(svc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1256,6 +849,12 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 	// ── Prepare env vars ────────────────────────────────────────────────
 	env := os.Environ()
 	env = append(env, "TASK="+taskName)
+	// The resolved outbound credential reaches the shell as TASK_TOKEN —
+	// how a scheduled task acts as a stored api_key record with nobody
+	// present (design/decoupled-auth.md, stated limit).
+	if token != "" {
+		env = append(env, "TASK_TOKEN="+token)
+	}
 	if args != nil {
 		for k, v := range args {
 			env = append(env, "TASK_"+strings.ToUpper(k)+"="+taskArgValue(v))
@@ -1379,13 +978,14 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		Environment string `json:"environment"`
 		URL         string `json:"url"`
 		OwnerID     *int64 `json:"owner_id"`
+		ProtectedBy *int64 `json:"protected_by"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	nonce, err := s.coreCreateApp(userFromContext(r.Context()), req.Name, req.Environment, req.URL, req.OwnerID)
+	nonce, err := s.coreCreateApp(userFromContext(r.Context()), req.Name, req.Environment, req.URL, req.OwnerID, req.ProtectedBy)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1469,8 +1069,9 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"nonce": app.Nonce,
-			"name":  app.Name,
+			"nonce":        app.Nonce,
+			"name":         app.Name,
+			"protected_by": app.ProtectedBy,
 		})
 	case http.MethodPut:
 		var req struct {
@@ -1478,12 +1079,13 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 			Environment string `json:"environment"`
 			URL         string `json:"url"`
 			OwnerID     *int64 `json:"owner_id"`
+			ProtectedBy *int64 `json:"protected_by"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := s.coreUpdateApp(userFromContext(r.Context()), nonce, req.Name, req.Environment, req.URL, req.OwnerID); err != nil {
+		if err := s.coreUpdateApp(userFromContext(r.Context()), nonce, req.Name, req.Environment, req.URL, req.OwnerID, req.ProtectedBy); err != nil {
 			writeErr(w, err)
 			return
 		}
@@ -1694,29 +1296,20 @@ func (s *Server) handleServices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateService(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name       string               `json:"name"`
-		URL        string               `json:"url"`
-		Descriptor db.ServiceDescriptor `json:"descriptor"`
-	}
+	var req db.ServiceUpdate
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	svc, err := s.coreCreateService(userFromContext(r.Context()), req.Name, req.URL, req.Descriptor)
+	svc, err := s.coreCreateService(userFromContext(r.Context()), req.Name, req.URL, req.Descriptor, req.ProtectedBy, req.ActsAs)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":         svc.ID,
-		"name":       svc.Name,
-		"url":        svc.URL,
-		"descriptor": svc.Descriptor,
-	})
+	json.NewEncoder(w).Encode(svc)
 }
 
 func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
@@ -1777,7 +1370,7 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := s.coreUpdateService(userFromContext(r.Context()), serviceID, req.Name, req.URL, req.Descriptor); err != nil {
+		if err := s.coreUpdateService(userFromContext(r.Context()), serviceID, req.Name, req.URL, req.Descriptor, req.ProtectedBy, req.ActsAs); err != nil {
 			writeErr(w, err)
 			return
 		}
@@ -1801,6 +1394,94 @@ func (s *Server) handleServiceApps(w http.ResponseWriter, r *http.Request, servi
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"apps": apps})
+}
+
+// ── Auth records API ────────────────────────────────────────────────
+
+func (s *Server) handleAuthRecords(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/api/auth" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		records, err := s.store.ListAuthRecords()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if records == nil {
+			records = []*db.AuthRecord{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"auth": records})
+	case http.MethodPost:
+		var req struct {
+			Name       string            `json:"name"`
+			Kind       string            `json:"kind"`
+			Descriptor db.AuthDescriptor `json:"descriptor"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		rec, err := s.coreCreateAuth(userFromContext(r.Context()), req.Name, req.Kind, req.Descriptor)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rec)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleAuthRecordDetail(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "api" || parts[1] != "auth" {
+		http.NotFound(w, r)
+		return
+	}
+	id, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid auth record id", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		rec, err := s.store.GetAuthRecord(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rec)
+	case http.MethodPut:
+		var req struct {
+			Name       string            `json:"name"`
+			Kind       string            `json:"kind"`
+			Descriptor db.AuthDescriptor `json:"descriptor"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := s.coreUpdateAuth(userFromContext(r.Context()), id, req.Name, req.Kind, req.Descriptor); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodDelete:
+		if err := s.coreDeleteAuth(userFromContext(r.Context()), id); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleServiceTools(w http.ResponseWriter, r *http.Request, svc *db.Service) {
@@ -2122,15 +1803,21 @@ func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
 			h(w, r)
 			return
 		}
-		svcIDStr, err := s.store.GetSetting("admin_auth_service")
-		if err != nil || svcIDStr == "" {
+		rec, err := s.adminAuthRecord()
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if rec == nil {
 			// Auth off — synthetic superuser so role checks still work downstream.
 			ctx := context.WithValue(r.Context(), userKey, &db.User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"})
 			h(w, r.WithContext(ctx))
 			return
 		}
-		user, err := s.verifyAdminToken(r, svcIDStr)
-		if err != nil {
+		_, user, err := s.verifyGateRequest(rec, r)
+		if err != nil || user == nil {
+			// The admin gate demands a real user row — a valid ext: token
+			// from the right provider is still nobody we know.
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -2251,39 +1938,6 @@ func (s *Server) requireAppServiceAccess(serviceType string) func(http.HandlerFu
 	}
 }
 
-func (s *Server) verifyAdminToken(r *http.Request, serviceID string) (*db.User, error) {
-	svcID, err := strconv.ParseInt(serviceID, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid service ID in settings")
-	}
-	user, _, err := s.verifyTaskToken(r, svcID)
-	return user, err
-}
-
-// verifyTaskToken verifies a Bearer token against a referenced auth service.
-// Returns the authenticated user and the token's sub claim on success.
-func (s *Server) verifyTaskToken(r *http.Request, authSvcID int64) (*db.User, string, error) {
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return nil, "", fmt.Errorf("missing bearer token")
-	}
-	idTokenRaw := strings.TrimPrefix(authHeader, "Bearer ")
-
-	svc, err := s.store.GetService(authSvcID)
-	if err != nil {
-		return nil, "", fmt.Errorf("auth service not found")
-	}
-	email, sub, err := s.verifyIDToken(r.Context(), svc, idTokenRaw)
-	if err != nil {
-		return nil, "", err
-	}
-	user, err := s.store.GetUserByEmail(email)
-	if err != nil {
-		return nil, "", fmt.Errorf("user not found for %s", email)
-	}
-	return user, sub, nil
-}
-
 func isFreshbreathToken(raw string) bool {
 	parts := strings.Split(raw, ".")
 	if len(parts) != 3 {
@@ -2298,76 +1952,6 @@ func isFreshbreathToken(raw string) bool {
 	}
 	json.Unmarshal(payload, &peek)
 	return peek.Iss == "freshbreath"
-}
-
-// setRefreshCookie creates a refresh family, mints a refresh token for the
-// given claims, and sets it as an HttpOnly cookie on the response.
-func (s *Server) setRefreshCookie(w http.ResponseWriter, r *http.Request, claims *freshbreathClaims) {
-	refreshData := freshbreathRefreshData{
-		Kind:      claims.Kind,
-		UserEmail: claims.UserEmail,
-		UserRole:  claims.UserRole,
-		UserName:  claims.UserName,
-		ServiceID: claims.ServiceID,
-	}
-	if claims.Kind == "wrapped" {
-		refreshData.UpstreamRefresh = claims.UpstreamRefresh
-		refreshData.UpstreamTokenURL = claims.UpstreamTokenURL
-		refreshData.UpstreamScopes = claims.UpstreamScopes
-	}
-
-	deviceLabel := deviceLabelFromUA(r.UserAgent())
-	familyID, jti, err := s.newRefreshFamily(claims.UserEmail, claims.ServiceID, deviceLabel)
-	if err != nil {
-		// Log but don't block the login — the user can still use their
-		// access token. Refresh will fail until they re-login.
-		fmt.Fprintf(os.Stderr, "create refresh family: %v\n", err)
-		s.makeRefreshCookie(w, refreshData)
-		return
-	}
-	refreshData.FamilyID = familyID
-	refreshData.JTI = jti
-	s.makeRefreshCookie(w, refreshData)
-}
-
-func (s *Server) verifyIDToken(ctx context.Context, svc *db.Service, raw string) (string, string, error) {
-	if isFreshbreathToken(raw) {
-		claims, err := s.verifyFreshbreathToken(raw)
-		if err != nil {
-			return "", "", err
-		}
-		if claims == nil {
-			return "", "", fmt.Errorf("not a freshbreath token")
-		}
-		// Service binding: an identity token is only valid against the service
-		// that minted it. Without this, a token issued by *any* OIDC service
-		// would authenticate against *this* one — letting an attacker who can
-		// register an account at some other service under a victim's email
-		// impersonate that victim here (e.g. log into the admin MCP).
-		if claims.Kind != "identity" || claims.ServiceID != svc.ID {
-			return "", "", fmt.Errorf("token was not issued by this auth service")
-		}
-		return claims.UserEmail, claims.Subject, nil
-	}
-	provider, err := s.getOIDCProvider(ctx, svc.ID, svc.URL)
-	if err != nil {
-		return "", "", fmt.Errorf("OIDC provider: %w", err)
-	}
-	idToken, err := provider.Verifier(&oidc.Config{ClientID: svc.Descriptor.ClientID}).Verify(ctx, raw)
-	if err != nil {
-		return "", "", fmt.Errorf("token verification: %w", err)
-	}
-	var claims struct {
-		Email string `json:"email"`
-		Sub   string `json:"sub"`
-	}
-	if err := idToken.Claims(&claims); err != nil {
-		return "", "", fmt.Errorf("claims extraction: %w", err)
-	}
-	if claims.Email == "" {
-		return "", "", fmt.Errorf("no email in token")
-	}
-	return claims.Email, claims.Sub, nil
 }
 
 func (s *Server) getOIDCProvider(ctx context.Context, serviceID int64, issuer string) (*oidc.Provider, error) {
@@ -2420,7 +2004,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		families, err := s.store.ListRefreshFamilies(user.Email)
+		families, err := s.store.ListRefreshFamilies(subjectForUser(user))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("list sessions: %v", err), http.StatusInternalServerError)
 			return
@@ -2430,7 +2014,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		for _, f := range families {
 			sessions = append(sessions, map[string]interface{}{
 				"id":           f.ID,
-				"service_id":   f.ServiceID,
+				"auth_id":      f.AuthID,
 				"device_label": f.DeviceLabel,
 				"created_at":   f.CreatedAt,
 				"expires_at":   f.ExpiresAt,
@@ -2441,7 +2025,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"sessions": sessions})
 
 	case http.MethodDelete:
-		if err := s.store.RevokeUserRefreshFamilies(user.Email); err != nil {
+		if err := s.store.RevokeUserRefreshFamilies(subjectForUser(user)); err != nil {
 			http.Error(w, fmt.Sprintf("revoke sessions: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -2478,7 +2062,7 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("lookup session: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if !ok || fam.UserEmail != user.Email {
+	if !ok || fam.Subject != subjectForUser(user) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -2699,395 +2283,3 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
-
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var body struct {
-		RefreshToken  string `json:"refresh_token"`
-		ServiceID     int64  `json:"service_id"`
-		ClientID      string `json:"client_id,omitempty"`
-		TokenEndpoint string `json:"token_endpoint,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return
-	}
-	if body.RefreshToken == "" || body.ServiceID == 0 {
-		http.Error(w, "refresh_token and service_id required", http.StatusBadRequest)
-		return
-	}
-	svc, err := s.store.GetService(body.ServiceID)
-	if err != nil {
-		http.Error(w, "Service not found", http.StatusNotFound)
-		return
-	}
-
-	// Resolve token endpoint ourselves using the service's config.
-	tokenEndpoint, err := s.resolveTokenEndpoint(r.Context(), svc)
-	if err != nil {
-		http.Error(w, "Could not determine token endpoint", http.StatusInternalServerError)
-		return
-	}
-
-	// If client sent a token_endpoint, validate it matches our service — prevents
-	// confused-deputy attacks where service_id is trusted but endpoint is swapped.
-	if body.TokenEndpoint != "" {
-		clientNorm := strings.TrimSuffix(body.TokenEndpoint, "/")
-		serverNorm := strings.TrimSuffix(tokenEndpoint, "/")
-		if clientNorm != serverNorm {
-			http.Error(w, "token_endpoint does not match service", http.StatusBadRequest)
-			return
-		}
-	}
-
-	// client_id: descriptor wins for pre-registered; body wins for DCR services
-	clientID := svc.Descriptor.ClientID
-	if clientID == "" {
-		clientID = body.ClientID
-	}
-	if clientID == "" {
-		http.Error(w, "client_id required", http.StatusBadRequest)
-		return
-	}
-
-	form := url.Values{
-		"grant_type":    {"refresh_token"},
-		"refresh_token": {body.RefreshToken},
-		"client_id":     {clientID},
-	}
-	if svc.Descriptor.ClientSecret != "" {
-		form.Set("client_secret", svc.Descriptor.ClientSecret)
-	}
-	if svc.Descriptor.Scopes != "" {
-		form.Set("scope", svc.Descriptor.Scopes)
-	}
-
-	resp, err := s.httpClient.PostForm(tokenEndpoint, form)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Refresh request failed: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	w.Write(respBody)
-}
-
-// handleSSHAuth handles the SSH passphrase login flow.
-// GET renders the email + passphrase form.
-// POST verifies credentials and completes auth via postMessage.
-func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		state := r.URL.Query().Get("state")
-		if state == "" {
-			http.Error(w, "Missing state parameter", http.StatusBadRequest)
-			return
-		}
-		isMCP := r.URL.Query().Get("mcp") == "1"
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		html := strings.Replace(sshAuthFormHTML, "{{STATE}}", state, 1)
-		html = strings.Replace(html, "{{IS_MCP}}", fmt.Sprintf("%v", isMCP), 1)
-		w.Write([]byte(html))
-
-	case http.MethodPost:
-		var req struct {
-			State      string `json:"state"`
-			Email      string `json:"email"`
-			Passphrase string `json:"passphrase"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-		if req.State == "" || req.Email == "" || req.Passphrase == "" {
-			http.Error(w, "state, email, and passphrase required", http.StatusBadRequest)
-			return
-		}
-
-		// Look up the pending auth entry. Kept alive until its TTL so a
-		// mistyped passphrase (or a back-button revisit) can be retried.
-		pending, ok, expired := s.getPending(req.State)
-		ok = ok && pending.serviceType == "ssh"
-
-		if !ok && expired {
-			http.Error(w, "Auth state expired — restart the login flow", http.StatusBadRequest)
-			return
-		}
-		if !ok {
-			http.Error(w, "Unknown auth state", http.StatusBadRequest)
-			return
-		}
-
-		// Look up the user by email
-		user, err := s.store.GetUserByEmail(req.Email)
-		if err != nil {
-			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-			return
-		}
-		if user.Metadata == nil || user.Metadata.SSHKey == nil {
-			http.Error(w, "No SSH key configured for this user", http.StatusUnauthorized)
-			return
-		}
-
-		// Verify the passphrase
-		if !sshkit.VerifyPassphrase(user.Metadata.SSHKey, req.Passphrase) {
-			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-			return
-		}
-
-		// Add decrypted key to the in-process SSH agent with 1h TTL.
-		// Agent TTL is decoupled from the web JWT — agent timeout doesn't
-		// invalidate the web session, and vice versa.
-		if s.agentMgr != nil {
-			if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, 1*time.Hour); err != nil {
-				log.Printf("agent add key for user %d: %v", user.ID, err)
-			}
-		}
-
-		_ = s.store.LogAudit(req.Email, "login", "admin panel (SSH)")
-
-		// Mint a panel JWT for this user
-		idToken, err := s.mintFreshbreathToken("identity", user.Email, user.Role, user.Name, pending.serviceID, nil)
-		if err != nil {
-			http.Error(w, "Token generation failed", http.StatusInternalServerError)
-			return
-		}
-
-		now := time.Now()
-
-		// MCP flow — return redirect URL for the form's JS to navigate to
-		if _, hasMCP, _ := s.getMCPPending(pending.appNonce); hasMCP {
-			redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, idToken, user.Email, "", now.Add(accessTokenTTL))
-			if !ok {
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"redirect": redirectURL})
-			return
-		}
-
-		s.completeAuth(w, r, pending, &db.OAuthData{
-			AccessToken: idToken,
-			TokenType:   "Bearer",
-			ExpiresAt:   now.Add(accessTokenTTL),
-			Claims: map[string]interface{}{
-				"email": user.Email,
-				"name":  user.Name,
-				"sub":   fmt.Sprintf("user:%d", user.ID),
-				"iss":   "freshbreath",
-			},
-			IDToken: idToken,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-const sshAuthFormHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SSH Login — Fresh Breath</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f11;color:#e4e4e7;display:grid;place-items:center;min-height:100vh}
-  .card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:32px;width:100%;max-width:380px}
-  h1{font-size:18px;font-weight:600;margin-bottom:4px}
-  p.lead{color:#71717a;font-size:14px;margin-bottom:24px}
-  label{display:block;font-size:13px;color:#a1a1aa;margin-bottom:6px;font-weight:500}
-  input{width:100%;padding:10px 12px;border:1px solid #27272a;border-radius:8px;background:#0f0f11;color:#e4e4e7;font-size:14px;margin-bottom:16px;outline:none}
-  input:focus{border-color:#6366f1}
-  button{width:100%;padding:10px;border:none;border-radius:8px;background:#6366f1;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
-  button:hover{background:#4f46e5}
-  button:disabled{opacity:.5;cursor:not-allowed}
-  .err{color:#f87171;font-size:13px;margin-bottom:12px;display:none}
-  .err.show{display:block}
-</style></head><body>
-<div class="card">
-  <h1>SSH Authentication</h1>
-  <p class="lead">Sign in with your SSH key passphrase.</p>
-  <div class="err" id="err"></div>
-  <form id="f">
-    <label for="e">Email</label>
-    <input id="e" type="email" required autocomplete="email" autofocus/>
-    <label for="p">Passphrase</label>
-    <input id="p" type="password" required autocomplete="current-password"/>
-    <button type="submit" id="btn">Sign in</button>
-  </form>
-</div>
-<script>
-(function(){
-  var state="{{STATE}}";
-  var isMCP="{{IS_MCP}}"==="true";
-  document.getElementById('f').onsubmit=function(ev){
-    ev.preventDefault();
-    var btn=document.getElementById('btn');
-    var errEl=document.getElementById('err');
-    errEl.className='err';
-    errEl.textContent='';
-    btn.disabled=true;btn.textContent='Signing in…';
-    fetch('/service/ssh-auth',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({state:state,email:document.getElementById('e').value,passphrase:document.getElementById('p').value})
-    }).then(function(r){
-      if(!r.ok){
-        r.text().then(function(t){errEl.textContent=t||'Login failed';errEl.className='err show'});
-        btn.disabled=false;btn.textContent='Sign in';
-        return;
-      }
-      if(isMCP){
-        r.json().then(function(d){if(d.redirect){window.location.href=d.redirect;}});
-      } else {
-        r.text().then(function(html){document.open();document.write(html);document.close()});
-      }
-    }).catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Sign in'});
-  };
-})();
-</script></body></html>`
-
-// handleAPIKeyAuth handles the API key entry flow.
-// GET renders the key entry form.
-// POST accepts the key and completes auth via postMessage or MCP redirect.
-func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		state := r.URL.Query().Get("state")
-		if state == "" {
-			http.Error(w, "Missing state parameter", http.StatusBadRequest)
-			return
-		}
-		svcID := r.URL.Query().Get("service_id")
-		isMCP := r.URL.Query().Get("mcp") == "1"
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		html := strings.Replace(apiKeyAuthFormHTML, "{{STATE}}", state, 1)
-		html = strings.Replace(html, "{{SERVICE_ID}}", svcID, 1)
-		html = strings.Replace(html, "{{IS_MCP}}", fmt.Sprintf("%v", isMCP), 1)
-		w.Write([]byte(html))
-
-	case http.MethodPost:
-		var req struct {
-			State  string `json:"state"`
-			APIKey string `json:"api_key"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
-		if req.State == "" || req.APIKey == "" {
-			http.Error(w, "state and api_key required", http.StatusBadRequest)
-			return
-		}
-
-		pending, ok, expired := s.getPending(req.State)
-		ok = ok && pending.serviceType == "apikey"
-
-		if !ok && expired {
-			http.Error(w, "Auth state expired — restart the login flow", http.StatusBadRequest)
-			return
-		}
-		if !ok {
-			http.Error(w, "Unknown auth state", http.StatusBadRequest)
-			return
-		}
-
-		// MCP flow — complete via redirect to the MCP client's redirect_uri
-		if _, hasMCP, _ := s.getMCPPending(pending.appNonce); hasMCP {
-			redirectURL, ok := s.completeMCPDirectAuth(w, pending.appNonce, req.APIKey, "api-key-user", "", time.Now().Add(365*24*time.Hour))
-			if !ok {
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{"redirect": redirectURL})
-			return
-		}
-
-		// Browser (non-MCP) flow — return a fabricated token
-		now := time.Now()
-		svc, err := s.store.GetService(pending.serviceID)
-		if err != nil {
-			http.Error(w, "Service not found", http.StatusInternalServerError)
-			return
-		}
-
-		_ = s.store.LinkAppService(pending.appNonce, pending.serviceID)
-
-		// Fabricate a simple token wrapping the API key
-		s.completeAuth(w, r, pending, &db.OAuthData{
-			AccessToken: req.APIKey,
-			TokenType:   "Bearer",
-			ExpiresAt:   now.Add(24 * time.Hour * 365), // long-lived
-			Claims: map[string]interface{}{
-				"sub": "api-key-user",
-				"iss": "freshbreath",
-			},
-			Proxied: svc.Descriptor.Proxied,
-		})
-
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-const apiKeyAuthFormHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>API Key — Fresh Breath</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f11;color:#e4e4e7;display:grid;place-items:center;min-height:100vh}
-  .card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:32px;width:100%;max-width:380px}
-  h1{font-size:18px;font-weight:600;margin-bottom:4px}
-  p.lead{color:#71717a;font-size:14px;margin-bottom:24px}
-  label{display:block;font-size:13px;color:#a1a1aa;margin-bottom:6px;font-weight:500}
-  input{width:100%;padding:10px 12px;border:1px solid #27272a;border-radius:8px;background:#0f0f11;color:#e4e4e7;font-size:14px;margin-bottom:16px;outline:none}
-  input:focus{border-color:#6366f1}
-  button{width:100%;padding:10px;border:none;border-radius:8px;background:#6366f1;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
-  button:hover{background:#4f46e5}
-  button:disabled{opacity:.5;cursor:not-allowed}
-  .err{color:#f87171;font-size:13px;margin-bottom:12px;display:none}
-  .err.show{display:block}
-</style></head><body>
-<div class="card">
-  <h1>API Key Authentication</h1>
-  <p class="lead">Enter your API key or access token.</p>
-  <div class="err" id="err"></div>
-  <form id="f">
-    <label for="k">API Key</label>
-    <input id="k" type="password" required autofocus/>
-    <button type="submit" id="btn">Submit</button>
-  </form>
-</div>
-<script>
-(function(){
-  var state="{{STATE}}";
-  var serviceId="{{SERVICE_ID}}";
-  var isMCP="{{IS_MCP}}"==="true";
-  document.getElementById('f').onsubmit=function(ev){
-    ev.preventDefault();
-    var btn=document.getElementById('btn');
-    var errEl=document.getElementById('err');
-    errEl.className='err';
-    errEl.textContent='';
-    btn.disabled=true;btn.textContent='Submitting…';
-    fetch('/service/apikey-auth',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({state:state,api_key:document.getElementById('k').value})
-    }).then(function(r){
-      if(!r.ok){
-        r.text().then(function(t){errEl.textContent=t||'Submission failed';errEl.className='err show'});
-        btn.disabled=false;btn.textContent='Submit';
-        return;
-      }
-      if(isMCP){
-        r.json().then(function(d){
-          if(d.redirect){window.location.href=d.redirect;}
-        });
-      } else {
-        r.text().then(function(html){document.open();document.write(html);document.close()});
-      }
-    }).catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Submit'});
-  };
-})();
-</script></body></html>`

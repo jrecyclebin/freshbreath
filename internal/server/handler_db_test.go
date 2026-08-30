@@ -30,7 +30,7 @@ func dbPost(t *testing.T, srv *Server, path string, body string) *dbQueryResult 
 
 func TestHandlerDBAppMount(t *testing.T) {
 	srv := newAppDBServer(t)
-	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestHandlerDBGlobalMount(t *testing.T) {
 
 func TestHandlerDBWatch(t *testing.T) {
 	srv := newAppDBServer(t)
-	nonce, err := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, err := srv.store.CreateApp("notes", "Development", "", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestHandlerDBWatch(t *testing.T) {
 
 func TestHandlerDBWatchBadName(t *testing.T) {
 	srv := newAppDBServer(t)
-	nonce, _ := srv.store.CreateApp("notes", "Development", "", nil)
+	nonce, _ := srv.store.CreateApp("notes", "Development", "", nil, nil)
 	rr := testRequest(t, srv, http.MethodGet,
 		"/api/apps/"+nonce+"/db/watch?db=BADNAME", nil, nil)
 	if rr.Code != http.StatusBadRequest {

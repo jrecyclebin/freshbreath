@@ -29,6 +29,7 @@ const Icon = ({ name, size = 16 }) => {
     bell:    <><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 7H4c0-1 2-2 2-7z"/><path d="M10 19a2 2 0 0 0 4 0"/></>,
     refresh: <><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></>,
     lock:    <><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></>,
+    key:     <><circle cx="8" cy="15" r="4"/><path d="M10.9 12.1L20 3"/><path d="M17 6l2.5 2.5"/><path d="M14.5 8.5L17 11"/></>,
     mail:    <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></>,
     cog:     <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></>,
     plug:    <><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></>,
@@ -71,12 +72,33 @@ const actionIcon = (a='') => {
   return {icon:'cog',tone:'gray'};
 };
 
+// Drawers nest: a service drawer opens an auth drawer over itself so you
+// can make a record without losing the form that needed one. Both listen
+// for Escape on window, so without a stack one keypress closes both and
+// takes the half-filled form with it. Only the topmost answers.
+const drawerStack = [];
+
 const Drawer = ({ open, title, onClose, footer, children }) => {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const me = useRef({});
   useEffect(() => {
-    const esc = (e) => { if(e.key==='Escape')onClose(); };
-    if(open) window.addEventListener('keydown',esc);
-    return () => window.removeEventListener('keydown',esc);
-  }, [open,onClose]);
+    if (!open) return;
+    const self = me.current;
+    drawerStack.push(self);
+    const esc = (e) => {
+      if (e.key === 'Escape' && drawerStack[drawerStack.length - 1] === self) closeRef.current();
+    };
+    window.addEventListener('keydown', esc);
+    return () => {
+      window.removeEventListener('keydown', esc);
+      const i = drawerStack.indexOf(self);
+      if (i >= 0) drawerStack.splice(i, 1);
+    };
+    // Deliberately keyed on `open` alone: onClose is usually a fresh inline
+    // closure each render, and re-running this would shuffle the stack
+    // order out from under a nested drawer.
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   return <>
     <div className={`drawer-scrim ${open?'open':''}`} onClick={onClose}/>
     <div className={`drawer ${open?'open':''}`} role="dialog" aria-modal="true">
@@ -180,50 +202,44 @@ const ToastProvider = ({children}) => {
 
 // ── Auth ───────────────────────────────────────────────────────────────
 
-const AuthCtx = createContext({ user: null, token: null, authRequired: false, serviceName: '', sessionExpired: false, login: ()=>{}, logout: ()=>{}, clearExpired: ()=>{} });
+const AuthCtx = createContext({ user: null, session: null, authRequired: false, gateName: '', sessionExpired: false, login: ()=>{}, logout: ()=>{}, clearExpired: ()=>{} });
 const useAuth = () => useContext(AuthCtx);
 
 function AuthProvider({ children }) {
   const [ready, setReady] = useState(false);
   const [user, setUser] = useState(null);
-  const [token, setToken] = useState(null);
+  const [session, setSession] = useState(null);
   const [authRequired, setAuthRequired] = useState(false);
-  const [serviceName, setServiceName] = useState('');
+  const [gateName, setGateName] = useState('');
   const [sessionExpired, setSessionExpired] = useState(false);
   const [authError, setAuthError] = useState('');
 
   useEffect(() => {
-    _onUnauthorized = () => { setUser(null); setToken(null); setSessionExpired(true); };
+    _onUnauthorized = () => { setUser(null); setSession(null); setSessionExpired(true); };
     return () => { _onUnauthorized = null; };
   }, []);
 
   useEffect(() => {
     (async () => {
       try {
-        const cfg = window.__HOMESLICE_CONFIG || {};
-        window.FrBr.Svc.on('refresh', s => {
-          console.log("Access token expired, refreshing...");
-          localStorage.setItem('frebre_admin', s.toJSON());
-          setToken(s);
-        });
-
         if (!window.FrBr || !window.__HOMESLICE_CONFIG) {
           // Script-ordering bug: frbr.js (which defines window.FrBr and
           // __HOMESLICE_CONFIG) must execute before this app. Without it we
-          // can't read authRequired and would silently skip the stored token.
+          // can't read authRequired and would silently skip a stored session.
           console.error('Fresh Breath: frbr.js/config not loaded before app init — script ordering bug');
         }
-
+        const cfg = window.__HOMESLICE_CONFIG || {};
         if (!cfg.authRequired) { setReady(true); return; }
         setAuthRequired(true);
-        setServiceName(cfg.authServiceName || '');
+        setGateName(cfg.authRecordName || '');
 
-        const stored = localStorage.getItem('frebre_admin');
-        if (stored) {
-          const result = window.FrBr.load(stored);
-          setToken(result);
-
-          const d = await api(result, 'GET','/api/me');
+        // The store is the session. Restoring one is a synchronous read of
+        // frbr:auth:<gate id> — no round trip, and nothing to persist here,
+        // because frbr.js owns persistence now including refresh rotation.
+        const restored = window.FrBr.currentSession();
+        if (restored) {
+          setSession(restored);
+          const d = await api(restored, 'GET', '/api/me');
           setUser(d.user);
         }
       } catch (e) {
@@ -233,40 +249,56 @@ function AuthProvider({ children }) {
     })();
   }, []);
 
+  // One verb. The control panel logs in to its own gate, so login() takes
+  // no service URL — whatever that gate is (OIDC, a passphrase, a key),
+  // frbr.js runs the right flow.
   const login = async () => {
-    const cfg = window.__HOMESLICE_CONFIG || {};
-    const serviceURL = cfg.authServiceURL;
-    if (!serviceURL) return;
-
-    const result = await window.FrBr.login(serviceURL);
+    const fresh = await window.FrBr.login();
     setSessionExpired(false);
-    localStorage.setItem('frebre_admin', result.toJSON());
-    setToken(result);
-
-    // Verify the token and load user
-    const d = await api(result, 'GET', '/api/me');
+    setSession(fresh);
+    const d = await api(fresh, 'GET', '/api/me');
     setUser(d.user);
   };
 
-  const logout = () => { localStorage.removeItem('frebre_admin'); setUser(null); setSessionExpired(false); };
+  const logout = () => { window.FrBr.signOut(); setSession(null); setUser(null); setSessionExpired(false); };
   const clearExpired = () => setSessionExpired(false);
 
   if (!ready) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
   return (
-    <AuthCtx.Provider value={{ user, token, authRequired, serviceName, sessionExpired, login, logout, clearExpired, authError }}>
+    <AuthCtx.Provider value={{ user, session, authRequired, gateName, sessionExpired, login, logout, clearExpired, authError }}>
       {children}
     </AuthCtx.Provider>
   );
 }
 
-function LoginScreen({ serviceName, onLogin, authError }) {
+// How each kind of gate introduces itself on the sign-in screen. The kind
+// comes from env.js, so the button says what will actually happen when it
+// is clicked rather than assuming everyone signs in the same way.
+const GATE_PROMPTS = {
+  ssh_key:   { lead: 'Sign in with your SSH key passphrase.', cta: () => 'Sign in with your passphrase', tag: 'SSH' },
+  api_key:   { lead: 'This panel is behind an API key.',      cta: () => 'Enter the API key',            tag: 'KEY' },
+  oidc:      { lead: 'Use your work account to access the control panel.', cta: (n) => `Continue with ${n || 'your identity provider'}`, tag: 'OIDC' },
+  oauth2:    { lead: 'Use your work account to access the control panel.', cta: (n) => `Continue with ${n || 'your provider'}`,          tag: 'OAUTH2' },
+};
+
+function LoginScreen({ gateName, onLogin, authError }) {
   const cfg = window.__HOMESLICE_CONFIG || {};
-  const isSSH = cfg.authServiceType === 'ssh';
+  const gate = GATE_PROMPTS[cfg.authKind] || GATE_PROMPTS.oidc;
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState('');
   const errorMessages = {
     no_user: 'Your account is not registered. Please contact an administrator.',
     invalid_token: 'Authentication failed. Please try again.',
     no_email: 'Your identity provider did not share an email address.',
+  };
+  // A login can fail for reasons the server never hears about — a blocked
+  // popup, a closed window — so the click, not the server, reports them.
+  const attempt = async () => {
+    setBusy(true); setFailure('');
+    try { await onLogin(); }
+    catch (e) { setFailure(e.message || 'Login failed'); }
+    finally { setBusy(false); }
   };
   return (
     <div className="login-screen">
@@ -294,18 +326,18 @@ function LoginScreen({ serviceName, onLogin, authError }) {
         <div className="login-card">
           <div>
             <h2>Sign in to Fresh Breath</h2>
-            <p className="lead">{isSSH ? 'Sign in with your SSH key passphrase.' : 'Use your work account to access the control panel.'}</p>
+            <p className="lead">{gate.lead}</p>
           </div>
-          {authError && (
+          {(authError || failure) && (
             <div className="login-error">
               <Icon name="bell" size={14}/>
-              <span>{errorMessages[authError] || 'Authentication error.'}</span>
+              <span>{failure || errorMessages[authError] || 'Authentication error.'}</span>
             </div>
           )}
-          <button className="oidc-btn oidc-primary" onClick={onLogin}>
-            <span className="glyph"><Icon name={isSSH ? 'lock' : 'lock'} size={16}/></span>
-            {isSSH ? 'Sign in with SSH key' : `Continue with ${serviceName || 'your identity provider'}`}
-            <span className="meta">{isSSH ? 'SSH' : 'OIDC'}</span>
+          <button className="oidc-btn oidc-primary" onClick={attempt} disabled={busy}>
+            <span className="glyph"><Icon name="lock" size={16}/></span>
+            {busy ? 'Signing in…' : gate.cta(gateName)}
+            <span className="meta">{gate.tag}</span>
           </button>
         </div>
       </main>
@@ -332,6 +364,7 @@ const NAV = [
   { id:'home',     label:'Overview', icon:'home' },
   { id:'apps',     label:'Apps',     icon:'apps', countKey:'apps' },
   { id:'services', label:'Services', icon:'plug', countKey:'services' },
+  { id:'auth',     label:'Auth',     icon:'key',  countKey:'auth' },
   { id:'users',    label:'Users',    icon:'users', countKey:'users' },
   { id:'roles',    label:'Roles',    icon:'shield' },
   { id:'audit',    label:'Audit log',icon:'log' },
@@ -467,26 +500,35 @@ function Toolbar({ search, onSearch, placeholder, filters=[], activeFilter, onFi
 
 let _onUnauthorized = null;
 
-async function api(token, method, path, body, { rawText = false } = {}) {
-  const opts = { method, headers: {} };
-  if (token?.data?.access_token) opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
+// Headers carrying the admin session's credential. The session decides
+// which header its kind implies — a bearer, or a key under its own name —
+// so nothing here has to know.
+const authHeaders = (session, init) => {
+  const h = new Headers(init);
+  session?.addAuth(h);
+  return h;
+};
+
+async function api(session, method, path, body, { rawText = false } = {}) {
+  const headers = authHeaders(session);
+  const opts = { method, headers };
   if (body) {
     if (body instanceof FormData) {
       opts.body = body;
       // Let the browser set the multipart boundary.
     } else {
-      opts.headers['Content-Type']='application/json';
-      opts.body=JSON.stringify(body);
+      headers.set('Content-Type', 'application/json');
+      opts.body = JSON.stringify(body);
     }
   }
 
   let r = await fetch(path, opts);
 
   // Stale token — try refresh once
-  if (r.status === 401 && token?.refresh) {
+  if (r.status === 401 && session?.refresh) {
     try {
-      await token.refresh();
-      opts.headers['Authorization'] = 'Bearer ' + token.data.access_token;
+      await session.refresh();
+      session.addAuth(headers);
       r = await fetch(path, opts);
     } catch {
       _onUnauthorized?.();
@@ -627,7 +669,7 @@ function Overview({ users, apps, services, audit }) {
 
 // ── Users ──────────────────────────────────────────────────────────────
 
-function UsersView({ token, users, apps, onRefresh }) {
+function UsersView({ session, users, apps, onRefresh }) {
   const [q,setQ] = useState('');
   const [filter,setFilter] = useState(null);
   const [editing,setEditing] = useState(null);
@@ -641,7 +683,7 @@ function UsersView({ token, users, apps, onRefresh }) {
 
   const remove = async (id) => {
     if (!confirm('Delete this user?')) return;
-    try { await api(token, 'DELETE','/api/users/'+id); toast('User deleted'); onRefresh(); }
+    try { await api(session, 'DELETE','/api/users/'+id); toast('User deleted'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -687,12 +729,12 @@ function UsersView({ token, users, apps, onRefresh }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No users match.</b>Try a different search.</div>}
       </div>
-      <UserDrawer user={editing} token={token} apps={apps} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      <UserDrawer user={editing} session={session} apps={apps} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
     </>
   );
 }
 
-function UserDrawer({ user, token, apps, onClose, onSaved }) {
+function UserDrawer({ user, session, apps, onClose, onSaved }) {
   const { user: actor, authRequired } = useAuth();
   const canManageSSH = (!authRequired) || (actor && (actor.role === 'Superuser' || actor.role === 'Admin'));
   const [form,setForm] = useState({name:'',email:'',role:'Member',status:'Active',apps:[]});
@@ -710,7 +752,7 @@ function UserDrawer({ user, token, apps, onClose, onSaved }) {
     if(isEdit) {
       setForm({name:user.name,email:user.email,role:user.role||'Member',status:user.status||'Active',apps:[]});
       setLoading(true);
-      api(token, 'GET','/api/users/'+user.id+'/apps')
+      api(session, 'GET','/api/users/'+user.id+'/apps')
         .then(d=>{
           setForm(f=>({...f,apps:d.apps||[]}));
         })
@@ -719,7 +761,7 @@ function UserDrawer({ user, token, apps, onClose, onSaved }) {
       // Load SSH key status for admins
       if (canManageSSH) {
         setSSHLoading(true);
-        api(token, 'GET','/api/users/'+user.id+'/ssh-key')
+        api(session, 'GET','/api/users/'+user.id+'/ssh-key')
           .then(d => setSSHKey(d.ssh_key))
           .catch(() => setSSHKey(null))
           .finally(() => setSSHLoading(false));
@@ -738,13 +780,13 @@ function UserDrawer({ user, token, apps, onClose, onSaved }) {
     try {
       let uid;
       if(isEdit) {
-        await api(token, 'PUT','/api/users/'+user.id,form);
-        await api(token, 'PUT','/api/users/'+user.id+'/apps',{apps:form.apps||[]});
+        await api(session, 'PUT','/api/users/'+user.id,form);
+        await api(session, 'PUT','/api/users/'+user.id+'/apps',{apps:form.apps||[]});
         toast('User updated');
       } else {
-        const resp = await api(token, 'POST','/api/users',form);
+        const resp = await api(session, 'POST','/api/users',form);
         uid = resp.id;
-        await api(token, 'PUT','/api/users/'+uid+'/apps',{apps:form.apps||[]});
+        await api(session, 'PUT','/api/users/'+uid+'/apps',{apps:form.apps||[]});
         toast('User created');
       }
       onClose(); onSaved();
@@ -805,7 +847,7 @@ function UserDrawer({ user, token, apps, onClose, onSaved }) {
                 </div>
                 <button className="btn btn-ghost" style={{color:'var(--red)',marginTop:8}} onClick={async () => {
                   if (!confirm('Delete this user\'s SSH key? They\'ll need a new one to use SSH auth.')) return;
-                  try { await api(token, 'DELETE','/api/users/'+user.id+'/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
+                  try { await api(session, 'DELETE','/api/users/'+user.id+'/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
                   catch(e) { toast(e.message, true); }
                 }}>Delete key</button>
               </>
@@ -832,7 +874,7 @@ function UserDrawer({ user, token, apps, onClose, onSaved }) {
                   <button className="btn btn-ghost" onClick={() => { setShowSSHGen(false); setPassphrase(''); setPassConfirm(''); }}>Cancel</button>
                   <button className="btn btn-primary" disabled={passphrase.length < 8 || passphrase !== passConfirm} onClick={async () => {
                     try {
-                      const d = await api(token, 'POST','/api/users/'+user.id+'/ssh-key', { passphrase });
+                      const d = await api(session, 'POST','/api/users/'+user.id+'/ssh-key', { passphrase });
                       setSSHKey(d.ssh_key);
                       setShowSSHGen(false);
                       setPassphrase('');
@@ -882,7 +924,7 @@ function UserAppTags({ apps, appList }) {
   );
 }
 
-function AppsView({ token, apps, services, users, onRefresh }) {
+function AppsView({ session, apps, services, users, auth, adminAuthID, onRefresh }) {
   const [q,setQ] = useState('');
   const [filter,setFilter] = useState(null);
   const [editing,setEditing] = useState(null);
@@ -896,15 +938,31 @@ function AppsView({ token, apps, services, users, onRefresh }) {
 
   const remove = async (nonce) => {
     if(!confirm('Delete this app?')) return;
-    try { await api(token, 'DELETE','/api/apps/'+nonce); toast('App deleted'); onRefresh(); }
+    try { await api(session, 'DELETE','/api/apps/'+nonce); toast('App deleted'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
   const copyNonce = (nonce) => copyText(nonce, toast);
 
+  // A service reached through an app answers to the *app's* gate — its own
+  // protected_by does not stack. So a service guarded more tightly than the
+  // app it is being linked into is about to become reachable by a wider
+  // audience than whoever set it up chose. Say so at the moment of the link;
+  // don't refuse it, because sometimes that is exactly the intent.
+  const appGate = effectiveGate(form.protected_by, auth, adminAuthID);
+  const exposed = form.services
+    .map(id => {
+      const service = services.find(s => s.id === id);
+      if (!service) return null;
+      const gate = effectiveGate(service.protected_by, auth, adminAuthID);
+      return gate && gateStrictness(gate) > gateStrictness(appGate) ? { service, gate } : null;
+    })
+    .filter(Boolean);
+
+
   const copyPrompt = async (a) => {
     try {
-      const r = await api(token, 'GET', '/api/apps/' + a.nonce + '/services');
+      const r = await api(session, 'GET', '/api/apps/' + a.nonce + '/services');
       const allowedIds = (r.services || []).filter(l => l.allowed).map(l => l.service_id);
       const appSvcs = services.filter(s => allowedIds.includes(s.id));
       copyText(buildPrompt(a, appSvcs), toast);
@@ -970,12 +1028,12 @@ function AppsView({ token, apps, services, users, onRefresh }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No apps found.</b></div>}
       </div>
-      <AppDrawer token={token} app={editing} services={services} users={users} apps={apps} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      <AppDrawer session={session} app={editing} services={services} users={users} apps={apps} auth={auth} adminAuthID={adminAuthID} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
     </>
   );
 }
 
-function HostUpload({ token, app, onRefresh }) {
+function HostUpload({ session, app, onRefresh }) {
   const [hosted, setHosted] = useState(!!(app.details?.last_uploaded));
   const [uploadedAt, setUploadedAt] = useState(app.details?.last_uploaded || null);
   const [deployed, setDeployed] = useState({
@@ -1003,7 +1061,7 @@ function HostUpload({ token, app, onRefresh }) {
     try {
       const res = await fetch('/api/apps/' + app.nonce + '/web', {
         method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + token?.data?.access_token },
+        headers: authHeaders(session),
         body: fd,
       });
       if (!res.ok) throw new Error(await res.text());
@@ -1023,7 +1081,7 @@ function HostUpload({ token, app, onRefresh }) {
     try {
       const res = await fetch('/api/apps/' + app.nonce + '/web', {
         method: 'DELETE',
-        headers: { 'Authorization': 'Bearer ' + token?.data?.access_token },
+        headers: authHeaders(session),
       });
       if (!res.ok) throw new Error(await res.text());
       setHosted(false);
@@ -1045,7 +1103,7 @@ function HostUpload({ token, app, onRefresh }) {
   const deploy = async (target) => {
     setDeploying(target);
     try {
-      const res = await api(token, 'POST', '/api/apps/' + app.nonce + '/deploy', { target });
+      const res = await api(session, 'POST', '/api/apps/' + app.nonce + '/deploy', { target });
       setDeployed(d => ({...d, [target]: new Date().toISOString()}));
       toast('Deployed to ' + (res.route || route + '@' + target));
       onRefresh();
@@ -1118,8 +1176,9 @@ function HostUpload({ token, app, onRefresh }) {
   );
 }
 
-function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
-  const [form,setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[]});
+function AppDrawer({ session, app, services, users, apps, auth, adminAuthID, onClose, onSaved }) {
+  const [form,setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],protected_by:null});
+  const [creatingGate,setCreatingGate] = useState(false);
   const [loading,setLoading] = useState(false);
   const toast = useToast();
   const isNew = app==='new';
@@ -1127,11 +1186,11 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
 
   useEffect(()=>{
     if(isEdit) {
-      setForm({name:app.name||'',environment:app.environment||'Development',url:app.url,owner_id:app.owner_id?String(app.owner_id):'',services:[],members:[]});
+      setForm({name:app.name||'',environment:app.environment||'Development',url:app.url,owner_id:app.owner_id?String(app.owner_id):'',services:[],members:[],protected_by:app.protected_by ?? null});
       setLoading(true);
       Promise.all([
-        api(token, 'GET','/api/apps/'+app.nonce+'/services'),
-        api(token, 'GET','/api/apps/'+app.nonce+'/members'),
+        api(session, 'GET','/api/apps/'+app.nonce+'/services'),
+        api(session, 'GET','/api/apps/'+app.nonce+'/members'),
       ])
         .then(([svcs,mems])=>{
           const allowed = (svcs.services||[]).filter(l=>l.allowed).map(l=>l.service_id);
@@ -1140,7 +1199,10 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
         .catch(e=>toast(e.message,true))
         .finally(()=>setLoading(false));
     } else {
-      setForm({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[]});
+      // A new app defaults to Anonymous: an app is a door onto the LAN,
+      // and inheriting admin auth would gate every dashboard by surprise.
+      setForm({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],
+               protected_by: auth.find(r => r.kind === 'anonymous' && r.builtin)?.id ?? null});
     }
   },[app]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1149,19 +1211,19 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
   };
 
   const save = async () => {
-    const payload = {name:form.name,environment:form.environment,url:form.url,owner_id:form.owner_id?Number(form.owner_id):null};
+    const payload = {name:form.name,environment:form.environment,url:form.url,owner_id:form.owner_id?Number(form.owner_id):null,protected_by:form.protected_by};
     try {
       let nonce;
       if(isEdit) {
-        await api(token, 'PUT','/api/apps/'+app.nonce,payload);
-        await api(token, 'PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
-        await api(token, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
+        await api(session, 'PUT','/api/apps/'+app.nonce,payload);
+        await api(session, 'PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
+        await api(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
         toast('App updated');
       } else {
-        const resp = await api(token, 'POST','/api/apps',payload);
+        const resp = await api(session, 'POST','/api/apps',payload);
         nonce = resp.nonce;
-        await api(token, 'PUT','/api/apps/'+nonce+'/members',{members:form.members||[]});
-        await api(token, 'PUT','/api/apps/'+nonce+'/services',{services:form.services||[]});
+        await api(session, 'PUT','/api/apps/'+nonce+'/members',{members:form.members||[]});
+        await api(session, 'PUT','/api/apps/'+nonce+'/services',{services:form.services||[]});
         toast('App created');
       }
       onClose(); onSaved();
@@ -1169,6 +1231,22 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
   };
 
   const copyNonce = (nonce) => copyText(nonce, toast);
+
+  // A service reached through an app answers to the *app's* gate — its own
+  // protected_by does not stack. So a service guarded more tightly than the
+  // app it is being linked into is about to become reachable by a wider
+  // audience than whoever set it up chose. Say so at the moment of the link;
+  // don't refuse it, because sometimes that is exactly the intent.
+  const appGate = effectiveGate(form.protected_by, auth, adminAuthID);
+  const exposed = form.services
+    .map(id => {
+      const service = services.find(s => s.id === id);
+      if (!service) return null;
+      const gate = effectiveGate(service.protected_by, auth, adminAuthID);
+      return gate && gateStrictness(gate) > gateStrictness(appGate) ? { service, gate } : null;
+    })
+    .filter(Boolean);
+
   const setupPrompt = isEdit && !loading
     ? buildPrompt(app, services.filter(s => form.services.includes(s.id)))
     : null;
@@ -1225,6 +1303,21 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
           )}
         </div>
       )}
+      <AuthSlot
+        label="Protected by"
+        placeholder="— inherit (admin auth) —"
+        help={
+          appGate
+            ? (appGate.kind === 'anonymous'
+                ? 'Open to anyone who can reach this app.'
+                : `Visitors clear ${appGate.name}${form.protected_by == null ? ' (inherited from admin auth)' : ''} before the page loads — and everything it calls answers to this gate.`)
+            : 'No admin auth is configured, so this app is open to anyone who can reach it.'
+        }
+        records={auth}
+        value={form.protected_by}
+        onChange={v=>setForm(f=>({...f,protected_by:v}))}
+        onCreate={()=>setCreatingGate(true)}
+      />
       {(isNew || isEdit) && (
         <div className="field">
           <label>Service access</label>
@@ -1236,6 +1329,16 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
               onChange={handleServicesChange}
               placeholder="No service access"
             />
+          )}
+          {exposed.length > 0 && (
+            <div className="help" style={{color:'var(--amber, #b7791f)',marginTop:8,lineHeight:1.5}}>
+              <Icon name="bell" size={12}/>{' '}
+              <b>Wider than {exposed.length === 1 ? 'it asks for' : 'they ask for'}.</b>{' '}
+              This app's gate governs everything reached through it, so linking{' '}
+              {exposed.map(e => `${e.service.name} (${e.gate.name})`).join(', ')}{' '}
+              {exposed.length === 1 ? 'opens it' : 'opens them'} to everyone who clears{' '}
+              {appGate ? appGate.name : 'no gate at all'}. Link anyway if that's the intent.
+            </div>
           )}
         </div>
       )}
@@ -1263,7 +1366,328 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
         </div>
       )}
       {isEdit && !loading && (
-        <HostUpload token={token} app={app} onRefresh={onSaved}/>
+        <HostUpload session={session} app={app} onRefresh={onSaved}/>
+      )}
+      {creatingGate && (
+        <AuthDrawer
+          session={session}
+          record="new"
+          onClose={()=>setCreatingGate(false)}
+          onSaved={(rec)=>{ setForm(f=>({...f,protected_by:rec.id})); setCreatingGate(false); onSaved(); }}
+        />
+      )}
+    </Drawer>
+  );
+}
+
+// ── Auth records ───────────────────────────────────────────────────────
+//
+// An auth record is a credential or a login method, standing on its own.
+// Services and apps point at one from either of two slots: "protected by"
+// (who may call in) and "acts as" (what goes upstream). Every kind is
+// eligible in both — what a kind *means* is what changes with the slot.
+
+const AUTH_KINDS = [
+  { kind:'anonymous', label:'Anonymous', tone:'gray',
+    blurb:'Open to anyone who can reach this instance. Inbound: no credential asked for. Outbound: the caller’s own credential is stripped.' },
+  { kind:'ssh_key', label:'SSH Key', tone:'purple',
+    blurb:'A registered user signing in with the passphrase on their SSH key.' },
+  { kind:'oidc', label:'OIDC', tone:'blue',
+    blurb:'An OpenID Connect provider, configured by discovery from its issuer.' },
+  { kind:'oauth2', label:'OAuth2', tone:'blue',
+    blurb:'An OAuth2 provider whose endpoints you name yourself — GitHub-shaped, no id_token.' },
+  { kind:'api_key', label:'API Key', tone:'amber',
+    blurb:'A stored key, sent under a header. Inbound: callers must present it. Outbound: it is injected on the way upstream.' },
+];
+
+const authKind = (k) => AUTH_KINDS.find(a => a.kind === k);
+const authKindLabel = (k) => authKind(k)?.label || k || '—';
+const authKindTone = (k) => authKind(k)?.tone || 'gray';
+const authRecord = (records, id) => (id == null || id === '') ? null : records.find(r => String(r.id) === String(id)) || null;
+
+// One builder for both slots' dropdowns. The two this replaces had already
+// drifted apart, which is the usual fate of a list written twice.
+const authOptions = (records) =>
+  records.map(r => ({ value: String(r.id), label: `${r.name} · ${authKindLabel(r.kind)}` }));
+
+// The gate actually in force: an empty slot inherits the admin record, and
+// only an explicit Anonymous record means open. A null here is setup mode —
+// no admin auth configured yet, which is also wide open.
+const effectiveGate = (slotID, records, adminID) => authRecord(records, slotID ?? adminID);
+
+// How narrow an audience a gate admits. The server ranks the kinds (it is
+// the half that can be tested); a missing gate is the widest thing there is.
+const gateStrictness = (rec) => rec ? (rec.strictness ?? 0) : 0;
+
+// A gate as a table cell. An empty slot is not "no gate" — it inherits the
+// admin record — so it says so, rather than showing a dash that reads like
+// the door is open.
+function GateCell({ slot, auth, adminAuthID }) {
+  const rec = effectiveGate(slot, auth, adminAuthID);
+  if (!rec) return <Badge tone="amber" dot={false}>Open (no admin auth)</Badge>;
+  const inherited = slot == null;
+  return (
+    <Badge dot={false} tone={rec.kind === 'anonymous' ? 'amber' : authKindTone(rec.kind)}>
+      {rec.name}{inherited ? ' (inherited)' : ''}
+    </Badge>
+  );
+}
+
+/**
+ * One auth slot: a dropdown over every record plus an inline "+ New…", so
+ * wiring up a service doesn't mean leaving the drawer to go make a record
+ * and finding your way back.
+ */
+function AuthSlot({ label, help, placeholder, records, value, onChange, onCreate, disabled }) {
+  return (
+    <div className="field">
+      <label>{label}</label>
+      <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
+        <select
+          className="input"
+          disabled={disabled}
+          value={value == null ? '' : String(value)}
+          onChange={e => onChange(e.target.value === '' ? null : Number(e.target.value))}
+        >
+          <option value="">{placeholder}</option>
+          {authOptions(records).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        {onCreate && (
+          <button className="btn btn-ghost" style={{whiteSpace:'nowrap'}} onClick={onCreate} disabled={disabled}>
+            <Icon name="plus" size={13}/> New…
+          </button>
+        )}
+      </div>
+      {help && <span className="help">{help}</span>}
+    </div>
+  );
+}
+
+function AuthView({ session, auth, services, apps, onRefresh }) {
+  const [q,setQ] = useState('');
+  const [editing,setEditing] = useState(null);
+  const toast = useToast();
+
+  const filtered = auth.filter(r =>
+    !q || `${r.name} ${r.kind}`.toLowerCase().includes(q.toLowerCase()));
+
+  // What points at a record, so deleting one is an informed choice rather
+  // than a 409 from the server.
+  const usedBy = (id) => [
+    ...services.filter(s => s.protected_by === id).map(s => `${s.name} (protects)`),
+    ...services.filter(s => s.acts_as === id).map(s => `${s.name} (acts as)`),
+    ...apps.filter(a => a.protected_by === id).map(a => `${a.name} (protects)`),
+  ];
+
+  const remove = async (rec) => {
+    const uses = usedBy(rec.id);
+    if (uses.length) {
+      toast(`In use by ${uses.join(', ')} — unassign it first`, true);
+      return;
+    }
+    if (!confirm(`Delete "${rec.name}"? Anyone holding a credential from it will have to log in again.`)) return;
+    try { await api(session, 'DELETE', '/api/auth/' + rec.id); toast('Auth record deleted'); onRefresh(); }
+    catch(e) { toast(e.message, true); }
+  };
+
+  return (
+    <>
+      <PageHead
+        crumbs={['Security','Auth']}
+        title="Auth"
+        sub="Credentials and login methods, each standing on its own."
+        actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New auth record</button>}
+      />
+      <Toolbar search={q} onSearch={setQ} placeholder="Search auth records…"/>
+      <div className="table-wrap">
+        <table className="tbl" data-mobile>
+          <thead><tr><th style={{width:'28%'}}>Name</th><th>Kind</th><th>Provider</th><th>Used by</th><th style={{width:80}}></th></tr></thead>
+          <tbody>
+            {filtered.map(r => {
+              const uses = usedBy(r.id);
+              return (
+                <tr key={r.id}>
+                  <td data-col="identity">
+                    <b>{r.name}</b>
+                    {r.builtin && <Badge tone="purple" dot={false}>Built-in</Badge>}
+                  </td>
+                  <td data-col="badge"><Badge dot={false} tone={authKindTone(r.kind)}>{authKindLabel(r.kind)}</Badge></td>
+                  <td data-col="detail">
+                    {r.descriptor?.provider
+                      ? <span className="mono" style={{fontSize:12.5}}>{r.descriptor.provider}</span>
+                      : <span className="muted">—</span>}
+                  </td>
+                  <td data-col="detail">
+                    {uses.length ? <span className="muted" style={{fontSize:12.5}}>{uses.join(', ')}</span> : <span className="muted">—</span>}
+                  </td>
+                  <td data-col="actions">
+                    <div className="row-actions">
+                      <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(r)} title="Edit"><Icon name="edit" size={14}/></button>
+                      {!r.builtin && <button className="btn btn-icon btn-ghost" onClick={()=>remove(r)} title="Delete"><Icon name="trash" size={14}/></button>}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {filtered.length===0 && <div className="empty"><b>No auth records found.</b></div>}
+      </div>
+      <AuthDrawer session={session} record={editing} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+    </>
+  );
+}
+
+/**
+ * Create or edit one auth record. The form is per-kind because the kinds
+ * genuinely have nothing in common — an issuer URL means nothing to a
+ * stored key, and asking for one anyway is how config screens get their
+ * reputation. `onSaved` receives the saved record, so a drawer that opened
+ * this one inline can pick the new record up without a round trip.
+ */
+function AuthDrawer({ session, record, onClose, onSaved, defaultKind }) {
+  const [form,setForm] = useState({name:'',kind:defaultKind||'oidc',descriptor:{}});
+  const [saving,setSaving] = useState(false);
+  const toast = useToast();
+  const isNew = record === 'new';
+  const isEdit = record && record.id;
+  const builtin = isEdit && record.builtin;
+
+  useEffect(()=>{
+    if (isEdit) setForm({name:record.name, kind:record.kind, descriptor:{...record.descriptor}});
+    else setForm({name:'', kind:defaultKind||'oidc', descriptor:{}});
+  },[record]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const upd = (k,v) => setForm(f=>({...f, descriptor:{...f.descriptor, [k]:v}}));
+
+  // Switching kind starts the descriptor over. Carrying stale fields across
+  // is how a record ends up with an issuer *and* an authorize URL and no
+  // way to tell which one is live.
+  const setKind = (kind) => setForm(f=>({...f, kind, descriptor:{}}));
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      // PUT answers 204, so an edit reports the record it just sent; a
+      // create gets the real one back, id and all.
+      let saved;
+      if (isEdit) {
+        await api(session, 'PUT', '/api/auth/' + record.id, form);
+        saved = {...record, ...form};
+      } else {
+        saved = await api(session, 'POST', '/api/auth', form);
+      }
+      toast(isEdit ? 'Auth record updated' : 'Auth record created');
+      onClose(); onSaved?.(saved);
+    } catch(e) { toast(e.message, true); }
+    finally { setSaving(false); }
+  };
+
+  const kind = form.kind;
+  const d = form.descriptor;
+  const secretPlaceholder = isEdit && record.has_secret ? 'Stored — leave blank to keep' : '';
+
+  return (
+    <Drawer
+      open={isNew || isEdit} title={isNew?'New auth record':'Edit auth record'}
+      onClose={onClose}
+      footer={<>
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn btn-primary" onClick={save} disabled={saving || !form.name}>{isNew?'Create':'Save'}</button>
+      </>}
+    >
+      <div className="field">
+        <label>Name</label>
+        <input className="input" value={form.name} disabled={builtin}
+               onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Company SSO"/>
+      </div>
+      <div className="field">
+        <label>Kind</label>
+        {builtin ? (
+          <div><Badge tone={authKindTone(kind)} dot={false}>{authKindLabel(kind)}</Badge></div>
+        ) : (
+          <select className="input" value={kind} onChange={e=>setKind(e.target.value)}>
+            {AUTH_KINDS.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+          </select>
+        )}
+        <span className="help">{authKind(kind)?.blurb}</span>
+      </div>
+
+      {(kind === 'oidc' || kind === 'oauth2') && (
+        <>
+          {kind === 'oidc' ? (
+            <div className="field"><label>Issuer</label>
+              <input className="input mono" value={d.issuer||''} onChange={e=>upd('issuer',e.target.value)} placeholder="https://accounts.example.com"/>
+              <span className="help">Endpoints are discovered from here.</span>
+            </div>
+          ) : (
+            <>
+              <div className="field"><label>Authorize URL</label>
+                <input className="input mono" value={d.authorize_url||''} onChange={e=>upd('authorize_url',e.target.value)} placeholder="https://github.com/login/oauth/authorize"/>
+              </div>
+              <div className="field"><label>Token URL</label>
+                <input className="input mono" value={d.token_url||''} onChange={e=>upd('token_url',e.target.value)} placeholder="https://github.com/login/oauth/access_token"/>
+              </div>
+              <div className="field"><label>Userinfo URL</label>
+                <input className="input mono" value={d.userinfo_url||''} onChange={e=>upd('userinfo_url',e.target.value)} placeholder="https://api.github.com/user"/>
+              </div>
+              <div className="field"><label>User emails URL</label>
+                <input className="input mono" value={d.userinfo_emails_url||''} onChange={e=>upd('userinfo_emails_url',e.target.value)} placeholder="https://api.github.com/user/emails"/>
+                <span className="help">Only when the provider keeps email off the main userinfo response.</span>
+              </div>
+            </>
+          )}
+          <div className="field-row">
+            <div className="field"><label>Client ID</label>
+              <input className="input mono" value={d.client_id||''} onChange={e=>upd('client_id',e.target.value)}/>
+            </div>
+            <div className="field"><label>Scopes</label>
+              <input className="input" value={d.scopes||''} onChange={e=>upd('scopes',e.target.value)} placeholder={kind==='oidc'?'openid profile email':'repo read:user'}/>
+            </div>
+          </div>
+          <div className="field"><label>Client Secret</label>
+            <input className="input mono" type="password" value={d.client_secret||''}
+                   onChange={e=>upd('client_secret',e.target.value)} placeholder={secretPlaceholder}/>
+            <span className="help">Never leaves the server — token exchange and refresh run here.</span>
+          </div>
+          <div className="field"><label>Provider slug</label>
+            <input className="input mono" value={d.provider||''} onChange={e=>upd('provider',e.target.value)} placeholder="github"/>
+            <span className="help">
+              The upstream this record talks to. Two records over the same provider share one
+              identity for the people behind them, so give them the same slug.
+            </span>
+          </div>
+        </>
+      )}
+
+      {kind === 'api_key' && (
+        <>
+          <div className="field"><label>Key</label>
+            <input className="input mono" type="password" value={d.key||''}
+                   onChange={e=>upd('key',e.target.value)} placeholder={secretPlaceholder}/>
+          </div>
+          <div className="field"><label>Header</label>
+            <input className="input mono" value={d.header||''} onChange={e=>upd('header',e.target.value)} placeholder="X-API-Key (blank for Authorization: Bearer)"/>
+          </div>
+        </>
+      )}
+
+      {kind === 'ssh_key' && (
+        <div className="field"><label>Stored private key</label>
+          <textarea className="input mono" rows={4} value={d.key||''}
+                    onChange={e=>upd('key',e.target.value)} placeholder={secretPlaceholder || '-----BEGIN OPENSSH PRIVATE KEY-----'}
+                    style={{fontSize:11,resize:'vertical'}}/>
+          <span className="help">
+            Leave empty and the passphrase is checked against each user's own key — which is
+            what the built-in record does, and what you almost certainly want.
+          </span>
+        </div>
+      )}
+
+      {kind === 'anonymous' && (
+        <div className="field">
+          <span className="help">Nothing to configure. That is the entire point of it.</span>
+        </div>
       )}
     </Drawer>
   );
@@ -1271,7 +1695,7 @@ function AppDrawer({ token, app, services, users, apps, onClose, onSaved }) {
 
 // ── Services ───────────────────────────────────────────────────────────
 
-function ServicesView({ token, services, onRefresh, onEditTools }) {
+function ServicesView({ session, services, auth, adminAuthID, onRefresh, onEditTools }) {
   const [q,setQ] = useState('');
   const [editing,setEditing] = useState(null);
   const toast = useToast();
@@ -1283,14 +1707,14 @@ function ServicesView({ token, services, onRefresh, onEditTools }) {
 
   const remove = async (id) => {
     let apps = [];
-    try { const r = await api(token, 'GET','/api/services/'+id+'/apps'); apps = r.apps||[]; }
+    try { const r = await api(session, 'GET','/api/services/'+id+'/apps'); apps = r.apps||[]; }
     catch(e) { /* ignore */ }
     let msg = 'Delete this service?';
     if(apps.length>0) {
       msg += `\n\nIt's used by ${apps.length} app${apps.length>1?'s':''}:\n${apps.map(a=>a.name).join(', ')}`;
     }
     if(!confirm(msg)) return;
-    try { await api(token, 'DELETE','/api/services/'+id); toast('Service deleted'); onRefresh(); }
+    try { await api(session, 'DELETE','/api/services/'+id); toast('Service deleted'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -1305,7 +1729,7 @@ function ServicesView({ token, services, onRefresh, onEditTools }) {
       <Toolbar search={q} onSearch={setQ} placeholder="Search services…"/>
       <div className="table-wrap">
         <table className="tbl" data-mobile>
-          <thead><tr><th style={{width:'25%'}}>Name</th><th>URL</th><th>Type</th><th>Proxied</th><th style={{width:80}}></th></tr></thead>
+          <thead><tr><th style={{width:'22%'}}>Name</th><th>URL</th><th>Type</th><th>Protected by</th><th>Acts as</th><th style={{width:80}}></th></tr></thead>
           <tbody>
             {filtered.map(s=>
               <tr key={s.id}>
@@ -1321,7 +1745,12 @@ function ServicesView({ token, services, onRefresh, onEditTools }) {
                   </span>
                 </td>
                 <td data-col="badge"><Badge dot={false} tone="gray">{s.descriptor?.type?.toLocaleUpperCase()||'—'}</Badge></td>
-                <td data-col="detail">{s.descriptor?.proxied ? <Badge tone="blue">Proxied</Badge> : <span className="muted">—</span>}</td>
+                <td data-col="detail"><GateCell slot={s.protected_by} auth={auth} adminAuthID={adminAuthID}/></td>
+                <td data-col="detail">
+                  {authRecord(auth, s.acts_as)
+                    ? <Badge dot={false} tone={authKindTone(authRecord(auth, s.acts_as).kind)}>{authRecord(auth, s.acts_as).name}</Badge>
+                    : <span className="muted" title="Whatever credential the caller brought">the caller’s</span>}
+                </td>
                 <td data-col="actions">
                   <div className="row-actions">
                     <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(s)} title="Edit"><Icon name="edit" size={14}/></button>
@@ -1334,24 +1763,30 @@ function ServicesView({ token, services, onRefresh, onEditTools }) {
         </table>
         {filtered.length===0 && <div className="empty"><b>No services found.</b></div>}
       </div>
-      <ServiceDrawer token={token} services={services} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh} onEditTools={onEditTools}/>
+      <ServiceDrawer session={session} services={services} auth={auth} adminAuthID={adminAuthID} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh} onEditTools={onEditTools}/>
     </>
   );
 }
 
-function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools }) {
-  const [form,setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false}});
+function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose, onSaved, onEditTools }) {
+  const [form,setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
   const [tools,setTools] = useState([]);
   const [toolsLoading,setToolsLoading] = useState(false);
   const [toolsError,setToolsError] = useState('');
+  // Which slot is waiting on the inline "+ New…" drawer, so the record it
+  // creates lands in the slot that asked for it.
+  const [creatingFor,setCreatingFor] = useState(null);
   const toast = useToast();
   const isNew = service==='new';
   const isEdit = service && service.id;
 
   useEffect(()=>{
-    if(isEdit) setForm({name:service.name,url:service.url,descriptor:{...service.descriptor}});
-    else setForm({name:'',url:'',descriptor:{type:'mcp',proxied:false}});
-  },[service]);
+    if(isEdit) setForm({
+      name:service.name, url:service.url, descriptor:{...service.descriptor},
+      protected_by:service.protected_by ?? null, acts_as:service.acts_as ?? null,
+    });
+    else setForm({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
+  },[service]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(()=>{
     if(!isEdit) { setTools([]); setToolsError(''); return; }
@@ -1360,46 +1795,31 @@ function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools
     let cancelled = false;
     setToolsLoading(true);
     setToolsError('');
-    api(token,'GET','/api/services/'+service.id+'/tools')
+    api(session,'GET','/api/services/'+service.id+'/tools')
       .then(r => { if(!cancelled){ setTools(r.tools||[]); setToolsError(''); } })
       .catch(e => { if(!cancelled){ setTools([]); setToolsError(e.message); } })
       .finally(() => { if(!cancelled) setToolsLoading(false); });
     return () => { cancelled = true; };
-  },[service,token]);
+  },[service,session]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updDesc = (k,v) => setForm(f=>({...f,descriptor:{...f.descriptor,[k]:v}}));
 
-  // When switching type, clear fields that don't apply
+  // The descriptor is down to four fields, and which ones apply still turns
+  // on the type. Auth is no longer among them — that lives in the slots now.
   const setType = (t) => {
     const d = {...form.descriptor, type: t};
-    if (t === 'tasks') {
-      delete d.auth; delete d.api_key; delete d.header; delete d.proxied;
-      delete d.client_id; delete d.client_secret; delete d.oauth_url;
-      delete d.scopes; delete d.userinfo_url; delete d.userinfo_emails_url;
-      delete d.database_target; delete d.database_name;
-    } else if (t === 'virtual') {
-      delete d.proxied;
-      delete d.auth_service_id; delete d.userinfo_url; delete d.userinfo_emails_url;
-    } else {
-      delete d.auth_service_id;
-      delete d.database_target; delete d.database_name;
-    }
+    if (t === 'tasks' || t === 'virtual') delete d.proxied;
+    if (t !== 'virtual') { delete d.database_target; delete d.database_name; }
     setForm(f=>({...f, descriptor: d}));
   };
 
   const save = async () => {
     try {
-      // Strip auth_service_id if not tasks type
       const payload = {...form};
-      if (payload.descriptor.type !== 'tasks' && payload.descriptor.auth_service_id) {
-        const d = {...payload.descriptor}; delete d.auth_service_id; payload.descriptor = d;
-      }
-      // Virtual services don't need a URL — server generates /mcp/{slug}
-      if (payload.descriptor.type === 'virtual') {
-        payload.url = '';
-      }
-      if(isEdit) { await api(token, 'PUT','/api/services/'+service.id,payload); toast('Service updated'); }
-      else { await api(token, 'POST','/api/services',payload); toast('Service created'); }
+      // Virtual services don't need a URL — the server mints /mcp/{slug}.
+      if (payload.descriptor.type === 'virtual') payload.url = '';
+      if(isEdit) { await api(session, 'PUT','/api/services/'+service.id,payload); toast('Service updated'); }
+      else { await api(session, 'POST','/api/services',payload); toast('Service created'); }
       onClose(); onSaved();
     } catch(e) { toast(e.message,true); }
   };
@@ -1408,13 +1828,16 @@ function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools
   const isTasks = form.descriptor.type === 'tasks';
   const isVirtual = form.descriptor.type === 'virtual';
 
-  // Auth service options for tasks: OIDC services + built-in SSH
-  const oidcSvc = services.filter(s => s.descriptor?.type === 'oidc');
-  const sshSvc = services.find(s => s.descriptor?.type === 'ssh');
-  const authSvcOptions = [
-    ...oidcSvc.map(s => ({ id: String(s.id), label: s.name, type: 'OIDC' })),
-    ...(sshSvc ? [{ id: String(sshSvc.id), label: 'SSH Key', type: 'SSH' }] : []),
-  ];
+  const gate = effectiveGate(form.protected_by, auth, adminAuthID);
+  const actsAs = authRecord(auth, form.acts_as);
+  // What an empty outbound slot means depends entirely on the gate — same
+  // table resolveOutboundCred walks on the server, said in words.
+  const outboundHelp = actsAs
+    ? null
+    : !gate ? 'No gate is configured, so whatever the caller sent rides through untouched.'
+    : gate.kind === 'anonymous' ? 'Behind an open gate, whatever the caller sent rides through untouched.'
+    : gate.kind === 'ssh_key' ? 'A passphrase yields no upstream credential, so nothing is sent.'
+    : `The caller's own ${gate.name} credential is forwarded.`;
 
   return (
     <Drawer
@@ -1433,7 +1856,7 @@ function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools
       <div className="field-row">
         <div className="field"><label>Type</label>
           <select className="input" value={form.descriptor.type} onChange={e=>setType(e.target.value)}>
-            <option value="mcp">MCP</option><option value="api">API</option><option value="oidc">OIDC</option><option value="tasks">Tasks</option><option value="virtual">Virtual</option>
+            <option value="mcp">MCP</option><option value="api">API</option><option value="tasks">Tasks</option><option value="virtual">Virtual</option>
           </select>
         </div>
         {!isTasks && !isVirtual && <div className="field"><label>Proxied</label>
@@ -1443,51 +1866,33 @@ function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools
         </div>}
       </div>
       )}
-      {isTasks && (
-        <div className="field" style={{maxWidth:380}}>
-          <label>Auth service</label>
-          <select className="input" value={form.descriptor.auth_service_id||''} onChange={e=>updDesc('auth_service_id',e.target.value)}>
-            <option value="">— None (app nonce only) —</option>
-            {authSvcOptions.map(s => <option key={s.id} value={s.id}>{s.label} ({s.type})</option>)}
-          </select>
-          {authSvcOptions.length === 0 && (
-            <span className="help">No auth services available. Add an OIDC service or use the built-in SSH service.</span>
-          )}
-        </div>
-      )}
-      {(form.descriptor.type==='api' || form.descriptor.type==='virtual') && (
-        <>
-          <div className="field-row">
-            <div className="field"><label>Auth</label>
-              <select className="input" value={form.descriptor.auth||''} onChange={e=>updDesc('auth',e.target.value)}>
-                <option value="">OAuth (default)</option><option value="key">API key</option>
-              </select>
-            </div>
-            {form.descriptor.auth==='key' &&
-              <div className="field"><label>API Key</label><input className="input mono" type="password" value={form.descriptor.api_key||''} onChange={e=>updDesc('api_key',e.target.value)}/></div>
-            }
-          </div>
-          {form.descriptor.auth==='key' &&
-            <div className="field"><label>API Key Header</label><input className="input mono" value={form.descriptor.header||''} onChange={e=>updDesc('header',e.target.value)} placeholder="X-API-Key (or empty for Bearer)"/></div>
-          }
-        </>
-      )}
-      {(form.descriptor.type==='oidc' || ((form.descriptor.type==='api' || form.descriptor.type==='virtual') && !form.descriptor.auth)) && (
-        <>
-          <div className="field"><label>OAuth URL</label><input className="input mono" value={form.descriptor.oauth_url||''} onChange={e=>updDesc('oauth_url',e.target.value)} placeholder="https://provider.com/oauth"/></div>
-          <div className="field-row">
-            <div className="field"><label>Client ID</label><input className="input mono" value={form.descriptor.client_id||''} onChange={e=>updDesc('client_id',e.target.value)}/></div>
-            <div className="field"><label>Scopes</label><input className="input" value={form.descriptor.scopes||''} onChange={e=>updDesc('scopes',e.target.value)} placeholder="openid profile email"/></div>
-          </div>
-          <div className="field"><label>Client Secret</label><input className="input mono" type="password" value={form.descriptor.client_secret||''} onChange={e=>updDesc('client_secret',e.target.value)}/></div>
-        </>
-      )}
-      {form.descriptor.type==='oidc' && (
-        <>
-          <div className="field"><label>Userinfo URL</label><input className="input mono" value={form.descriptor.userinfo_url||''} onChange={e=>updDesc('userinfo_url',e.target.value)}/></div>
-          <div className="field"><label>User Email URL</label><input className="input mono" value={form.descriptor.userinfo_emails_url||''} onChange={e=>updDesc('userinfo_emails_url',e.target.value)}/></div>
-        </>
-      )}
+
+      <AuthSlot
+        label="Protected by"
+        placeholder="— inherit (admin auth) —"
+        help={
+          gate
+            ? (form.protected_by == null
+                ? `Inheriting ${gate.name}. Reached through an app, the app's gate governs instead.`
+                : `Callers must clear ${gate.name}. Reached through an app, the app's gate governs instead.`)
+            : 'No admin auth is configured, so this is open to anyone who can reach it.'
+        }
+        records={auth}
+        value={form.protected_by}
+        onChange={v=>setForm(f=>({...f,protected_by:v}))}
+        onCreate={()=>setCreatingFor('protected_by')}
+      />
+
+      <AuthSlot
+        label="Service acts as"
+        placeholder="— the caller's credential —"
+        help={outboundHelp}
+        records={auth}
+        value={form.acts_as}
+        onChange={v=>setForm(f=>({...f,acts_as:v}))}
+        onCreate={()=>setCreatingFor('acts_as')}
+      />
+
       {isVirtual && (
         <>
           <div className="field-row">
@@ -1542,13 +1947,28 @@ function ServiceDrawer({ token, services, service, onClose, onSaved, onEditTools
           )}
         </div>
       )}
+
+      {creatingFor && (
+        <AuthDrawer
+          session={session}
+          record="new"
+          onClose={()=>setCreatingFor(null)}
+          onSaved={(rec)=>{
+            // Drop the new record straight into the slot that asked for it,
+            // then refresh so every other dropdown sees it too.
+            setForm(f=>({...f,[creatingFor]:rec.id}));
+            setCreatingFor(null);
+            onSaved();
+          }}
+        />
+      )}
     </Drawer>
   );
 }
 
 // ── Service tools editor ───────────────────────────────────────────────
 
-function ServiceToolsEditor({ token, services, serviceId, onBack, onSaved }) {
+function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
   const service = services.find(s => String(s.id) === serviceId);
   const type = service?.descriptor?.type;
   const isTasks = type === 'tasks';
@@ -1564,7 +1984,7 @@ function ServiceToolsEditor({ token, services, serviceId, onBack, onSaved }) {
     if (!service) return;
     let cancelled = false;
     setLoading(true);
-    api(token, 'GET', '/api/services/' + serviceId + '/files', null, { rawText: true })
+    api(session, 'GET', '/api/services/' + serviceId + '/files', null, { rawText: true })
       .then(text => { if (!cancelled) { setContent(text || ''); setDirty(false); } })
       .catch(e => {
         if (cancelled) return;
@@ -1573,7 +1993,7 @@ function ServiceToolsEditor({ token, services, serviceId, onBack, onSaved }) {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [service, serviceId, token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [service, serviceId, session]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1593,7 +2013,7 @@ function ServiceToolsEditor({ token, services, serviceId, onBack, onSaved }) {
       const blob = new Blob([content], { type: 'text/plain' });
       const form = new FormData();
       form.append('file', blob, service.name + '.txt');
-      await api(token, 'POST', '/api/services/' + serviceId + '/files', form, { rawText: true });
+      await api(session, 'POST', '/api/services/' + serviceId + '/files', form, { rawText: true });
       setDirty(false);
       toast('File saved');
       onSaved?.();
@@ -1736,9 +2156,10 @@ function AuditView({ audit }) {
 
 // ── Settings ───────────────────────────────────────────────────────────
 
-function SettingsView({ token, services, apps, user }) {
-  const [selectedSvc, setSelectedSvc] = useState('');
-  const [currentSvc, setCurrentSvc] = useState(null);
+function SettingsView({ session, services, apps, auth, user, onRefresh }) {
+  const [selectedAuth, setSelectedAuth] = useState('');
+  const [savedAuth, setSavedAuth] = useState('');
+  const [creatingGate, setCreatingGate] = useState(false);
   const [defaultApp, setDefaultApp] = useState('');
   const [dbMode, setDbMode] = useState('read-only');
   const [loading, setLoading] = useState(true);
@@ -1750,11 +2171,11 @@ function SettingsView({ token, services, apps, user }) {
   const toast = useToast();
 
   useEffect(() => {
-    api(token, 'GET', '/api/settings')
+    api(session, 'GET', '/api/settings')
       .then(d => {
         const id = d.admin_auth_service || '';
-        setSelectedSvc(id);
-        setCurrentSvc(id ? (services.find(s => String(s.id) === id) || null) : null);
+        setSelectedAuth(id);
+        setSavedAuth(id);
         setDefaultApp(d.default_app || '');
         setDbMode(d.mcp_database_mode || 'read-only');
       })
@@ -1765,47 +2186,39 @@ function SettingsView({ token, services, apps, user }) {
   useEffect(() => {
     if (!user || user.id < 0) return;
     setSSHLoading(true);
-    api(token, 'GET', '/api/me/ssh-key')
+    api(session, 'GET', '/api/me/ssh-key')
       .then(d => setSSHKey(d.ssh_key))
       .catch(() => setSSHKey(null))
       .finally(() => setSSHLoading(false));
   }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const oidcServices = services.filter(s => s.descriptor?.type === 'oidc');
-  const sshService = services.find(s => s.descriptor?.type === 'ssh');
-
-  const authServices = [
-    ...oidcServices.map(s => ({ id: String(s.id), label: s.name, type: 'OIDC' })),
-    ...(sshService ? [{ id: String(sshService.id), label: 'SSH Key', type: 'SSH' }] : []),
-  ];
-
   const saveAuth = async () => {
     try {
-      await api(token, 'PUT', '/api/settings', { admin_auth_service: selectedSvc });
-      setCurrentSvc(oidcServices.find(s => String(s.id) === selectedSvc) || null);
+      await api(session, 'PUT', '/api/settings', { admin_auth_service: selectedAuth });
+      setSavedAuth(selectedAuth);
       toast('Settings saved');
     } catch(e) { toast(e.message, true); }
   };
 
   const unlink = async () => {
-    if (!confirm('Remove admin auth? The control panel will be open until auth is reconfigured.')) return;
+    if (!confirm('Remove admin auth? The control panel — and every app and service with an empty gate — will be open until auth is reconfigured.')) return;
     try {
-      await api(token, 'PUT', '/api/settings', { admin_auth_service: '' });
-      setSelectedSvc(''); setCurrentSvc(null);
+      await api(session, 'PUT', '/api/settings', { admin_auth_service: '' });
+      setSelectedAuth(''); setSavedAuth('');
       toast('Admin auth removed');
     } catch(e) { toast(e.message, true); }
   };
 
   const saveLanding = async () => {
     try {
-      await api(token, 'PUT', '/api/settings', { default_app: defaultApp });
+      await api(session, 'PUT', '/api/settings', { default_app: defaultApp });
       toast('Landing page saved');
     } catch(e) { toast(e.message, true); }
   };
 
   const saveDBMode = async () => {
     try {
-      await api(token, 'PUT', '/api/settings', { mcp_database_mode: dbMode });
+      await api(session, 'PUT', '/api/settings', { mcp_database_mode: dbMode });
       toast('Database mode saved');
     } catch(e) { toast(e.message, true); }
   };
@@ -1816,24 +2229,37 @@ function SettingsView({ token, services, apps, user }) {
       <div className="setting-section">
         <h3 className="setting-heading">Admin authentication</h3>
         <p className="muted" style={{marginBottom:20,fontSize:13}}>
-          Gate this control panel with an OIDC service. Once set, all API calls require a valid identity token.
+          The auth record guarding this control panel — and the one every empty gate falls back to.
+          An app or service naming no record of its own inherits this one, so the lazy default is
+          the safe one. Leave it unset and the whole instance is open.
         </p>
         {loading ? <span className="muted">Loading…</span> : (
           <>
-            <div className="field" style={{maxWidth:380}}>
-              <label>Auth service</label>
-              <select className="input" value={selectedSvc} onChange={e => setSelectedSvc(e.target.value)}>
-                <option value="">— None (open access) —</option>
-                {authServices.map(s => <option key={s.id} value={s.id}>{s.label} ({s.type})</option>)}
-              </select>
-              {oidcServices.length === 0 && !sshService && (
-                <span className="help">No auth services available. Add an OIDC service or use the built-in SSH service.</span>
-              )}
+            <div style={{maxWidth:460}}>
+              <AuthSlot
+                label="Admin auth record"
+                placeholder="— None (open access) —"
+                help={selectedAuth
+                  ? 'Every empty “Protected by” slot in this instance resolves to this record.'
+                  : 'Nothing is configured, so nothing is gated — including apps and services with empty slots.'}
+                records={auth}
+                value={selectedAuth === '' ? null : Number(selectedAuth)}
+                onChange={v => setSelectedAuth(v == null ? '' : String(v))}
+                onCreate={() => setCreatingGate(true)}
+              />
             </div>
             <div style={{display:'flex',gap:8,marginTop:16}}>
-              <button className="btn btn-primary" onClick={saveAuth}>Save</button>
-              {currentSvc && <button className="btn btn-ghost" onClick={unlink}>Unlink</button>}
+              <button className="btn btn-primary" onClick={saveAuth} disabled={selectedAuth === savedAuth}>Save</button>
+              {savedAuth && <button className="btn btn-ghost" onClick={unlink}>Unlink</button>}
             </div>
+            {creatingGate && (
+              <AuthDrawer
+                session={session}
+                record="new"
+                onClose={()=>setCreatingGate(false)}
+                onSaved={(rec)=>{ setSelectedAuth(String(rec.id)); setCreatingGate(false); onRefresh?.(); }}
+              />
+            )}
           </>
         )}
       </div>
@@ -1862,7 +2288,7 @@ function SettingsView({ token, services, apps, user }) {
         )}
       </div>
 
-      <RemoteUpdates token={token} apps={apps} services={services} />
+      <RemoteUpdates session={session} apps={apps} services={services} />
 
       <div className="setting-section" style={{marginTop:32}}>
         <h3 className="setting-heading">MCP database mode</h3>
@@ -1905,7 +2331,7 @@ function SettingsView({ token, services, apps, user }) {
             <div style={{marginTop:12}}>
               <button className="btn btn-ghost" style={{color:'var(--red)'}} onClick={async () => {
                 if (!confirm('Delete your SSH key? You\'ll need to generate a new one to use SSH auth.')) return;
-                try { await api(token, 'DELETE', '/api/me/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
+                try { await api(session, 'DELETE', '/api/me/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
                 catch(e) { toast(e.message, true); }
               }}>Delete key</button>
             </div>
@@ -1935,7 +2361,7 @@ function SettingsView({ token, services, apps, user }) {
               <button className="btn btn-ghost" onClick={() => { setShowGenModal(false); setPassphrase(''); setPassConfirm(''); }}>Cancel</button>
               <button className="btn btn-primary" disabled={passphrase.length < 8 || passphrase !== passConfirm} onClick={async () => {
                 try {
-                  const d = await api(token, 'POST', '/api/me/ssh-key', { passphrase });
+                  const d = await api(session, 'POST', '/api/me/ssh-key', { passphrase });
                   setSSHKey(d.ssh_key);
                   setShowGenModal(false);
                   setPassphrase('');
@@ -1997,7 +2423,7 @@ function UpdateProgress({ events, onClose }) {
 // RemoteUpdates is the settings-page section for update feeds: receive
 // feeds pull key-authenticated archives into staging; publish feeds build
 // them for self-hosting. See design/remote-updates.md.
-function RemoteUpdates({ token, apps, services }) {
+function RemoteUpdates({ session, apps, services }) {
   const [feeds, setFeeds] = useState(null);
   const [mode, setMode] = useState('receive');
   const [url, setUrl] = useState('');
@@ -2012,7 +2438,7 @@ function RemoteUpdates({ token, apps, services }) {
   const [buildLog, setBuildLog] = useState(null); // {events: [], done: null}
   const toast = useToast();
 
-  const load = () => api(token, 'GET', '/api/updates')
+  const load = () => api(session, 'GET', '/api/updates')
     .then(d => setFeeds(d.feeds || []))
     .catch(e => toast(e.message, true));
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2023,7 +2449,7 @@ function RemoteUpdates({ token, apps, services }) {
       const body = { mode, name };
       if (mode === 'receive') body.url = url;
       if (keyHex.trim()) body.key_hex = keyHex.trim();
-      const d = await api(token, 'POST', '/api/updates', body);
+      const d = await api(session, 'POST', '/api/updates', body);
       setNewKey({ id: d.id, key: d.key });
       setUrl(''); setName(''); setKeyHex('');
       load();
@@ -2033,13 +2459,13 @@ function RemoteUpdates({ token, apps, services }) {
 
   const remove = async (f) => {
     if (!confirm(`Delete update feed "${f.name || f.url || f.id.slice(0, 8)}"?`)) return;
-    try { await api(token, 'DELETE', '/api/updates/' + f.id); load(); toast('Feed deleted'); }
+    try { await api(session, 'DELETE', '/api/updates/' + f.id); load(); toast('Feed deleted'); }
     catch (e) { toast(e.message, true); }
   };
 
   const checkNow = async () => {
     try {
-      const d = await api(token, 'GET', '/api/updates/check');
+      const d = await api(session, 'GET', '/api/updates/check');
       const ups = d.updates || [];
       toast(ups.length === 0 ? 'All feeds up to date' :
         `${ups.length} update${ups.length > 1 ? 's' : ''} available: ${ups.map(u => u.version || '?').join(', ')}`);
@@ -2063,7 +2489,7 @@ function RemoteUpdates({ token, apps, services }) {
     setBuildLog(entry);
     try {
       await FrBr.sseStream(`/api/updates/${buildFor.id}/build`, {
-        token,
+        session,
         body: { apps: buildSel.apps, services: buildSel.services, version: buildVersion || undefined },
         onEvent: (ev, data) => setBuildLog(prev => prev && {
           ...prev,
@@ -2080,7 +2506,7 @@ function RemoteUpdates({ token, apps, services }) {
     (async () => {
       try {
         const r = await fetch(buildLog.done.download_url, {
-          headers: token?.data?.access_token ? { 'Authorization': 'Bearer ' + token.data.access_token } : {},
+          headers: authHeaders(session),
         });
         if (!r.ok) throw new Error(`download: ${r.status}`);
         const blob = await r.blob();
@@ -2296,7 +2722,7 @@ const buildPath = (page, params = {}) => {
 // ── App ────────────────────────────────────────────────────────────────
 
 function AppShell() {
-  const { user, token, authRequired, serviceName, login, logout, sessionExpired, clearExpired, authError } = useAuth();
+  const { user, session, authRequired, gateName, login, logout, sessionExpired, clearExpired, authError } = useAuth();
   const [route,setRoute] = useState(parseRoute);
   const [sidebarOpen,setSidebarOpen] = useState(false);
 
@@ -2313,6 +2739,8 @@ function AppShell() {
   const [users,setUsers] = useState([]);
   const [apps,setApps] = useState([]);
   const [services,setServices] = useState([]);
+  const [auth,setAuth] = useState([]);
+  const [adminAuthID,setAdminAuthID] = useState(null);
   const [roles,setRoles] = useState([]);
   const [audit,setAudit] = useState([]);
   const [loading,setLoading] = useState(true);
@@ -2321,26 +2749,33 @@ function AppShell() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [u,a,s,r,au] = await Promise.all([
-        api(token, 'GET','/api/users'),
-        api(token, 'GET','/api/apps'),
-        api(token, 'GET','/api/services'),
-        api(token, 'GET','/api/roles'),
-        api(token, 'GET','/api/audit'),
+      // The admin record is loaded alongside the rest because every gate
+      // dropdown needs it: an empty slot resolves to it, so the panel cannot
+      // label a single inherited gate without knowing which record that is.
+      const [u,a,s,r,au,ar,st] = await Promise.all([
+        api(session, 'GET','/api/users'),
+        api(session, 'GET','/api/apps'),
+        api(session, 'GET','/api/services'),
+        api(session, 'GET','/api/roles'),
+        api(session, 'GET','/api/audit'),
+        api(session, 'GET','/api/auth'),
+        api(session, 'GET','/api/settings').catch(()=>({})),
       ]);
-      setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]); setRoles(r.roles||[]); setAudit(au.audit||[]);
+      setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]);
+      setRoles(r.roles||[]); setAudit(au.audit||[]); setAuth(ar.auth||[]);
+      setAdminAuthID(st.admin_auth_service ? Number(st.admin_auth_service) : null);
     } catch(e) { if (!authRequired || user) toast('Failed to load: '+e.message, true); }
     setLoading(false);
-  },[authRequired, user, token]); // eslint-disable-line react-hooks/exhaustive-deps
+  },[authRequired, user, session]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(()=>{
     if (authRequired && !user) return;
     load();
   },[authRequired, user]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (authRequired && !user) return <LoginScreen serviceName={serviceName} onLogin={login} authError={authError}/>;
+  if (authRequired && !user) return <LoginScreen gateName={gateName} onLogin={login} authError={authError}/>;
 
-  const counts = { users:users.length, apps:apps.length, services:services.length };
+  const counts = { users:users.length, apps:apps.length, services:services.length, auth:auth.length };
 
   if(loading) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
@@ -2353,13 +2788,14 @@ function AppShell() {
         <MobileTopBar onMenuOpen={()=>setSidebarOpen(true)} pageLabel={activeLabel}/>
         {sessionExpired && <SessionBanner onLogin={login} onDismiss={clearExpired}/>}
         {route.page==='home'     && <Overview users={users} apps={apps} services={services} audit={audit}/>}
-        {route.page==='apps'     && <AppsView token={token} apps={apps} services={services} users={users} onRefresh={load}/>}
-        {route.page==='services' && route.params.screen !== 'edit-tools' && <ServicesView token={token} services={services} onRefresh={load} onEditTools={(id)=>navigate('services',{serviceId:String(id),screen:'edit-tools'})}/>}
-        {route.page==='services' && route.params.screen === 'edit-tools' && <ServiceToolsEditor token={token} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('services')} onSaved={load}/>}
-        {route.page==='users'    && <UsersView token={token} users={users} apps={apps} onRefresh={load}/>}
+        {route.page==='apps'     && <AppsView session={session} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load}/>}
+        {route.page==='services' && route.params.screen !== 'edit-tools' && <ServicesView session={session} services={services} auth={auth} adminAuthID={adminAuthID} onRefresh={load} onEditTools={(id)=>navigate('services',{serviceId:String(id),screen:'edit-tools'})}/>}
+        {route.page==='auth'     && <AuthView session={session} auth={auth} services={services} apps={apps} onRefresh={load}/>}
+        {route.page==='services' && route.params.screen === 'edit-tools' && <ServiceToolsEditor session={session} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('services')} onSaved={load}/>}
+        {route.page==='users'    && <UsersView session={session} users={users} apps={apps} onRefresh={load}/>}
         {route.page==='roles'    && <RolesView roles={roles}/>}
         {route.page==='audit'    && <AuditView audit={audit}/>}
-        {route.page==='settings' && <SettingsView token={token} services={services} apps={apps} user={user}/>}
+        {route.page==='settings' && <SettingsView session={session} services={services} apps={apps} auth={auth} user={user} onRefresh={load}/>}
       </main>
     </div>
   );

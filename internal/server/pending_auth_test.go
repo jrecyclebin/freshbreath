@@ -5,14 +5,23 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"poggers.institute/freshbreath/internal/db"
 )
+
+// sshPending is a login flow waiting on the built-in passphrase leg.
+func sshPending(t *testing.T, srv *Server) *pendingAuth {
+	t.Helper()
+	rec := builtinAuth(t, srv, db.AuthSSHKey)
+	return &pendingAuth{legs: []*db.AuthRecord{rec}, primaryID: rec.ID}
+}
 
 // A failed credential attempt must not kill the login state: the user can
 // correct their password (or revisit the link) while the TTL is still valid.
 func TestPendingStateSurvivesBadCredentials(t *testing.T) {
 	srv := newTestServer(t)
 	state := "test-state-123"
-	srv.putPending(state, &pendingAuth{serviceType: "ssh"})
+	srv.putPending(state, sshPending(t, srv))
 
 	post := func() *httptest.ResponseRecorder {
 		body := strings.NewReader(`{"state":"` + state + `","email":"nobody@example.com","passphrase":"wrong"}`)
@@ -37,7 +46,7 @@ func TestPendingStateSurvivesBadCredentials(t *testing.T) {
 func TestPendingStateExpiry(t *testing.T) {
 	srv := newTestServer(t)
 	state := "expired-state"
-	srv.putPending(state, &pendingAuth{serviceType: "ssh"})
+	srv.putPending(state, sshPending(t, srv))
 
 	srv.pendingMu.Lock()
 	srv.pending[state].expiresAt = time.Now().Add(-time.Minute)
@@ -70,12 +79,15 @@ func TestPendingStateExpiry(t *testing.T) {
 // can't accumulate until restart.
 func TestPendingSweepOnPut(t *testing.T) {
 	srv := newTestServer(t)
+	stale, fresh := sshPending(t, srv), sshPending(t, srv)
+	stale.expiresAt = time.Now().Add(-time.Hour)
+	fresh.expiresAt = time.Now().Add(time.Hour)
 	srv.pendingMu.Lock()
-	srv.pending["stale"] = &pendingAuth{serviceType: "ssh", expiresAt: time.Now().Add(-time.Hour)}
-	srv.pending["fresh"] = &pendingAuth{serviceType: "ssh", expiresAt: time.Now().Add(time.Hour)}
+	srv.pending["stale"] = stale
+	srv.pending["fresh"] = fresh
 	srv.pendingMu.Unlock()
 
-	srv.putPending("new", &pendingAuth{serviceType: "ssh"})
+	srv.putPending("new", sshPending(t, srv))
 
 	srv.pendingMu.Lock()
 	_, staleKept := srv.pending["stale"]
