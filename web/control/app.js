@@ -944,22 +944,6 @@ function AppsView({ session, apps, services, users, auth, adminAuthID, onRefresh
 
   const copyNonce = (nonce) => copyText(nonce, toast);
 
-  // A service reached through an app answers to the *app's* gate — its own
-  // protected_by does not stack. So a service guarded more tightly than the
-  // app it is being linked into is about to become reachable by a wider
-  // audience than whoever set it up chose. Say so at the moment of the link;
-  // don't refuse it, because sometimes that is exactly the intent.
-  const appGate = effectiveGate(form.protected_by, auth, adminAuthID);
-  const exposed = form.services
-    .map(id => {
-      const service = services.find(s => s.id === id);
-      if (!service) return null;
-      const gate = effectiveGate(service.protected_by, auth, adminAuthID);
-      return gate && gateStrictness(gate) > gateStrictness(appGate) ? { service, gate } : null;
-    })
-    .filter(Boolean);
-
-
   const copyPrompt = async (a) => {
     try {
       const r = await api(session, 'GET', '/api/apps/' + a.nonce + '/services');

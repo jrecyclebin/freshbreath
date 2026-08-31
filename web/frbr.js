@@ -148,6 +148,8 @@ export class AuthSession {
   get subject()   { return this.#entry.subject ?? null; }
   get legs()      { return this.#entry.legs ?? []; }
   get token()     { return this.#entry.access_token ?? null; }
+  get user_name() { return jwtPayload(this.#entry.access_token)?.user_name; }
+  get email()     { return jwtPayload(this.#entry.access_token)?.user_email; }
   get expiresAt() { return this.#entry.expires_at ? new Date(this.#entry.expires_at) : null; }
 
   // Whether this session already clears a given record — directly, or as
