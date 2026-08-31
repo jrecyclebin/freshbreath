@@ -2,6 +2,9 @@
 
 **𝓐 𝓹𝓮𝓻𝓼𝓸𝓷𝓪𝓵 𝓪𝓹𝓹 𝓼𝓮𝓻𝓿𝓮𝓻.**
 
+**QUICK NOTE ON THAT:** *Personal* not *public*. Don't just host this on the
+Internet!!
+
 So - weirdly enough - this is a dream project I've had it in mind to do for
 ages. I love writing *little personal tools* - blogging tools, feed readers,
 task trackers, calendar tools - things that require some storage, some auth,
@@ -11,7 +14,8 @@ email to help me get a weekly summary. These apps sit side-by-side in Fresh Brea
 
 I want these apps to be *together* and to share authentication and whatever
 integrations they need - a big one more me was SSH access to other servers.
-(I want to publish all kinds of little things easily.)
+Think of a homelab setup where you may want to automated tasks between them - or
+publish to a VPS online.
 
 And now that friends and family are cooking up their own little single-use
 apps - almost all of them standalone static HTML files - I realized that lots
@@ -20,17 +24,19 @@ of people need this kind of thing!
 > ⌐■_■ **STATIC IS SO SIMPLE**
 >
 > Part of the goal here is to keep EVERYTHING client-side - keep it all in
-> pure, static HTML. All external connections and necessities can be handled
-> by Fresh Breath.
+> pure, static HTML, where possible. All external connections and necessities
+> can be handled by Fresh Breath.
 
-If you find yourself writing lots of little apps that are going beyond static
+If you find yourself writing lots of little apps that threaten to go beyond static
 HTML - they need basic auth, some integrations, some LLM calls, some file I/O -
 oh and proxying API calls to get around CORS - then this is the project for you.
 (Think of this almost like N8N or Zapier - a box of integrations - but then
 having the flexibility of actual client-side code to tie them together, rather than
-restrictive pipes.)
+restrictive no-code platforms that always seem to have their limits.)
 
-**OH! Also!** I wanted these apps to allow people to log in using their OWN
+𝕆𝕙! 𝔸𝕝𝕤𝕠!
+
+I wanted these apps to allow people to log in using their OWN
 creds - of course. So you needn't make accounts in Fresh Breath for people who
 are just using the apps you build. Fresh Breath's whole point is to let you
 build apps that use the connections and credentials of the people using them -
