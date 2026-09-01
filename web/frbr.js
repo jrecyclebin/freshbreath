@@ -458,13 +458,13 @@ export class ServiceProxy {
   }
 
   async callTool(name, args = {}) {
-    const result = this.#serviceSlug()
-      ? await this.#callTask(name, args)
-      : await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
+    const task = this.#serviceSlug()
+    if (task) return await this.#callTask(name, args);
+    const result = await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
     const text = result.content
-      .filter(c => c.type === "text")
-      .map(c => c.text)
-      .join("\n");
+        .filter(c => c.type === "text")
+        .map(c => c.text)
+        .join("\n");
     if (result.isError) throw new Error(`Tool error: ${text}`);
     try {
       return JSON.parse(text);
