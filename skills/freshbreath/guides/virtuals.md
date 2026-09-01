@@ -252,6 +252,40 @@ Here `$content` is the base64 text of the PNG; `base64dec($content)` decodes it
 and the raw PNG bytes are what hits the wire. (`base64enc` is the inverse — it
 encodes a string to base64 text.)
 
+## Response Shaping
+
+A `{...}` block that follows a status line replaces the raw upstream body with
+whatever you say the tool returns. Shaping ends the tool right there — nothing
+after it runs.
+
+If you want to batch up several request responses and send them as one result,
+use variables:
+
+```
+[get-anything] Two fetches, one answer.
+
+GET https://httpbin.org/json
+
+HTTP 200
+$author = $.slideshow.author
+
+GET https://httpbin.org/headers
+X-Test: 1
+
+HTTP 200
+$headers = $.headers
+
+{
+  "slideshow_author": $author,
+  "raw_headers": $headers
+}
+```
+
+The caller sees only `slideshow_author` and `raw_headers` — the two upstream
+bodies stay backstage. Note the rhythm: `$.` always means *the response the step
+just got*, so each assignment has to be written under its own request. The
+closing block is the only place where all of them are in scope at once.
+
 ## SQL Steps — Querying a Database
 
 A tool script step doesn't have to be an HTTP request. A step's verb can be a

@@ -1898,3 +1898,186 @@ INSERT INTO stamps (email, uid, sub)
 		t.Errorf("sub binding = %v", bound["token_sub"])
 	}
 }
+
+// ── Trailing shaping blocks ──────────────────────────────────────────
+
+// A shaping block that follows an assignment rather than a status line has no
+// request of its own — it is the tool's return value, assembled from variables
+// gathered across every earlier step.
+
+func TestParseShapingAfterTrailingAssignment(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[gather] Two fetches, one answer.
+GET https://example.com/one
+
+HTTP 200
+$author = $.slideshow.author
+
+GET https://example.com/two
+X-Test: 1
+
+HTTP 200
+$headers = $.headers
+
+{
+  "slideshow_author": $author,
+  "raw_headers": $headers
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := findTool(tools, "gather")
+	if tool == nil {
+		t.Fatal("gather tool not found")
+	}
+	if len(tool.Steps) != 3 {
+		t.Fatalf("steps = %d, want 3", len(tool.Steps))
+	}
+
+	last := tool.Steps[2]
+	if last.Method != "" {
+		t.Errorf("last step method = %q, want empty (assignments only)", last.Method)
+	}
+	// No status line to hang it on, so the block anchors at 0 — as SQL does.
+	vr := last.Responses[0]
+	if vr == nil {
+		t.Fatal("last step has no response block at 0; shaping was dropped")
+	}
+	if !strings.Contains(vr.Shaping, `"slideshow_author": $author`) ||
+		!strings.Contains(vr.Shaping, `"raw_headers": $headers`) {
+		t.Errorf("shaping = %q, want both keys", vr.Shaping)
+	}
+
+	// $author and $headers are assigned, so neither becomes an argument.
+	for _, p := range tool.Params {
+		if p.Name == "author" || p.Name == "headers" {
+			t.Errorf("assigned variable $%s leaked into params", p.Name)
+		}
+	}
+}
+
+func TestExecuteShapingAfterTrailingAssignment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/json":
+			fmt.Fprintln(w, `{"slideshow": {"author": "Yours Truly"}}`)
+		case "/headers":
+			fmt.Fprintf(w, `{"headers": {"X-Test": %q}}`, r.Header.Get("X-Test"))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[gather] Two fetches, one answer.
+GET %s/json
+
+HTTP 200
+$author = $.slideshow.author
+
+GET %s/headers
+X-Test: 1
+
+HTTP 200
+$headers = $.headers
+
+{
+  "slideshow_author": $author,
+  "raw_headers": $headers
+}
+`, srv.URL, srv.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "gather", nil, VirtualAuth{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("result type = %T, want map", result)
+	}
+	if len(m) != 2 {
+		t.Errorf("result keys = %v, want exactly the two shaped keys", m)
+	}
+	if m["slideshow_author"] != "Yours Truly" {
+		t.Errorf("slideshow_author = %v, want %q", m["slideshow_author"], "Yours Truly")
+	}
+	// The second response's own body must not be what comes back whole.
+	raw, ok := m["raw_headers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("raw_headers type = %T, want map", m["raw_headers"])
+	}
+	if raw["X-Test"] != "1" {
+		t.Errorf("raw_headers[X-Test] = %v, want \"1\"", raw["X-Test"])
+	}
+}
+
+// A shaping block that opens and closes on one line is still the return value.
+func TestExecuteSingleLineTrailingShaping(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintln(w, `{"deep": {"name": "Nausicaa"}, "noise": "ignore me"}`)
+	}))
+	defer srv.Close()
+
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[pluck]
+GET %s/x
+
+HTTP 200
+$name = $.deep.name
+
+{"name": $name}
+`, srv.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "pluck", nil, VirtualAuth{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("result type = %T, want map", result)
+	}
+	if len(m) != 1 || m["name"] != "Nausicaa" {
+		t.Errorf("result = %v, want {name: Nausicaa}", m)
+	}
+}
+
+// A request following a trailing shaping block still starts a fresh step —
+// the block must not swallow what comes after it.
+func TestParseStepAfterTrailingShaping(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[chain]
+GET https://example.com/one
+
+HTTP 200
+$a = $.a
+
+{
+  "a": $a
+}
+
+GET https://example.com/two
+
+HTTP 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := findTool(tools, "chain")
+	if tool == nil {
+		t.Fatal("chain tool not found")
+	}
+	if len(tool.Steps) != 3 {
+		t.Fatalf("steps = %d, want 3", len(tool.Steps))
+	}
+	if tool.Steps[1].URL != "" || tool.Steps[1].Responses[0] == nil {
+		t.Errorf("step 1 should be the assignments-only shaping step, got %+v", tool.Steps[1])
+	}
+	if tool.Steps[2].URL != "https://example.com/two" {
+		t.Errorf("step 2 URL = %q, want the trailing request", tool.Steps[2].URL)
+	}
+}
