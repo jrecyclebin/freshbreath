@@ -351,6 +351,22 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				step.Method = m
 				step.URL = u
 				state = sHeaders
+			} else if strings.HasPrefix(line, "{") {
+				// A shaping block with no request of its own — the tool's
+				// return value, assembled from variables gathered across
+				// earlier steps. Anchored at 0 like SQL shaping: there is no
+				// status line here to hang it on.
+				step.Responses[0] = &VirtualResponse{}
+				lastHTTPStatus = 0
+				shapingLines = []string{lines[i]}
+				braceDepth = countBraces(line)
+				if braceDepth <= 0 {
+					step.Responses[0].Shaping = strings.Join(shapingLines, "\n")
+					shapingLines = nil
+					state = sResp
+				} else {
+					state = sShaping
+				}
 			}
 
 		case sHeaders:
@@ -1302,8 +1318,13 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 		}
 
 		// Assignments-only step (post-processing for a previous step): its
-		// work is done, nothing to request.
+		// work is done, nothing to request. A shaping block riding along is
+		// the tool's return value — the assignments above have just run, so
+		// it sees everything gathered on the way here.
 		if step.Method == "" {
+			if vr := step.Responses[0]; vr != nil && vr.Shaping != "" {
+				return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
+			}
 			continue
 		}
 
