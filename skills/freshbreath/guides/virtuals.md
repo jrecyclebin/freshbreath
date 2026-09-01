@@ -42,10 +42,11 @@ response.
 A virtual service tool script has this basic structure:
 
 - Tool header: `[tool-name] Tool description here.`
-- HTTP request: The HTTP method, URL, headers, and body (if applicable).
+- HTTP request: The HTTP method, URL, headers, and body (if applicable) along
+  with an expected HTTP response status code (usually "HTTP 200")..
 - (Optional) Additional requests: each starting with the HTTP method and URL,
-  followed by headers and body.
-- Expected response: The expected HTTP status code and any response body.
+  followed by headers, body and status code.
+- Final response shaping: an optional response body to return from the tool.
 
 If no response body is specified, the final request's response body will be
 returned as-is. So, in the `list-pull-requests` tool above, the response body
@@ -123,7 +124,7 @@ If a tool uses any of these, the caller must be logged in - the call fails
 otherwise. (`$token_id` is the one exception in spirit: a logged-in user
 without a Fresh Breath account gets `null` - see the SQL section below.)
 
-There are some additional ways to format JSON responses in tool scripts, which
+There are some additional ways to format JSON requests in tool scripts, which
 can be seen in the example below for a SharePoint virtual service:
 
 ```
