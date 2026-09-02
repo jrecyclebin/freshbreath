@@ -23,7 +23,10 @@ fi
 
 # ── Build ──────────────────────────────────────────────────────────
 echo "→ Building $binary (GOOS=$GOOS GOARCH=$GOARCH CC=${CC:-default})"
-go build -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/${GOOS}-${arch}-$binary" ./cmd/freshbreath
+# -tags sqlite_fts5: full-text search is compiled in, not loaded. Named here
+# as well as in mise.toml's GOFLAGS so a release binary can't lose it by
+# being built outside mise.
+go build -tags sqlite_fts5 -ldflags "-X main.version=$VERSION -X main.commit=$COMMIT" -o "dist/${GOOS}-${arch}-$binary" ./cmd/freshbreath
 
 # ── Package ────────────────────────────────────────────────────────
 staging="dist/staging"

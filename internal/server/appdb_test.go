@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mattn/go-sqlite3"
+
 	"poggers.institute/freshbreath/internal/db"
 )
 
@@ -276,8 +278,20 @@ func TestAppDBAuthorizer(t *testing.T) {
 		}
 	}
 
-	// Read-only schema pragmas are allowlisted (db_schema depends on them).
-	for _, p := range []string{"PRAGMA table_info(t)", "PRAGMA index_list(t)", "PRAGMA table_xinfo(t)", "PRAGMA foreign_key_list(t)"} {
+	// load_extension is denied by name. SQLite also refuses it whenever an
+	// authorizer is registered, so this asserts our own branch fires: for
+	// SQLITE_FUNCTION the name arrives in arg2, and reading arg1 matched
+	// nothing at all.
+	if appDBAuthorizer(sqlite3.SQLITE_FUNCTION, "", "load_extension", "") != sqlite3.SQLITE_DENY {
+		t.Errorf("load_extension: want DENY")
+	}
+	if appDBAuthorizer(sqlite3.SQLITE_FUNCTION, "", "bm25", "") != sqlite3.SQLITE_OK {
+		t.Errorf("bm25: want OK — FTS5 aux functions have to pass")
+	}
+
+	// Read-only schema pragmas are allowlisted (db_schema depends on them;
+	// data_version is FTS5's, and every full-text write needs it).
+	for _, p := range []string{"PRAGMA table_info(t)", "PRAGMA index_list(t)", "PRAGMA table_xinfo(t)", "PRAGMA foreign_key_list(t)", "PRAGMA table_list", "PRAGMA data_version"} {
 		if _, err := srv.coreDBQuery(admin, target, dbQueryRequest{SQL: p}, false); err != nil {
 			t.Errorf("%s: %v", p, err)
 		}
