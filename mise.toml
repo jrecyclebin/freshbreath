@@ -5,6 +5,13 @@ env_shell_expand = true
 go = "1.26"
 
 [env]
+# FTS5 is a build-time question for mattn/go-sqlite3: no tag, no full-text
+# search, and an app's CREATE VIRTUAL TABLE … USING fts5 fails at runtime
+# with "no such module: fts5". GOFLAGS puts the tag on every go command run
+# under mise — build, test, run, vet — so there is one place to look and no
+# task that can quietly forget it. (scripts/build.sh names it explicitly too;
+# that one ships binaries.)
+GOFLAGS = "-tags=sqlite_fts5"
 GIT_VERSION = "{{ exec(command='git describe --tags --always --dirty 2>/dev/null || echo dev') }}"
 GIT_COMMIT = "{{ exec(command='git rev-parse --short HEAD 2>/dev/null || echo none') }}"
 

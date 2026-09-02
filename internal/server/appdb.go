@@ -101,11 +101,17 @@ func appDBOpName(op int) string {
 // comments and `/**/ATTACH` on day two; this is told what the statement
 // *actually intends* by SQLite itself.
 //
-// The PRAGMA allowlist is exactly what db_schema needs and not one pragma
-// wider — table_info, table_xinfo, index_list, index_info, index_xinfo, and
-// foreign_key_list. Everything else (journal_mode, writable_schema, …) is
-// denied. db_schema runs through the same hardened pool, so there is no side
-// channel; the allowlist is how it gets through.
+// The PRAGMA allowlist is exactly what db_schema and FTS5 need and not one
+// pragma wider. Everything else (journal_mode, writable_schema, …) is denied.
+// db_schema runs through the same hardened pool, so there is no side channel;
+// the allowlist is how it gets through.
+//
+// Two of these are not for us. FTS5's xUpdate reads `data_version` on every
+// write to notice when another connection has changed the index out from
+// under its cached config — deny it and every INSERT into a full-text table
+// dies with "authorization denied", which is a confusing way to learn about
+// a pragma. `table_list` is how db_schema tells a virtual table's shadow
+// tables from real ones. Both are read-only.
 var appDBPragmaAllow = map[string]bool{
 	"table_info":       true,
 	"table_xinfo":      true,
@@ -113,6 +119,8 @@ var appDBPragmaAllow = map[string]bool{
 	"index_info":       true,
 	"index_xinfo":      true,
 	"foreign_key_list": true,
+	"table_list":       true, // db_schema: shadow-table detection
+	"data_version":     true, // FTS5 internals, read-only
 }
 
 func appDBAuthorizer(param int, arg1, arg2, arg3 string) int {
@@ -125,8 +133,11 @@ func appDBAuthorizer(param int, arg1, arg2, arg3 string) int {
 		}
 		return sqlite3.SQLITE_DENY
 	case sqlite3.SQLITE_FUNCTION:
-		// Deny load_extension() by name. Other functions (date, count, …) pass.
-		if strings.EqualFold(arg1, "load_extension") {
+		// Deny load_extension() by name. Other functions (date, count, and
+		// FTS5's bm25/snippet/highlight) pass. For SQLITE_FUNCTION the name
+		// arrives in arg2 — arg1 is always empty, which is why this used to
+		// match nothing at all.
+		if strings.EqualFold(arg2, "load_extension") {
 			return sqlite3.SQLITE_DENY
 		}
 		return sqlite3.SQLITE_OK
@@ -754,6 +765,11 @@ func (s *Server) coreDBSchema(actor *db.User, target, name string) (interface{},
 	ctx, cancel := context.WithTimeout(context.Background(), appDBStatementTimeout)
 	defer cancel()
 
+	// Before the sqlite_master cursor opens, not during: the pool is capped
+	// at one connection, so a query nested inside an open rows would wait on
+	// itself until the deadline.
+	shadow := appDBShadowTables(handle, ctx)
+
 	rows, err := handle.QueryContext(ctx,
 		"SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
 	if err != nil {
@@ -766,6 +782,9 @@ func (s *Server) coreDBSchema(actor *db.User, target, name string) (interface{},
 		if err := rows.Scan(&n, &ddl); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if shadow[n.String] {
+			continue
 		}
 		tables = append(tables, tableMeta{n.String, ddl.String})
 	}
@@ -785,6 +804,27 @@ func (s *Server) coreDBSchema(actor *db.User, target, name string) (interface{},
 		out = append(out, entry)
 	}
 	return map[string]interface{}{"tables": out}, nil
+}
+
+// appDBShadowTables names the tables that belong to a virtual table's
+// innards rather than to the schema someone wrote. One FTS5 index quietly
+// adds five of them — notes_data, notes_idx, notes_content, notes_docsize,
+// notes_config — and a model reading the schema blind will happily try to
+// SELECT from notes_data and get gibberish. `PRAGMA table_list` labels them
+// for us, so this is SQLite's own opinion, not a guess at naming.
+//
+// The virtual table itself (type "virtual") stays: its DDL is the CREATE
+// VIRTUAL TABLE line, which is exactly what a query author needs to see.
+func appDBShadowTables(handle *sql.DB, ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	for _, row := range appDBPragmaRows(handle, ctx, "PRAGMA table_list") {
+		typ, _ := row["type"].(string)
+		name, _ := row["name"].(string)
+		if typ == "shadow" && name != "" {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 func appDBPragmaRows(handle *sql.DB, ctx context.Context, q string) []map[string]interface{} {

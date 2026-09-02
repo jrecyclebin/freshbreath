@@ -413,6 +413,100 @@ INSERT INTO issues (title, body, source)
 
 Great for adding logging and caching to your API call tools.
 
+### Full-text search with FTS5
+
+SQLite's FTS5 module is compiled into Fresh Breath, so a real search box —
+stemming, ranking, highlighted excerpts — is three tools and no new
+dependency. The index is a virtual table you create like any other table,
+which means your migration tool builds it:
+
+```
+[migrate] Build the note index.
+
+CREATE VIRTUAL TABLE IF NOT EXISTS notes USING fts5(title, body)
+---
+[add-note] File a note.
+
+INSERT INTO notes (title, body)
+  VALUES ($title, $body)
+---
+[search-notes] Search notes, best match first.
+# $query is FTS5 match syntax: bare words, "quoted phrases", prefix*, AND/OR/NOT.
+
+SELECT title, snippet(notes, 1, '<b>', '</b>', '…', 10) AS excerpt
+  FROM notes
+  WHERE notes MATCH $query
+  ORDER BY rank
+  LIMIT 20
+
+{
+  "hits": $.rows
+}
+```
+
+Every column in an FTS5 table is text and every one is indexed — there are no
+types to declare, which is why the `fts5(...)` list looks so bare.
+
+Three things are worth knowing before you write the search tool:
+
+- **`MATCH $query` is a binding, not a splice.** Same rule as everywhere else
+  in a SQL step, and it's the whole reason a model calling `search-notes`
+  can't turn it into something else. What the caller passes is a *match
+  expression*, so the wildcard is theirs to supply: `frog*` finds frogs and
+  froggy, `"jumping frogs"` is a phrase, `frog NOT toad` does what it says.
+  A malformed expression comes back as an error from SQLite, not a crash.
+- **`ORDER BY rank` sorts by relevance.** FTS5 fills `rank` in for you with
+  bm25 scoring (more negative is better, so plain ascending order is
+  correct). `bm25(notes)` gives you the number itself if you want to show it,
+  and column weights go in the same call: `bm25(notes, 10.0, 1.0)` says a
+  title hit is worth ten body hits.
+- **`snippet()` and `highlight()` build the excerpt.** The arguments to
+  `snippet` are the table, the column index (0-based, or -1 for "wherever
+  the match is"), the opening and closing markers, an ellipsis, and a token
+  budget. `highlight()` is the same idea without the trimming.
+
+Note that the markers in `snippet(notes, 1, '<b>', '</b>', …)` are plain SQL
+string literals with no `$` in them, so the no-variables-inside-quotes rule
+never comes up. If you want the caller to choose the markers, that's what a
+binding is for.
+
+**Indexing a table you already have.** Point the index at the real table with
+`content=` and keep the two in step with triggers. Remember that a SQL step
+is the verb line plus its *indented* continuation, so the entire trigger body
+— `END` included — has to sit indented under the `CREATE`:
+
+```
+[migrate] Index the tasks table.
+
+CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts
+  USING fts5(title, body, content='tasks', content_rowid='id')
+---
+[migrate-triggers] Keep the index in step with the table.
+
+CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
+    INSERT INTO tasks_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+  END
+```
+
+(You'll want the matching `AFTER DELETE` and `AFTER UPDATE` triggers too —
+the FTS5 documentation spells out the `'delete'` command rows they need.)
+
+**Tokenizers** ride along in the create statement: `tokenize='porter
+unicode61'` gets you English stemming, so a search for *jump* finds
+*jumping*. `unicode61` alone folds case and accents without stemming;
+`trigram` makes substring search possible at the cost of a bigger index.
+Choose once — changing a tokenizer means rebuilding.
+
+**Housekeeping** is done by inserting into the table's own name, which looks
+strange the first time: `INSERT INTO notes(notes) VALUES('optimize')` merges
+the index's internal segments and is worth a scheduled task on a busy index.
+
+Each FTS5 index quietly adds five internal tables — `notes_data`,
+`notes_idx`, `notes_content`, `notes_docsize`, `notes_config`. Fresh Breath
+hides those from `db_schema`, so a model reading the schema before writing a
+query sees `notes` and its `CREATE VIRTUAL TABLE` line and isn't tempted to
+go rummaging in the shoebox.
+
 ### Which database does a service target?
 
 The database isn't declared in the tool script. It's service configuration,
@@ -442,9 +536,10 @@ Two access facts worth knowing in plain words:
   global services sparingly.
 
 The engine behind these steps is hardened SQLite: ATTACH and extension
-loading are refused, PRAGMA is allowlisted to read-only schema inspection,
-statements run under a 5-second deadline, and results cap at 10,000 rows —
-reported honestly as `"truncated": true` rather than silently shortened.
+loading are refused, PRAGMA is allowlisted to a handful of read-only ones
+(schema inspection, plus the one FTS5 reads on every write), statements run
+under a 5-second deadline, and results cap at 10,000 rows — reported honestly
+as `"truncated": true` rather than silently shortened.
 
 > ⚡ **YOUR TABLES BECOME MCP TOOLS**
 >

@@ -431,3 +431,64 @@ INSERT INTO stamps (email, uid)
 		t.Errorf("anonymous stamp: status %d, want 401", rr.Code)
 	}
 }
+
+// A full-text search service, front to back: the migration builds the index,
+// one tool feeds it, one tool searches it. `MATCH $query` is a binding like
+// any other — the caller varies the search terms, never the query.
+const fts5ToolFile = `[migrate] Build the note index.
+
+CREATE VIRTUAL TABLE IF NOT EXISTS notes USING fts5(title, body)
+---
+[add-note] File a note.
+
+INSERT INTO notes (title, body)
+  VALUES ($title, $body)
+---
+[search-notes] Search notes, best match first.
+# $query is FTS5 match syntax: bare words, "quoted phrases", prefix*, AND/OR/NOT.
+
+SELECT title, snippet(notes, 1, '<b>', '</b>', '…', 10) AS excerpt
+  FROM notes
+  WHERE notes MATCH $query
+  ORDER BY rank
+  LIMIT 20
+
+{
+  "hits": $.rows
+}
+`
+
+func TestBrowserSQLRunnerFTS5(t *testing.T) {
+	requireFTS5(t)
+	srv, _, nonce := newVirtualSvcServer(t, fts5ToolFile, db.ServiceDescriptor{})
+
+	call := func(body string) string {
+		t.Helper()
+		rr := testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+			strings.NewReader(body), map[string]string{"X-App-Nonce": nonce})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", body, rr.Code, rr.Body.String())
+		}
+		return rr.Body.String()
+	}
+
+	call(`{"task": "migrate", "args": {}}`)
+	call(`{"task": "add-note", "args": {"title": "Frogs", "body": "the pond is full of frogs, jumping"}}`)
+	call(`{"task": "add-note", "args": {"title": "Birds", "body": "the sky is full of birds"}}`)
+
+	got := call(`{"task": "search-notes", "args": {"query": "frog*"}}`)
+	if !strings.Contains(got, "Frogs") || strings.Contains(got, "Birds") {
+		t.Errorf("search body = %s, want the frog note alone", got)
+	}
+	// The snippet markers come back HTML-escaped by Go's JSON encoder, so
+	// this is `<b>frogs</b>` wearing its travelling clothes.
+	if !strings.Contains(got, `\u003cb\u003efrogs\u003c/b\u003e`) {
+		t.Errorf("search body = %s, want a highlighted snippet", got)
+	}
+
+	// The wildcard belongs to the caller, same as with LIKE: the tool never
+	// splices anything into the SQL.
+	if got := call(`{"task": "search-notes", "args": {"query": "sky"}}`); !strings.Contains(got, "Birds") {
+		t.Errorf("search sky = %s", got)
+	}
+}

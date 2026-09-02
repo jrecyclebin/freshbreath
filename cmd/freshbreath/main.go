@@ -224,6 +224,9 @@ func main() {
 	srv := server.New(cfg, store, localKey, agentMgr, sessionMgr, version, commit)
 
 	log.Printf("*:・ﾟ✧ freshbreath %s server on %s [dir: %s, data: %s, db: %s]", version, cfg.PublicBaseURL, cfg.Dir, cfg.DataDir, cfg.DBPath)
+	if !server.FTS5Enabled {
+		log.Printf("   note: no FTS5 in this build — rebuild with -tags sqlite_fts5 for full-text search")
+	}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
