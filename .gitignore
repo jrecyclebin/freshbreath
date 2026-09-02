@@ -18,6 +18,7 @@
 static.html
 
 # Agent files
+.claude
 /.journal
 .todos/
 .sidecar/
