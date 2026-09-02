@@ -20,6 +20,10 @@ files in the app's web directory:
 Treat writes like a deploy: you can replace a whole file or patch a single chunk
 of text, but there is no automatic merge of directories.
 
+HTML is served in single-page app style: any URL paths that don't resolve to
+filesystem paths are sent to the index.html. You can use common routers without
+needing to stick to hash paths.
+
 ---
 
 ## 2. Publish over MCP
