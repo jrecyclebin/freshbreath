@@ -157,7 +157,8 @@ for an app.
 Fresh Breath can also host apps the user is creating for long-term hosting and
 sharing with other users. If you follow the services guide, users will get
 prompted for their credentials. See the publishing guide if the app proceeds
-to that point.
+to that point or if you need guidance on reading or writing files to Fresh
+Breath.
 
 Fresh Breath server URL: %q`, s.config.PublicBaseURL),
 	})

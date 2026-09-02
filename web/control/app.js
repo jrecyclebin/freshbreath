@@ -958,7 +958,7 @@ function AppsView({ session, apps, services, users, auth, adminAuthID, onRefresh
       <PageHead
         crumbs={['Workspace','Apps']}
         title="Applications"
-        sub="Service consumers with managed access."
+        sub="Hosted user apps with managed access."
         actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New app</button>}
       />
       <Toolbar

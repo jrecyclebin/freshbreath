@@ -27,7 +27,8 @@ Here's the toolkit available in this skill:
   transfer files or use Git, see the 'guides/ssh.md'.
 
 - For publishing apps to be hosted by your Fresh Breath, see the
-  'guides/publishing.md'.
+  'guides/publishing.md'. Read this before reading and writing files in
+  Fresh Breath.
 
 # Some General Knowledge
 
