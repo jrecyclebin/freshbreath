@@ -3,6 +3,11 @@ name: Build & Release
 on:
   release:
     types: [published]
+  # The build matrix is otherwise only reachable by publishing a release,
+  # which is a poor place to discover that a linker flag is wrong. Dispatch
+  # builds every platform and uploads artifacts; the `release` job sits it
+  # out for want of a tag to attach them to.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -78,6 +83,38 @@ jobs:
           update: true
           install: mingw-w64-clang-aarch64-gcc
 
+      # go-sqlite3's FTS5 file carries an unconditional `#cgo LDFLAGS: -lm`
+      # (sqlite3_opt_fts5.go) with no platform guard, because on every Unix
+      # libm is a real library. Windows has no separate libm — the math
+      # functions live in the UCRT — so whether `-lm` is harmless depends
+      # entirely on which toolchain sees it. MinGW ships an empty `libm.a`
+      # kept alive for exactly this reason, which is why the x64 job links
+      # fine. The arm64 runner's `clang` resolves to the preinstalled LLVM,
+      # which targets the MSVC ABI and drives lld-link, and there `-lm`
+      # means `m.lib` — a file no one has ever shipped:
+      #   lld-link: error: could not open 'm.lib'
+      # So we hand it the stub MinGW would have. The symbols still come from
+      # the UCRT; this archive exists only to be found. Swapping in msys2's
+      # clangarm64 toolchain instead would be the tidier fix, but the MSVC
+      # clang is the toolchain that built every windows-arm64 release
+      # through v0.6.7, and a missing stub library is no reason to go
+      # replace a linker that works.
+      - name: Stub libm for MSVC-ABI clang (Windows arm64 only)
+        if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stub="$RUNNER_TEMP/libm-stub"
+          mkdir -p "$stub"
+          # A real object with a symbol in it, rather than an empty archive:
+          # an archive with no members is a thing lld-link may or may not
+          # accept quietly, and this is not the place to find out.
+          echo 'int _freshbreath_libm_stub(void) { return 0; }' > "$stub/stub.c"
+          clang -c "$stub/stub.c" -o "$stub/stub.o"
+          llvm-lib "-out:$(cygpath -w "$stub/m.lib")" "$(cygpath -w "$stub/stub.o")"
+          echo "CGO_LDFLAGS=-L$(cygpath -m "$stub")" >> "$GITHUB_ENV"
+          echo "→ libm stub at $stub"
+
       - name: Install zip & unzip
         if: matrix.goos == 'windows'
         run: choco install zip unzip -y
@@ -130,6 +167,7 @@ jobs:
 
   release:
     needs: build
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
