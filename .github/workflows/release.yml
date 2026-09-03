@@ -226,7 +226,7 @@ jobs:
             --arg msg "$message" \
             --arg url "$RELEASE_URL" '
               def slack: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
-              { text: "*\($name|slack)* is out\n\($msg|slack)\n<\($url)|View the release>" }
+              { text: "Fresh Breath *\($name|slack)* is out\n\($msg|slack)\n<\($url)|View the release>" }
             ')
 
           curl -sS --fail-with-body -X POST \
