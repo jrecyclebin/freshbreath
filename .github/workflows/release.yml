@@ -194,6 +194,8 @@ jobs:
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - name: Post to Slack
         shell: bash
         env:
@@ -213,21 +215,27 @@ jobs:
             exit 0
           fi
 
+          # Read the body back over the API rather than out of the event
+          # payload: the payload froze at publish time, and a release whose
+          # notes were written into a draft beforehand deserves to have them
+          # read. If there is no prose either way, the formatter falls back
+          # to the tag's commit message.
+          body=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.body // ""')
+
           # The commits endpoint takes any ref, so the tag resolves to its
           # commit whether it was made annotated or lightweight.
-          message=$(gh api "repos/$REPO/commits/$TAG" --jq '.commit.message')
+          commit=$(gh api "repos/$REPO/commits/$TAG" --jq '.commit.message')
 
-          # Everything above arrives through env rather than being pasted
-          # into the script via interpolation, and the text goes through jq
-          # rather than a printf. A release name is a string somebody typed; it
-          # should not be able to become shell, or JSON, or markup.
+          # Everything arrives through env rather than being pasted into the
+          # script by interpolation, and the text is assembled by jq, never printf.
+          # Release notes are prose someone typed; they should not be able to
+          # become shell, or JSON, or markup.
           payload=$(jq -n \
             --arg name "${RELEASE_NAME:-$TAG}" \
-            --arg msg "$message" \
-            --arg url "$RELEASE_URL" '
-              def slack: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
-              { text: "Fresh Breath *\($name|slack)* is out\n\($msg|slack)\n<\($url)|View the release>" }
-            ')
+            --arg body "$body" \
+            --arg commit "$commit" \
+            --arg url "$RELEASE_URL" \
+            -f scripts/slack-release-payload.jq)
 
           curl -sS --fail-with-body -X POST \
             -H 'Content-Type: application/json' \

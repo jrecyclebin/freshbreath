@@ -80,12 +80,33 @@ COMMIT="$(git rev-parse HEAD)"
 echo "→ Tagging $VERSION"
 git tag "$VERSION"
 git push origin "$VERSION"
-echo "→ Creating release"
+echo "→ Creating draft release"
 # --target pins the release to the commit directly instead of having gh look
 # up the tag over the API, which can lag a moment behind the push above and
 # fail with "tag exists locally but has not been pushed".
-gh release create "$VERSION" --title "$VERSION" --generate-notes --target "$COMMIT"
-echo "✓ Release $VERSION created — CI will build and attach binaries"
+#
+# --draft is what makes the notes worth writing. Publishing is the event the
+# whole pipeline hangs off — it builds the binaries and posts to Slack — and
+# it reads the release body as it stands at that moment. Create it published
+# and the body is a compare URL and nothing else, so Slack announces the
+# tag's last commit, which after a retag is whatever errand you were running.
+# Write the notes into the draft, then publish once and everything downstream
+# sees the finished thing.
+gh release create "$VERSION" --title "$VERSION" --generate-notes --target "$COMMIT" --draft
+echo "✓ Draft $VERSION created — write the notes, then: mise run release:publish $VERSION"
+gh release view "$VERSION" --json url -q .url
+"""
+
+[tasks."release:publish"]
+description = "Publish a drafted release, which starts the build (usage: mise run release:publish v1.0)"
+usage = '''
+arg "<version>"
+'''
+run = """
+VERSION="${usage_version}"
+echo "→ Publishing $VERSION"
+gh release edit "$VERSION" --draft=false
+echo "✓ Published — CI is building binaries; Slack gets the note once they attach"
 """
 
 [tasks."release:undo"]
