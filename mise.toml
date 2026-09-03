@@ -95,15 +95,6 @@ echo "→ Creating draft release"
 gh release create "$VERSION" --title "$VERSION" --generate-notes --target "$COMMIT" --draft
 echo "✓ Draft $VERSION created — write the notes, then: mise run release:publish $VERSION"
 gh release view "$VERSION" --json url -q .url
-"""
-
-[tasks."release:publish"]
-description = "Publish a drafted release, which starts the build (usage: mise run release:publish v1.0)"
-usage = '''
-arg "<version>"
-'''
-run = """
-VERSION="${usage_version}"
 echo "→ Publishing $VERSION"
 gh release edit "$VERSION" --draft=false
 echo "✓ Published — CI is building binaries; Slack gets the note once they attach"
