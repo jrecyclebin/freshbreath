@@ -1296,15 +1296,21 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 					params[name] = nil
 					continue
 				}
-				if v, ok := vars[name]; ok {
-					params[name] = v
-					continue
-				}
-				if v, ok := scope[name]; ok {
-					params[name] = v
-					continue
-				}
-				return nil, fmt.Errorf("step %d: unresolved $%s in SQL", stepIdx, name)
+			if v, ok := vars[name]; ok {
+				params[name] = v
+				continue
+			}
+			if v, ok := scope[name]; ok {
+				params[name] = v
+				continue
+			}
+			// scope was replaced by the previous SQL result; caller args
+			// stay bindable for the whole tool regardless.
+			if v, ok := args[name]; ok {
+				params[name] = v
+				continue
+			}
+			return nil, fmt.Errorf("step %d: unresolved $%s in SQL", stepIdx, name)
 			}
 			result, err := sqlRunner(step.SQL, params)
 			if err != nil {

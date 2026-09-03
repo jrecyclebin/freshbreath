@@ -185,3 +185,52 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*-setup.exe
+
+  # Say it out loud in Slack. Only after `release`, so the ping means the
+  # binaries are actually attached — a notification that fires on a release
+  # with nothing in it is worse than silence, because you believe it.
+  notify:
+    needs: release
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Slack
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+        run: |
+          set -euo pipefail
+
+          # No webhook configured (a fork, or before the secret is added) is
+          # a quiet no-op, not a red X on an otherwise good release.
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "→ no SLACK_WEBHOOK_URL secret set; skipping the Slack post"
+            exit 0
+          fi
+
+          # The commits endpoint takes any ref, so the tag resolves to its
+          # commit whether it was made annotated or lightweight.
+          message=$(gh api "repos/$REPO/commits/$TAG" --jq '.commit.message')
+
+          # Everything above arrives through env rather than being pasted
+          # into the script by ${{ }}, and the text goes through jq rather
+          # than a printf. A release name is a string somebody typed; it
+          # should not be able to become shell, or JSON, or markup.
+          payload=$(jq -n \
+            --arg name "${RELEASE_NAME:-$TAG}" \
+            --arg msg "$message" \
+            --arg url "$RELEASE_URL" '
+              def slack: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;");
+              { text: "*\($name|slack)* is out\n\($msg|slack)\n<\($url)|View the release>" }
+            ')
+
+          curl -sS --fail-with-body -X POST \
+            -H 'Content-Type: application/json' \
+            -d "$payload" \
+            "$SLACK_WEBHOOK_URL"
+          echo "→ posted $TAG to Slack"
