@@ -529,7 +529,7 @@ func (s *Server) coreDBBatch(handle *sql.DB, batch []dbStmtRequest) (*dbQueryRes
 	}
 	tx = nil
 	if last == nil {
-		return &dbQueryResult{}, nil
+		return &dbQueryResult{Rows: [][]interface{}{}}, nil
 	}
 	return last, nil
 }
@@ -554,7 +554,7 @@ func runDBStmt(ctx context.Context, cap int, q dbExecQuerier, sqlText string, ar
 		}
 		aff, _ := res.RowsAffected()
 		lid, _ := res.LastInsertId()
-		return &dbQueryResult{RowsAffected: aff, LastInsertID: lid}, nil
+		return &dbQueryResult{Rows: [][]interface{}{}, RowsAffected: aff, LastInsertID: lid}, nil
 	}
 	rows, err := q.QueryContext(ctx, sqlText, args...)
 	if err != nil {
@@ -570,7 +570,7 @@ func runDBStmt(ctx context.Context, cap int, q dbExecQuerier, sqlText string, ar
 	for i := range holders {
 		scaners[i] = &holders[i]
 	}
-	out := dbQueryResult{Columns: cols}
+	out := dbQueryResult{Columns: cols, Rows: [][]interface{}{}}
 	for rows.Next() {
 		if err := rows.Scan(scaners...); err != nil {
 			return nil, err

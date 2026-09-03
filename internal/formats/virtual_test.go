@@ -1539,6 +1539,40 @@ SELECT * FROM t WHERE x = $nope
 	}
 }
 
+// Regression: scope is replaced by each SQL step's result, so a caller arg
+// bound in a later SQL step must fall back to the original args.
+func TestExecuteMultiSQLStepBindsCallerArgs(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[load]
+$project_id is number
+
+SELECT id FROM projects
+
+$rows = $.rows
+
+SELECT id FROM modules WHERE project_id = $project_id
+
+{
+  "projects": $rows
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotParams map[string]interface{}
+	runner := func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		gotParams = params
+		return map[string]interface{}{"rows": []interface{}{}, "columns": []interface{}{}}, nil
+	}
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "load",
+		map[string]interface{}{"project_id": float64(1)}, VirtualAuth{}, runner)
+	if err != nil {
+		t.Fatalf("second SQL step lost the caller arg: %v", err)
+	}
+	if gotParams["project_id"] != float64(1) {
+		t.Errorf("second step params = %v, want project_id = 1", gotParams)
+	}
+}
+
 func TestExecuteMixedHTTPAndSQL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `{"title": "Fetched", "body": "Content"}`)
