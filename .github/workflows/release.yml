@@ -218,8 +218,8 @@ jobs:
           message=$(gh api "repos/$REPO/commits/$TAG" --jq '.commit.message')
 
           # Everything above arrives through env rather than being pasted
-          # into the script by ${{ }}, and the text goes through jq rather
-          # than a printf. A release name is a string somebody typed; it
+          # into the script via interpolation, and the text goes through jq
+          # rather than a printf. A release name is a string somebody typed; it
           # should not be able to become shell, or JSON, or markup.
           payload=$(jq -n \
             --arg name "${RELEASE_NAME:-$TAG}" \
