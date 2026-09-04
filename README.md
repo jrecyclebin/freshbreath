@@ -13,9 +13,9 @@ over text message. I made an app to read online purchase receipts from my
 email to help me get a weekly summary. These apps sit side-by-side in Fresh Breath.)
 
 I want these apps to be *together* and to share authentication and whatever
-integrations they need - a big one more me was SSH access to other servers.
+integrations they need - oh, for me, another one was SSH access to other servers.
 Think of a homelab setup where you may want to automated tasks between them - or
-publish to a VPS online.
+to publish to a VPS online.
 
 And now that friends and family are cooking up their own little single-use
 apps - almost all of them standalone static HTML files - I realized that lots
