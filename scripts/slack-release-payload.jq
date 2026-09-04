@@ -45,6 +45,6 @@ def is_changelog:   test("^\\*\\*Full Changelog\\*\\*");
 
 | (if ($heading | length) > 0
    then "*\($name | mrkdwn)* — \($heading | mrkdwn)"
-   else "*Fresh Breath \($name | mrkdwn)* is out" end) as $title
+   else "*Fresh Breath \($name | mrkdwn)* is out on Github" end) as $title
 
 | { text: "\($title)\n\($lead | mrkdwn | clip(600))\n<\($url)|View the release>" }

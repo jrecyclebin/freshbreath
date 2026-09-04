@@ -328,6 +328,9 @@ first non-indented line, so indent your `WHERE` clauses and format the query
 however reads best. Blank lines and indented `#` comments inside a step are
 skipped. (And ensure that all closing parentheses end up indented as well.)
 
+Again, all `WHERE`, `FROM`, `ORDER BY` and other clauses MUST be indented as
+well!
+
 The `DELETE FROM` spelling is load-bearing: SQL's DELETE is always followed
 by `FROM`, and that's how the parser tells it apart from an HTTP
 `DELETE https://…` request. Both kinds of step can live in one file.
