@@ -392,7 +392,8 @@ SELECT id, title
   LIMIT 10
 
 {
-  "tasks": $.rows
+  "tasks": $.rows,
+  "tasks_columns": $.columns
 }
 ```
 
@@ -412,6 +413,10 @@ $body = $.body
 
 INSERT INTO issues (title, body, source)
   VALUES ($title, $body, 'github')
+
+{
+  "imported": $.lastInsertId
+}
 ```
 
 Great for adding logging and caching to your API call tools.
