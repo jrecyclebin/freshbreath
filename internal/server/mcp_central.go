@@ -822,7 +822,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// write_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_app_file",
-		Description: "Write or patch a file in an app's web directory. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once.",
+		Description: "Write or patch a file in an app's web directory. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once. For sending files, use the http transport with something like curl.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1036,7 +1036,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 	// write_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_service_file",
-		Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once. Admin+ only.",
+		Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once. For sending files, use the http transport with something like curl. Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
