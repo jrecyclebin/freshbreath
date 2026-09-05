@@ -74,6 +74,9 @@ user, so your app/role permissions apply at the other end.
   your bytes to the URL. Incompatible with `old_text` — patches always stay
   inline (they're small).
 
+For most files, you'll want to use the http transport with something like
+curl.
+
 ---
 
 ## Notes
