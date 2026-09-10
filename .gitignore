@@ -19,6 +19,7 @@ static.html
 
 # Agent files
 .claude
+.mcp.json
 /.journal
 .todos/
 .sidecar/

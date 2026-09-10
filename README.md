@@ -197,6 +197,60 @@ freshbreath
 
 The server starts on `:9009` by default with an SQLite database at `./freshbreath.db`.
 
+### Docker
+
+Images live on the GitHub Container Registry, built for `linux/amd64` and
+`linux/arm64` (so the Pi in the closet is invited too).
+
+```bash
+docker run -d --name freshbreath \
+  -p 9009:9009 \
+  -v freshbreath-data:/data \
+  ghcr.io/jrecyclebin/freshbreath:latest
+```
+
+Then visit `http://localhost:9009/`. Tags are `:latest` and the release
+version (`:1.2.0`).
+
+There's a `docker-compose.yml` in the repo if you'd rather keep the settings
+somewhere you can read them next month:
+
+```bash
+docker compose up -d
+```
+
+Everything mutable — `apps/`, `virtual/`, `tasks/` and `freshbreath.db` —
+lives in `/data`, which is the one thing worth backing up. Configure the rest
+with the environment variables below; `FRBR_DIR` and `FRBR_DATA_DIR` are
+already set inside the image, so leave those alone.
+
+> 🪪 **THE UID 10001 GOTCHA**
+>
+> The container runs as a non-root user (uid 10001). A *named* volume picks up
+> that ownership on creation and all is well. A *bind mount* — `-v
+> ./mydata:/data` — arrives owned by whoever made the directory, so
+> `chown -R 10001:10001 ./mydata` first, or Fresh Breath will open its eyes on
+> a database it can't write.
+
+Set `FRBR_BASE_URL` whenever the server isn't reached at `localhost:9009` —
+OAuth callback URLs are built from it, and a wrong one fails in the confusing
+way, over at the provider's end. For TLS, mount the certs in and point
+`FRBR_TLS_CERT` / `FRBR_TLS_KEY` at them.
+
+Docker Hub carries the same images (`jrecyclebin/freshbreath`) as a backup —
+identical bytes, copied from GHCR rather than rebuilt. Use it if ghcr.io is
+having a day.
+
+To build the image yourself:
+
+```bash
+mise run docker:build   # → freshbreath:dev
+mise run docker:run     # build, then serve on :9009
+```
+
+The Dockerfile runs the same `mise run build:linux` that produces the release
+tarballs, so the image and the zips can't drift apart.
+
 ### Personal Installation
 
 However you install it, Fresh Breath will figure out sensible defaults for where

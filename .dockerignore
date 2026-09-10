@@ -1,0 +1,33 @@
+# Keep the build context to what scripts/build.sh actually reads: source,
+# web/, skills/, mise.toml, scripts/. Everything below is either local state,
+# a build output, or an agent's scratch drawer.
+
+.git
+.github
+.journal
+.claude
+.todos/
+.sidecar*
+.mcp.json
+.td-root
+
+dist/
+freshbreath
+*.db
+*.db-wal
+*.db-shm
+*.pem
+.env
+
+apps/
+data/
+tasks/
+virtual/
+tmp/
+design/
+samples/
+static.html
+
+Dockerfile
+.dockerignore
+docker-compose.yml
