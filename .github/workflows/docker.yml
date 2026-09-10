@@ -109,6 +109,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # `secrets` is off-limits inside an `if:`, but it's fine in `env:` —
+      # so the presence of a Docker Hub token becomes a plain string the
+      # mirror steps are allowed to look at.
+      HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' }}
 
     steps:
       - uses: actions/checkout@v5
@@ -157,7 +162,7 @@ jobs:
 
       - name: Log in to Docker Hub
         id: hub
-        if: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        if: env.HAS_DOCKERHUB == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
