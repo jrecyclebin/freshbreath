@@ -1,0 +1,187 @@
+name: Docker Images
+
+on:
+  release:
+    types: [published]
+  # Same reasoning as release.yml: a build matrix you can only reach by
+  # publishing a release is a poor place to discover a broken Dockerfile.
+  # Dispatch builds both architectures and (unless you say otherwise)
+  # pushes nothing.
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push the images to the registries"
+        type: boolean
+        default: false
+
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: docker.io/${{ github.repository }}
+
+jobs:
+  # Each architecture is built on its own native runner and pushed *by
+  # digest* — no tags yet. CGO under QEMU is a long, sad afternoon.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether we're pushing
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "release" ] || [ "${{ inputs.push }}" = "true" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Version metadata
+        id: meta
+        run: |
+          version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "arch=${{ matrix.platform }}" | tr '/' '-' >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push by digest)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.meta.outputs.commit }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          outputs: >-
+            ${{ steps.mode.outputs.push == 'true'
+              && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.GHCR_IMAGE)
+              || 'type=cacheonly' }}
+
+      - name: Stash the digest
+        if: steps.mode.outputs.push == 'true'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.mode.outputs.push == 'true'
+        with:
+          name: digest-${{ steps.meta.outputs.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # The two digests become one multi-arch tag on GHCR (the registry we point
+  # people at), then the same manifest is copied to Docker Hub as a backup.
+  manifest:
+    needs: build
+    if: github.event_name == 'release' || inputs.push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: tags
+        run: |
+          version="$(git describe --tags --always 2>/dev/null || echo dev)"
+          version="${version#v}"
+          {
+            echo "version=$version"
+            # A release tag also moves :latest; a dispatched push doesn't.
+            if [ "${{ github.event_name }}" = "release" ] && [ "${{ github.event.release.prerelease }}" != "true" ]; then
+              echo "latest=true"
+            else
+              echo "latest=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create the GHCR manifest
+        run: |
+          cd /tmp/digests
+          args=""
+          for d in *; do args="$args ${GHCR_IMAGE}@sha256:$d"; done
+          docker buildx imagetools create -t "${GHCR_IMAGE}:${{ steps.tags.outputs.version }}" $args
+          if [ "${{ steps.tags.outputs.latest }}" = "true" ]; then
+            docker buildx imagetools create -t "${GHCR_IMAGE}:latest" $args
+          fi
+
+      - name: Log in to Docker Hub
+        id: hub
+        if: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Docker Hub is the backup shelf: same bytes, copied from GHCR rather
+      # than rebuilt, so the two registries can never disagree.
+      - name: Mirror to Docker Hub
+        if: steps.hub.outcome == 'success'
+        run: |
+          docker buildx imagetools create \
+            -t "${DOCKERHUB_IMAGE}:${{ steps.tags.outputs.version }}" \
+            "${GHCR_IMAGE}:${{ steps.tags.outputs.version }}"
+          if [ "${{ steps.tags.outputs.latest }}" = "true" ]; then
+            docker buildx imagetools create \
+              -t "${DOCKERHUB_IMAGE}:latest" "${GHCR_IMAGE}:latest"
+          fi
+
+      - name: Summary
+        run: |
+          echo "### Images" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${GHCR_IMAGE}:${{ steps.tags.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.hub.outcome }}" = "success" ]; then
+            echo "- \`${DOCKERHUB_IMAGE}:${{ steps.tags.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Docker Hub skipped (no DOCKERHUB_TOKEN secret)" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,33 @@
+# Fresh Breath, the whole homelab-shaped version of it.
+#
+#   docker compose up -d
+#   → http://localhost:9009/
+#
+# Remember the sign on the door: *personal*, not *public*. Bind to a LAN
+# address or sit it behind something that knows about TLS.
+
+services:
+  freshbreath:
+    image: ghcr.io/jrecyclebin/freshbreath:latest
+    # Swap the line above for this to build from a checkout instead:
+    # build: .
+    container_name: freshbreath
+    restart: unless-stopped
+    ports:
+      - "9009:9009"
+    volumes:
+      # Named volume: apps/, virtual/, tasks/ and freshbreath.db all live
+      # here, and it inherits the image's uid 10001 on first creation. A
+      # bind mount works too — just `chown -R 10001:10001` it first.
+      - freshbreath-data:/data
+      # Certs and a config.env, if you have them (read-only):
+      # - ./config:/config:ro
+    environment:
+      # The browser-visible URL. Set it whenever the container isn't reached
+      # at localhost:9009 — OAuth callbacks are built from this.
+      FRBR_BASE_URL: http://localhost:9009
+      # FRBR_TLS_CERT: /config/fullchain.pem
+      # FRBR_TLS_KEY: /config/privkey.pem
+
+volumes:
+  freshbreath-data:

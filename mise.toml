@@ -69,6 +69,20 @@ run = "bash scripts/build-installer.sh"
 description = "Build all platform binaries"
 depends = ["build:linux", "build:linux-arm64", "build:mac", "build:mac-x64", "build:windows", "build:windows-arm64", "build:windows-installer", "build:windows-arm64-installer"]
 
+[tasks."docker:build"]
+description = "Build the container image locally (tags freshbreath:dev)"
+run = """
+docker build \
+  --build-arg VERSION="$GIT_VERSION" \
+  --build-arg COMMIT="$GIT_COMMIT" \
+  -t freshbreath:dev .
+"""
+
+[tasks."docker:run"]
+description = "Run the locally built image on :9009 with a freshbreath-data volume"
+depends = ["docker:build"]
+run = "docker run --rm -p 9009:9009 -v freshbreath-data:/data freshbreath:dev"
+
 [tasks.release]
 description = "Create a GitHub release (usage: mise run release v1.0)"
 usage = '''
