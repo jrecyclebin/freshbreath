@@ -1,44 +1,29 @@
 # Fresh Breath — container image.
 #
-# The build stage runs the *same* `mise run build:linux` that ships the
-# release tarballs, so the image can't drift from the zips: one build
-# script, one FTS5 tag, one control-panel dist swap. We just untar the
-# result into a slim runtime instead of uploading it to a release.
+# This image compiles nothing. It unpacks a release tarball — the very same
+# `freshbreath-<version>-linux-<arch>.tar.gz` that `mise run build:linux-static`
+# produces and that CI attaches to the GitHub release. One build path, one
+# set of bytes: if the tarball on the release page works, so does this.
 #
-#   docker build -t freshbreath .
-#   docker run -p 9009:9009 -v freshbreath-data:/data freshbreath
+# That's the trade: you can't `docker build .` from a bare checkout, there
+# has to be a tarball in dist/ first. The mise task does both:
+#
+#   mise run docker:build
+#   docker run -p 9009:9009 -v freshbreath-data:/data freshbreath:dev
+#
+# The binary is static musl, so the base image below is chosen purely for
+# the *task scripts'* comfort — Fresh Breath itself would be just as happy
+# on scratch. Debian gives a task a real shell, git, ssh and curl to work
+# with, which is rather the point of task services.
 
-# ── Stage 1: build via mise ───────────────────────────────────────────
-FROM debian:bookworm-slim AS build
-ARG TARGETARCH
-ARG VERSION=dev
-ARG COMMIT=none
-
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-      ca-certificates curl git gcc libc6-dev nodejs zip \
- && rm -rf /var/lib/apt/lists/*
-
-# mise brings the Go toolchain pinned in mise.toml, plus GOFLAGS (the
-# sqlite_fts5 tag) — the same environment a local `mise run build:linux` gets.
-RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
-ENV PATH="/root/.local/share/mise/shims:$PATH"
-
-WORKDIR /src
-COPY mise.toml ./
-RUN mise trust && mise install
-
-COPY . .
-# VERSION/COMMIT are honoured by scripts/build.sh ahead of its git-derived
-# defaults, which is just as well: there's no .git in the build context.
-RUN VERSION="${VERSION}" COMMIT="${COMMIT}" \
-    mise run "build:$([ "$TARGETARCH" = arm64 ] && echo linux-arm64 || echo linux)"
-
-# Unpack the release tarball we just made — binary, web/, skills/, README.
-RUN mkdir -p /out && tar -xzf dist/freshbreath-*-linux-*.tar.gz -C /out
-
-# ── Stage 2: runtime ──────────────────────────────────────────────────
 FROM debian:bookworm-slim
+
+# Set by buildx per platform (amd64 / arm64); "amd64" when you build by
+# hand. It picks which tarball out of dist/ gets unpacked, which is the
+# whole of this image's cross-architecture story — there's no compiler here
+# to emulate.
+ARG TARGETARCH=amd64
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git openssh-client tzdata \
@@ -50,8 +35,23 @@ RUN apt-get update \
 RUN useradd --uid 10001 --user-group --home-dir /data --create-home freshbreath
 
 WORKDIR /app
-COPY --from=build /out/ ./
-RUN mv freshbreath /usr/local/bin/freshbreath && chown -R freshbreath:freshbreath /data
+COPY dist/*.tar.gz /tmp/dist/
+# The ldd check at the end: a tarball built dynamically on some other distro
+# would unpack here perfectly happily and only fail when someone runs the
+# container. Ask it now, while anyone is still watching.
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) arch=x64 ;; \
+      arm64) arch=arm64 ;; \
+      *) echo "✗ unsupported arch $TARGETARCH"; exit 1 ;; \
+    esac; \
+    tar -xzf /tmp/dist/freshbreath-*-linux-"$arch".tar.gz -C /app; \
+    rm -rf /tmp/dist; \
+    mv /app/freshbreath /usr/local/bin/freshbreath; \
+    chown -R freshbreath:freshbreath /data; \
+    if ! ldd /usr/local/bin/freshbreath 2>&1 | grep -q "not a dynamic executable"; then \
+      echo "✗ binary is not static — build it with: mise run build:linux-static"; exit 1; \
+    fi
 
 ENV FRBR_DIR=/app \
     FRBR_DATA_DIR=/data \

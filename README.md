@@ -241,15 +241,38 @@ Docker Hub carries the same images (`jrecyclebin/freshbreath`) as a backup —
 identical bytes, copied from GHCR rather than rebuilt. Use it if ghcr.io is
 having a day.
 
-To build the image yourself:
+Images are published by hand, from the *very tarballs* a release attached —
+unpacked, not rebuilt. So they're always a release you could have downloaded
+yourself, and a release whose Windows build fell over never becomes an image
+at all.
+
+To build one locally:
 
 ```bash
-mise run docker:build   # → freshbreath:dev
-mise run docker:run     # build, then serve on :9009
+mise run docker:build   # static tarball → freshbreath:dev
+mise run docker:run     # ...then serve it on :9009
 ```
 
-The Dockerfile runs the same `mise run build:linux` that produces the release
-tarballs, so the image and the zips can't drift apart.
+That needs `musl-gcc` (`apt install musl-tools`, `pacman -S musl`), because
+the Linux binaries are statically linked — see below.
+
+> 🧊 **WHY THE LINUX BUILDS ARE STATIC**
+>
+> SQLite is C, so the binary uses cgo, and a cgo binary is normally welded to
+> the glibc that built it — build on Ubuntu 24.04 and it won't start on Debian
+> 12. The `linux-x64` and `linux-arm64` tarballs are therefore linked
+> statically against musl: no libc dependency, no distro opinions, runs on a
+> NAS. Which is also why the container image doesn't care what base it sits on.
+>
+> SQLite is unaffected — it's compiled *into* the binary either way, FTS5
+> included. What goes is `load_extension()`, the runtime loading of
+> third-party SQLite extension `.so` files, which app databases already
+> refuse by name (`internal/server/appdb.go`).
+>
+> The other trade is a Go DNS resolver in place of libc's, so NSS modules
+> don't apply — LDAP or mDNS hostnames won't resolve, DNS and `/etc/hosts`
+> work as normal. `mise run build:linux` stays dynamic and unbothered for
+> everyday work.
 
 ### Personal Installation
 

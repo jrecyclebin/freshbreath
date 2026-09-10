@@ -1,6 +1,12 @@
-# Keep the build context to what scripts/build.sh actually reads: source,
-# web/, skills/, mise.toml, scripts/. Everything below is either local state,
-# a build output, or an agent's scratch drawer.
+# The image is built from a release tarball, so the context is dist/ and
+# nothing else. Everything below is source (already inside the tarball),
+# local state, or an agent's scratch drawer.
+
+*
+!dist/*.tar.gz
+
+# Belt and braces — the ignores below predate the tarball approach and cost
+# nothing to keep, in case that `*` ever softens.
 
 .git
 .github
@@ -11,7 +17,6 @@
 .mcp.json
 .td-root
 
-dist/
 freshbreath
 *.db
 *.db-wal
