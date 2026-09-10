@@ -17,20 +17,25 @@ jobs:
     strategy:
       matrix:
         include:
+          # Both Linux rows build static musl binaries, which is what makes
+          # them general-purpose: a dynamic CGO build made here would demand
+          # the runner's glibc (2.39) and refuse to start on Debian 12.
+          # arm64 builds on a native arm64 runner rather than cross-compiling,
+          # because a musl cross-toolchain is a scavenger hunt.
           - os: ubuntu-latest
             goos: linux
             goarch: amd64
-            cc: gcc
+            cc: musl-gcc
             ext: .tar.gz
             label: linux-x64
-            mise_task: build:linux
-          - os: ubuntu-latest
+            mise_task: build:linux-static
+          - os: ubuntu-24.04-arm
             goos: linux
             goarch: arm64
-            cc: aarch64-linux-gnu-gcc
+            cc: musl-gcc
             ext: .tar.gz
             label: linux-arm64
-            mise_task: build:linux-arm64
+            mise_task: build:linux-arm64-static
           - os: macos-14
             goos: darwin
             goarch: arm64
@@ -63,9 +68,9 @@ jobs:
 
       - uses: jdx/mise-action@v4
 
-      - name: Install Linux arm64 cross-compiler
-        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install musl toolchain (Linux)
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Install MinGW (Windows x64 only)
         if: matrix.goos == 'windows' && matrix.goarch == 'amd64'
@@ -205,6 +210,10 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
           RELEASE_NAME: ${{ github.event.release.name }}
           RELEASE_URL: ${{ github.event.release.html_url }}
+          # The Docker images are a manual follow-up — built from the tarballs
+          # this release just attached, once someone has looked at them. The
+          # note carries the link so nobody has to go hunting through Actions.
+          DOCKER_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/docker.yml
         run: |
           set -euo pipefail
 
@@ -235,6 +244,7 @@ jobs:
             --arg body "$body" \
             --arg commit "$commit" \
             --arg url "$RELEASE_URL" \
+            --arg docker_url "$DOCKER_URL" \
             -f scripts/slack-release-payload.jq)
 
           curl -sS --fail-with-body -X POST \

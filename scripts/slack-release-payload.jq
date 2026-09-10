@@ -1,6 +1,6 @@
 # Boil a GitHub release down to the one paragraph worth reading in Slack.
 #
-# Inputs (all --arg): name, body, commit, url.
+# Inputs (all --arg): name, body, commit, url, docker_url.
 # Output: the JSON object to POST to an incoming webhook.
 #
 # The shape we're after is a headline and a lead, which is what the release
@@ -47,4 +47,11 @@ def is_changelog:   test("^\\*\\*Full Changelog\\*\\*");
    then "*\($name | mrkdwn)* — \($heading | mrkdwn)"
    else "*Fresh Breath \($name | mrkdwn)* is out on Github" end) as $title
 
-| { text: "\($title)\n\($lead | mrkdwn | clip(600))\n<\($url)|View the release>" }
+# Container images are a separate, manual step: built from the very tarballs
+# this release just attached, and only once a human has decided the release
+# is a keeper (see .github/workflows/docker.yml). So the note ends with the
+# handle for that door. Absent docker_url, the line simply isn't there.
+| (if ($docker_url | length) > 0
+   then "\n<\($docker_url)|Build the Docker images →>" else "" end) as $docker
+
+| { text: "\($title)\n\($lead | mrkdwn | clip(600))\n<\($url)|View the release>\($docker)" }

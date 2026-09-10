@@ -29,6 +29,23 @@ description = "Build for Linux arm64 (requires aarch64-linux-gnu-gcc)"
 env = { CGO_ENABLED = "1", GOOS = "linux", GOARCH = "arm64", CC = "${CC:-aarch64-linux-gnu-gcc}" }
 run = "bash scripts/build.sh"
 
+# The two tasks below are what CI actually releases, and what the container
+# image is built from: fully static musl binaries that don't care which
+# distro they land on (scripts/build.sh explains the flags). They need
+# musl-gcc — `apt install musl-tools`, `pacman -S musl` — and the arm64 one
+# wants a native arm64 host, since a musl cross-toolchain is a scavenger
+# hunt and GitHub rents arm64 runners by the minute. The plain build:linux
+# tasks above stay dynamic and use the system gcc; keep using those locally.
+[tasks."build:linux-static"]
+description = "Build for Linux x64, fully static (musl; requires musl-gcc)"
+env = { CGO_ENABLED = "1", GOOS = "linux", GOARCH = "amd64", CC = "${CC:-musl-gcc}", FRBR_STATIC = "1" }
+run = "bash scripts/build.sh"
+
+[tasks."build:linux-arm64-static"]
+description = "Build for Linux arm64, fully static (musl; native arm64 host, requires musl-gcc)"
+env = { CGO_ENABLED = "1", GOOS = "linux", GOARCH = "arm64", CC = "${CC:-musl-gcc}", FRBR_STATIC = "1" }
+run = "bash scripts/build.sh"
+
 [tasks."build:mac"]
 description = "Build for macOS arm64 (native on macOS runners; needs osxcross on Linux)"
 env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "arm64", CC = "${CC:-cc}" }
@@ -70,12 +87,12 @@ description = "Build all platform binaries"
 depends = ["build:linux", "build:linux-arm64", "build:mac", "build:mac-x64", "build:windows", "build:windows-arm64", "build:windows-installer", "build:windows-arm64-installer"]
 
 [tasks."docker:build"]
-description = "Build the container image locally (tags freshbreath:dev)"
+description = "Build the container image from a fresh static tarball (tags freshbreath:dev)"
+depends = ["build:linux-static"]
 run = """
-docker build \
-  --build-arg VERSION="$GIT_VERSION" \
-  --build-arg COMMIT="$GIT_COMMIT" \
-  -t freshbreath:dev .
+TARBALL="freshbreath-${GIT_VERSION}-linux-x64.tar.gz"
+[ -f "dist/$TARBALL" ] || { echo "✗ dist/$TARBALL missing"; exit 1; }
+docker build --build-arg TARBALL="$TARBALL" -t freshbreath:dev .
 """
 
 [tasks."docker:run"]
