@@ -89,7 +89,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
-          tags: >-
+          # One tag per line — literal block, not folded. `>-` would join
+          # these into a single space-separated string, which buildx reads as
+          # one gloriously invalid tag.
+          tags: |
             ${{ format('{0}:{1}', env.GHCR_IMAGE, steps.rel.outputs.version) }}
             ${{ inputs.latest && format('{0}:latest', env.GHCR_IMAGE) || '' }}
 
