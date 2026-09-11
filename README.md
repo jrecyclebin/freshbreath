@@ -90,6 +90,46 @@ Its control panel is used to register the different apps, set up the service
 each app needs and manage users, if you want to give others access to manage
 the apps and services.
 
+## Using Fresh Breath in your app
+
+For a complete guide on loading the SDK, logging in, restoring sessions, and
+calling tools, see the detailed skill at `skills/freshbreath/SKILL.md`.
+
+Every app hosted on Fresh Breath gets a random ID - used to identify itself.
+And every integration (auth connection, API, MCP) is identified by a primary
+URL.
+
+Your app needs to include `frbr.js` from the server, call `login()` with your
+app ID and service URL - this gives your app access to functions like `listTools()`,
+`callTool()`, or `fetch()`.
+
+```html
+<script type="module">
+  import { login, ServiceProxy } from "http://localhost:9009/frbr.js?your-app-id";
+
+  const service = await login("https://mcp.example.com/mcp");
+  const tools = await service.listTools();
+  const result = await service.callTool("some_tool", { arg: "value" });
+</script>
+```
+
+Tokens are automatically refreshed in these calls, if possible.
+
+## Admin panel
+
+Visit `/control` in a browser to open the admin panel.
+
+- Register **apps** (static HTML projects that use the SDK)
+- Register **services** (MCP servers, HTTP APIs, task runners, virtual endpoints)
+- Register **auth records** and point services and apps at them, from either slot
+- Link services to apps so only permitted services work with each app
+- Manage **users** and assign them roles
+- Set which auth record gates the panel - and which every empty slot inherits
+- Review the **audit log**
+
+You can also connect to `/mcp` on your Fresh Breath instance to log-in and
+do all of the above through the MCP.
+
 ## Using With Claude Design
 
 Quick trick off the bat: since Claude Design gives you a zip file, you can
@@ -195,12 +235,7 @@ mise use -g github:jrecyclebin/freshbreath
 freshbreath
 ```
 
-The server starts on `:9009` by default with an SQLite database at `./freshbreath.db`.
-
-### Docker
-
-Images live on the GitHub Container Registry, built for `linux/amd64` and
-`linux/arm64` (so the Pi in the closet is invited too).
+Or there are Docker images for Linux:
 
 ```bash
 docker run -d --name freshbreath \
@@ -209,70 +244,7 @@ docker run -d --name freshbreath \
   ghcr.io/jrecyclebin/freshbreath:latest
 ```
 
-Then visit `http://localhost:9009/`. Tags are `:latest` and the release
-version (`:1.2.0`).
-
-There's a `docker-compose.yml` in the repo if you'd rather keep the settings
-somewhere you can read them next month:
-
-```bash
-docker compose up -d
-```
-
-Everything mutable — `apps/`, `virtual/`, `tasks/` and `freshbreath.db` —
-lives in `/data`, which is the one thing worth backing up. Configure the rest
-with the environment variables below; `FRBR_DIR` and `FRBR_DATA_DIR` are
-already set inside the image, so leave those alone.
-
-> 🪪 **THE UID 10001 GOTCHA**
->
-> The container runs as a non-root user (uid 10001). A *named* volume picks up
-> that ownership on creation and all is well. A *bind mount* — `-v
-> ./mydata:/data` — arrives owned by whoever made the directory, so
-> `chown -R 10001:10001 ./mydata` first, or Fresh Breath will open its eyes on
-> a database it can't write.
-
-Set `FRBR_BASE_URL` whenever the server isn't reached at `localhost:9009` —
-OAuth callback URLs are built from it, and a wrong one fails in the confusing
-way, over at the provider's end. For TLS, mount the certs in and point
-`FRBR_TLS_CERT` / `FRBR_TLS_KEY` at them.
-
-Docker Hub carries the same images (`jrecyclebin/freshbreath`) as a backup —
-identical bytes, copied from GHCR rather than rebuilt. Use it if ghcr.io is
-having a day.
-
-Images are published by hand, from the *very tarballs* a release attached —
-unpacked, not rebuilt. So they're always a release you could have downloaded
-yourself, and a release whose Windows build fell over never becomes an image
-at all.
-
-To build one locally:
-
-```bash
-mise run docker:build   # static tarball → freshbreath:dev
-mise run docker:run     # ...then serve it on :9009
-```
-
-That needs `musl-gcc` (`apt install musl-tools`, `pacman -S musl`), because
-the Linux binaries are statically linked — see below.
-
-> 🧊 **WHY THE LINUX BUILDS ARE STATIC**
->
-> SQLite is C, so the binary uses cgo, and a cgo binary is normally welded to
-> the glibc that built it — build on Ubuntu 24.04 and it won't start on Debian
-> 12. The `linux-x64` and `linux-arm64` tarballs are therefore linked
-> statically against musl: no libc dependency, no distro opinions, runs on a
-> NAS. Which is also why the container image doesn't care what base it sits on.
->
-> SQLite is unaffected — it's compiled *into* the binary either way, FTS5
-> included. What goes is `load_extension()`, the runtime loading of
-> third-party SQLite extension `.so` files, which app databases already
-> refuse by name (`internal/server/appdb.go`).
->
-> The other trade is a Go DNS resolver in place of libc's, so NSS modules
-> don't apply — LDAP or mDNS hostnames won't resolve, DNS and `/etc/hosts`
-> work as normal. `mise run build:linux` stays dynamic and unbothered for
-> everyday work.
+The server starts on `:9009` by default with an SQLite database at `./freshbreath.db`.
 
 ### Personal Installation
 
@@ -348,35 +320,18 @@ mise check        # lint + tests
 mise run          # run the dev server, reloads from code changes (requires `entr`)
 ```
 
-## Using Fresh Breath in your app
+### Building Docker Images
 
-For a complete guide on loading the SDK, logging in, restoring sessions, and calling tools, see the detailed skill at `skills/freshbreath/SKILL.md`.
+Docker images are based on the release tarballs.
+To build locally:
 
-The short version: include `frbr.js` from the server, call `login()` with your app nonce and service URL, then use `ServiceProxy` to call `listTools()`, `callTool()`, or `fetch()`.
-
-```html
-<script type="module">
-  import { login, ServiceProxy } from "http://localhost:9009/frbr.js?your-app-nonce";
-
-  const service = await login("https://mcp.example.com/mcp");
-  const tools = await service.listTools();
-  const result = await service.callTool("some_tool", { arg: "value" });
-</script>
+```bash
+mise run docker:build   # static tarball → freshbreath:dev
+mise run docker:run     # ...then serve it on :9009
 ```
 
-Tokens are automatically refreshed in these calls, if possible.
-
-## Admin panel
-
-Visit `/control` in a browser to open the admin panel.
-
-- Register **apps** (static HTML projects that use the SDK)
-- Register **services** (MCP servers, HTTP APIs, task runners, virtual endpoints)
-- Register **auth records** and point services and apps at them, from either slot
-- Link services to apps so only permitted services work with each app
-- Manage **users** and assign them roles
-- Set which auth record gates the panel - and which every empty slot inherits
-- Review the **audit log**
+That needs `musl-gcc` (`apt install musl-tools`, `pacman -S musl`), because
+the Linux binaries are statically linked — see below.
 
 ## Project layout
 
