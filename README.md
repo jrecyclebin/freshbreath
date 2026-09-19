@@ -2,6 +2,12 @@
 
 **𝓐 𝓹𝓮𝓻𝓼𝓸𝓷𝓪𝓵 𝓪𝓹𝓹 𝓼𝓮𝓻𝓿𝓮𝓻.**
 
+* For hosting apps.
+* For writing quick MCP wrappers around SQLite queries, HTTP APIs, or scripts.
+* For setting up connections (like Github or Google Drive) and giving apps
+  access to them.
+* Hook an agent up and build directly on it.
+
 **QUICK NOTE ON THAT:** *Personal* not *public*. Don't just host this on the
 Internet!!
 
@@ -21,11 +27,10 @@ And now that friends and family are cooking up their own little single-use
 apps - almost all of them standalone static HTML files - I realized that lots
 of people need this kind of thing!
 
-> ⌐■_■ **STATIC IS SO SIMPLE**
+> ⌐■_■ **STATIC SO SIMPLE**
 >
 > Part of the goal here is to keep EVERYTHING client-side - keep it all in
-> pure, static HTML, where possible. All external connections and necessities
-> can be handled by Fresh Breath.
+> pure, static HTML, where possible. Like even a `file;///` URL if you want.
 
 If you find yourself writing lots of little apps that threaten to go beyond static
 HTML - they need basic auth, some integrations, some LLM calls, some file I/O -
