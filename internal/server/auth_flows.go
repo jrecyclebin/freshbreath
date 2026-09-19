@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -130,7 +131,7 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	// key itself, verified against the record.
 	if p.mcpKey == "" && len(p.done) == 1 && p.done[0].rec.Kind == db.AuthAPIKey {
 		rec := p.done[0].rec
-		writeCallbackPage(w, p.appState, map[string]interface{}{
+		writeCallbackPage(w, p, map[string]interface{}{
 			"v": 1, "auth_id": rec.ID, "kind": rec.Kind,
 			"key": p.done[0].presentedKey, "header": rec.Descriptor.Header,
 		})
@@ -186,32 +187,76 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	if len(rd.Legs) > 0 {
 		entry["legs"] = rd.Legs
 	}
-	writeCallbackPage(w, p.appState, entry)
+	writeCallbackPage(w, p, entry)
 	return "", nil
 }
 
-// writeCallbackPage hands a finished browser login back to the opener. The
+// writeCallbackPage hands a finished browser login back to the app.
 // entry is the frbr:auth:* store record; frbr.js stamps written_at and
 // persists it. Correlation is by state; the listener pins the origin.
-func writeCallbackPage(w io.Writer, appState string, entry map[string]interface{}) {
+//
+// A popup flow has an opener to postMessage to. A top-level flow — the
+// auto-login redirect — does not, so the page writes the store itself
+// and bounces back to returnTo; both only work on this origin, which is
+// why frbr.js only starts the flow same-origin. (The page writing the
+// store bends "frbr.js is the sole writer" — but this page is server
+// kin, not app code.)
+func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}) {
 	entryJSON, _ := json.Marshal(entry)
+	lead := "Logged in. You can close this window."
+	redirect := ""
+	if p.returnTo != "" {
+		lead = "Logged in. Returning to the app…"
+		redirect = fmt.Sprintf("window.location.replace(%q);", p.returnTo)
+	}
 	fmt.Fprintf(w, `<!doctype html>
 <html>
 <body>
-  <p>Logged in. You can close this window.</p>
+  <p>%s</p>
   <script>
-    window.opener?.postMessage({
-      type: "auth-complete",
-      state: %q,
-      entry: %s,
-    }, "*");
+    (function () {
+      var entry = %s;
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage({
+          type: "auth-complete",
+          state: %q,
+          entry: entry,
+        }, "*");
+        return;
+      }
+      entry.written_at = new Date().toISOString();
+      try {
+        localStorage.setItem("frbr:auth:" + entry.auth_id, JSON.stringify(entry));
+      } catch (e) {
+        document.querySelector("p").textContent =
+          "Logged in, but the browser would not store the session.";
+        return;
+      }
+      %s
+    })();
   </script>
 </body>
 </html>
-`, appState, string(entryJSON))
+`, lead, string(entryJSON), p.appState, redirect)
 }
 
-// ── /service/login ──────────────────────────────────────────────────
+// returnAllowed judges a login's return target the way the CORS check
+// judges an Origin: a relative path is this origin's own, and an absolute
+// URL only the app's registered one. Anything else — another scheme,
+// another host, a protocol-relative trick — stays out, so a login URL
+// can't be aimed at some origin that has nothing to do with the app.
+func returnAllowed(app *db.App, ret string) bool {
+	if strings.HasPrefix(ret, "/") && !strings.HasPrefix(ret, "//") {
+		return true
+	}
+	u, err := url.Parse(ret)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	return u.Scheme + "://" + u.Host == appRegisteredOrigin(app)
+}
+
+// ── /service/login ──────────────────────────────────────────────
 
 // serviceInfo is the service metadata a caller needs to build a proxy
 // around what it just logged in to. Every /service/login answer carries it
@@ -356,9 +401,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A return path sends a finished top-level login back into the app
+	// that started it — the leg the auto-login redirect plays.
+	ret := r.URL.Query().Get("return")
+	if ret != "" && !returnAllowed(app, ret) {
+		http.Error(w, "Invalid return path", http.StatusBadRequest)
+		return
+	}
+
 	p := &pendingAuth{
 		appNonce:  nonce,
 		appState:  appState,
+		returnTo:  ret,
 		legs:      todo,
 		done:      done,
 		primaryID: legs[len(legs)-1].ID,

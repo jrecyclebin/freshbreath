@@ -238,10 +238,18 @@ export class AuthSession {
 
 // ── login ───────────────────────────────────────────────────────────
 
-// Ask the door what a login would cost. A pure query: it starts no flow
-// and leaves no state, which is what makes it safe to call before we know
-// whether we can pay.
-async function resolveDoor(serviceURL) {
+/**
+ * Ask the door what a login would cost, without starting one. A pure
+ * query — no flow begins, no state is stored, no window opens — which
+ * is what makes it safe to call at any moment, loaded or idle.
+ *
+ * @param {string} [serviceURL] — a registered service URL, or omitted
+ *                                (or null) for this page's own gate
+ * @returns {Promise<{type: string, legs?: Array, service?: Object}>}
+ *          "anonymous" (nothing to ask) or "legs" (these records, in
+ *          this order)
+ */
+export async function resolveDoor(serviceURL) {
   const q = new URLSearchParams({ resolve: "1" });
   if (serviceURL) q.set("url", serviceURL);
   const r = await fetch(`${API}/service/login?${q}`, {
@@ -255,9 +263,10 @@ async function resolveDoor(serviceURL) {
 
 // Commit to a login, presenting whatever we found. The server re-verifies
 // it: a browser saying "I'm already logged in" is a claim, not a fact.
-async function beginLogin(serviceURL, state, session) {
+async function beginLogin(serviceURL, state, session, returnTo) {
   const q = new URLSearchParams({ state });
   if (serviceURL) q.set("url", serviceURL);
+  if (returnTo) q.set("return", returnTo);
   const headers = { "X-App-Nonce": APP_NONCE };
   if (session?.token) headers["Authorization"] = `Bearer ${session.token}`;
   const r = await fetch(`${API}/service/login?${q}`, { headers });
@@ -366,6 +375,47 @@ export function currentSession() {
 export function signOut(authID = GATE_ID) {
   if (!authID) return;
   (AuthSession.get(authID) ?? new AuthSession({ auth_id: authID })).forget();
+}
+
+// ── Auto-login at load ───────────────────────────────────────────────
+//
+// A gated hosted app walks its users into the login before the first
+// frame draws. With no credential in the store the page navigates itself
+// into the flow and comes back with the store filled — the page *becomes*
+// the popup, because a popup with no gesture behind it is a popup the
+// browser blocks. Only pages on this origin take part: the hand-back
+// runs through localStorage, which a cross-origin or file:// page
+// cannot reach.
+//
+// A lapsed entry still counts as holding a credential — the refresh
+// family can revive it silently — so only a first visit redirects. The
+// sessionStorage guard breaks the loop when a login comes back without
+// one: a page with a dead sign-in button beats a browser pinned between
+// two redirects. Set window.__FRBR_AUTO_LOGIN = false before this script
+// loads to keep the decision in app code.
+const AUTO_KEY = "frbr:auto-login";
+
+function autoLoginTried() {
+  try { return !!sessionStorage.getItem(AUTO_KEY); } catch { return false; }
+}
+
+if (
+  window.__FRBR_AUTO_LOGIN !== false &&
+  GATE_ID &&
+  window.location.origin === FRBR_ORIGIN &&
+  !readEntry(GATE_ID) &&
+  !autoLoginTried()
+) {
+  try { sessionStorage.setItem(AUTO_KEY, "1"); } catch {}
+  resolveDoor().then(door => {
+    if (door.type === "anonymous") return; // open door; nothing to ask
+    const here = window.location.pathname + window.location.search + window.location.hash;
+    return beginLogin(null, uuidv4(), null, here).then(d => {
+      if (d.type === "redirect") window.location.replace(d.url);
+    });
+  }).catch(err => console.warn("frbr auto-login skipped:", err?.message ?? err));
+} else if (GATE_ID && readEntry(GATE_ID)) {
+  try { sessionStorage.removeItem(AUTO_KEY); } catch {}
 }
 
 // ── ServiceProxy ────────────────────────────────────────────────────
