@@ -45,6 +45,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// appRegisteredOrigin returns the origin an app is registered at — "" for
+// hosted apps (their URL is a slug on this server's own origin) and for
+// anything unparseable. This is the one origin besides our own that a
+// request or redirect for the app may name; both the CORS check below
+// and the login return-path check read it.
+func appRegisteredOrigin(app *db.App) string {
+	if app == nil || app.URL == "" {
+		return ""
+	}
+	appURL, err := url.Parse(app.URL)
+	if err != nil || appURL.Scheme == "" || appURL.Host == "" {
+		return ""
+	}
+	return appURL.Scheme + "://" + appURL.Host
+}
+
 // originAllowed checks whether the request's Origin should be permitted.
 // Same-origin requests (Origin matches scheme://r.Host) are always allowed.
 // file:// pages (Origin: null) are always allowed.
@@ -76,10 +92,8 @@ func (s *Server) originAllowed(r *http.Request, origin string) bool {
 	if appNonce == "" {
 		appNonce = s.adminNonce
 	}
-	if app, err := s.store.GetApp(appNonce); err == nil && app.URL != "" {
-		appURL, _ := url.Parse(app.URL)
-		appOrigin := appURL.Scheme + "://" + appURL.Host
-		return appOrigin == origin
+	if app, err := s.store.GetApp(appNonce); err == nil {
+		return appRegisteredOrigin(app) == origin
 	}
 	return false
 }

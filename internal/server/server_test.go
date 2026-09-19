@@ -829,6 +829,70 @@ func TestAPIKeyAuthFlow(t *testing.T) {
 	}
 }
 
+// The auto-login redirect leg: a return path rides the login state through
+// the flow, and the finished page — no opener to postMessage to — writes
+// the store itself and bounces back to it. The return target is held to
+// the same rule as an Origin: a relative path (this origin) or the app's
+// registered origin, and nothing else.
+func TestLoginReturnPath(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "return-test")
+	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "s3cret"})
+	setAppGate(t, srv, nonce, rec.ID)
+
+	// A return aimed at some other origin is refused before anything starts.
+	rr := testRequest(t, srv, "GET", "/service/login?state=x&return=https://evil.example", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 400 {
+		t.Errorf("evil return: status = %d, want 400 (body %s)", rr.Code, rr.Body.String())
+	}
+
+	// A protocol-relative return is the same trick with a hat on.
+	rr = testRequest(t, srv, "GET", "/service/login?state=x&return=//evil.example", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 400 {
+		t.Errorf("protocol-relative return: status = %d, want 400", rr.Code)
+	}
+
+	// A registered-origin return passes for an app that has one.
+	if err := srv.store.UpdateApp(nonce, "return-test", "Development", "https://myapp.example", nil, &rec.ID); err != nil {
+		t.Fatalf("update app url: %v", err)
+	}
+	rr = testRequest(t, srv, "GET", "/service/login?state=x&return=https://myapp.example/page", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 200 {
+		t.Errorf("registered-origin return: status = %d, want 200", rr.Code)
+	}
+
+	// A relative return rides through the api-key flow and comes back.
+	rr = testRequest(t, srv, "GET", "/service/login?state=x&return=/return-test/", nil,
+		map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != 200 {
+		t.Fatalf("login: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(rr.Body.Bytes(), &resp)
+	url, _ := resp["url"].(string)
+	i := strings.Index(url, "state=")
+	if i < 0 {
+		t.Fatalf("no state in redirect URL %q", url)
+	}
+	state := url[i+len("state="):]
+
+	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+	if rr.Code != 200 {
+		t.Fatalf("finish: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `location.replace("/return-test/")`) {
+		t.Errorf("final page missing return redirect: %s", body)
+	}
+	if !strings.Contains(body, `frbr:auth:`) {
+		t.Errorf("final page missing store write: %s", body)
+	}
+}
+
 func TestLoginAppNotAllowed(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "no-link-test")

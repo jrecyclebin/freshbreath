@@ -28,17 +28,16 @@ don't have to be a member to *use* the app, just to maintain it.)
 - **ssh** — every server has exactly one SSH service (URL `ssh://`) for
   connecting to remote machines.
 
-## How auth works now
+## How auth works
 
-A service no longer carries its own login configuration. Two slots do that work,
-and both point at an **auth record** — a credential or login method standing on
-its own, shared by everything that names it:
+A service has two auth slots that point at an **auth record** — a credential or
+login method standing on its own, shared by everything that names it:
 
 - **Protected by** — who may call in. Empty means *inherit the admin record*,
   not *open*; only an explicit Anonymous record means open.
 - **Acts as** — what credential goes upstream. Empty means *the caller's own*.
 
-Two consequences worth internalizing, because they're what make `login()` so
+Two consequences worth stopping at, because they're what make `login()` so
 quiet in practice:
 
 1. **The door owns the gate.** A service reached through your app answers to
@@ -74,6 +73,26 @@ const { login, currentSession, signOut } = window.FreshBreath;
 
 For `file://` apps use the full server URL. For apps hosted on the server's own
 origin, `/frbr.js` is enough.
+
+### Auto-login at load
+
+If your app is hosted on the server's origin and has a gate, loading frbr.js
+is itself a login event: when the store holds no credential for the gate, the
+page navigates into the login and comes back with one — before your first
+frame draws.
+
+A lapsed credential still counts as holding one (the refresh family can
+revive it silently), so only a first visit redirects — and a login that comes
+back empty-handed trips a once-per-session guard instead of a redirect loop.
+`file://` apps never auto-login: the hand-back runs through localStorage, which
+they cannot reach.
+
+To keep the decision in app code, set the flag before the script loads:
+
+```html
+<script>window.__FRBR_AUTO_LOGIN = false</script>
+<script type="module" src="/frbr.js?your-app-nonce"></script>
+```
 
 ---
 
@@ -111,6 +130,19 @@ past, because the app's gate is the first leg of that login.
 
 **Throws:** `"Login window closed"` if the user gives up, `"The login window was
 blocked"` if there was no gesture behind the call.
+
+### resolveDoor()
+
+To ask what a login would cost without starting one:
+
+```js
+const door = await resolveDoor();                 // this app's gate
+const door = await resolveDoor("https://mcp.example.com/mcp");  // a service door
+// { type: "anonymous" } or { type: "legs", legs: [...] }
+```
+
+A pure query: no flow begins, no window opens, no state is stored. Useful for
+deciding whether to draw a sign-in affordance at all.
 
 ---
 
