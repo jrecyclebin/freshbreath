@@ -229,6 +229,6 @@ outputs = [".vitepress/dist"]
 run = "aube run build"
 
 [tasks."docs:preview"]
-description = "Serve the built docs site on :4173 (run docs:build first)"
+description = "Serve the built docs site on :5174 (run docs:build first)"
 dir = "docs"
 run = "aube run preview"
