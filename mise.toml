@@ -210,3 +210,25 @@ run = "go list -u -m all 2>/dev/null | grep '\\['"
 [tasks.update]
 description = "Updated out-of-date modules"
 run = "go get -u ./... && go mod tidy"
+
+# The docs site (docs/) is a self-contained Node project — package.json,
+# aube-lock.yaml, node_modules all live inside that one directory. aube brings
+# its own Node runtime resolver, so there is deliberately no `node` tool entry
+# in [tools] above: `aube node`/`aube run` are the shims. `dir = "docs"` scopes
+# sources, outputs and the run command to that directory.
+[tasks."docs:dev"]
+description = "Serve the docs site locally (vitepress dev, hot reload)"
+dir = "docs"
+run = "aube run dev"
+
+[tasks."docs:build"]
+description = "Build the docs site into docs/.vitepress/dist"
+dir = "docs"
+sources = ["package.json", "aube-lock.yaml", "*.md", "public/**", ".vitepress/config.mts"]
+outputs = [".vitepress/dist"]
+run = "aube run build"
+
+[tasks."docs:preview"]
+description = "Serve the built docs site on :4173 (run docs:build first)"
+dir = "docs"
+run = "aube run preview"
