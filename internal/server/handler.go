@@ -89,9 +89,6 @@ func (s *Server) originAllowed(r *http.Request, origin string) bool {
 	if appNonce == "" {
 		appNonce = r.URL.RawQuery
 	}
-	if appNonce == "" {
-		appNonce = s.adminNonce
-	}
 	if app, err := s.store.GetApp(appNonce); err == nil {
 		return appRegisteredOrigin(app) == origin
 	}
@@ -202,7 +199,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/ssh/known-hosts", s.authWrap(pipeline(s.handleSSHHostKeys, s.requireAppServiceAccess("ssh"))))
 	s.mux.HandleFunc("/ssh/known-hosts/", s.authWrap(pipeline(s.handleSSHHostKeyDetail, s.requireAppServiceAccess("ssh"))))
 
-	// SSH sessions — admin+ gets access via adminNonce; members via app service check
+	// SSH sessions — require app access
 	s.mux.HandleFunc("/ssh/sessions", s.authWrap(pipeline(s.handleSSHSessions, s.requireAppServiceAccess("ssh"))))
 	s.mux.HandleFunc("/ssh/sessions/", s.authWrap(pipeline(s.handleSSHSessionDetail, s.requireAppServiceAccess("ssh"))))
 
