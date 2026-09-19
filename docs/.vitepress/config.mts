@@ -41,16 +41,18 @@ export default defineConfig({
   themeConfig: {
     // https://vitepress.dev/reference/default-theme-config
     nav: [
-      { text: 'Guide', link: '/guide' },
-      { text: 'Features', link: '/features' }
+      { text: 'Guide', link: '/' },
+      { text: 'Features', link: '/' }
     ],
 
     sidebar: [
       {
-        text: 'Guide',
+        text: 'Quick Start',
         items: [
-          { text: 'Introduction', link: '/guide' },
-          { text: 'Features', link: '/features' }
+          { text: 'Four-step Setup', link: '/setup' },
+          { text: 'The Full Tour', link: '/tour' },
+          { text: 'Apps and Services', link: '/apps' },
+          { text: 'Using with Agents', link: '/agents' }
         ]
       }
     ],

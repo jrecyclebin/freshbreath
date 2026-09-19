@@ -1,7 +1,7 @@
-# Introduction
+# The Four-Step Setup
 
-Fresh Breath is a **personal app server** — a place where little personal tools
-can live together and share authentication, storage, and integrations.
+Let's get Fresh Breath up and going so you can try it out. (It's a **personal
+app server** — a place where little personal tools can live together and share authentication, storage, and integrations.
 
 > *Personal* not *public*. Don't just host this on the Internet!!
 
