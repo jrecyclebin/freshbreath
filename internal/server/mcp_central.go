@@ -155,10 +155,8 @@ guide for examples on how to login and use APIs, MCPs, OIDC or virtual services
 for an app.
 
 Fresh Breath can also host apps the user is creating for long-term hosting and
-sharing with other users. If you follow the services guide, users will get
-prompted for their credentials. See the publishing guide if the app proceeds
-to that point or if you need guidance on reading or writing files to Fresh
-Breath.
+sharing with other users. See the publishing guide for how to read and write
+files to both apps and services.
 
 Fresh Breath server URL: %q`, s.config.PublicBaseURL),
 	})
