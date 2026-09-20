@@ -50,28 +50,31 @@ quiet in practice:
 
 ## 1. Load frbr.js
 
-Every Fresh Breath app starts with a module import:
+Every Fresh Breath app starts with a module import of `frbr.js`.
 
 ```html
-<script type="module">
-  import { login } from "[Fresh Breath URL]/frbr.js?[Your App Nonce]";
-  // ...
-</script>
+<script type="module" src="/frbr.js"></script>
 ```
 
-Or as a plain script tag — say your server is on HTTPS port 9009:
+frbr.js figures out which app it is from where the page is hosted (the browser
+sends a `Referer`, or frbr.js tells the server its location on load).
+
+If you are writing a static HTML app (`file://` URL), then you'll need to
+manually include your app nonce in the URL. (Or on pages that set
+`referrerpolicy="no-referrer"`.)
 
 ```html
-<script type="module" src="https://localhost:9009/frbr.js?[Your App Nonce]"></script>
+<script type="module" src="/frbr.js?[Your App Nonce]"></script>
 ```
 
-which puts everything on `window.FreshBreath` (aliased `window.FrBr`):
+Either way puts everything on `window.FreshBreath` (aliased `window.FrBr`):
 
 ```js
 const { login, currentSession, signOut } = window.FreshBreath;
 ```
 
-For `file://` apps use the full server URL. For apps hosted on the server's own
+For `file://` apps use the full server URL with the nonce; the server can't
+infer the app from a `file://` page. For apps hosted on the server's own
 origin, `/frbr.js` is enough.
 
 ### Auto-login at load
@@ -280,8 +283,7 @@ relative to the service's registered URL; the leading slash is optional.
 
 ## Notes
 
-- **App nonce** comes from `/api/apps` — a 10-character string. Put it in the
-  frbr.js URL. (Older installs may still hold 48-char hex nonces; both work.)
+- **App nonce** comes from `/api/apps` — a 10-character random string.
 - **Service URL** must match a service registered *and linked to your app*.
   Exact match; trailing slashes matter.
 - **`file://` apps**: the server must be running, and CORS must allow the `null`

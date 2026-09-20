@@ -15,15 +15,34 @@ import { McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-d
 
 const CFG = window.__HOMESLICE_CONFIG ?? {};
 const API = CFG.apiBase ?? "";
-const APP_NONCE = CFG.appNonce ?? null;
+let APP_NONCE = CFG.appNonce ?? null; // let: re-derived if the server couldn't resolve from Referer
 // The auth record guarding this page. 0 when the door is open — an app
 // behind the Anonymous record, or an instance still in setup.
-const GATE_ID = CFG.authRecordID ?? 0;
+let GATE_ID = CFG.authRecordID ?? 0; // let: re-derived alongside APP_NONCE
 
 // The origin our callback page will post from. The page posts to "*"
 // because it cannot know its opener's origin; the listener is the half
 // that can be strict, so this is where strictness goes.
 const FRBR_ORIGIN = new URL(API || window.location.href, window.location.href).origin;
+
+// resolveFromLocation: when the server couldn't derive our app from Referer
+// (a page that set referrerpolicy="no-referrer", or a same-origin script tag
+// the browser chose not to refer), tell the env endpoint where we are and
+// re-derive. /env.js?loc= is trusted by the server for app resolution only —
+// never the admin door — so this can recover a hosted app's nonce but not
+// the control panel's. No-op when the server already resolved it.
+async function resolveFromLocation() {
+  if (APP_NONCE) return;                       // server resolved it from Referer
+  if (window.location.origin !== FRBR_ORIGIN) return; // cross-origin: env.js can't help (file:// dev uses the explicit nonce)
+  try {
+    const r = await fetch(`${API}/env.js?loc=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+    if (!r.ok) return;
+    const cfg = await r.json();
+    if (cfg.appNonce) APP_NONCE = cfg.appNonce;
+    GATE_ID = cfg.authRecordID ?? GATE_ID;
+    Object.assign(CFG, cfg);                   // keep CFG in step for anything that reads it later
+  } catch { /* leave the server-rendered defaults; the page must use an explicit nonce */ }
+}
 
 // Peek at a JWT payload without verifying anything. Verification is the
 // server's job — this is only ever used to read a claim we already trust
@@ -399,24 +418,33 @@ function autoLoginTried() {
   try { return !!sessionStorage.getItem(AUTO_KEY); } catch { return false; }
 }
 
-if (
-  window.__FRBR_AUTO_LOGIN !== false &&
-  GATE_ID &&
-  window.location.origin === FRBR_ORIGIN &&
-  !readEntry(GATE_ID) &&
-  !autoLoginTried()
-) {
-  try { sessionStorage.setItem(AUTO_KEY, "1"); } catch {}
-  resolveDoor().then(door => {
-    if (door.type === "anonymous") return; // open door; nothing to ask
-    const here = window.location.pathname + window.location.search + window.location.hash;
-    return beginLogin(null, uuidv4(), null, here).then(d => {
-      if (d.type === "redirect") window.location.replace(d.url);
-    });
-  }).catch(err => console.warn("frbr auto-login skipped:", err?.message ?? err));
-} else if (GATE_ID && readEntry(GATE_ID)) {
-  try { sessionStorage.removeItem(AUTO_KEY); } catch {}
+function autoLoginMaybe() {
+  if (
+    window.__FRBR_AUTO_LOGIN !== false &&
+    GATE_ID &&
+    window.location.origin === FRBR_ORIGIN &&
+    !readEntry(GATE_ID) &&
+    !autoLoginTried()
+  ) {
+    try { sessionStorage.setItem(AUTO_KEY, "1"); } catch {}
+    resolveDoor().then(door => {
+      if (door.type === "anonymous") return; // open door; nothing to ask
+      const here = window.location.pathname + window.location.search + window.location.hash;
+      return beginLogin(null, uuidv4(), null, here).then(d => {
+        if (d.type === "redirect") window.location.replace(d.url);
+      });
+    }).catch(err => console.warn("frbr auto-login skipped:", err?.message ?? err));
+  } else if (GATE_ID && readEntry(GATE_ID)) {
+    try { sessionStorage.removeItem(AUTO_KEY); } catch {}
+  }
 }
+
+// Resolve the app from the hosting location first (re-deriving APP_NONCE /
+// GATE_ID when the server couldn't see Referer), then run the auto-login
+// decision on the settled values. Skipped entirely when the page opts out
+// via window.__FRBR_AUTO_LOGIN = false — and resolveFromLocation is a no-op
+// when the server already resolved a nonce.
+resolveFromLocation().finally(autoLoginMaybe);
 
 // ── ServiceProxy ────────────────────────────────────────────────────
 
