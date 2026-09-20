@@ -990,7 +990,7 @@ function AppsView({ session, apps, services, users, auth, adminAuthID, onRefresh
                         {isHosted(a) && <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'oklch(from var(--tone-green) var(--tone-bg-l) calc(c*.25) h)',color:'oklch(from var(--tone-green) var(--tone-fg-l) calc(c*.67) h)',border:'1px solid oklch(from var(--tone-green) var(--tone-border-l) calc(c*.33) h)',lineHeight:1.4}}>hosted</span>}
                       </div>
                       <span className="mono" style={{cursor:'pointer'}} onClick={()=>copyNonce(a.nonce)} title={`${a.nonce} — click to copy`}>
-                        {a.nonce.slice(0,8)}… <span style={{opacity:0.6,verticalAlign:'middle',marginLeft:2}}><Icon name="copy" size={12}/></span>
+                        {a.nonce} <span style={{opacity:0.6,verticalAlign:'middle',marginLeft:2}}><Icon name="copy" size={12}/></span>
                       </span>
                     </div>
                   </div>
@@ -2384,7 +2384,7 @@ function UpdateProgress({ events, onClose }) {
       case 'skip': text = `skipped — already applied${d.version ? ` (${d.version})` : ''}`; break;
       case 'done': text = d.download_url ? `built ${d.version} — downloading archive…` : `applied ${d.version} (${d.applied ?? '?'} ops)`; break;
       case 'summary': text = `done: ${d.applied ?? 0} applied, ${d.failed ?? 0} failed, ${d.skipped ?? 0} skipped`; break;
-      case 'feed_error': text = `error at ${d.step ?? 'feed'}${d.id ? ` [${d.id.slice(0, 8)}]` : ''}: ${d.message}`; break;
+      case 'feed_error': text = `error at ${d.step ?? 'feed'}${d.id ? ` [${d.id}]` : ''}: ${d.message}`; break;
       default: text = e.event;
     }
     const tone = e.event === 'feed_error' || e.event === 'error' ? 'var(--red)' :
@@ -2442,7 +2442,7 @@ function RemoteUpdates({ session, apps, services }) {
   };
 
   const remove = async (f) => {
-    if (!confirm(`Delete update feed "${f.name || f.url || f.id.slice(0, 8)}"?`)) return;
+    if (!confirm(`Delete update feed "${f.name || f.url || f.id}"?`)) return;
     try { await api(session, 'DELETE', '/api/updates/' + f.id); load(); toast('Feed deleted'); }
     catch (e) { toast(e.message, true); }
   };
