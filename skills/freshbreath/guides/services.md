@@ -280,8 +280,8 @@ relative to the service's registered URL; the leading slash is optional.
 
 ## Notes
 
-- **App nonce** comes from `/api/apps` — a 48-char hex string. Put it in the
-  frbr.js URL.
+- **App nonce** comes from `/api/apps` — a 10-character string. Put it in the
+  frbr.js URL. (Older installs may still hold 48-char hex nonces; both work.)
 - **Service URL** must match a service registered *and linked to your app*.
   Exact match; trailing slashes matter.
 - **`file://` apps**: the server must be running, and CORS must allow the `null`

@@ -474,7 +474,7 @@ func TestMCPServiceFileUnsupportedType(t *testing.T) {
 // callCentralTool runs as the synthetic Superuser, which has no email — so an
 // act token it mints can't be re-resolved by handleAct (a test artifact; in
 // production mcpUser returns a real emailable user). The tests below verify
-// the tool's minted token (verifyActToken) pins the right path+method, then
+// the tool's minted ticket (lookupActTicket) pins the right path+method, then
 // re-mint that exact path for a real Admin (Ada) and dispatch via httptest to
 // prove the chosen route yields the right bytes.
 
@@ -487,15 +487,16 @@ func toolResultJSON(t *testing.T, res *mcp.CallToolResult) map[string]interface{
 	return m
 }
 
-// actTokenPayloadFromURL verifies the act token embedded in a tool-returned
-// /api/act/<token> URL and returns its payload — proving the tool minted a
-// valid token (HMAC + expiry + scope) for the right operation.
-func actTokenPayloadFromURL(t *testing.T, srv *Server, fullURL string) *actTokenPayload {
+// actTokenPayloadFromURL looks up the act ticket embedded in a tool-returned
+// /api/act/<ticket> URL and returns its payload — proving the tool minted a
+// valid ticket (in-memory lookup + expiry + /api/ scope) for the right
+// operation.
+func actTokenPayloadFromURL(t *testing.T, srv *Server, fullURL string) *actTicketPayload {
 	t.Helper()
 	tok := strings.TrimPrefix(fullURL, srv.config.PublicBaseURL+"/api/act/")
-	p, err := srv.verifyActToken(tok)
+	p, err := srv.lookupActTicket(tok)
 	if err != nil {
-		t.Fatalf("verify tool-minted token: %v (url=%s)", err, fullURL)
+		t.Fatalf("lookup tool-minted ticket: %v (url=%s)", err, fullURL)
 	}
 	return p
 }
