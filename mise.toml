@@ -2,7 +2,7 @@
 env_shell_expand = true
 
 [tools]
-go = "1.26"
+go = "1.27"
 
 [env]
 # FTS5 is a build-time question for mattn/go-sqlite3: no tag, no full-text
