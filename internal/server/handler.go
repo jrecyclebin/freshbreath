@@ -408,31 +408,184 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-func (s *Server) renderEnvJS(r *http.Request) []byte {
-	scheme := "http"
+// schemeOf returns the request's scheme — "https" when the connection is
+// TLS or arrived behind a TLS-terminating proxy (X-Forwarded-Proto), else
+// "http". Shared by the nonce-resolution path and renderEnvJS so they agree
+// on what "same-origin" means; originAllowed computes the same thing inline.
+func schemeOf(r *http.Request) string {
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
+		return "https"
 	}
-	apiBase := scheme + "://" + r.Host
+	return "http"
+}
 
-	// Use the request's nonce (header or query param), falling back to admin.
-	appNonce := r.Header.Get("X-App-Nonce")
-	if appNonce == "" {
-		appNonce = r.URL.RawQuery
+// isSubdomainHost reports whether host is a subdomain-shaped hostname — one
+// with a dot that is neither an IP literal nor "localhost". Such hosts are
+// FRBR-15's territory (per-app subdomains); until that lands, location
+// resolution fails closed for them rather than guessing via the path slug.
+func isSubdomainHost(host string) bool {
+	if host == "" || host == "localhost" {
+		return false
 	}
-	if appNonce == "" {
-		appNonce = s.adminNonce
+	if net.ParseIP(host) != nil {
+		return false
 	}
+	return strings.Contains(host, ".")
+}
+
+// resolveAppNonce determines the app nonce a request is acting for, without
+// the old admin fallback. Resolution order:
+//
+//  1. X-App-Nonce header (API calls, file:// dev override, the control panel).
+//     The admin nonce is secret (60-bit, minted at startup), so holding it is
+//     the proof the caller is the control panel — no path check needed.
+//  2. bare query nonce (/frbr.js?XXXX with no key=value) — back-compat for
+//     script tags that embed the nonce directly.
+//  3. location-based, via Referer (browser-set, same-origin, trustworthy) or
+//     frbr.js's ?loc= report (client-supplied, honored for app resolution but
+//     never trusted to claim the admin door). See nonceForLocation for the
+//     subdomain / alternate-port fail-closed rules.
+//
+// Unknown locations fail closed (return ""); admin is reachable only via the
+// explicit header or a /control path in a trusted Referer. FRBR-15 will fold
+// subdomain and per-app-port maps into nonceForLocation; until then those
+// host shapes fail closed here on purpose.
+func (s *Server) resolveAppNonce(r *http.Request) string {
+	if h := r.Header.Get("X-App-Nonce"); h != "" {
+		if h == s.adminNonce {
+			return h
+		}
+		if _, err := s.store.GetApp(h); err == nil {
+			return h
+		}
+	}
+	// Back-compat bare query nonce: /frbr.js?XXXX (no key=value). A named
+	// query like ?loc=... has '=', so it can't be mistaken for a nonce here.
+	if rq := r.URL.RawQuery; rq != "" && !strings.Contains(rq, "=") {
+		if _, err := s.store.GetApp(rq); err == nil {
+			return rq
+		}
+	}
+	// Referer is the trustworthy location signal: same-origin script fetches
+	// carry the page's real URL, and a page cannot fake Referer to a false
+	// value (only suppress it). A /control Referer may resolve to admin.
+	if ref := r.Header.Get("Referer"); ref != "" {
+		if nonce, ok := s.nonceForLocation(ref, r); ok {
+			return nonce
+		}
+	}
+	// ?loc= is frbr.js's report of window.location — client-supplied, so it
+	// resolves hosted apps but never the admin door (a hostile same-origin
+	// page could otherwise grab admin with ?loc=/control/). When Referer is
+	// suppressed (referrerpolicy="no-referrer"), this is the only signal.
+	if loc := r.URL.Query().Get("loc"); loc != "" {
+		if nonce, ok := s.nonceForLocation(loc, r); ok && nonce != s.adminNonce {
+			return nonce
+		}
+	}
+	return ""
+}
+
+// nonceForLocation resolves a page location (a full URL from Referer, or a
+// path from frbr.js's ?loc= report) to an app nonce via the hosted-routes
+// slug map. It mirrors handleHostedApp's slug extraction, including the
+// @slot suffix strip. "control" resolves to the admin nonce.
+//
+// Two explicit fail-closed rules, both FRBR-15 territory:
+//
+//   - Same-origin: a full-URL location (Referer) must share scheme+host+port
+//     with the request. A cross-origin location is not ours to resolve; this
+//     also rejects alternate-port locations (per-app ports are FRBR-15).
+//   - Subdomain shape: a host with a dot (not an IP, not localhost) is a
+//     subdomain; per-app subdomains are FRBR-15. Until that lands, fail
+//     closed so a subdomain-hosted page doesn't accidentally resolve via
+//     the path slug.
+//
+// FRBR-15 will relax both: consult a subdomain→app map and a port→app map
+// before the path-slug fallback, and accept those origins as known.
+func (s *Server) nonceForLocation(locURL string, r *http.Request) (string, bool) {
+	if locURL == "" {
+		return "", false
+	}
+	u, err := url.Parse(locURL)
+	if err != nil {
+		return "", false
+	}
+	if u.Host == "" {
+		// Path-only report (?loc=/myapp/). Anchor to the request's own origin
+		// — same-origin by construction, so the checks below pass through.
+		u.Scheme = schemeOf(r)
+		u.Host = r.Host
+	} else if u.Scheme != schemeOf(r) || u.Host != r.Host {
+		// Cross-origin location (also catches alternate ports). Not ours.
+		return "", false
+	}
+	if isSubdomainHost(u.Hostname()) {
+		return "", false
+	}
+	path := strings.TrimPrefix(u.Path, "/")
+	slug, _, _ := strings.Cut(path, "/")
+	if i := strings.IndexByte(slug, '@'); i >= 0 {
+		slug = slug[:i]
+	}
+	if slug == "" {
+		return "", false
+	}
+	if slug == "control" {
+		return s.adminNonce, true
+	}
+	s.hostedMu.RLock()
+	ha, ok := s.hostedRoutes[slug]
+	s.hostedMu.RUnlock()
+	return ha.nonce, ok
+}
+
+// envConfig is the structured form of the frbr.js config blob. renderEnvJS
+// emits it as a `window.__HOMESLICE_CONFIG = {...};` assignment for script tags;
+// handleEnv also emits it as JSON when frbr.js fetches /env.js?loc=... to
+// re-derive the nonce after a Referer-suppressed load (see handleEnv).
+type envConfig struct {
+	APIBase        string `json:"apiBase"`
+	AuthRequired   bool   `json:"authRequired"`
+	AuthRecordID   int64  `json:"authRecordID"`
+	AuthRecordName string `json:"authRecordName"`
+	AuthKind       string `json:"authKind"`
+	AppNonce       string `json:"appNonce"`
+	Version        string `json:"version"`
+	Commit         string `json:"commit"`
+}
+
+func (s *Server) renderEnvJS(r *http.Request) []byte {
+	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = %s;\n",
+		mustJSON(s.envConfig(r))))
+}
+
+// envConfig computes the config blob for a request. It's the single source
+// for both the script-tag JS form (renderEnvJS) and the JSON form frbr.js
+// fetches when Referer is suppressed (handleEnv with ?loc=).
+func (s *Server) envConfig(r *http.Request) envConfig {
+	apiBase := schemeOf(r) + "://" + r.Host
+
+	// Resolve the app nonce from the request. See resolveAppNonce for the
+	// full order; the headline is that the admin nonce is reachable ONLY via
+	// an explicit header or a /control Referer — an unknown location fails
+	// closed (empty nonce, no gate) rather than silently logging in as the
+	// admin door. A hosted page that includes /frbr.js with no nonce resolves
+	// its app from where it's hosted (Referer, or frbr.js's ?loc= report).
+	appNonce := s.resolveAppNonce(r)
 
 	// The gate for this door: the admin record for the control panel, the
-	// app's own for a hosted app. The id matters as much as the name —
-	// it is the store key, so a page can tell whether it already holds a
-	// live credential for its gate without asking the server.
+	// app's own for a hosted app, nothing for an unresolved location. The id
+	// matters as much as the name — it is the store key, so a page can tell
+	// whether it already holds a live credential for its gate without asking
+	// the server.
 	var gate *db.AuthRecord
-	if app, err := s.store.GetApp(appNonce); err == nil {
-		gate, _ = s.resolveAppGate(app)
-	} else {
+	if appNonce == s.adminNonce {
 		gate, _ = s.adminAuthRecord()
+	} else if appNonce != "" {
+		if app, err := s.store.GetApp(appNonce); err == nil {
+			gate, _ = s.resolveAppGate(app)
+		}
 	}
 	authRequired := false
 	authRecordID := int64(0)
@@ -444,11 +597,39 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 		authRecordName = gate.Name
 		authKind = gate.Kind
 	}
-	return []byte(fmt.Sprintf("window.__HOMESLICE_CONFIG = { apiBase: %q, authRequired: %v, authRecordID: %d, authRecordName: %q, authKind: %q, appNonce: %q, version: %q, commit: %q };\n",
-		apiBase, authRequired, authRecordID, authRecordName, authKind, appNonce, s.version, s.commit))
+	return envConfig{
+		APIBase:        apiBase,
+		AuthRequired:   authRequired,
+		AuthRecordID:   authRecordID,
+		AuthRecordName: authRecordName,
+		AuthKind:       authKind,
+		AppNonce:       appNonce,
+		Version:        s.version,
+		Commit:         s.commit,
+	}
+}
+
+// mustJSON marshals v or returns the literal "null" on error (never panics;
+// used only for values we build ourselves, so errors are unreachable).
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "null"
+	}
+	return string(b)
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
+	// A ?loc= query marks a programmatic fetch from frbr.js re-deriving its
+	// nonce after a Referer-suppressed load (script tags never set ?loc=).
+	// Hand it JSON instead of the JS assignment so the client can .json() it;
+	// the same envConfig drives both shapes.
+	if r.URL.Query().Has("loc") {
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := json.Marshal(s.envConfig(r))
+		w.Write(b)
+		return
+	}
 	w.Header().Set("Content-Type", "application/javascript")
 	w.Write(s.renderEnvJS(r))
 }
