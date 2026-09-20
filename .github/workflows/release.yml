@@ -81,6 +81,7 @@ jobs:
           path-type: inherit
 
       - name: Install MinGW (Windows arm64 only)
+        id: msys2-arm64
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
         uses: msys2/setup-msys2@v2
         with:
@@ -88,37 +89,27 @@ jobs:
           update: true
           install: mingw-w64-clang-aarch64-gcc
 
-      # go-sqlite3's FTS5 file carries an unconditional `#cgo LDFLAGS: -lm`
-      # (sqlite3_opt_fts5.go) with no platform guard, because on every Unix
-      # libm is a real library. Windows has no separate libm — the math
-      # functions live in the UCRT — so whether `-lm` is harmless depends
-      # entirely on which toolchain sees it. MinGW ships an empty `libm.a`
-      # kept alive for exactly this reason, which is why the x64 job links
-      # fine. The arm64 runner's `clang` resolves to the preinstalled LLVM,
-      # which targets the MSVC ABI and drives lld-link, and there `-lm`
-      # means `m.lib` — a file no one has ever shipped:
-      #   lld-link: error: could not open 'm.lib'
-      # So we hand it the stub MinGW would have. The symbols still come from
-      # the UCRT; this archive exists only to be found. Swapping in msys2's
-      # clangarm64 toolchain instead would be the tidier fix, but the MSVC
-      # clang is the toolchain that built every windows-arm64 release
-      # through v0.6.7, and a missing stub library is no reason to go
-      # replace a linker that works.
-      - name: Stub libm for MSVC-ABI clang (Windows arm64 only)
+      # Windows arm64 toolchain: build with msys2's clangarm64 clang, not the
+      # runner's preinstalled LLVM. Go's cgo appends `-mthreads` to the C
+      # compiler on Windows, and the preinstalled clang targets the MSVC ABI
+      # (aarch64-pc-windows-msvc), which rejects `-mthreads` as unsupported
+      # (golang/go#80290; Go 1.27+ restricts the flag to MinGW, but the
+      # MinGW toolchain is the tidier home here regardless — see below).
+      # msys2's clangarm64 clang targets the GNU/MinGW ABI
+      # (aarch64-w4-windows-gnu), where `-mthreads` is accepted — and it
+      # ships a real libm.a, so the old MSVC `-lm` stub (a missing `m.lib`
+      # workaround) is gone too: keeping it would shadow the real libm.a
+      # under the GNU linker's `-lm` search.
+      #
+      # Put msys2's clangarm64/bin ahead of the runner's preinstalled LLVM on
+      # PATH so the bare `clang` in matrix.cc resolves to msys2's. GITHUB_PATH
+      # entries are prepended, so this wins over the system clang for the
+      # build step (and anything else that says `clang`). The install step
+      # only runs for arm64, so the x64 job's PATH is untouched.
+      - name: Put msys2 clangarm64 on PATH (Windows arm64 only)
         if: matrix.goos == 'windows' && matrix.goarch == 'arm64'
         shell: bash
-        run: |
-          set -euo pipefail
-          stub="$RUNNER_TEMP/libm-stub"
-          mkdir -p "$stub"
-          # A real object with a symbol in it, rather than an empty archive:
-          # an archive with no members is a thing lld-link may or may not
-          # accept quietly, and this is not the place to find out.
-          echo 'int _freshbreath_libm_stub(void) { return 0; }' > "$stub/stub.c"
-          clang -c "$stub/stub.c" -o "$stub/stub.o"
-          llvm-lib "-out:$(cygpath -w "$stub/m.lib")" "$(cygpath -w "$stub/stub.o")"
-          echo "CGO_LDFLAGS=-L$(cygpath -m "$stub")" >> "$GITHUB_ENV"
-          echo "→ libm stub at $stub"
+        run: echo "${{ steps.msys2-arm64.outputs.msys2-location }}/clangarm64/bin" >> "$GITHUB_PATH"
 
       - name: Install zip & unzip
         if: matrix.goos == 'windows'
@@ -183,13 +174,23 @@ jobs:
       - name: List artifacts
         run: ls -lh dist/
 
+      # Plain `gh release upload` rather than softprops/action-gh-release: that
+      # action PATCHes the release (name, body, target commit — all unchanged)
+      # before it uploads a single byte, and GitHub has taken to answering
+      # that PATCH with a 403 for GITHUB_TOKEN even with contents: write
+      # (softprops/action-gh-release#836). We only ever wanted to attach
+      # files; the release is yours to write, and the job shouldn't be able
+      # to overwrite it by accident anyway.
       - name: Upload release assets
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*-setup.exe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            dist/*.tar.gz dist/*.zip dist/*-setup.exe
 
   # Say it out loud in Slack. Only after `release`, so the ping means the
   # binaries are actually attached — a notification that fires on a release
