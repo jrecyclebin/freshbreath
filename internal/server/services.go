@@ -679,7 +679,7 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
 	return josejwt.Signed(sig).Claims(claims).Serialize()
 }
 
-func (s *Server) makeRefreshCookie(w http.ResponseWriter, data freshbreathRefreshData) (string, error) {
+func (s *Server) makeRefreshCookie(w http.ResponseWriter, r *http.Request, data freshbreathRefreshData) (string, error) {
 	rt, err := s.mintRefreshToken(data)
 	if err != nil {
 		return "", err
@@ -693,13 +693,27 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, data freshbreathRefres
 	// apps served from a foreign origin registered in the app config; the
 	// cross-site CSRF surface this opens is closed by the app/record
 	// authorization in handleRefreshTokenGrant rather than by SameSite.
+	//
+	// Secure flag: a SameSite=None cookie MUST also carry Secure or the
+	// spec-compliant browser refuses to store it at all (R10). The old check
+	// (TLSCertFile != "") broke the recommended TLS-terminating-proxy
+	// deployment, where the app speaks plain HTTP to the proxy and TLS
+	// terminates upstream — there TLSCertFile is empty, yet the request truly
+	// arrived over https, which the proxy signals via X-Forwarded-Proto. We
+	// therefore consult the request the same way schemeOf does (r.TLS != nil
+	// || X-Forwarded-Proto == "https"), and additionally keep TLSCertFile as a
+	// belt-and-suspenders fallback. X-Forwarded-Proto is client-controllable
+	// when NOT behind a proxy, but spoofing it to "https" over plain HTTP just
+	// makes the browser refuse the Secure cookie — self-defeating, no DoS
+	// or gain — so no extra validation is warranted here.
+	secure := schemeOf(r) == "https" || s.config.TLSCertFile != ""
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    rt,
 		Path:     "/oauth/token/" + strconv.FormatInt(data.AuthID, 10),
 		MaxAge:   int(refreshTokenTTL.Seconds()),
 		HttpOnly: true,
-		Secure:   s.config.TLSCertFile != "",
+		Secure:   secure,
 		SameSite: http.SameSiteNoneMode,
 	})
 	return rt, nil

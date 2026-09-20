@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -1340,13 +1341,84 @@ func hasRefreshCookie(rr *httptest.ResponseRecorder) bool {
 // or "" if none was set. The path is scoped by auth record id so that refresh
 // tokens for several records occupy distinct cookie slots.
 func refreshCookiePath(rr *httptest.ResponseRecorder) string {
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == "refresh_token" {
-			return c.Path
-		}
+	if c := findRefreshCookie(rr); c != nil {
+		return c.Path
 	}
 	return ""
 }
+
+// findRefreshCookie returns the refresh_token Set-Cookie from rr, or nil if
+// none was set. Used by the Secure-flag assertions.
+func findRefreshCookie(rr *httptest.ResponseRecorder) *http.Cookie {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "refresh_token" {
+			return c
+		}
+	}
+	return nil
+}
+
+// R10 (FRBR-12): the refresh cookie is SameSite=None, and a spec-compliant
+// browser refuses to store a SameSite=None cookie that lacks Secure. The old
+// Secure guard was s.config.TLSCertFile != "", which left Secure false in the
+// recommended TLS-terminating-proxy deployment (app speaks plain HTTP to the
+// proxy; TLS terminates upstream) — there the request truly arrived over https,
+// signalled by X-Forwarded-Proto, but the cookie's Secure flag stayed false and
+// the browser silently dropped the refresh cookie on every login. The fix lets
+// the request's own scheme (schemeOf) decide, with TLSCertFile as a fallback.
+//
+// This pins the server side of the contract across the deployment shapes in
+// the ticket's impact matrix: default localhost (byte-identical to before the
+// fix), native TLS, and TLS-terminating proxy (the repair).
+func TestRefreshCookieSecureFlag(t *testing.T) {
+	srv := newTestServer(t)
+	data := freshbreathRefreshData{Subject: "frbr:1", UserEmail: "r10@example.com", AuthID: 1}
+
+	cases := []struct {
+		name      string
+		nativeTLS bool   // r.TLS != nil
+		forwarded string // X-Forwarded-Proto header
+		certFile  string // s.config.TLSCertFile
+		wantSecure bool
+	}{
+		{"default localhost http", false, "", "", false},
+		{"proxy terminates TLS (X-Forwarded-Proto: https)", false, "https", "", true},
+		{"proxy forwards http (misconfigured/not TLS)", false, "http", "", false},
+		{"native TLS", true, "", "", true},
+		{"native TLS plus forwarded https", true, "https", "", true},
+		{"TLSCertFile set, plain direct (no r.TLS, no proxy)", false, "", "/srv/cert.pem", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv.config.TLSCertFile = tc.certFile
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/oauth/token/1", strings.NewReader(""))
+			if tc.nativeTLS {
+				req.TLS = &tls.ConnectionState{}
+			}
+			if tc.forwarded != "" {
+				req.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			}
+
+			if _, err := srv.makeRefreshCookie(rr, req, data); err != nil {
+				t.Fatalf("makeRefreshCookie: %v", err)
+			}
+			c := findRefreshCookie(rr)
+			if c == nil {
+				t.Fatal("no refresh_token cookie set")
+			}
+			// SameSite=None must hold in every shape — that is the invariant the
+			// Secure flag exists to rescue, so assert it stays put too.
+			if c.SameSite != http.SameSiteNoneMode {
+				t.Errorf("SameSite = %v, want SameSiteNoneMode", c.SameSite)
+			}
+			if c.Secure != tc.wantSecure {
+				t.Errorf("Secure = %v, want %v", c.Secure, tc.wantSecure)
+			}
+		})
+	}
+}
+
 
 // ── Refresh token rotation (token families) ─────────────────────────
 

@@ -164,7 +164,7 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	} else {
 		rd.FamilyID, rd.JTI = familyID, jti
 	}
-	if _, err := s.makeRefreshCookie(w, rd); err != nil {
+	if _, err := s.makeRefreshCookie(w, r, rd); err != nil {
 		return "", err
 	}
 

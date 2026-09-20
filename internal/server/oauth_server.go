@@ -580,7 +580,7 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 
 	// Initial issuance is consumed by the client exchanging the code
 	// (CLI/MCP), so the refresh token goes in the body.
-	os.writeTokenResponse(w, pending.fbToken, refreshData, "", true)
+	os.writeTokenResponse(w, r, pending.fbToken, refreshData, "", true)
 }
 
 // ── Refresh Token Grant ─────────────────────────────────────────────
@@ -773,7 +773,7 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 	newRefreshData.FamilyID = fam.ID
 	newRefreshData.JTI = nextJTI
 
-	os.writeTokenResponse(w, accessToken, newRefreshData, "", fromForm)
+	os.writeTokenResponse(w, r, accessToken, newRefreshData, "", fromForm)
 }
 
 // refreshLegs re-mints an access token from refresh data: the identity is
@@ -887,10 +887,10 @@ func (os *oauthServer) refreshLegs(data *freshbreathRefreshData) (string, freshb
 // browser flows ride the cookie, so echoing it there would only hand a
 // readable copy to any script on the page — defeating HttpOnly. Callers pass
 // false for cookie-sourced (browser) refreshes.
-func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, accessToken string, refreshData freshbreathRefreshData, scope string, deliverRefreshInBody bool) {
+func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, r *http.Request, accessToken string, refreshData freshbreathRefreshData, scope string, deliverRefreshInBody bool) {
 	expiresIn := int(accessTokenTTL.Seconds())
 
-	rt, err := os.server.makeRefreshCookie(w, refreshData)
+	rt, err := os.server.makeRefreshCookie(w, r, refreshData)
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", "refresh token issuance failed")
 		return
