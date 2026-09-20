@@ -54,6 +54,7 @@ func newTestServer(t *testing.T) *Server {
 		httpClient:     &http.Client{},
 		oidcProviders:  make(map[int64]*oidc.Provider),
 		hostedRoutes:   make(map[string]hostedApp),
+		actTickets:     actTickets{tix: make(map[string]actTicketPayload)},
 		lastSeenAt:     make(map[int64]time.Time),
 		localKey:       localKey,
 		agentMgr:       agentMgr,

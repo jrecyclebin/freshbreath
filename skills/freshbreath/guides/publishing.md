@@ -62,10 +62,9 @@ A whole-file `read_app_file` (no `offset`/`limit`) on a file **larger than
 size, content_type, max_inline_bytes }` instead of the content.
 
 **`"http"` — return a URL, fetch it yourself.** The tool returns a
-short-lived URL instead of inlining. The URL is an *act token*: signed,
-scoped to that one file and HTTP method, good for **10 minutes**, and
-self-authenticating — no auth header needed. It still resolves to your
-user, so your app/role permissions apply at the other end.
+short-lived URL, good for **10 minutes**. No auth header needed —
+the ticket *is* the auth, granting you access to read or write the specific
+file.
 
 - **`read_app_file`, `transport:"http"`** → `{ url, method:"GET", size,
   content_type }`. GET the URL. Incompatible with `offset`/`limit` — the
@@ -81,7 +80,7 @@ curl.
 
 ## Notes
 
-- **App nonce** is the 48-char hex id from the Apps list (or `/api/apps`).
+- **App nonce** is the 10-character id from the Apps list (or `/api/apps`).
 - **Replace, not merge** — writing a file replaces it; writing `index.html`
   replaces the previous entry point. If you want incremental file-level updates
   to a *remote* host instead, that's the SSH file sync API. See `guides/ssh.md`.

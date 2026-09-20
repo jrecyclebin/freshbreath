@@ -49,6 +49,7 @@ type Server struct {
 	lastSeenMu        sync.Mutex
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedMu          sync.RWMutex
+	actTickets        actTickets // /api/act capability tickets (in-memory only)
 	virtualMCPs       *virtualMCPRegistry                // slug → MCP server entries
 	mcpAuthPending    *sync.Map                          // key → *mcpPendingAuth (MCP OAuth flow state)
 	oauthSrv          *oauthServer                       // Freshbreath OAuth authorization server
@@ -199,6 +200,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		gitGw:          sshkit.NewGitGateway(agentMgr, store),
 		virtualMCPs:    newVirtualMCPRegistry(),
 		mcpAuthPending: &sync.Map{},
+		actTickets:     actTickets{tix: make(map[string]actTicketPayload)},
 	}
 	s.oauthSrv = newOAuthServer(s)
 	s.SetupRoutes()
@@ -212,6 +214,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 			s.sessionMgr.ExpireSessions()
 			s.store.DeleteExpiredRefreshFamilies(time.Now())
 			s.appDBSweep()
+			s.sweepActTickets(time.Now())
 		}
 	}()
 
