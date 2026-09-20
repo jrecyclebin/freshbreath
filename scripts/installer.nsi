@@ -50,6 +50,7 @@ InstallDir "$PROGRAMFILES64\Fresh Breath"
 InstallDirRegKey HKLM "Software\freshbreath" "InstallDir"
 
 Var DataDir
+Var IsUpgrade
 
 !define MUI_ABORTWARNING
 
@@ -97,63 +98,119 @@ FunctionEnd
 
 Section "freshbreath" SecMain
   SectionIn RO
-  SetOutPath "$INSTDIR"
 
+  ; Detect an existing install: is the service already registered? sc query
+  ; returns 0 if the service exists (any state — running, stopped, disabled),
+  ; non-zero if it doesn't. A registered service means a previous install,
+  ; and we upgrade it in place — preserving its nssm tuning — instead of the
+  ; old nuclear stop/remove/re-register path that lost every `nssm set` the
+  ; operator had applied by hand.
+  StrCpy $IsUpgrade 0
+  nsExec::ExecToLog 'sc query "${SERVICE_NAME}"'
+  Pop $0
+  ${If} $0 == 0
+    StrCpy $IsUpgrade 1
+    DetailPrint "Existing Fresh Breath service found — upgrading in place."
+  ${Else}
+    DetailPrint "No existing service — fresh install."
+  ${EndIf}
+
+  ; On upgrade, stop the running service BEFORE copying files. Windows
+  ; locks a running .exe against overwrite, and the service holds
+  ; freshbreath.exe open while it runs. The old nssm.exe is still on disk
+  ; at this point, so use it to stop the service. nssm stop sends a graceful
+  ; stop control; if the service won't die within nssm's window, taskkill /F
+  ; is the force fallback (logged so a stubborn stop isn't a silent mystery).
+  ${If} $IsUpgrade == 1
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" stop "${SERVICE_NAME}"'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "nssm stop did not confirm (exit $0) — taskkill fallback"
+      nsExec::ExecToLog 'taskkill /F /IM freshbreath.exe'
+      Pop $0
+    ${EndIf}
+  ${EndIf}
+
+  ; Rollback artifact: rename the previous binary out of the way before the
+  ; new copy lands. A failed File copy then leaves freshbreath.exe.old for
+  ; manual recovery instead of a missing binary the service points at. The
+  ; stale .old from a prior upgrade is cleared first, so at most one lives
+  ; here at a time. (Rename works even on a just-stopped service's exe; on a
+  ; fresh install there's nothing to rename, so this block is skipped.)
+  ${If} $IsUpgrade == 1
+    Delete "$INSTDIR\freshbreath.exe.old"
+    Rename "$INSTDIR\freshbreath.exe" "$INSTDIR\freshbreath.exe.old"
+  ${EndIf}
+
+  ; Copy payload. On upgrade this overwrites everything except the .old.
+  SetOutPath "$INSTDIR"
   File "${STAGING}\freshbreath.exe"
   File "${STAGING}\nssm.exe"
   File "${STAGING}\README.txt"
   File /r "${STAGING}\web"
   File /r "${STAGING}\skills"
 
+  ; Data dir: safe on both paths. File /r only writes files from the
+  ; staging archive (just a README.txt from build-installer.sh); it never
+  ; deletes existing files, so the runtime-created DB (freshbreath.db) and
+  ; uploaded app content are untouched on upgrade.
   SetOutPath "$DataDir"
   ; Optional out-of-band payload (see build-installer.sh).
   File /r "${STAGING}\data\*.*"
 
-  ; Data directory: LocalService needs an explicit grant, ProgramData's
-  ; default ACLs only give BUILTIN\Users read & execute.
+  ; Data directory ACL: LocalService needs an explicit grant — ProgramData's
+  ; default ACLs only give BUILTIN\Users read & execute. Harmless to re-run
+  ; on upgrade (re-asserts the same grant).
   nsExec::ExecToLog 'icacls "$DataDir" /grant "${SERVICE_ACCOUNT}:(OI)(CI)M"'
   Pop $0
 
-  ; Stop/remove any previous install of the service so re-running the
-  ; installer (e.g. an upgrade) doesn't fail on an already-registered name.
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" stop "${SERVICE_NAME}"'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" remove "${SERVICE_NAME}" confirm'
-  Pop $0
+  ; Fresh install only: register the service and apply all nssm settings.
+  ; Upgrade skips this entire block — the service is already registered
+  ; and the operator's nssm tuning (anything set by hand after the first
+  ; install, or any future knob we don't know about yet) is preserved. No
+  ; nssm remove, no re-install, no re-set.
+  ${If} $IsUpgrade == 0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" install "${SERVICE_NAME}" "$INSTDIR\freshbreath.exe"'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "nssm install failed (exit $0)"
+      Abort "Could not install the Fresh Breath service."
+    ${EndIf}
 
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" install "${SERVICE_NAME}" "$INSTDIR\freshbreath.exe"'
-  Pop $0
-  ${If} $0 != 0
-    DetailPrint "nssm install failed (exit $0)"
-    Abort "Could not install the Fresh Breath service."
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppDirectory "$INSTDIR"'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppEnvironmentExtra "FRBR_DATA_DIR=$DataDir"'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppStdout "$DataDir\freshbreath.log"'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppStderr "$DataDir\freshbreath.log"'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppRotateFiles 1'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" DisplayName "Fresh Breath"'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" Description "Fresh Breath personal app server and MCP gateway"'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" Start SERVICE_AUTO_START'
+    Pop $0
+    nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" ObjectName "${SERVICE_ACCOUNT}" ""'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "nssm set ObjectName failed (exit $0)"
+      Abort "Could not configure the Fresh Breath service account."
+    ${EndIf}
   ${EndIf}
 
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppDirectory "$INSTDIR"'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppEnvironmentExtra "FRBR_DATA_DIR=$DataDir"'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppStdout "$DataDir\freshbreath.log"'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppStderr "$DataDir\freshbreath.log"'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" AppRotateFiles 1'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" DisplayName "Fresh Breath"'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" Description "Fresh Breath personal app server and MCP gateway"'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" Start SERVICE_AUTO_START'
-  Pop $0
-  nsExec::ExecToLog '"$INSTDIR\nssm.exe" set "${SERVICE_NAME}" ObjectName "${SERVICE_ACCOUNT}" ""'
-  Pop $0
-  ${If} $0 != 0
-    DetailPrint "nssm set ObjectName failed (exit $0)"
-    Abort "Could not configure the Fresh Breath service account."
-  ${EndIf}
-
+  ; Start (or restart) the service. On a fresh install this starts the
+  ; just-registered service; on upgrade this restarts the preserved service
+  ; with the new binary. The start type (auto-start) was set on the fresh
+  ; install and is held by the SCM, so it survives the upgrade untouched.
   nsExec::ExecToLog '"$INSTDIR\nssm.exe" start "${SERVICE_NAME}"'
   Pop $0
 
+  ; Registry writes: unconditional (both fresh and upgrade). The version
+  ; bump and install-location refresh run on every pass, so an upgrade over
+  ; vN rewrites DisplayVersion to vN+1 and refreshes the uninstall key.
   WriteRegStr HKLM "Software\freshbreath" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\freshbreath" "DataDir" "$DataDir"
 
@@ -179,6 +236,7 @@ Section "Uninstall"
   Pop $0
 
   Delete "$INSTDIR\freshbreath.exe"
+  Delete "$INSTDIR\freshbreath.exe.old"
   Delete "$INSTDIR\nssm.exe"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\uninstall.exe"
