@@ -277,11 +277,11 @@ func (s *Server) mcpUser(req *mcp.CallToolRequest) (*db.User, error) {
 const mcpInlineMaxBytes = 10 * 1024
 
 // actTokenTransport is the closed enum for the transfer tools' `transport`
-// option. "mcp" (default) returns bytes inline; "http" mints an act-token URL
+// option. "inline" returns bytes inline; "http" mints an act-token URL
 // the client fetches/PUTs over HTTP. Named to accept future sensible additions
 // without restructuring.
 const (
-	actTokenTransportMCP  = "mcp"
+	actTokenTransportInline  = "inline"
 	actTokenTransportHTTP = "http"
 )
 
@@ -732,7 +732,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// read_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "read_app_file",
-		Description: "Read all or part of a file from an app's web directory. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded.",
+Description: "Read all or part of a file from an app's web directory. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -740,9 +740,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
 				"offset":    map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
 				"limit":     map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to fetch/PUT over HTTP — for large files)"},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to fetch over HTTP sidechannel — for saving as files)"},
 			},
-			"required": []string{"nonce", "path"},
+			"required": []string{"nonce", "path", "transport"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -759,7 +759,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		chunked := offset != 0 || limit != 0
 
 		switch transport {
-		case "", actTokenTransportMCP:
+		case actTokenTransportInline:
 			if chunked {
 				data, err := s.coreReadAppFile(user, nonce, path, offset, limit)
 				if err != nil {
@@ -783,7 +783,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 					return mcpToolError("%v", merr), nil
 				}
 				return mcpToolResult(map[string]interface{}{
-					"error":            "file too large for inline MCP response",
+					"error":            "file too large for inline MCP response - use \"http\" transport or read in chunks",
 					"url":              u,
 					"method":           http.MethodGet,
 					"size":             size,
@@ -813,24 +813,24 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			})
 
 		default:
-			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
+			return mcpToolError("transport must be \"inline\" or \"http\", got %q", transport), nil
 		}
 	})
 
 	// write_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_app_file",
-		Description: "Write or patch a file in an app's web directory. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once. For sending files, use the http transport with something like curl.",
+Description: "Write or patch a file in an app's web directory. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"nonce":     map[string]interface{}{"type": "string", "description": "App nonce"},
 				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
-				"content":   map[string]interface{}{"type": "string", "description": "New file content"},
+				"new_text":  map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
 				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to PUT over HTTP — for large files). Incompatible with old_text."},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files). Incompatible with old_text."},
 			},
-			"required": []string{"nonce", "path", "content"},
+			"required": []string{"nonce", "path", "transport"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -841,12 +841,15 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
 		path, _ := args["path"].(string)
-		content, _ := args["content"].(string)
+		content, _ := args["new_text"].(string)
 		oldText, _ := args["old_text"].(string)
 		transport, _ := args["transport"].(string)
 
 		switch transport {
-		case "", actTokenTransportMCP:
+		case actTokenTransportInline:
+			if content == "" && oldText == "" {
+				return mcpToolError("transport:\"inline\" requires new_text or old_text"), nil
+			}
 			if err := s.coreWriteAppFile(user, nonce, path, []byte(content), oldText); err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -868,7 +871,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			return mcpToolResult(map[string]string{"url": u, "method": http.MethodPut})
 
 		default:
-			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
+			return mcpToolError("transport must be \"inline\" or \"http\", got %q", transport), nil
 		}
 	})
 
@@ -941,16 +944,16 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 	// read_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "read_service_file",
-		Description: "Read all or part of a virtual or task service's definition file. Admin+ only.",
+Description: "Read all or part of a virtual or task service's definition file. Admin+ only. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"name":      map[string]interface{}{"type": "string", "description": "Service name"},
 				"offset":    map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
 				"limit":     map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to fetch over HTTP — for large files)"},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to fetch over HTTP sidechannel — for saving as files)"},
 			},
-			"required": []string{"name"},
+			"required": []string{"name", "transport"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -975,7 +978,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		pathQuery := serviceFileActPath(svc.ID)
 
 		switch transport {
-		case "", actTokenTransportMCP:
+		case actTokenTransportInline:
 			if chunked {
 				data, _, err := s.coreReadServiceFile(user, svc.ID, offset, limit)
 				if err != nil {
@@ -997,7 +1000,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 					return mcpToolError("%v", merr), nil
 				}
 				return mcpToolResult(map[string]interface{}{
-					"error":            "file too large for inline MCP response",
+					"error":            "file too large for inline MCP response - use \"http\" transport or read in chunks",
 					"url":              u,
 					"method":           http.MethodGet,
 					"size":             size,
@@ -1027,23 +1030,23 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			})
 
 		default:
-			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
+			return mcpToolError("transport must be \"inline\" or \"http\", got %q", transport), nil
 		}
 	})
 
 	// write_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_service_file",
-		Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced. With old_text, the single occurrence of old_text is replaced with content. An error is returned if old_text is not found or appears more than once. For sending files, use the http transport with something like curl. Admin+ only.",
+Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band. Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"name":      map[string]interface{}{"type": "string", "description": "Service name"},
-				"content":   map[string]interface{}{"type": "string", "description": "New file content"},
+				"new_text":   map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
 				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"mcp", "http"}, "description": "How to transfer bytes: \"mcp\" (inline, default) or \"http\" (return an act-token URL to PUT over HTTP — for large files). Incompatible with old_text."},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files). Incompatible with old_text."},
 			},
-			"required": []string{"name", "content"},
+			"required": []string{"name", "transport"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -1053,12 +1056,15 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		name, _ := args["name"].(string)
-		content, _ := args["content"].(string)
+		content, _ := args["new_text"].(string)
 		oldText, _ := args["old_text"].(string)
 		transport, _ := args["transport"].(string)
 
 		switch transport {
-		case "", actTokenTransportMCP:
+		case actTokenTransportInline:
+			if content == "" && oldText == "" {
+				return mcpToolError("transport:\"inline\" requires new_text or old_text"), nil
+			}
 			if err := s.gate(user, rolesAdminPlus); err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -1089,7 +1095,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 			return mcpToolResult(map[string]string{"url": u, "method": http.MethodPut})
 
 		default:
-			return mcpToolError("transport must be \"mcp\" or \"http\", got %q", transport), nil
+			return mcpToolError("transport must be \"inline\" or \"http\", got %q", transport), nil
 		}
 	})
 
