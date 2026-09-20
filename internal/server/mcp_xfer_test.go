@@ -126,6 +126,7 @@ func TestMCPReadAppFile(t *testing.T) {
 	createAppFile(t, srv, nonce, "index.html", []byte("<h1>hello world</h1>"))
 
 	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+		"transport": "inline",
 		"nonce": nonce,
 		"path":  "index.html",
 	})
@@ -144,6 +145,7 @@ func TestMCPReadAppFile(t *testing.T) {
 
 	// Chunk read.
 	res = callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+		"transport": "inline",
 		"nonce":  nonce,
 		"path":   "index.html",
 		"offset": 4,
@@ -166,6 +168,7 @@ func TestMCPReadAppFileBinary(t *testing.T) {
 	createAppFile(t, srv, nonce, "data.bin", []byte{0xff, 0xfe, 0xfd})
 
 	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+		"transport": "inline",
 		"nonce": nonce,
 		"path":  "data.bin",
 	})
@@ -197,9 +200,10 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 
 	// Write whole file.
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"transport": "inline",
 		"nonce":   nonce,
 		"path":    "index.html",
-		"content": "<h1>hello</h1>",
+		"new_text": "<h1>hello</h1>",
 	})
 	if res.IsError {
 		t.Fatalf("write_app_file failed: %s", toolResultText(t, res))
@@ -207,9 +211,10 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 
 	// Patch via old_text.
 	res = callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"transport": "inline",
 		"nonce":    nonce,
 		"path":     "index.html",
-		"content":  "goodbye",
+		"new_text":  "goodbye",
 		"old_text": "hello",
 	})
 	if res.IsError {
@@ -234,9 +239,10 @@ func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
 	createAppFile(t, srv, nonce, "index.html", []byte("abc"))
 
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"transport": "inline",
 		"nonce":    nonce,
 		"path":     "index.html",
-		"content":  "x",
+		"new_text":  "x",
 		"old_text": "notfound",
 	})
 	if !res.IsError {
@@ -256,9 +262,10 @@ func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
 	createAppFile(t, srv, nonce, "index.html", []byte("abc abc"))
 
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+		"transport": "inline",
 		"nonce":    nonce,
 		"path":     "index.html",
-		"content":  "x",
+		"new_text":  "x",
 		"old_text": "abc",
 	})
 	if !res.IsError {
@@ -356,7 +363,7 @@ func TestMCPReadServiceFile(t *testing.T) {
 		t.Fatalf("write service file: %v", err)
 	}
 
-	res := callCentralTool(t, srv, "read_service_file", map[string]interface{}{"name": svc.Name})
+	res := callCentralTool(t, srv, "read_service_file", map[string]interface{}{"transport": "inline", "name": svc.Name})
 	if res.IsError {
 		t.Fatalf("read_service_file failed: %s", toolResultText(t, res))
 	}
@@ -372,6 +379,7 @@ func TestMCPReadServiceFile(t *testing.T) {
 
 	// Chunk read.
 	res = callCentralTool(t, srv, "read_service_file", map[string]interface{}{
+		"transport": "inline",
 		"name":   svc.Name,
 		"offset": 1,
 		"limit":  5,
@@ -394,16 +402,18 @@ func TestMCPWriteServiceFile(t *testing.T) {
 	}
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
+		"transport": "inline",
 		"name":    svc.Name,
-		"content": "[build]\nmake all\n",
+		"new_text": "[build]\nmake all\n",
 	})
 	if res.IsError {
 		t.Fatalf("write_service_file failed: %s", toolResultText(t, res))
 	}
 
 	res = callCentralTool(t, srv, "write_service_file", map[string]interface{}{
+		"transport": "inline",
 		"name":     svc.Name,
-		"content":  "make install",
+		"new_text":  "make install",
 		"old_text": "make all",
 	})
 	if res.IsError {
@@ -451,8 +461,9 @@ func TestMCPServiceFileUnsupportedType(t *testing.T) {
 	}
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
+		"transport": "inline",
 		"name":    svc.Name,
-		"content": "x",
+		"new_text": "x",
 	})
 	if !res.IsError {
 		t.Fatal("expected error for unsupported service type")
@@ -464,8 +475,8 @@ func TestMCPServiceFileUnsupportedType(t *testing.T) {
 
 // ── transport:"http" + read threshold escape ──
 //
-// The four transfer tools gain a `transport` option ("mcp" default / "http"
-// escape). transport:"http" mints an act-token URL without transferring bytes.
+// The four transfer tools take a required `transport` option ("inline" /
+// "http"). transport:"http" mints an act-token URL without transferring bytes.
 // Reads additionally auto-escape to a URL when the whole-file result exceeds
 // mcpInlineMaxBytes (chunked reads always inline). Writes never auto-escape —
 // if MCP received the bytes, write them; a client that wants to skip the
@@ -589,7 +600,7 @@ func TestMCPReadAppFileThresholdEscape(t *testing.T) {
 	nonce := makeAppWithFile(t, srv, "thresh-app", "big.bin", body)
 
 	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
-		"nonce": nonce, "path": "big.bin", // default transport
+		"transport": "inline", "nonce": nonce, "path": "big.bin",
 	})
 	m := toolResultJSON(t, res)
 	if _, ok := m["error"]; !ok {
@@ -620,7 +631,7 @@ func TestMCPReadAppFileChunkedStaysInline(t *testing.T) {
 	nonce := makeAppWithFile(t, srv, "chunk-app", "big.txt", bytes.Repeat([]byte("Q"), 12000))
 
 	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
-		"nonce": nonce, "path": "big.txt", "offset": 0, "limit": 100,
+		"transport": "inline", "nonce": nonce, "path": "big.txt", "offset": 0, "limit": 100,
 	})
 	m := toolResultJSON(t, res)
 	if _, ok := m["url"]; ok {
@@ -635,7 +646,7 @@ func TestMCPReadAppFileSmallStaysInline(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := makeAppWithFile(t, srv, "small-app", "s.txt", []byte("small"))
 	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
-		"nonce": nonce, "path": "s.txt",
+		"transport": "inline", "nonce": nonce, "path": "s.txt",
 	})
 	m := toolResultJSON(t, res)
 	if _, ok := m["url"]; ok {
@@ -656,7 +667,7 @@ func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 	}
 	// content is ignored on the http path — the client PUTs the real body later.
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
-		"nonce": nonce, "path": "via-http.txt", "content": "ignored", "transport": "http",
+		"nonce": nonce, "path": "via-http.txt", "new_text": "ignored", "transport": "http",
 	})
 	m := toolResultJSON(t, res)
 	url, _ := m["url"].(string)
@@ -684,7 +695,7 @@ func TestMCPWriteAppFileTransportHTTPRejectsPatch(t *testing.T) {
 	srv := newTestServer(t)
 	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "wpapp", "", "", nil, nil)
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
-		"nonce": nonce, "path": "x.txt", "content": "new", "old_text": "old", "transport": "http",
+		"nonce": nonce, "path": "x.txt", "new_text": "new", "old_text": "old", "transport": "http",
 	})
 	if !res.IsError {
 		t.Fatalf("expected error for transport:http + old_text, got: %s", toolResultText(t, res))
@@ -696,7 +707,7 @@ func TestMCPWriteAppFileLargeNoThreshold(t *testing.T) {
 	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "bigw", "", "", nil, nil)
 	big := bytes.Repeat([]byte("M"), 12000)
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
-		"nonce": nonce, "path": "big.txt", "content": string(big), // default transport
+		"transport": "inline", "nonce": nonce, "path": "big.txt", "new_text": string(big), // default transport
 	})
 	m := toolResultJSON(t, res)
 	if _, ok := m["url"]; ok {
@@ -716,7 +727,7 @@ func TestMCPWriteAppFilePatchStaysInline(t *testing.T) {
 	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "patchapp", "", "", nil, nil)
 	createAppFile(t, srv, nonce, "p.txt", []byte("hello old world"))
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
-		"nonce": nonce, "path": "p.txt", "content": "new", "old_text": "old",
+		"transport": "inline", "nonce": nonce, "path": "p.txt", "new_text": "new", "old_text": "old",
 	})
 	m := toolResultJSON(t, res)
 	if m["status"] != "written" {
@@ -772,7 +783,7 @@ func TestMCPReadServiceFileThresholdEscape(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	res := callCentralTool(t, srv, "read_service_file", map[string]interface{}{
-		"name": "tsvc", // default transport
+		"transport": "inline", "name": "tsvc", // default transport
 	})
 	m := toolResultJSON(t, res)
 	if _, ok := m["error"]; !ok {
@@ -800,7 +811,7 @@ func TestMCPReadServiceFileChunkedStaysInline(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	res := callCentralTool(t, srv, "read_service_file", map[string]interface{}{
-		"name": "csvc", "offset": 0, "limit": 100,
+		"transport": "inline", "name": "csvc", "offset": 0, "limit": 100,
 	})
 	m := toolResultJSON(t, res)
 	if _, ok := m["url"]; ok {
@@ -815,7 +826,7 @@ func TestMCPWriteServiceFileTransportHTTP(t *testing.T) {
 	srv := newTestServer(t)
 	idStr := registerService(t, srv, "wsvc", "http://wsvc", db.ServiceDescriptor{Type: "tasks"})
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"name": "wsvc", "content": "ignored", "transport": "http",
+		"name": "wsvc", "new_text": "ignored", "transport": "http",
 	})
 	m := toolResultJSON(t, res)
 	url, _ := m["url"].(string)
@@ -845,7 +856,7 @@ func TestMCPWriteServiceFileTransportHTTPRejectsPatch(t *testing.T) {
 	srv := newTestServer(t)
 	registerService(t, srv, "wpsvc", "http://wpsvc", db.ServiceDescriptor{Type: "tasks"})
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"name": "wpsvc", "content": "new", "old_text": "old", "transport": "http",
+		"name": "wpsvc", "new_text": "new", "old_text": "old", "transport": "http",
 	})
 	if !res.IsError {
 		t.Fatalf("expected error for transport:http + old_text, got: %s", toolResultText(t, res))
@@ -858,7 +869,7 @@ func TestMCPWriteServiceFileLargeNoThreshold(t *testing.T) {
 	id := parseServiceID(t, idStr)
 	big := bytes.Repeat([]byte("S"), 12000)
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
-		"name": "bwsvc", "content": string(big), // default transport, no threshold
+		"transport": "inline", "name": "bwsvc", "new_text": string(big), // default transport, no threshold
 	})
 	m := toolResultJSON(t, res)
 	if _, ok := m["url"]; ok {
