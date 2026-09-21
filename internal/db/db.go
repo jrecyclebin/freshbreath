@@ -9,7 +9,12 @@ import (
 	"time"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db *sql.DB
+
+	// sealKey arms at-rest secret sealing (see seal.go). nil = off.
+	sealKey []byte
+}
 
 // NewStore wraps an open *sql.DB so callers outside package db can construct
 // a Store without touching its unexported db field.
@@ -253,6 +258,12 @@ func (s *Store) Migrate() error {
 		if err != nil {
 			return err
 		}
+	}
+
+	// One-time pass (idempotent, cheap when there's nothing to do): seal
+	// any secret still stored plaintext from a pre-FRBR-4 database.
+	if err := s.sealSecretsAtRest(); err != nil {
+		return err
 	}
 
 	return nil
@@ -1148,7 +1159,7 @@ func (s *Store) RegisterOAuthClient(clientID, clientSecret string, redirectURIs 
 	}
 	_, err = s.db.Exec(
 		"INSERT INTO oauth_clients (client_id, client_secret, redirect_uris) VALUES (?, ?, ?)",
-		clientID, clientSecret, string(urisJSON),
+		clientID, s.sealField(clientSecret), string(urisJSON),
 	)
 	return err
 }
@@ -1169,7 +1180,11 @@ func (s *Store) GetOAuthClient(clientID string) (clientSecret string, redirectUR
 	if err := json.Unmarshal([]byte(urisStr), &uris); err != nil {
 		return "", nil, false, err
 	}
-	return secretStr, uris, true, nil
+	secret, err := s.openField(secretStr)
+	if err != nil {
+		return "", nil, false, fmt.Errorf("oauth client %q: %w", clientID, err)
+	}
+	return secret, uris, true, nil
 }
 
 // ── Refresh Token Families ──

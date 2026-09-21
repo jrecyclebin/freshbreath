@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hkdf"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -488,23 +486,17 @@ func open(key []byte, sealed string) ([]byte, error) {
 
 // ── Key derivation ──────────────────────────────────────────────────
 //
-// localKey is the single master secret (random, or derived from the TLS key).
-// It's never used directly for crypto: deriveSubkey splits it into independent
-// subkeys per purpose via HKDF-SHA256, so the JWT-signing (HMAC) key and the
-// AES-GCM sealing key can't interact even though they share one master.
+// localKey is the single master secret (env var or 0600 file — see
+// cmd/freshbreath loadSigningKey). It's never used directly for crypto:
+// deriveSubkey splits it into independent subkeys per purpose via
+// HKDF-SHA256, so the JWT-signing (HMAC) key and the AES-GCM sealing key
+// can't interact even though they share one master. The same authority
+// (db.DeriveSubkey) feeds the at-rest seal subkey in the db package.
 
-const (
-	jwtSignLabel = "freshbreath/jwt-sign"
-	sealLabel    = "freshbreath/seal"
-)
+const jwtSignLabel = "freshbreath/jwt-sign"
 
 func (s *Server) deriveSubkey(label string) []byte {
-	k, err := hkdf.Key(sha256.New, s.localKey, nil, label, 32)
-	if err != nil {
-		// HKDF-SHA256 only errors on absurd output lengths; 32 bytes never does.
-		panic(fmt.Sprintf("hkdf derive %q: %v", label, err))
-	}
-	return k
+	return db.DeriveSubkey(s.localKey, label)
 }
 
 // ── Access token mint/verify ────────────────────────────────────────
@@ -537,7 +529,7 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID 
 		if err != nil {
 			return "", fmt.Errorf("marshal creds: %w", err)
 		}
-		claims.Sealed, err = seal(s.deriveSubkey(sealLabel), plain)
+		claims.Sealed, err = seal(s.deriveSubkey(db.SealSubkeyLabel), plain)
 		if err != nil {
 			return "", fmt.Errorf("seal creds: %w", err)
 		}
@@ -568,7 +560,7 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
 		return nil, fmt.Errorf("invalid: %w", err)
 	}
 	if claims.Sealed != "" {
-		plain, err := open(s.deriveSubkey(sealLabel), claims.Sealed)
+		plain, err := open(s.deriveSubkey(db.SealSubkeyLabel), claims.Sealed)
 		if err != nil {
 			return nil, fmt.Errorf("unseal creds: %w", err)
 		}
@@ -653,7 +645,7 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal refresh data: %w", err)
 	}
-	sealed, err := seal(s.deriveSubkey(sealLabel), plain)
+	sealed, err := seal(s.deriveSubkey(db.SealSubkeyLabel), plain)
 	if err != nil {
 		return "", fmt.Errorf("seal refresh data: %w", err)
 	}
@@ -741,7 +733,7 @@ func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error)
 	}); err != nil {
 		return nil, fmt.Errorf("refresh token invalid: %w", err)
 	}
-	plain, err := open(s.deriveSubkey(sealLabel), outer.Sealed)
+	plain, err := open(s.deriveSubkey(db.SealSubkeyLabel), outer.Sealed)
 	if err != nil {
 		return nil, fmt.Errorf("unseal refresh: %w", err)
 	}
