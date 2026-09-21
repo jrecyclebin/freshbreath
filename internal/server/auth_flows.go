@@ -123,13 +123,32 @@ func (s *Server) completeLeg(w http.ResponseWriter, r *http.Request, p *pendingA
 	return s.finishLogin(w, r, p)
 }
 
+// appNeedsClientKey reports whether a browser app must hold raw api_key
+// material: only when it is allowed a non-proxied service. The admin door
+// never does. Errors fail closed (no key handoff) — a token still works
+// for every proxied path.
+func (s *Server) appNeedsClientKey(appNonce string) bool {
+	if appNonce == "" || appNonce == s.adminNonce {
+		return false
+	}
+	direct, err := s.store.AppLinksDirectService(appNonce)
+	if err != nil {
+		log.Printf("app %s: check direct services: %v", appNonce, err)
+		return false
+	}
+	return direct
+}
+
 // finishLogin mints the token for a fully-cleared pending login and hands
 // it off: to the MCP client via a one-shot code, or to the opener via the
 // postMessage page (with the refresh cookie set alongside).
 func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingAuth) (string, error) {
-	// Pure api_key browser logins carry no token: the store entry is the
-	// key itself, verified against the record.
-	if p.mcpKey == "" && len(p.done) == 1 && p.done[0].rec.Kind == db.AuthAPIKey {
+	// Pure api_key browser logins hand the key itself to the browser —
+	// but only when the app actually calls some service directly. An app
+	// whose linked services are all proxied (or the admin door) gets a
+	// standard token instead, so the stored key never leaves the server;
+	// the proxy injects it upstream (FRBR-7).
+	if p.mcpKey == "" && len(p.done) == 1 && p.done[0].rec.Kind == db.AuthAPIKey && s.appNeedsClientKey(p.appNonce) {
 		rec := p.done[0].rec
 		writeCallbackPage(w, p, map[string]interface{}{
 			"v": 1, "auth_id": rec.ID, "kind": rec.Kind,

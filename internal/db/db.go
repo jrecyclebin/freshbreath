@@ -997,6 +997,37 @@ func (s *Store) SetAppServiceAllowed(appNonce string, serviceID int64, allowed b
 	return err
 }
 
+// AppLinksDirectService reports whether the app is allowed to use any
+// service it must call directly (descriptor.proxied false). Such an app
+// needs raw api_key material in the browser; an app whose linked services
+// are all proxied does not (FRBR-7).
+func (s *Store) AppLinksDirectService(appNonce string) (bool, error) {
+	rows, err := s.db.Query(`
+    SELECT s.descriptor
+    FROM services s
+    JOIN app_service_links l ON s.id = l.service_id
+    WHERE l.app_nonce = ? AND l.allowed = 1
+  `, appNonce)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var descStr string
+		if err := rows.Scan(&descStr); err != nil {
+			return false, err
+		}
+		var d ServiceDescriptor
+		if err := json.Unmarshal([]byte(descStr), &d); err != nil {
+			return false, err
+		}
+		if !d.Proxied {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 func (s *Store) IsServiceAllowedForApp(appNonce string, serviceID int64) (bool, error) {
 	var allowed int
 	err := s.db.QueryRow(

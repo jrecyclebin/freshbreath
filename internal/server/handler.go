@@ -691,8 +691,10 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// claims == nil means the api_key gate was cleared by key, not by a
+	// Fresh Breath token — only then is the Authorization value a key.
 	var presentedKey string
-	if gate != nil && gate.Kind == db.AuthAPIKey {
+	if gate != nil && gate.Kind == db.AuthAPIKey && claims == nil {
 		presentedKey = presentedGateKey(gate, r)
 	}
 	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
@@ -826,8 +828,10 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// claims == nil means the api_key gate was cleared by key, not by a
+	// Fresh Breath token — only then is the Authorization value a key.
 	var presentedKey string
-	if gate != nil && gate.Kind == db.AuthAPIKey {
+	if gate != nil && gate.Kind == db.AuthAPIKey && claims == nil {
 		presentedKey = presentedGateKey(gate, r)
 	}
 	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
