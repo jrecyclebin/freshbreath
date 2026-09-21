@@ -37,6 +37,7 @@ type ToolParam struct {
 	Name     string
 	Type     ParamType
 	Optional bool // from a `?` annotation; parameters are required by default
+	Values   []string // declared enum values; non-nil when the param is an enum
 }
 
 // VirtualTool defines a single tool in a virtual service description.
@@ -52,6 +53,7 @@ type typeAnnotation struct {
 	names    []string // one or more: "$a, $b is number"
 	typ      ParamType
 	optional bool
+	values   []string // non-nil for enum annotations: $x is "a" | "b"
 }
 
 // VirtualStep is one step within a tool's script — an HTTP request, a SQL
@@ -156,6 +158,33 @@ var spreadVarRe = regexp.MustCompile(`\.\.\.\$([a-zA-Z_]\w*)`)
 var typeAnnotationRe = regexp.MustCompile(
 	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array)(\?)?$`)
 
+// enumAnnotationRe matches an enum declaration: "$name is "a" | 'b' | ..." with
+// an optional trailing `?`. The values are quote-delimited (double or single,
+// no escapes — a value cannot contain its own quote character), one or more,
+// separated by `|`. Like type annotations, multiple names may share one
+// declaration ("$a, $b is "x" | "y""). The first token after `is ` MUST be a
+// quoted value, so this regex is disjoint from typeAnnotationRe (which
+// requires a bare type word there) — a line can match at most one.
+var enumAnnotationRe = regexp.MustCompile(
+	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+((?:"[^"]*"|'[^']*')(?:\s*\|\s*(?:"[^"]*"|'[^']*'))*)(\?)?$`)
+
+// enumValueRe finds one quoted token (double- or single-quoted) in an enum
+// body. Used after enumAnnotationRe has already validated the overall
+// shape, so every match is a value.
+var enumValueRe = regexp.MustCompile(`"[^"]*"|'[^']*'`)
+
+// parseEnumValues splits an enumAnnotationRe body (group 2) into its bare
+// values, stripping the surrounding quotes. An empty quoted token ("" or '')
+// is a legitimate value meaning the empty string.
+func parseEnumValues(s string) []string {
+	tokens := enumValueRe.FindAllString(s, -1)
+	values := make([]string, len(tokens))
+	for i, t := range tokens {
+		values[i] = t[1 : len(t)-1]
+	}
+	return values
+}
+
 func toolParams(tool VirtualTool) []ToolParam {
 	// token* are server-injected (auth token + identity claims), never caller params.
 	defined := map[string]bool{"token": true, "token_email": true, "token_sub": true, "token_id": true}
@@ -211,12 +240,16 @@ func toolParams(tool VirtualTool) []ToolParam {
 	// so "$host, $search is string?" makes both optional; mixed optionality
 	// is two lines.
 	optional := map[string]bool{}
+	enumValues := map[string][]string{}
 	for _, ann := range tool.typeAnnotations {
 		for _, name := range ann.names {
 			if _, ok := seen[name]; ok {
 				types[name] = ann.typ
 				if ann.optional {
 					optional[name] = true
+				}
+				if ann.values != nil {
+					enumValues[name] = ann.values
 				}
 			}
 		}
@@ -228,7 +261,7 @@ func toolParams(tool VirtualTool) []ToolParam {
 		if pt, ok := types[name]; ok {
 			t = pt
 		}
-		params = append(params, ToolParam{Name: name, Type: t, Optional: optional[name]})
+		params = append(params, ToolParam{Name: name, Type: t, Optional: optional[name], Values: enumValues[name]})
 	}
 	sort.Slice(params, func(i, j int) bool { return params[i].Name < params[j].Name })
 	return params
@@ -302,6 +335,17 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				step.Assignments = append(step.Assignments, VirtualAssignment{VarName: vn, Expr: ex})
 			} else if ok, ex, msg := tryParseAssertion(line); ok {
 				step.Assertions = append(step.Assertions, VirtualAssertion{Expr: ex, Msg: msg})
+			} else if m := enumAnnotationRe.FindStringSubmatch(line); m != nil {
+				var names []string
+				for _, part := range strings.Split(m[1], ",") {
+					names = append(names, strings.TrimPrefix(strings.TrimSpace(part), "$"))
+				}
+				tool.typeAnnotations = append(tool.typeAnnotations, typeAnnotation{
+					names:    names,
+					typ:      ParamString,
+					optional: m[3] == "?",
+					values:   parseEnumValues(m[2]),
+				})
 			} else if m := typeAnnotationRe.FindStringSubmatch(line); m != nil {
 				var names []string
 				for _, part := range strings.Split(m[1], ",") {
@@ -1255,8 +1299,42 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 			optionalNames[p.Name] = true
 			if _, ok := scope[p.Name]; !ok {
 				scope[p.Name] = ""
-				omittedOptionals[p.Name] = true
+			omittedOptionals[p.Name] = true
 			}
+		}
+	}
+
+	// Enum validation: a parameter with declared values must be one of them
+	// when supplied. Optional enums the caller omitted are skipped — the
+	// empty placeholder above would otherwise trip the check. This runs on
+	// every call path; the MCP SDK also enforces the schema enum before the
+	// handler, but the HTTP/task path bypasses that, so the executor is the
+	// single chokepoint that covers both.
+	for _, p := range tool.Params {
+		if len(p.Values) == 0 {
+			continue
+		}
+		if omittedOptionals[p.Name] {
+			continue
+		}
+		val, ok := scope[p.Name]
+		if !ok {
+			// A required enum the caller didn't send: the MCP SDK's
+			// required-check rejects this on the MCP path; elsewhere it
+			// surfaces later as an undefined-variable error. Nothing to
+			// validate against here.
+			continue
+		}
+		s := fmt.Sprintf("%v", val)
+		allowed := false
+		for _, v := range p.Values {
+			if s == v {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, fmt.Errorf("parameter %q must be one of %v, got %q", p.Name, p.Values, s)
 		}
 	}
 

@@ -317,6 +317,76 @@ GET https://api.example.com/issues?state=$state
 	}
 }
 
+// TestVirtualToolInputSchemaEnum verifies that an enum-declared parameter
+// surfaces as a JSON Schema `enum` array in the MCP tool definition, so
+// clients (and the go-sdk's pre-handler validation) can enforce it.
+func TestVirtualToolInputSchemaEnum(t *testing.T) {
+	tools, err := formats.ParseVirtualFile([]byte(`[list] List issues.
+
+$status is "active" | 'disabled' | "cancelled"?
+$owner is string
+
+SELECT id FROM issues WHERE status = $status AND owner = $owner
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := virtualToolInputSchema(tools[0], "global")
+	props := schema["properties"].(map[string]interface{})
+
+	// Enum property carries type + enum; the optional flag stays out of the
+	// schema (optionality is expressed via `required`, which omits it).
+	statusProp, ok := props["status"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("status property missing: %+v", props)
+	}
+	if statusProp["type"] != "string" {
+		t.Errorf("status type = %v, want string", statusProp["type"])
+	}
+	enumVals, ok := statusProp["enum"].([]string)
+	if !ok {
+		t.Fatalf("status enum missing or wrong type: %+v", statusProp)
+	}
+	want := []string{"active", "disabled", "cancelled"}
+	if len(enumVals) != len(want) {
+		t.Fatalf("status enum = %v, want %v", enumVals, want)
+	}
+	for i, v := range want {
+		if i < len(enumVals) && enumVals[i] != v {
+			t.Errorf("status enum[%d] = %q, want %q", i, enumVals[i], v)
+		}
+	}
+
+	// Optional enum stays out of `required`.
+	req, _ := schema["required"].([]string)
+	for _, r := range req {
+		if r == "status" {
+			t.Errorf("optional enum should not be required; required = %v", req)
+		}
+	}
+	if !containsStr(req, "owner") {
+		t.Errorf("non-enum required param dropped: required = %v", req)
+	}
+
+	// Non-enum param has no `enum` field.
+	ownerProp, ok := props["owner"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("owner property missing: %+v", props)
+	}
+	if _, ok := ownerProp["enum"]; ok {
+		t.Errorf("owner should not carry an enum: %+v", ownerProp)
+	}
+}
+
+func containsStr(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func TestVirtualAuthFromClaims(t *testing.T) {
 	srv := newAppDBServer(t)
 
