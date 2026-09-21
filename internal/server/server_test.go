@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -791,14 +792,10 @@ func TestLoginWithAPIKeyGate(t *testing.T) {
 	}
 }
 
-// The full api_key gate flow: login redirects to the form, the wrong key is
-// refused, the right key finishes with a store entry carrying what was typed.
-func TestAPIKeyAuthFlow(t *testing.T) {
-	srv := newTestServer(t)
-	nonce := createApp(t, srv, "key-flow-test")
-	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "s3cret", Header: "X-Weather-Key"})
-	setAppGate(t, srv, nonce, rec.ID)
-
+// apiKeyLoginState starts a browser login for the app and returns the
+// pending state the key-entry form posts back with.
+func apiKeyLoginState(t *testing.T, srv *Server, nonce string) string {
+	t.Helper()
 	rr := testRequest(t, srv, "GET", "/service/login?state=corr-1", nil,
 		map[string]string{"X-App-Nonce": nonce})
 	if rr.Code != 200 {
@@ -811,10 +808,25 @@ func TestAPIKeyAuthFlow(t *testing.T) {
 	if i < 0 {
 		t.Fatalf("no state in redirect URL %q", url)
 	}
-	state := url[i+len("state="):]
+	return url[i+len("state="):]
+}
+
+// The full api_key gate flow for an app that calls a service directly:
+// login redirects to the form, the wrong key is refused, the right key
+// finishes with a store entry carrying what was typed.
+func TestAPIKeyAuthFlow(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "key-flow-test")
+	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "s3cret", Header: "X-Weather-Key"})
+	setAppGate(t, srv, nonce, rec.ID)
+	// A non-proxied service: the browser needs the key in hand.
+	id := registerService(t, srv, "weather", "https://weather.example", db.ServiceDescriptor{Type: "api"})
+	linkServiceToApp(t, srv, nonce, id)
+
+	state := apiKeyLoginState(t, srv, nonce)
 
 	// Wrong key → 401, and the state survives for a retry.
-	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
+	rr := testRequest(t, srv, "POST", "/service/apikey-auth",
 		strings.NewReader(`{"state":"`+state+`","api_key":"wrong"}`), nil)
 	if rr.Code != 401 {
 		t.Fatalf("wrong key: status = %d, want 401", rr.Code)
@@ -829,6 +841,67 @@ func TestAPIKeyAuthFlow(t *testing.T) {
 	body := rr.Body.String()
 	if !strings.Contains(body, `"key":"s3cret"`) || !strings.Contains(body, `"kind":"api_key"`) {
 		t.Errorf("final page missing store entry fields: %s", body)
+	}
+}
+
+// FRBR-7: an app whose linked services are all proxied never receives the
+// key. The login finishes with a standard token entry, and a proxied call
+// made with that token gets the stored key injected server-side.
+func TestAPIKeyAuthFlowProxiedKeepsKeyServerSide(t *testing.T) {
+	var receivedKey string
+	mockService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedKey = r.Header.Get("X-Weather-Key")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer mockService.Close()
+
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "key-proxied-test")
+	rec := newAuthRecord(t, srv, "Weather Key", db.AuthAPIKey, db.AuthDescriptor{Key: "s3cret", Header: "X-Weather-Key"})
+	setAppGate(t, srv, nonce, rec.ID)
+	id := registerService(t, srv, "weather", mockService.URL, db.ServiceDescriptor{Type: "api", Proxied: true})
+	linkServiceToApp(t, srv, nonce, id)
+
+	state := apiKeyLoginState(t, srv, nonce)
+	rr := testRequest(t, srv, "POST", "/service/apikey-auth",
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+	if rr.Code != 200 {
+		t.Fatalf("finish: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "s3cret") {
+		t.Fatalf("final page leaks the key: %s", body)
+	}
+	m := regexp.MustCompile(`"access_token":"([^"]+)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("final page carries no token entry: %s", body)
+	}
+	if !strings.Contains(body, `"kind":"api_key"`) {
+		t.Errorf("entry should still name the api_key kind: %s", body)
+	}
+
+	// The token clears the app gate; the proxy injects the stored key.
+	rr = testRequest(t, srv, "GET", "/service/"+id+"/forecast", nil,
+		map[string]string{"X-App-Nonce": nonce, "Authorization": "Bearer " + m[1]})
+	if rr.Code != 200 {
+		t.Fatalf("proxied call: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if receivedKey != "s3cret" {
+		t.Errorf("upstream X-Weather-Key = %q, want the stored key", receivedKey)
+	}
+	if strings.Contains(rr.Body.String(), "s3cret") {
+		t.Errorf("proxy response leaks the key")
+	}
+
+	// An app with nothing linked is covered too — no key handoff.
+	bare := createApp(t, srv, "key-bare-test")
+	setAppGate(t, srv, bare, rec.ID)
+	state = apiKeyLoginState(t, srv, bare)
+	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+	if rr.Code != 200 || strings.Contains(rr.Body.String(), "s3cret") {
+		t.Errorf("bare app: status = %d, leaks key = %v", rr.Code, strings.Contains(rr.Body.String(), "s3cret"))
 	}
 }
 

@@ -154,7 +154,8 @@ type outboundCred struct {
 //   - acts_as Anonymous: explicitly credential-free; strip what the caller sent
 //   - acts_as empty, gate interactive: passthrough — the caller's own sealed
 //     upstream credential
-//   - acts_as empty, gate api_key: passthrough of the presented key
+//   - acts_as empty, gate api_key: passthrough of the presented key, or the
+//     gate's stored key when the caller cleared it by token instead
 //   - acts_as empty, gate open: leave the caller's Authorization alone
 //   - acts_as empty, gate ssh_key: nothing — a passphrase yields no upstream
 func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claims *freshbreathClaims, presentedKey string) (outboundCred, error) {
@@ -187,6 +188,12 @@ func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claim
 	case gateIsOpen(gate):
 		return outboundCred{Verbatim: true}, nil
 	case gate.Kind == db.AuthAPIKey:
+		// A caller that cleared the gate with a Fresh Breath token (no key
+		// on the wire) gets the gate's stored key — login already verified
+		// the two equal.
+		if presentedKey == "" {
+			presentedKey = gate.Descriptor.Key
+		}
 		return outboundCred{Token: presentedKey, Header: gate.Descriptor.Header}, nil
 	case authInteractive(gate):
 		if claims == nil {
