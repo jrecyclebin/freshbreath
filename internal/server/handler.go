@@ -520,9 +520,11 @@ func (s *Server) nonceForLocation(locURL string, r *http.Request) (string, bool)
 		// Cross-origin location (also catches alternate ports). Not ours.
 		return "", false
 	}
-	if isSubdomainHost(u.Hostname()) {
-		return "", false
-	}
+	// TODO: This is commented out because subdomains can be assigned to the
+	//   Fresh Breath server itself.
+	// if isSubdomainHost(u.Hostname()) {
+	// 	return "", false
+	// }
 	path := strings.TrimPrefix(u.Path, "/")
 	slug, _, _ := strings.Cut(path, "/")
 	if i := strings.IndexByte(slug, '@'); i >= 0 {
