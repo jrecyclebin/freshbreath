@@ -2,9 +2,7 @@ package sshkit
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -218,13 +216,4 @@ func genNonce() string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
-}
-
-// DeriveJWTSecretFromTLSKey derives a 32-byte HMAC-SHA256 signing key
-// from the TLS private key using a fixed domain label. This makes the JWT
-// secret stable across restarts without additional configuration.
-func DeriveJWTSecretFromTLSKey(tlsKeyPEM []byte) []byte {
-	h := hmac.New(sha256.New, tlsKeyPEM)
-	h.Write([]byte("freshbreath.jwt.v1"))
-	return h.Sum(nil)
 }

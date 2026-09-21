@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -34,9 +35,10 @@ func newTestServer(t *testing.T) *Server {
 	if err := store.Migrate(); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	localKey, err := store.GetOrCreateLocalSigningKey()
-	if err != nil {
-		t.Fatalf("signing key: %v", err)
+	// Tests use a random master key per run; nothing persists.
+	localKey := make([]byte, 32)
+	if _, err := rand.Read(localKey); err != nil {
+		t.Fatalf("rand: %v", err)
 	}
 	baseDir, err := filepath.Abs("../..")
 	if err != nil {

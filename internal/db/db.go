@@ -3,7 +3,6 @@ package db
 import (
 	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1079,30 +1078,30 @@ func (s *Store) GetSetting(key string) (string, error) {
 	return value, nil
 }
 
+// DeleteSetting removes a settings row. A missing row is quiet; a missing
+// settings table is too — this is used to retire legacy keys during boot,
+// before Migrate has had a chance to create the table on a fresh install.
+func (s *Store) DeleteSetting(key string) error {
+	if !s.HasTable("settings") {
+		return nil
+	}
+	_, err := s.db.Exec("DELETE FROM settings WHERE key = ?", key)
+	return err
+}
+
+// HasTable reports whether a table exists (SQLite: sqlite_master).
+func (s *Store) HasTable(name string) bool {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", name).Scan(&n)
+	return err == nil && n > 0
+}
+
 func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(
 		"INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
 		key, value,
 	)
 	return err
-}
-
-func (s *Store) GetOrCreateLocalSigningKey() ([]byte, error) {
-	val, err := s.GetSetting("local_signing_key")
-	if err != nil {
-		return nil, err
-	}
-	if val != "" {
-		return hex.DecodeString(val)
-	}
-	key := make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, err
-	}
-	if err := s.SetSetting("local_signing_key", hex.EncodeToString(key)); err != nil {
-		return nil, err
-	}
-	return key, nil
 }
 
 // GetSSHHostKey returns the stored host key data and fingerprint for a host:port.
