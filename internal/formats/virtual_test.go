@@ -1747,6 +1747,178 @@ GET ` + srv.URL + `/things/$name
 	}
 }
 
+// ── Enum annotations ──
+
+func TestEnumAnnotations(t *testing.T) {
+	src := `[list] List issues.
+
+$status is "active" | 'disabled' | "cancelled"?
+$prio is 'easy' | "medium" | 'hard'
+$mode, $env is "dev" | "prod"?
+
+GET https://api.example.com/issues?status=$status&prio=$prio&mode=$mode&env=$env
+`
+	tools, err := ParseVirtualFile([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]ToolParam{}
+	for _, p := range tools[0].Params {
+		params[p.Name] = p
+	}
+	want := map[string]struct {
+		optional bool
+		values   []string
+	}{
+		"status": {optional: true, values: []string{"active", "disabled", "cancelled"}},
+		"prio":   {optional: false, values: []string{"easy", "medium", "hard"}},
+		"mode":   {optional: true, values: []string{"dev", "prod"}},
+		"env":    {optional: true, values: []string{"dev", "prod"}},
+	}
+	for name, w := range want {
+		p, ok := params[name]
+		if !ok {
+			t.Fatalf("param %s missing: %+v", name, params)
+		}
+		if p.Type != ParamString {
+			t.Errorf("%s type = %v, want string", name, p.Type)
+		}
+		if p.Optional != w.optional {
+			t.Errorf("%s optional = %v, want %v", name, p.Optional, w.optional)
+		}
+		if len(p.Values) != len(w.values) {
+			t.Errorf("%s values = %v, want %v", name, p.Values, w.values)
+			continue
+		}
+		for i, v := range w.values {
+			if i < len(p.Values) && p.Values[i] != v {
+				t.Errorf("%s values[%d] = %q, want %q", name, i, p.Values[i], v)
+			}
+		}
+	}
+}
+
+func TestEnumAnnotationGrammar(t *testing.T) {
+	// Shapes that must parse as enums.
+	for _, line := range []string{
+		`$x is "a"`,
+		`$x is "a" | "b"`,
+		`$x is 'a' | 'b'`,
+		`$x is "a" | 'b' | "c"`,
+		`$x is "a" | "b"?`,
+		`$x, $y is "a" | "b"?`,
+		`$x is ""`,        // single empty value
+		`$x is "" | "x"`, // empty value among others
+	} {
+		if !enumAnnotationRe.MatchString(line) {
+			t.Errorf("%q should match enumAnnotationRe", line)
+		}
+	}
+	// Shapes that must NOT parse as enums.
+	for _, line := range []string{
+		`$x is string`,       // type annotation, not enum
+		`$x is "a" "b"`,    // no `|` separator
+		`$x is "a" | b`,     // unquoted value
+		`$x is a | b`,        // no quotes at all
+		`$x is "a" | "b" ?`, // space before `?`
+		`$x is "a" extra`,    // trailing garbage
+		`x is "a"`,           // missing leading $
+		`$x are "a" | "b"`,  // wrong keyword
+	} {
+		if enumAnnotationRe.MatchString(line) {
+			t.Errorf("%q should NOT match enumAnnotationRe", line)
+		}
+	}
+	// Empty value roundtrips through parseEnumValues.
+	vals := parseEnumValues(`"" | "x" | ''`)
+	want := []string{"", "x", ""}
+	if len(vals) != len(want) {
+		t.Fatalf("parseEnumValues: got %v, want %v", vals, want)
+	}
+	for i, v := range want {
+		if i < len(vals) && vals[i] != v {
+			t.Errorf("parseEnumValues[%d] = %q, want %q", i, vals[i], v)
+		}
+	}
+}
+
+// TestEnumExecutionRejectsInvalidValue verifies the executor's enum
+// validation: a supplied value outside the declared set fails the call,
+// regardless of the MCP SDK's schema check (the HTTP/task path bypasses
+// that). A value in the set passes; an omitted optional enum passes.
+func TestEnumExecutionRejectsInvalidValue(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	src := `[list] List issues.
+
+$status is "active" | 'disabled' | "cancelled"?
+$prio is 'easy' | "medium" | 'hard'
+
+GET ` + srv.URL + `/issues?status=$status&prio=$prio
+`
+	tools, err := ParseVirtualFile([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bad value for a required enum: rejected before any HTTP call.
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "list",
+		map[string]interface{}{"prio": "impossible"}, VirtualAuth{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "must be one of") {
+		t.Fatalf("bad prio: want 'must be one of', got %v", err)
+	}
+	if hits != 0 {
+		t.Errorf("bad prio should not hit the upstream; hits = %d", hits)
+	}
+
+	// Good value passes and reaches the upstream.
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list",
+		map[string]interface{}{"prio": "medium"}, VirtualAuth{}, nil); err != nil {
+		t.Fatalf("good prio: %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("good prio should hit upstream once; hits = %d", hits)
+	}
+
+	// Omitted optional enum passes (no value to check).
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "list",
+		map[string]interface{}{"prio": "easy"}, VirtualAuth{}, nil); err != nil {
+		t.Fatalf("omitted optional enum: %v", err)
+	}
+
+	// Supplied optional enum with a bad value is still rejected.
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "list",
+		map[string]interface{}{"prio": "easy", "status": "nope"}, VirtualAuth{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "must be one of") {
+		t.Fatalf("bad status: want 'must be one of', got %v", err)
+	}
+
+	// Empty-string enum value is honored when declared.
+	emptySrc := `[flag] Toggle.
+
+$mode is "" | "on"
+
+GET ` + srv.URL + `/flag?mode=$mode
+`
+	emptyTools, err := ParseVirtualFile([]byte(emptySrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExecuteVirtualTool(http.DefaultClient, emptyTools, "flag",
+		map[string]interface{}{"mode": ""}, VirtualAuth{}, nil); err != nil {
+		t.Fatalf("empty enum value: %v", err)
+	}
+	_, err = ExecuteVirtualTool(http.DefaultClient, emptyTools, "flag",
+		map[string]interface{}{"mode": "off"}, VirtualAuth{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "must be one of") {
+		t.Fatalf("bad empty-enum value: want 'must be one of', got %v", err)
+	}
+}
+
 func TestDropEmptyOptionalPairs(t *testing.T) {
 	cases := []struct {
 		url  string

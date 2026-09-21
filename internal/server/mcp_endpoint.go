@@ -229,7 +229,11 @@ func virtualToolInputSchema(vt formats.VirtualTool, dbTarget string) map[string]
 	props := map[string]interface{}{}
 	required := []string{}
 	for _, p := range vt.Params {
-		props[p.Name] = map[string]interface{}{"type": string(p.Type)}
+		prop := map[string]interface{}{"type": string(p.Type)}
+		if len(p.Values) > 0 {
+			prop["enum"] = p.Values
+		}
+		props[p.Name] = prop
 		if !p.Optional {
 			required = append(required, p.Name)
 		}

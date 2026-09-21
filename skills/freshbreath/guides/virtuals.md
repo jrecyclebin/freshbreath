@@ -200,6 +200,17 @@ $offset, $count is number?
 
 This declares two optional numerical arguments for the tool.
 
+You can also define enums - a limited selection of possible strings that work
+for that variable.
+
+```
+$status is "todo" | "active" | "completed" | "aborted"
+```
+
+These are still strings - a string is expected as input. But the tool will
+give back an error if the string doesn't match. For MCPs, this list shows up
+in the tool definition so a caller will know what to pass in.
+
 ## Object Traversal
 
 In the case of object arguments and responses, the tool script can use dot
