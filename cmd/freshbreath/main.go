@@ -1,8 +1,13 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -46,6 +51,116 @@ func resolveConfigPath(configDir, p string) string {
 		return p
 	}
 	return filepath.Join(configDir, p)
+}
+
+// decodeKeyMaterial decodes operator-provided key material: hex first
+// (the `openssl rand -hex 32` shape), then base64 in its std and URL
+// variants, padded or raw. Material that decodes to fewer than 16 bytes
+// is rejected — a master key shorter than that isn't one.
+func decodeKeyMaterial(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, errors.New("empty key material")
+	}
+	if b, err := hex.DecodeString(s); err == nil {
+		if len(b) < 16 {
+			return nil, fmt.Errorf("key material is %d bytes; need at least 16", len(b))
+		}
+		return b, nil
+	}
+	encodings := []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding,
+		base64.URLEncoding, base64.RawURLEncoding,
+	}
+	for _, enc := range encodings {
+		if b, err := enc.DecodeString(s); err == nil {
+			if len(b) < 16 {
+				return nil, fmt.Errorf("key material is %d bytes; need at least 16", len(b))
+			}
+			return b, nil
+		}
+	}
+	return nil, errors.New("not valid hex or base64")
+}
+
+// loadSigningKey resolves the master signing key, by precedence:
+//
+//  1. FRBR_SIGNING_KEY env var (hex or base64)
+//  2. signing.key file in the config dir (0600)
+//  3. adoption of the legacy settings-table key, preserving sessions
+//  4. a fresh 32-byte mint
+//
+// The key never lives in the DB: the JWT-sign and at-rest-seal subkeys
+// both derive from it (HKDF), so the DB file alone can neither forge
+// tokens nor open sealed secrets. Branches 3 and 4 write the key to the
+// file so later boots find it there; the legacy settings row is retired
+// whichever branch wins. store may be nil (tests) — legacy adoption and
+// retirement are skipped then.
+func loadSigningKey(configDir string, store *db.Store) ([]byte, error) {
+	if env := os.Getenv("FRBR_SIGNING_KEY"); env != "" {
+		key, err := decodeKeyMaterial(env)
+		if err != nil {
+			return nil, fmt.Errorf("FRBR_SIGNING_KEY: %w", err)
+		}
+		retireLegacySigningRow(store)
+		return key, nil
+	}
+
+	if configDir == "" {
+		// No config dir exists yet; give the key (and future config) a home.
+		configDir = filepath.Join(xdg.ConfigHome, "freshbreath")
+		if err := os.MkdirAll(configDir, 0o700); err != nil {
+			return nil, fmt.Errorf("create config dir: %w", err)
+		}
+	}
+	keyPath := filepath.Join(configDir, "signing.key")
+
+	if raw, err := os.ReadFile(keyPath); err == nil {
+		key, err := decodeKeyMaterial(string(raw))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", keyPath, err)
+		}
+		if info, err := os.Stat(keyPath); err == nil && info.Mode().Perm()&0o077 != 0 {
+			log.Printf("warning: %s is readable by group/others (chmod 600 it)", keyPath)
+		}
+		retireLegacySigningRow(store)
+		return key, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("read signing key: %w", err)
+	}
+
+	// No env, no file: adopt the legacy settings-table key when one
+	// exists, else mint fresh.
+	var key []byte
+	if store != nil && store.HasTable("settings") {
+		if val, err := store.GetSetting("local_signing_key"); err == nil && val != "" {
+			key, _ = decodeKeyMaterial(val)
+		}
+	}
+	if len(key) == 0 {
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("generate signing key: %w", err)
+		}
+		log.Printf("generated new signing key: %s", keyPath)
+	}
+	if err := os.WriteFile(keyPath, []byte(hex.EncodeToString(key)+"\n"), 0o600); err != nil {
+		return nil, fmt.Errorf("write signing key: %w", err)
+	}
+	retireLegacySigningRow(store)
+	return key, nil
+}
+
+// retireLegacySigningRow deletes the settings-table copy of the signing
+// key (FRBR-5). Missing rows and a missing table are both quiet; the key
+// has a better home now.
+func retireLegacySigningRow(store *db.Store) {
+	if store == nil || !store.HasTable("settings") {
+		return
+	}
+	if err := store.DeleteSetting("local_signing_key"); err != nil {
+		log.Printf("retire legacy signing key row: %v", err)
+	}
 }
 
 // resolveDir searches for a freshbreath install directory containing a
@@ -193,6 +308,15 @@ func main() {
 	defer sqlDB.Close()
 
 	store := db.NewStore(sqlDB)
+
+	// Master signing key: env var, 0600 file, legacy adoption, or fresh
+	// mint (see loadSigningKey). Resolved before Migrate so the DB needs
+	// no key to open, and Migrate can seal secrets against it (FRBR-4).
+	localKey, err := loadSigningKey(cfg.ConfigDir, store)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if err := store.Migrate(); err != nil {
 		log.Fatal(err)
 	}
@@ -200,22 +324,6 @@ func main() {
 	// Seed built-in SSH service
 	if _, err := store.EnsureSSHService(); err != nil {
 		log.Fatal(err)
-	}
-
-	localKey, err := store.GetOrCreateLocalSigningKey()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// When TLS is enabled, derive JWT signing key from the TLS private key.
-	// This makes the secret stable across restarts and ties it to the server's
-	// TLS identity. Rotating the TLS key invalidates all sessions.
-	if tlsEnabled {
-		tlsKey, err := os.ReadFile(cfg.TLSKeyFile)
-		if err != nil {
-			log.Fatalf("read TLS key for JWT derivation: %v", err)
-		}
-		localKey = sshkit.DeriveJWTSecretFromTLSKey(tlsKey)
 	}
 
 	agentMgr := sshkit.NewAgentManager()
