@@ -125,6 +125,7 @@ func (s *Store) CreateAuthRecord(name, kind string, d AuthDescriptor) (*AuthReco
 	if !ValidAuthKind(kind) {
 		return nil, fmt.Errorf("unknown auth kind %q", kind)
 	}
+	s.sealDescriptor(&d)
 	descJSON, err := json.Marshal(d)
 	if err != nil {
 		return nil, err
@@ -143,7 +144,7 @@ func (s *Store) CreateAuthRecord(name, kind string, d AuthDescriptor) (*AuthReco
 	return s.GetAuthRecord(id)
 }
 
-func scanAuthRecord(row interface{ Scan(...any) error }) (*AuthRecord, error) {
+func (s *Store) scanAuthRecord(row interface{ Scan(...any) error }) (*AuthRecord, error) {
 	a := &AuthRecord{}
 	var descStr, createdAt string
 	var builtin int
@@ -154,6 +155,9 @@ func scanAuthRecord(row interface{ Scan(...any) error }) (*AuthRecord, error) {
 	if err := json.Unmarshal([]byte(descStr), &a.Descriptor); err != nil {
 		return nil, err
 	}
+	if err := s.unsealDescriptor(&a.Descriptor); err != nil {
+		return nil, fmt.Errorf("auth record %d: %w", a.ID, err)
+	}
 	a.Builtin = builtin != 0
 	a.CreatedAt = parseTime(createdAt)
 	return a, nil
@@ -162,7 +166,7 @@ func scanAuthRecord(row interface{ Scan(...any) error }) (*AuthRecord, error) {
 const authRecordCols = "id, name, kind, descriptor, builtin, created_at"
 
 func (s *Store) GetAuthRecord(id int64) (*AuthRecord, error) {
-	a, err := scanAuthRecord(s.db.QueryRow(
+	a, err := s.scanAuthRecord(s.db.QueryRow(
 		"SELECT "+authRecordCols+" FROM auth_records WHERE id = ?", id))
 	if err == sql.ErrNoRows {
 		return nil, errors.New("auth record not found")
@@ -171,7 +175,7 @@ func (s *Store) GetAuthRecord(id int64) (*AuthRecord, error) {
 }
 
 func (s *Store) GetAuthRecordByName(name string) (*AuthRecord, error) {
-	a, err := scanAuthRecord(s.db.QueryRow(
+	a, err := s.scanAuthRecord(s.db.QueryRow(
 		"SELECT "+authRecordCols+" FROM auth_records WHERE name = ?", name))
 	if err == sql.ErrNoRows {
 		return nil, errors.New("auth record not found")
@@ -199,7 +203,7 @@ func (s *Store) ListAuthRecords() ([]*AuthRecord, error) {
 	defer rows.Close()
 	var out []*AuthRecord
 	for rows.Next() {
-		a, err := scanAuthRecord(rows)
+		a, err := s.scanAuthRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -228,6 +232,7 @@ func (s *Store) UpdateAuthRecord(id int64, name, kind string, d AuthDescriptor) 
 	if d.Key == "" {
 		d.Key = existing.Descriptor.Key
 	}
+	s.sealDescriptor(&d)
 	descJSON, err := json.Marshal(d)
 	if err != nil {
 		return err

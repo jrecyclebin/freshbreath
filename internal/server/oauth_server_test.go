@@ -1614,7 +1614,7 @@ func TestTokenSubkeySeparation(t *testing.T) {
 	srv := newTestServer(t)
 
 	sign := srv.deriveSubkey(jwtSignLabel)
-	sealK := srv.deriveSubkey(sealLabel)
+	sealK := srv.deriveSubkey(db.SealSubkeyLabel)
 
 	if len(sign) != 32 || len(sealK) != 32 {
 		t.Fatalf("subkey lengths = %d/%d, want 32/32", len(sign), len(sealK))

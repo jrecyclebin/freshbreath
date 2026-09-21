@@ -317,6 +317,10 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// FRBR-4: seal stored secrets at rest with the seal subkey. Armed
+	// before Migrate so its one-time pass seals any plaintext secrets.
+	store.SetSealKey(db.DeriveSubkey(localKey, db.SealSubkeyLabel))
+
 	if err := store.Migrate(); err != nil {
 		log.Fatal(err)
 	}
