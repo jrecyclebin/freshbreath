@@ -1237,3 +1237,6 @@ select.input {
     padding: 20px 16px 64px;
   }
 }
+
+/* Orange (!) beside a service name whose creds may reach the browser. */
+.unproxied-mark { margin-left: 6px; color: var(--warn); font-weight: 700; cursor: help; }
