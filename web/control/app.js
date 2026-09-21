@@ -58,6 +58,9 @@ const Badge = ({ tone = "gray", dot = true, children }) => (
 );
 
 const statusTone = (s='') => ({ Active:'green', Invited:'blue', Suspended:'red' }[s] || 'gray');
+// Only mcp/api services have the proxied switch; tasks, virtuals and the
+// built-in SSH service always run server-side.
+const unproxied = (s) => (s.descriptor?.type === 'mcp' || s.descriptor?.type === 'api') && !s.descriptor?.proxied;
 const envTone = (e='') => ({ Production:'green', Staging:'amber', Development:'blue' }[e] || 'gray');
 const envShort = (e='') => ({ Production:'Prod', Staging:'Staging', Development:'Dev' }[e] || e);
 const roleTone = (r='') => ({ Superuser:'violet', Admin:'blue', Member:'gray', 'Read-only':'gray' }[r] || 'gray');
@@ -1717,7 +1720,11 @@ function ServicesView({ session, services, auth, adminAuthID, onRefresh, onEditT
           <tbody>
             {filtered.map(s=>
               <tr key={s.id}>
-                <td data-col="identity"><b>{s.name}</b>{s.descriptor?.type==='ssh' && <Badge tone="purple" style={{marginLeft:6}}>Built-in</Badge>}</td>
+                <td data-col="identity">
+                  <b>{s.name}</b>
+                  {unproxied(s) && <span className="unproxied-mark" title="Unproxied services are allowed to pass their creds to the user.">(!)</span>}
+                  {s.descriptor?.type==='ssh' && <Badge tone="purple" style={{marginLeft:6}}>Built-in</Badge>}
+                </td>
                 <td data-col="url">
                   <span
                     className="mono"
@@ -1845,7 +1852,7 @@ function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose,
         </div>
         {!isTasks && !isVirtual && <div className="field"><label>Proxied</label>
           <select className="input" value={form.descriptor.proxied?'true':'false'} onChange={e=>updDesc('proxied',e.target.value==='true')}>
-            <option value="false">No</option><option value="true">Yes</option>
+            <option value="true">Yes</option><option value="false">No</option>
           </select>
         </div>}
       </div>
