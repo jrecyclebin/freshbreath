@@ -29,6 +29,22 @@ echo "→ Building $binary (GOOS=$GOOS GOARCH=$GOARCH CC=${CC:-default})"
 tags="sqlite_fts5"
 ldflags="-X main.version=$VERSION -X main.commit=$COMMIT"
 
+# Go 1.27 began stamping the PE optional header itself when cgo forces an
+# external link: --major-os-version=10, --major-subsystem-version=10. Honest
+# of it — Go dropped pre-Windows-10 support a while back — but the Windows
+# loader reads that field as a hard gate and turns the binary away before it
+# runs a single instruction. Server 2012 reports 6.2, so v0.7 wouldn't start
+# there while v0.6 (Go 1.26, mingw's old 6.1 watermark) was perfectly happy.
+#
+# We put 6.2 back. Go's flags are emitted first and ours land after, which is
+# how ld settles the argument. Note this only unlocks the door: the runtime
+# reaches newer APIs through GetProcAddress, which never shows up in the
+# import table, so anything genuinely missing on an old box surfaces as a
+# crash at startup rather than a refusal to load. Test on the real thing.
+if [ "$GOOS" = "windows" ]; then
+  ldflags="$ldflags -extldflags '-Wl,--major-os-version,6 -Wl,--minor-os-version,2 -Wl,--major-subsystem-version,6 -Wl,--minor-subsystem-version,2'"
+fi
+
 # FRBR_STATIC=1 (set by the build:linux-static tasks, and what CI releases)
 # links a fully static binary against musl. go-sqlite3 is C, so CGO is not
 # optional, and a CGO binary is bound to the glibc that built it — build on
