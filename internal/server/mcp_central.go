@@ -828,7 +828,7 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
 				"new_text":  map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
 				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files). Incompatible with old_text."},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"http", "inline"}, "description": "How to transfer bytes: \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files) or \"inline\" (directly from context)."},
 			},
 			"required": []string{"nonce", "path", "transport"},
 		},
@@ -871,7 +871,7 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 			return mcpToolResult(map[string]string{"url": u, "method": http.MethodPut})
 
 		default:
-			return mcpToolError("transport must be \"inline\" or \"http\", got %q", transport), nil
+			return mcpToolError("transport must be \"http\" or \"inline\", got %q", transport), nil
 		}
 	})
 
@@ -1044,7 +1044,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 				"name":      map[string]interface{}{"type": "string", "description": "Service name"},
 				"new_text":   map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
 				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files). Incompatible with old_text."},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"http","inline"}, "description": "How to transfer bytes: \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files) or \"inline\" (directly from context)."},
 			},
 			"required": []string{"name", "transport"},
 		},
@@ -1095,7 +1095,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			return mcpToolResult(map[string]string{"url": u, "method": http.MethodPut})
 
 		default:
-			return mcpToolError("transport must be \"inline\" or \"http\", got %q", transport), nil
+			return mcpToolError("transport must be \"http\" or \"inline\", got %q", transport), nil
 		}
 	})
 
