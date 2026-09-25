@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // maxArchiveSize caps a fetched/built archive. Generous (apps can be big) but
@@ -361,7 +362,7 @@ func (s *Server) coreCreateUpdateFeed(actor *db.User, url, mode, name, keyHex st
 			return "", "", cerr(http.StatusBadRequest, "key_hex must be 64 hex characters (32 bytes)")
 		}
 	}
-	id := db.GenNonce()
+	id := utils.GenNonce()
 	if err := s.store.CreateUpdateFeed(id, url, mode, name, keyHex, actor.ID); err != nil {
 		return "", "", cerr(http.StatusInternalServerError, "%v", err)
 	}
@@ -858,7 +859,7 @@ func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []st
 		return "", cerr(http.StatusInternalServerError, "encrypt: %v", err)
 	}
 	_ = emit(UpdateEvent{Event: "encrypt", Step: "encrypt", Status: "ok"})
-	ref := db.GenNonce()
+	ref := utils.GenNonce()
 	s.putPendingArchive(feed.ID, ref, archive)
 	// Plain admin-authenticated URL — no act-token. The consumer is the
 	// control panel SPA, which already holds a bearer token; act-tokens are

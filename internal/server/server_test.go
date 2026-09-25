@@ -23,6 +23,7 @@ import (
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -983,7 +984,7 @@ func TestLoginAppNotAllowed(t *testing.T) {
 
 func TestLoginAdminNonceAllowed(t *testing.T) {
 	srv := newTestServer(t)
-	srv.adminNonce = db.GenNonce()
+	srv.adminNonce = utils.GenNonce()
 
 	// Fully-specified oauth2 record: no discovery, no DCR, no network.
 	rec := newAuthRecord(t, srv, "Admin IdP", db.AuthOAuth2, db.AuthDescriptor{

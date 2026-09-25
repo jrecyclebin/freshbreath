@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // actTokenTTL is how long a minted act token stays valid. Short by design —
@@ -67,7 +68,7 @@ func (s *Server) mintActToken(user *db.User, method, pathQuery string, ttl time.
 	// vanishingly rare, but GenNonce has no uniqueness guarantee and we
 	// must not overwrite a live ticket. A few tries is plenty.
 	for i := 0; i < 8; i++ {
-		id := db.GenNonce()
+		id := utils.GenNonce()
 		s.actTickets.mu.Lock()
 		if _, exists := s.actTickets.tix[id]; !exists {
 			s.actTickets.tix[id] = p

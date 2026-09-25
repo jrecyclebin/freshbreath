@@ -134,6 +134,10 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/mcp/{name}", s.handleMCP)
 	s.mux.HandleFunc("/.well-known/oauth-protected-resource/mcp/{name}", s.handleMCPPRM)
 
+	// Public completion callback for URL elicitation steps: the out-of-band
+	// target redirects here when the user finishes. Capability = the ID.
+	s.mux.HandleFunc("/elicitation/{id}", s.handleElicitationComplete)
+
 	// Central MCP server — exposes admin API as MCP tools
 	s.setupCentralMCP()
 	s.mux.HandleFunc("/mcp", s.handleCentralMCP)
@@ -951,8 +955,17 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 	// SQL steps run against the app's database (design/app-databases.md).
 	sqlRunner := s.browserSQLRunner(svc, r.Header.Get("X-App-Nonce"), body.Args)
 
-	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, auth, sqlRunner)
+	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, auth, sqlRunner,
+		&formats.ExecContext{})
 	if err != nil {
+		// A FORM/URL step suspends the run waiting for an elicitation —
+		// only an MCP client can supply that. Surface a clean message
+		// instead of leaking the internal suspension error.
+		var susp *formats.ErrSuspend
+		if errors.As(err, &susp) {
+			http.Error(w, "tool requires elicitation — call it through the MCP endpoint with a client that supports elicitation", http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

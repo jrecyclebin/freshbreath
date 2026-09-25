@@ -11,6 +11,7 @@ import (
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // Config holds the resolved runtime configuration for a freshbreath server.
@@ -50,6 +51,7 @@ type Server struct {
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedMu          sync.RWMutex
 	actTickets        actTickets // /api/act capability tickets (in-memory only)
+	pendingElicits    pendingElicits // virtual-tool elicitation suspend/resume state (in-memory only)
 	virtualMCPs       *virtualMCPRegistry                // slug → MCP server entries
 	mcpAuthPending    *sync.Map                          // key → *mcpPendingAuth (MCP OAuth flow state)
 	oauthSrv          *oauthServer                       // Freshbreath OAuth authorization server
@@ -194,7 +196,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		localKey:       localKey,
 		version:        version,
 		commit:         commit,
-		adminNonce:     db.GenNonce(),
+		adminNonce:     utils.GenNonce(),
 		agentMgr:       agentMgr,
 		sessionMgr:     sessionMgr,
 		gitGw:          sshkit.NewGitGateway(agentMgr, store),
@@ -215,6 +217,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 			s.store.DeleteExpiredRefreshFamilies(time.Now())
 			s.appDBSweep()
 			s.sweepActTickets(time.Now())
+			s.pendingElicits.sweep(time.Now())
 		}
 	}()
 

@@ -3,11 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/formats"
@@ -50,7 +52,16 @@ func (r *virtualMCPRegistry) add(s *Server, svc *db.Service) {
 
 	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return mcps
-	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	}, &mcp.StreamableHTTPOptions{
+		// Stateful: elicitation steps suspend the tool across a
+		// multi-round-trip retry (SEP-2322), which needs a live session on
+		// both POSTs — the SDK rejects server-initiated requests from
+		// stateless sessions outright. SessionTimeout reaps abandoned
+		// sessions; the idle timer pauses while a request is in flight, so
+		// a suspended run inside an open tools/call can't be reaped.
+		Stateless:      false,
+		SessionTimeout: 30 * time.Minute,
+	})
 
 	r.mu.Lock()
 	r.entries[slug] = &virtualMCPEntry{
@@ -103,19 +114,24 @@ func (s *Server) requireMCPGate(svc *db.Service, next http.Handler) http.Handler
 // ── MCP Server Factory ───────────────────────────────────────────────
 
 // newVirtualMCPServer creates an MCP server that exposes the virtual service's
-// tools via the MCP protocol.
-func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
+// tools via the MCP protocol. Optional opts tweak the ServerOptions before the
+// server is built (tests use them to force an old protocol version).
+func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOptions)) (*mcp.Server, error) {
 	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
 	if err != nil {
 		return nil, fmt.Errorf("load virtual tools: %w", err)
 	}
 
+	sopts := &mcp.ServerOptions{
+		Instructions: fmt.Sprintf("Virtual service: %s", svc.Name),
+	}
+	for _, opt := range opts {
+		opt(sopts)
+	}
 	mcps := mcp.NewServer(&mcp.Implementation{
 		Name:    fmt.Sprintf("frbr-%s", slugify(svc.Name)),
 		Version: "1.0.0",
-	}, &mcp.ServerOptions{
-		Instructions: fmt.Sprintf("Virtual service: %s", svc.Name),
-	})
+	}, sopts)
 
 	for _, vt := range tools {
 		tool := &mcp.Tool{
@@ -130,6 +146,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 			tool.Meta = mcp.Meta{"ui": map[string]any{"visibility": []string{"app"}}}
 		}
 		capturedName := vt.Name
+		svcSlug := strings.TrimPrefix(svc.URL, "/mcp/")
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Re-resolve the gate and outbound credential per call: the
 			// middleware verified admission, but $token and the identity
@@ -177,8 +194,25 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 				json.Unmarshal(req.Params.Arguments, &args)
 			}
 
-			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args,
-				s.virtualAuth(token, claims), s.mcpSQLRunner(svc, claims, args))
+			// A RequestState means this is the retry of a run that was
+			// suspended at an elicitation step (SEP-2322 multi-round-trip):
+			// the host answers the form/URL prompt and re-issues the call
+			// with the responses echoed. Old-protocol hosts reach this same
+			// path through the SDK's server middleware, which fulfills the
+			// input request with a blocking ss.Elicit and re-invokes the
+			// handler.
+			if req.Params.RequestState != "" {
+				return s.resumeVirtualTool(tools, req)
+			}
+
+			auth := s.virtualAuth(token, claims)
+			sqlRunner := s.mcpSQLRunner(svc, claims, args)
+			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, auth, sqlRunner,
+				&formats.ExecContext{Hooks: s.elicitHooks()})
+			var susp *formats.ErrSuspend
+			if errors.As(err, &susp) {
+				return s.suspendVirtualTool(susp.Susp, svcSlug, req.Session, sqlRunner), nil
+			}
 			if err != nil {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
@@ -236,6 +270,12 @@ func virtualToolInputSchema(vt formats.VirtualTool, dbTarget string) map[string]
 	required := []string{}
 	for _, p := range vt.Params {
 		prop := map[string]interface{}{"type": string(p.Type)}
+		if p.Format != "" {
+			// Format-typed strings (email/uri/date/date-time): JSON Schema
+			// type string + format — the type word itself isn't a schema type.
+			prop["type"] = "string"
+			prop["format"] = p.Format
+		}
 		if len(p.Values) > 0 {
 			prop["enum"] = p.Values
 		}

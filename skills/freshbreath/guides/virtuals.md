@@ -567,3 +567,86 @@ as `"truncated": true` rather than silently shortened.
 > caller varies the bindings, never the query, so a model calling
 > `recent-tasks` can't be talked into `DROP TABLE` no matter how confidently
 > it asks.
+
+## Elicitation Steps — FORM and URL
+
+Some tools need the *user*, not the model, to supply input: an approval, a
+consent checkbox, a link to open in a browser. Two directives do this. Both
+suspend the tool at the step: the MCP host shows its elicitation UI, the user
+answers, and the tool resumes with the answer. The variables the form or URL
+step need must be captured into `$vars` (assignments or caller params)
+*before* the step — the step's output replaces the whole scope, so
+capture-first is the authoring idiom.
+
+### FORM — ask the user for values
+
+```
+[send-payment] Send a payment after explicit user approval.
+
+$amount = $.quote.total
+
+FORM "Send $amount to the payee?"
+    $confirm is boolean
+    $memo is string?
+```
+
+- The message is interpolated like any template and may be quoted or plain
+  (no escapes in either — don't put `"` in the message).
+- Fields are declared on **indented lines under the directive**. Supported
+  types: `string`, `number`, `boolean`, `enum:a,b,c`, and format-typed
+  strings (`email`, `uri`, `date`, `date-time`). Trailing `?` marks the field
+  optional (blank → `""` on resume).
+- Field names join the tool's *defined* set and are never caller parameters —
+  the user, not the model, fills them.
+- The accepted form content **replaces the scope**, like a step response.
+- If the user declines or cancels, the tool returns an error saying so.
+- Objects and arrays are parse errors — elicitation is flat primitives only.
+
+### URL — hand the user a link
+
+```
+URL <template> [message]
+```
+
+Two behaviors, depending on position:
+
+- **Mid-script URL** (more work follows, or a `{shaping}` block anchors to
+  it): the tool suspends, the host is handed the URL through elicitation, and
+  the run resumes when the user finishes — see the completion callback below.
+- **URL as the LAST step with no shaping after it**: pure hand-off. No
+  elicitation happens at all; the resolved link lands in scope as
+  **`$.handoff_url`** and is included in the tool result. (An eager
+  elicitation here would write its completion notification to the wire
+  *before* the input-required result it relates to, hanging spec-conscious
+  hosts.)
+
+### The completion callback and $elicitation_url
+
+A mid-script URL step usually needs the out-of-band site to send data back
+(an OAuth code, a signed confirmation). Fresh Breath serves a public callback
+at `/elicitation/{id}` — GET turns query params into the payload, POST takes
+a JSON body. The author interpolates the built-in **`$elicitation_url`**
+(reserved, unshadowable, query-escaped) into their link:
+
+```
+[callback] Out-of-band flow gated on the completion callback.
+
+URL https://idp.example.com/authorize?redirect=$elicitation_url "Authorize, then come back"
+GET https://api.example.com/verify/$code
+
+HTTP 200
+```
+
+When the user finishes, the target hits the callback; its payload becomes the
+resumed scope (here `$code`), hosts holding the URL prompt open are notified,
+and the tool continues.
+
+### Limitations
+
+- URL-mode elicitation cannot return data *through MCP* — data arrives only
+  via the completion callback. URL steps are hand-off semantics.
+- Old-protocol hosts (pre-2026-07-28) are bridged by the SDK with a blocking
+  prompt, which works for FORM steps; but such a host re-invokes the tool at
+  most once, so a tool with *multiple* elicitation steps will surface its
+  second suspension raw. Prefer one elicitation step per tool for
+  compatibility.

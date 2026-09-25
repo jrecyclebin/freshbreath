@@ -20,6 +20,7 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ func oidcRecord(t *testing.T, srv *Server, name string) *db.AuthRecord {
 // its id. Refresh-token tests need a backing family record.
 func createRefreshFamily(t *testing.T, store *db.Store, subject string, authID int64, currentJTI string) string {
 	t.Helper()
-	famID := db.GenNonce()
+	famID := utils.GenNonce()
 	fam := &db.RefreshFamily{
 		ID:         famID,
 		Subject:    subject,
@@ -783,7 +784,7 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 	}
 	subject := subjectForUser(ada)
 
-	jti := db.GenNonce()
+	jti := utils.GenNonce()
 	famID := createRefreshFamily(t, srv.store, subject, rec.ID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Subject:   subject,
@@ -827,7 +828,7 @@ func TestOAuthRefreshIdentityHappyPath(t *testing.T) {
 func TestOAuthRefreshDeletedUser(t *testing.T) {
 	srv := newTestServer(t)
 	rec := oidcRecord(t, srv, "Admin IdP")
-	jti := db.GenNonce()
+	jti := utils.GenNonce()
 	famID := createRefreshFamily(t, srv.store, "frbr:9999", rec.ID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Subject:   "frbr:9999",
@@ -873,7 +874,7 @@ func TestOAuthRefreshUpstreamLegHappyPath(t *testing.T) {
 	})
 
 	subject := extSubject("up", "u-42")
-	jti := db.GenNonce()
+	jti := utils.GenNonce()
 	famID := createRefreshFamily(t, srv.store, subject, rec.ID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Subject:   subject,
@@ -938,7 +939,7 @@ func TestOAuthRefreshRotatesEveryLeg(t *testing.T) {
 	})
 
 	subject := extSubject("company", "u-2")
-	jti := db.GenNonce()
+	jti := utils.GenNonce()
 	famID := createRefreshFamily(t, srv.store, subject, acts.ID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Subject:   subject,
@@ -998,7 +999,7 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	srv.adminNonce = db.GenNonce() // production sets this in NewServer; tests build the literal directly
+	srv.adminNonce = utils.GenNonce() // production sets this in NewServer; tests build the literal directly
 	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
@@ -1086,7 +1087,7 @@ func cookieRefresh(srv *Server, authID int64, rt, appNonce string) *httptest.Res
 func mintIdentityRefresh(t *testing.T, srv *Server, user *db.User, authID int64) string {
 	t.Helper()
 	subject := subjectForUser(user)
-	jti := db.GenNonce()
+	jti := utils.GenNonce()
 	famID := createRefreshFamily(t, srv.store, subject, authID, jti)
 	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
 		Subject: subject, UserEmail: user.Email, AuthID: authID,
@@ -1177,7 +1178,7 @@ func TestRefreshGrantAdminNonceWrongRecord(t *testing.T) {
 	authRec := oidcRecord(t, srv, "Auth IdP")
 	otherRec := oidcRecord(t, srv, "Other IdP")
 	admin, _ := srv.store.CreateUser("Admin User", "admin@example.com", "Admin", "Active")
-	srv.adminNonce = db.GenNonce()
+	srv.adminNonce = utils.GenNonce()
 	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(authRec.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
@@ -1199,7 +1200,7 @@ func TestRefreshCookiePathScopedByRecord(t *testing.T) {
 	recA := oidcRecord(t, srv, "IdP A")
 	recB := oidcRecord(t, srv, "IdP B")
 	scope, _ := srv.store.CreateUser("Scope User", "scope@example.com", "Admin", "Active")
-	srv.adminNonce = db.GenNonce()
+	srv.adminNonce = utils.GenNonce()
 	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(recA.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
@@ -1432,7 +1433,7 @@ func refreshFixture(t *testing.T, srv *Server, email string) (rec *db.AuthRecord
 		t.Fatalf("create user: %v", err)
 	}
 	subject := subjectForUser(user)
-	jti := db.GenNonce()
+	jti := utils.GenNonce()
 	famID = createRefreshFamily(t, srv.store, subject, rec.ID, jti)
 	rt, err = srv.mintRefreshToken(freshbreathRefreshData{
 		Subject: subject, UserEmail: email, AuthID: rec.ID,

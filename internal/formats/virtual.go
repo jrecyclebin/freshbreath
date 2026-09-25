@@ -17,6 +17,8 @@ import (
 	"unicode"
 
 	"github.com/tidwall/gjson"
+
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // ── Data Structures ──────────────────────────────────────────────────
@@ -30,12 +32,31 @@ const (
 	ParamNumber ParamType = "number"
 	ParamBool   ParamType = "boolean"
 	ParamArray  ParamType = "array"
+
+	// String-constrained types: variables typed with these carry a JSON
+	// Schema `format` on the wire (tool input schemas and elicitation form
+	// schemas), which helps models and host form UIs; they resolve as plain
+	// strings in templates and SQL.
+	ParamEmail    ParamType = "email"
+	ParamURI      ParamType = "uri"
+	ParamDate     ParamType = "date"
+	ParamDateTime ParamType = "date-time"
 )
+
+// stringFormats maps the format-typed ParamTypes to their JSON Schema
+// `format` value. Everything else resolves by type name alone.
+var stringFormats = map[ParamType]string{
+	ParamEmail:    "email",
+	ParamURI:      "uri",
+	ParamDate:     "date",
+	ParamDateTime: "date-time",
+}
 
 // ToolParam describes an input parameter for a virtual tool.
 type ToolParam struct {
 	Name     string
 	Type     ParamType
+	Format   string   // JSON Schema format for the *-typed string params
 	Optional bool     // from a `?` annotation; parameters are required by default
 	Values   []string // declared enum values; non-nil when the param is an enum
 }
@@ -53,8 +74,35 @@ type VirtualTool struct {
 type typeAnnotation struct {
 	names    []string // one or more: "$a, $b is number"
 	typ      ParamType
+	format   string // "email"/"uri"/... for the format-typed string params
 	optional bool
 	values   []string // non-nil for enum annotations: $x is "a" | "b"
+}
+
+// FormField is one input of a FORM elicitation step. Fields use the same
+// annotation syntax as tool parameters ("$x is type", enums, optional "?")
+// but bind runtime scope from the user's answers instead of caller arguments.
+type FormField struct {
+	Name     string
+	Type     ParamType
+	Format   string
+	Optional bool
+	Values   []string // enum choices
+}
+
+// VirtualForm is a FORM directive: a blocking form elicitation whose result
+// replaces the scope (like every step output).
+type VirtualForm struct {
+	Message string      // $-interpolated message shown above the form
+	Fields  []FormField // declared on indented lines under the directive
+}
+
+// VirtualElicit is an elicitation directive step: FORM (blocking form) or URL
+// (URL-mode elicitation handing the user a link out-of-band).
+type VirtualElicit struct {
+	Form    *VirtualForm // non-nil for FORM steps
+	URL     string       // URL template for URL steps
+	Message string       // message template (may be empty for URL steps)
 }
 
 // VirtualStep is one step within a tool's script — an HTTP request, a SQL
@@ -70,6 +118,7 @@ type VirtualStep struct {
 	SQL         string                   // Compiled SQL: $var → :var bindings
 	SQLNames    []string                 // Unique bind names, first-appearance order
 	Responses   map[int]*VirtualResponse // Expected status → response handling (0 = SQL step shaping)
+	Elicit      *VirtualElicit           // FORM or URL directive: elicitation step
 }
 
 // VirtualAssignment binds a variable name to an expression.
@@ -167,7 +216,7 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 //   - All other parameters default to "string".
 var spreadVarRe = regexp.MustCompile(`\.\.\.\$([a-zA-Z_]\w*)`)
 var typeAnnotationRe = regexp.MustCompile(
-	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array)(\?)?$`)
+	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array|email|uri|date-time|date)(\?)?$`)
 
 // enumAnnotationRe matches an enum declaration: "$name is "a" | 'b' | ..." with
 // an optional trailing `?`. The values are quote-delimited (double or single,
@@ -185,7 +234,7 @@ var enumAnnotationRe = regexp.MustCompile(
 var enumValueRe = regexp.MustCompile(`"[^"]*"|'[^']*'`)
 
 // parseEnumValues splits an enumAnnotationRe body (group 2) into its bare
-// values, stripping the surrounding quotes. An empty quoted token ("" or '')
+// values, stripping the surrounding quotes. An empty quoted token ("" or ”)
 // is a legitimate value meaning the empty string.
 func parseEnumValues(s string) []string {
 	tokens := enumValueRe.FindAllString(s, -1)
@@ -198,15 +247,23 @@ func parseEnumValues(s string) []string {
 
 func toolParams(tool VirtualTool) []ToolParam {
 	// token* are server-injected (auth token + identity claims), never caller params.
-	defined := map[string]bool{"token": true, "token_email": true, "token_sub": true, "token_id": true}
+	defined := map[string]bool{"token": true, "token_email": true, "token_sub": true, "token_id": true, "elicitation_url": true, "handoff_url": true}
 	for _, step := range tool.Steps {
 		for _, a := range step.Assignments {
 			defined[a.VarName] = true
+		}
+		// FORM fields bind runtime scope from the user's answers, not caller
+		// arguments — they must never surface as caller params.
+		if step.Elicit != nil && step.Elicit.Form != nil {
+			for _, f := range step.Elicit.Form.Fields {
+				defined[f.Name] = true
+			}
 		}
 	}
 
 	seen := map[string]bool{}
 	types := map[string]ParamType{} // name → inferred type
+	formats := map[string]string{}  // name → JSON Schema format (email/uri/…)
 
 	scan := func(s string) {
 		for _, m := range plainVarRe.FindAllStringSubmatch(s, -1) {
@@ -230,6 +287,13 @@ func toolParams(tool VirtualTool) []ToolParam {
 		}
 		scan(step.Body)
 		scan(step.BodyRaw)
+		if step.Elicit != nil {
+			if step.Elicit.Form != nil {
+				scan(step.Elicit.Form.Message)
+			}
+			scan(step.Elicit.Message)
+			scan(step.Elicit.URL)
+		}
 		// SQL steps keep their bind names from compilation — scan those.
 		for _, name := range step.SQLNames {
 			if !defined[name] {
@@ -256,6 +320,9 @@ func toolParams(tool VirtualTool) []ToolParam {
 		for _, name := range ann.names {
 			if _, ok := seen[name]; ok {
 				types[name] = ann.typ
+				if ann.format != "" {
+					formats[name] = ann.format
+				}
 				if ann.optional {
 					optional[name] = true
 				}
@@ -272,7 +339,7 @@ func toolParams(tool VirtualTool) []ToolParam {
 		if pt, ok := types[name]; ok {
 			t = pt
 		}
-		params = append(params, ToolParam{Name: name, Type: t, Optional: optional[name], Values: enumValues[name]})
+		params = append(params, ToolParam{Name: name, Type: t, Format: formats[name], Optional: optional[name], Values: enumValues[name]})
 	}
 	sort.Slice(params, func(i, j int) bool { return params[i].Name < params[j].Name })
 	return params
@@ -306,7 +373,7 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 	state := sPre
 
 	newStep := func() {
-		if step != nil && (step.Method != "" || step.SQL != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+		if step != nil && (step.Method != "" || step.SQL != "" || step.Elicit != nil || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
 			tool.Steps = append(tool.Steps, *step)
 		}
 		step = &VirtualStep{Responses: make(map[int]*VirtualResponse)}
@@ -347,27 +414,49 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				step.Assignments = append(step.Assignments, VirtualAssignment{VarName: vn, Expr: ex})
 			} else if ok, ex, msg := tryParseAssertion(line); ok {
 				step.Assertions = append(step.Assertions, VirtualAssertion{Expr: ex, Msg: msg})
-			} else if m := enumAnnotationRe.FindStringSubmatch(line); m != nil {
-				var names []string
-				for _, part := range strings.Split(m[1], ",") {
-					names = append(names, strings.TrimPrefix(strings.TrimSpace(part), "$"))
+			} else if ann, ok := parseAnnotation(line); ok {
+				tool.typeAnnotations = append(tool.typeAnnotations, ann)
+			} else if ok, form := tryParseForm(line); ok {
+				// FORM directive: a blocking form elicitation whose answers
+				// replace the scope. Field declarations use the same annotation
+				// syntax as tool parameters on indented continuation lines
+				// (SQL-style): ends at the first non-indented line; blanks and
+				// indented # comments are skipped.
+				j := i + 1
+				for j < len(lines) {
+					raw := lines[j]
+					t := strings.TrimSpace(raw)
+					if t == "" {
+						j++
+						continue
+					}
+					if raw[0] != ' ' && raw[0] != '\t' {
+						break
+					}
+					if !strings.HasPrefix(t, "#") {
+						field, err := parseFormField(t)
+						if err != nil {
+							return err
+						}
+						form.Fields = append(form.Fields, field)
+					}
+					j++
 				}
-				tool.typeAnnotations = append(tool.typeAnnotations, typeAnnotation{
-					names:    names,
-					typ:      ParamString,
-					optional: m[3] == "?",
-					values:   parseEnumValues(m[2]),
-				})
-			} else if m := typeAnnotationRe.FindStringSubmatch(line); m != nil {
-				var names []string
-				for _, part := range strings.Split(m[1], ",") {
-					names = append(names, strings.TrimPrefix(strings.TrimSpace(part), "$"))
-				}
-				tool.typeAnnotations = append(tool.typeAnnotations, typeAnnotation{
-					names:    names,
-					typ:      ParamType(m[2]),
-					optional: m[3] == "?",
-				})
+				i = j - 1
+				step.Elicit = &VirtualElicit{Form: form}
+				// Forms have no status line; anchor any shaping block to 0.
+				step.Responses[0] = &VirtualResponse{}
+				lastHTTPStatus = 0
+				state = sResp
+			} else if ok, urlTmpl, msg := tryParseElicitURL(line); ok {
+				// URL directive: URL-mode elicitation. One line — the resolved
+				// link is handed to the user through the host's elicitation UI;
+				// there are no headers or bodies. Shaping may follow, anchored
+				// to 0 like SQL shaping.
+				step.Elicit = &VirtualElicit{URL: urlTmpl, Message: msg}
+				step.Responses[0] = &VirtualResponse{}
+				lastHTTPStatus = 0
+				state = sResp
 			} else if isSQLVerbLine(line) {
 				// SQL step: the verb line plus every indented continuation,
 				// against the RAW line (the loop's trim already happened).
@@ -500,7 +589,7 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 	}
 
 	// Finalize last step
-	if step != nil && (step.Method != "" || step.SQL != "" || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+	if step != nil && (step.Method != "" || step.SQL != "" || step.Elicit != nil || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
 		tool.Steps = append(tool.Steps, *step)
 	}
 	return nil
@@ -668,6 +757,24 @@ func rejectReservedParams(tool VirtualTool) error {
 				return err
 			}
 		}
+		if st.Elicit != nil {
+			msgs := []string{st.Elicit.Message, st.Elicit.URL}
+			if st.Elicit.Form != nil {
+				msgs = append(msgs, st.Elicit.Form.Message)
+			}
+			for _, s := range msgs {
+				if err := check(s); err != nil {
+					return err
+				}
+			}
+			if st.Elicit.Form != nil {
+				for _, f := range st.Elicit.Form.Fields {
+					if f.Name == "app_nonce" {
+						return fmt.Errorf("$app_nonce is reserved (the server supplies it for database tools); rename the FORM field")
+					}
+				}
+			}
+		}
 		for _, v := range st.Headers {
 			if err := check(v); err != nil {
 				return err
@@ -695,6 +802,92 @@ func rejectReservedParams(tool VirtualTool) error {
 		}
 	}
 	return nil
+}
+
+// parseAnnotation parses one "$names is spec" line — a type annotation or an
+// enum declaration — into a typeAnnotation. Returns ok=false when the line
+// isn't an annotation.
+func parseAnnotation(line string) (typeAnnotation, bool) {
+	if m := enumAnnotationRe.FindStringSubmatch(line); m != nil {
+		var names []string
+		for _, part := range strings.Split(m[1], ",") {
+			names = append(names, strings.TrimPrefix(strings.TrimSpace(part), "$"))
+		}
+		return typeAnnotation{names: names, typ: ParamString, optional: m[3] == "?", values: parseEnumValues(m[2])}, true
+	}
+	if m := typeAnnotationRe.FindStringSubmatch(line); m != nil {
+		var names []string
+		for _, part := range strings.Split(m[1], ",") {
+			names = append(names, strings.TrimPrefix(strings.TrimSpace(part), "$"))
+		}
+		ann := typeAnnotation{names: names, optional: m[3] == "?"}
+		if f, ok := stringFormats[ParamType(m[2])]; ok {
+			ann.typ = ParamString
+			ann.format = f
+		} else {
+			ann.typ = ParamType(m[2])
+		}
+		return ann, true
+	}
+	return typeAnnotation{}, false
+}
+
+// parseFormField parses one FORM field declaration. Fields reuse the tool
+// parameter annotation syntax minus object/array: elicitation schemas are
+// flat primitives (string, number, boolean, enum, formatted string), and
+// arrays exist in the MCP form subset only for multi-select enums, which the
+// single-field annotation can't express.
+func parseFormField(line string) (FormField, error) {
+	ann, ok := parseAnnotation(line)
+	if !ok {
+		return FormField{}, fmt.Errorf("invalid FORM field %q: expected an annotation like $name is string", line)
+	}
+	if len(ann.names) != 1 {
+		return FormField{}, fmt.Errorf("FORM fields are declared one per line: %q", line)
+	}
+	if ann.typ == ParamObject || ann.typ == ParamArray {
+		return FormField{}, fmt.Errorf("FORM field $%s: %s fields are not supported (forms take string, number, boolean, enum, or a formatted string)", ann.names[0], ann.typ)
+	}
+	return FormField{Name: ann.names[0], Type: ann.typ, Format: ann.format, Optional: ann.optional, Values: ann.values}, nil
+}
+
+// tryParseForm matches a FORM directive: "FORM <message>". The message is
+// plain text or a quoted string (quotes stripped); either way it stays
+// $-interpolated at execution time.
+func tryParseForm(line string) (ok bool, form *VirtualForm) {
+	if !strings.HasPrefix(line, "FORM ") {
+		return false, nil
+	}
+	return true, &VirtualForm{Message: unquoteText(strings.TrimSpace(line[len("FORM "):]))}
+}
+
+// tryParseElicitURL matches a URL directive: "URL <template> [message]".
+// The template is the first whitespace-delimited token (URL templates never
+// contain spaces); the remainder, if present, is the descriptive text shown
+// with the elicitation, quoted or plain.
+func tryParseElicitURL(line string) (ok bool, urlTmpl, msg string) {
+	if !strings.HasPrefix(line, "URL ") {
+		return false, "", ""
+	}
+	rest := strings.TrimSpace(line[len("URL "):])
+	if rest == "" {
+		return false, "", ""
+	}
+	urlTmpl = rest
+	if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
+		urlTmpl = strings.TrimSpace(rest[:idx])
+		msg = unquoteText(strings.TrimSpace(rest[idx+1:]))
+	}
+	return true, urlTmpl, msg
+}
+
+// unquoteText strips one pair of surrounding double quotes from a directive
+// message, if present. No escape processing (consistent with enum values).
+func unquoteText(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1]
+	}
+	return s
 }
 
 func tryParseHTTPStatus(line string) (ok bool, code int) {
@@ -729,6 +922,9 @@ func isPreRequestLine(line string) bool {
 		return true
 	}
 	if ok, _, _ := tryParseAssertion(line); ok {
+		return true
+	}
+	if strings.HasPrefix(line, "FORM ") || strings.HasPrefix(line, "URL ") {
 		return true
 	}
 	if isSQLVerbLine(line) {
@@ -1272,21 +1468,136 @@ type VirtualAuth struct {
 	UserID interface{} // int64 when the caller maps to a Fresh Breath user; nil otherwise
 }
 
+// ── Elicitation (FORM / URL steps) ───────────────────────────────────
+
+// ElicitRequest is the neutral description of one elicitation the executor
+// needs answered. The server adapter turns it into protocol-specific
+// (mcp.ElicitParams) messages.
+type ElicitRequest struct {
+	Mode    string                 // "form" or "url"
+	Message string                 // resolved message shown to the user
+	URL     string                 // resolved link (url mode)
+	Schema  map[string]interface{} // flat JSON Schema (form mode)
+}
+
+// ElicitResponse is one answered elicitation.
+type ElicitResponse struct {
+	Action  string                 // "accept", "decline", "cancel"
+	Content map[string]interface{} // submitted values (form) / completion payload (url)
+}
+
+// Suspension is the executor's state at an unanswered elicitation step. The
+// server stores it and resumes the tool when the answer arrives.
+type Suspension struct {
+	ToolName      string
+	Args          map[string]interface{}
+	Auth          VirtualAuth
+	Vars          map[string]interface{}
+	Scope         map[string]interface{}
+	StepIdx       int
+	ElicitationID string // crypto-random; doubles as the MCP RequestState / ElicitationID
+	Elicit        ElicitRequest
+	Handoff       bool // URL step as the final step with no shaping: no response is needed
+}
+
+// ResumeState converts a suspension into a resumable state (response to be
+// attached by the server when the host answers).
+func (susp *Suspension) ResumeState() *ResumeState {
+	return &ResumeState{
+		ToolName: susp.ToolName,
+		Args:     susp.Args,
+		Auth:     susp.Auth,
+		Vars:     susp.Vars,
+		Scope:    susp.Scope,
+		StepIdx:  susp.StepIdx,
+	}
+}
+
+// ErrSuspend signals that execution paused at an elicitation step; the
+// Suspension carries everything needed to resume.
+type ErrSuspend struct {
+	Susp *Suspension
+}
+
+func (e *ErrSuspend) Error() string { return "suspended awaiting elicitation" }
+
+// ResumeState carries a suspension plus the elicitation's answer back into
+// the executor. Execution restarts AT the saved step with Response injected
+// (assignments/assertions on the step re-run harmlessly — they are pure
+// evaluations), and continues from there.
+type ResumeState struct {
+	ToolName string
+	Args     map[string]interface{}
+	Auth     VirtualAuth
+	Vars     map[string]interface{}
+	Scope    map[string]interface{}
+	StepIdx  int
+	Response *ElicitResponse
+}
+
+// VirtualHooks supplies server-provided values the executor can't know.
+type VirtualHooks struct {
+	// ElicitationURL builds the public completion-callback URL for an
+	// elicitation ID; it backs the $elicitation_url built-in in URL step
+	// templates. Nil when the server has no public completion route.
+	ElicitationURL func(elicitationID string) string
+}
+
+// ExecContext is the optional server-provided context for a run: the hooks
+// and, when resuming, the stored suspension with its answer attached.
+type ExecContext struct {
+	Hooks  *VirtualHooks
+	Resume *ResumeState
+}
+
 // ExecuteVirtualTool runs a virtual tool's steps and returns the result.
 // auth carries the upstream token and the caller's verified identity
 // (empty when unauthenticated); sqlRunner may be nil for tools that never
-// touch a database.
-func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, auth VirtualAuth, sqlRunner SQLRunner) (interface{}, error) {
+// touch a database. exctx (optional) continues a run that was suspended at
+// an elicitation step; its Resume must name the same tool.
+func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName string, args map[string]interface{}, auth VirtualAuth, sqlRunner SQLRunner, exctx ...*ExecContext) (interface{}, error) {
 	tool := findVirtualTool(tools, toolName)
 	if tool == nil {
 		return nil, fmt.Errorf("tool %q not found", toolName)
 	}
+	var rs *ResumeState
+	var hooks *VirtualHooks
+	for _, x := range exctx {
+		if x == nil {
+			continue
+		}
+		if x.Resume != nil {
+			rs = x.Resume
+		}
+		if x.Hooks != nil {
+			hooks = x.Hooks
+		}
+	}
+	if rs != nil && rs.ToolName != "" && !strings.EqualFold(rs.ToolName, tool.Name) {
+		return nil, fmt.Errorf("resume state is for tool %q, not %q", rs.ToolName, toolName)
+	}
+	return runVirtualTool(tool, httpClient, args, auth, sqlRunner, hooks, rs)
+}
 
+// runVirtualTool is the executor core.
+func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]interface{}, auth VirtualAuth, sqlRunner SQLRunner, hooks *VirtualHooks, rs *ResumeState) (interface{}, error) {
 	vars := make(map[string]interface{})
 	scope := map[string]interface{}{}
-	// Input args become the initial scope for JSON path queries.
-	for k, v := range args {
-		scope[k] = v
+	startIdx := 0
+	if rs != nil {
+		// Resuming: the stored scope already carries caller args, optional
+		// placeholders and everything gathered before the suspension.
+		vars = rs.Vars
+		scope = rs.Scope
+		startIdx = rs.StepIdx
+		if rs.Args != nil {
+			args = rs.Args
+		}
+	} else {
+		// Input args become the initial scope for JSON path queries.
+		for k, v := range args {
+			scope[k] = v
+		}
 	}
 
 	// Identity built-ins are server-injected claims, not inputs: namesake
@@ -1297,6 +1608,8 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 	delete(scope, "token_email")
 	delete(scope, "token_sub")
 	delete(scope, "token_id")
+	delete(scope, "elicitation_url") // reserved: injected per elicitation step
+	delete(scope, "handoff_url")     // reserved: hand-off URL step output
 	if auth.Email != "" {
 		vars["token_email"] = auth.Email
 		vars["token_sub"] = auth.Sub
@@ -1317,7 +1630,7 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 			optionalNames[p.Name] = true
 			if _, ok := scope[p.Name]; !ok {
 				scope[p.Name] = ""
-			omittedOptionals[p.Name] = true
+				omittedOptionals[p.Name] = true
 			}
 		}
 	}
@@ -1356,7 +1669,10 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 		}
 	}
 
-	for stepIdx, step := range tool.Steps {
+	for stepIdx := startIdx; stepIdx < len(tool.Steps); stepIdx++ {
+		step := tool.Steps[stepIdx]
+
+		// Execute assignments first.
 		// Execute assignments first.
 		for _, a := range step.Assignments {
 			val, err := evalExpr(a.Expr, vars, scope, token)
@@ -1371,6 +1687,95 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 			if err := evalAssertion(a.Expr, a.Msg, vars, scope, token); err != nil {
 				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
 			}
+		}
+
+		// Elicitation step: FORM (blocking form whose answers replace the
+		// scope) or URL (URL-mode elicitation handing the user a link).
+		// Executing one without a stored answer suspends the tool — the
+		// server surfaces that as an input-required result and resumes with
+		// ResumeState once the answer arrives (multi-round-trip, SEP-2322).
+		if step.Elicit != nil {
+			// URL step as the final step with no shaping: a pure hand-off. No
+			// elicitation — there is nothing to wait for — and the resolved
+			// link lands in scope as $.handoff_url so the tool result carries
+			// it. (Eliciting here would need an eager completion notification
+			// that races the input-required result on the wire; hosts that
+			// wait for it would hang. The elicitation UI is for steps that
+			// gate further work.)
+			if step.Elicit.Form == nil && stepIdx == len(tool.Steps)-1 && shapingOf(&step) == "" {
+				u, err := resolveTemplate(step.Elicit.URL, vars, scope, token, ResolveURL)
+				if err != nil {
+					return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
+				}
+				scope["handoff_url"] = u
+				continue
+			}
+			elicitationID := elicitationID()
+			if hooks != nil && hooks.ElicitationURL != nil {
+				// $elicitation_url backs out-of-band flows that redirect or
+				// call back: the author interpolates the public completion
+				// URL into their target link. Re-injected per elicitation —
+				// a later step gets a fresh ID.
+				vars["elicitation_url"] = hooks.ElicitationURL(elicitationID)
+			}
+			el, err := buildElicitRequest(step.Elicit, vars, scope, token)
+			if err != nil {
+				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
+			}
+			if rs != nil && rs.StepIdx == stepIdx {
+				resp := rs.Response
+				if resp == nil {
+					return nil, fmt.Errorf("step %d: resume state has no elicitation response", stepIdx)
+				}
+				if resp.Action != "accept" {
+					verb := "declined"
+					if resp.Action == "cancel" {
+						verb = "cancelled"
+					}
+					return nil, fmt.Errorf("step %d: user %s the elicitation", stepIdx, verb)
+				}
+				if el.Mode == "form" {
+					if err := validateFormContent(el.Schema, resp.Content); err != nil {
+						return nil, fmt.Errorf("step %d, form: %w", stepIdx, err)
+					}
+					if resp.Content == nil {
+						resp.Content = map[string]interface{}{}
+					}
+					scope = resp.Content
+					// Optional fields the user left blank resolve as "" so
+					// later templates don't hit undefined-variable errors
+					// (mirrors optional caller params).
+					for _, f := range step.Elicit.Form.Fields {
+						if f.Optional {
+							if _, ok := scope[f.Name]; !ok {
+								scope[f.Name] = ""
+							}
+						}
+					}
+				} else if len(resp.Content) > 0 {
+					// URL completion payload (e.g. OAuth callback query
+					// params riding the completion redirect): replaces the
+					// scope like any step output. No payload → prior scope kept.
+					scope = resp.Content
+				}
+			} else {
+				handoff := el.Mode == "url" && stepIdx == len(tool.Steps)-1 && shapingOf(&step) == ""
+				return nil, &ErrSuspend{Susp: &Suspension{
+					ToolName:      tool.Name,
+					Args:          args,
+					Auth:          auth,
+					Vars:          copyMap(vars),
+					Scope:         copyMap(scope),
+					StepIdx:       stepIdx,
+					ElicitationID: elicitationID,
+					Elicit:        *el,
+					Handoff:       handoff,
+				}}
+			}
+			if vr := step.Responses[0]; vr != nil && vr.Shaping != "" {
+				return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
+			}
+			continue
 		}
 
 		// SQL step: bind, run, feed the result into scope. A failing
@@ -1392,21 +1797,21 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 					params[name] = nil
 					continue
 				}
-			if v, ok := vars[name]; ok {
-				params[name] = v
-				continue
-			}
-			if v, ok := scope[name]; ok {
-				params[name] = v
-				continue
-			}
-			// scope was replaced by the previous SQL result; caller args
-			// stay bindable for the whole tool regardless.
-			if v, ok := args[name]; ok {
-				params[name] = v
-				continue
-			}
-			return nil, fmt.Errorf("step %d: unresolved $%s in SQL", stepIdx, name)
+				if v, ok := vars[name]; ok {
+					params[name] = v
+					continue
+				}
+				if v, ok := scope[name]; ok {
+					params[name] = v
+					continue
+				}
+				// scope was replaced by the previous SQL result; caller args
+				// stay bindable for the whole tool regardless.
+				if v, ok := args[name]; ok {
+					params[name] = v
+					continue
+				}
+				return nil, fmt.Errorf("step %d: unresolved $%s in SQL", stepIdx, name)
 			}
 			result, err := sqlRunner(step.SQL, params)
 			if err != nil {
@@ -1532,6 +1937,170 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 
 	// No shaping on the final step — return raw scope (the last response body).
 	return scope, nil
+}
+
+// elicitationID returns a fresh crypto-random ID for one elicitation. It
+// is the capability for the whole suspend-resume exchange: the RequestState
+// the host echoes on retry, the ElicitationID on the wire, and the completion
+// callback path — possession of it is the only credential, so 60 bits over
+// the nonce alphabet (same generator as app nonces) is the right strength.
+func elicitationID() string {
+	return utils.GenNonce()
+}
+
+// buildElicitRequest resolves an elicitation directive's templates into the
+// neutral request the server adapter sends.
+func buildElicitRequest(ev *VirtualElicit, vars map[string]interface{}, scope interface{}, token string) (*ElicitRequest, error) {
+	el := &ElicitRequest{}
+	msgTmpl := ev.Message
+	if ev.Form != nil {
+		el.Mode = "form"
+		el.Schema = BuildFormSchema(ev.Form)
+		msgTmpl = ev.Form.Message
+	} else {
+		el.Mode = "url"
+	}
+	if msgTmpl != "" {
+		msg, err := resolveTemplate(msgTmpl, vars, scope, token, ResolveHeader)
+		if err != nil {
+			return nil, fmt.Errorf("message: %w", err)
+		}
+		el.Message = msg
+	}
+	if ev.Form == nil {
+		u, err := resolveTemplate(ev.URL, vars, scope, token, ResolveURL)
+		if err != nil {
+			return nil, fmt.Errorf("url: %w", err)
+		}
+		el.URL = u
+	}
+	if el.Message == "" {
+		if el.Mode == "url" {
+			el.Message = "Open this link to continue."
+		} else {
+			el.Message = "Please provide the requested information."
+		}
+	}
+	return el, nil
+}
+
+// shapingOf returns a step's anchored shaping text ("" when none).
+func shapingOf(step *VirtualStep) string {
+	if vr := step.Responses[0]; vr != nil {
+		return vr.Shaping
+	}
+	return ""
+}
+
+// copyMap shallow-copies a scope/vars map for suspension snapshots.
+func copyMap(m map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// BuildFormSchema renders a form's fields as the flat JSON Schema object the
+// MCP form-elicitation protocol requires (top-level primitives only).
+func BuildFormSchema(form *VirtualForm) map[string]interface{} {
+	props := make(map[string]interface{}, len(form.Fields))
+	required := make([]string, 0, len(form.Fields))
+	for _, f := range form.Fields {
+		prop := map[string]interface{}{"type": "string"}
+		switch {
+		case len(f.Values) > 0:
+			prop["enum"] = f.Values
+		case f.Format != "":
+			prop["format"] = f.Format
+		default:
+			prop["type"] = string(f.Type)
+		}
+		props[f.Name] = prop
+		if !f.Optional {
+			required = append(required, f.Name)
+		}
+	}
+	sort.Strings(required)
+	schema := map[string]interface{}{"type": "object", "properties": props}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
+}
+
+// validateFormContent checks a form's submitted answers against the schema
+// the form was presented with. Multi-round-trip retries hand the server raw
+// client responses with no SDK-side validation, so this is the chokepoint
+// that keeps garbage out of scope: required presence, primitive types, enum
+// membership. The string formats (email/uri/…) are hints; hosts enforce them
+// in the form UI.
+func validateFormContent(schema map[string]interface{}, content map[string]interface{}) error {
+	props, _ := schema["properties"].(map[string]interface{})
+	if props == nil {
+		return nil
+	}
+	for _, name := range stringList(schema["required"]) {
+		if _, ok := content[name]; !ok {
+			return fmt.Errorf("missing required field %q", name)
+		}
+	}
+	for name, val := range content {
+		prop, ok := props[name].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected field %q", name)
+		}
+		if val == nil {
+			continue
+		}
+		typ, _ := prop["type"].(string)
+		switch typ {
+		case "string":
+			s, ok := val.(string)
+			if !ok {
+				return fmt.Errorf("field %q: expected a string, got %T", name, val)
+			}
+			if allowed := stringList(prop["enum"]); len(allowed) > 0 {
+				ok := false
+				for _, c := range allowed {
+					if c == s {
+						ok = true
+						break
+					}
+				}
+				if !ok {
+					return fmt.Errorf("field %q: %q is not one of the allowed values", name, s)
+				}
+			}
+		case "number":
+			switch val.(type) {
+			case float64, json.Number:
+			default:
+				return fmt.Errorf("field %q: expected a number, got %T", name, val)
+			}
+		case "boolean":
+			if _, ok := val.(bool); !ok {
+				return fmt.Errorf("field %q: expected a boolean, got %T", name, val)
+			}
+		}
+	}
+	return nil
+}
+
+func stringList(v interface{}) []string {
+	switch list := v.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return list
+	}
+	return nil
 }
 
 // applyShaping resolves a shaping template against the current scope and

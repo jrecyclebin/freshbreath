@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // envJSFor sends GET /env.js (or /frbr.js) with an explicit Host and headers,
@@ -53,7 +54,7 @@ func parseEnvJS(t *testing.T, body string) map[string]any {
 // sets one), and several assertions compare against it.
 func makeHostedApp(t *testing.T, srv *Server, name string) (nonce, slug string) {
 	t.Helper()
-	srv.adminNonce = db.GenNonce()
+	srv.adminNonce = utils.GenNonce()
 	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, name, "", "", nil, nil)
 	if err != nil {
 		t.Fatalf("create app: %v", err)
@@ -89,7 +90,7 @@ func TestResolveNonceRefererHostedApp(t *testing.T) {
 
 func TestResolveNonceRefererControlIsAdmin(t *testing.T) {
 	srv := newTestServer(t)
-	srv.adminNonce = db.GenNonce()
+	srv.adminNonce = utils.GenNonce()
 	rr := envJSFor(t, srv, "/env.js", "localhost:9009", map[string]string{
 		"Referer": "http://localhost:9009/control",
 	})
@@ -123,7 +124,7 @@ func TestResolveNonceLocHostedAppJSON(t *testing.T) {
 // ?loc= is client-supplied and untrusted — it must NOT claim the admin door.
 func TestResolveNonceLocCannotClaimAdmin(t *testing.T) {
 	srv := newTestServer(t)
-	srv.adminNonce = db.GenNonce()
+	srv.adminNonce = utils.GenNonce()
 	rr := envJSFor(t, srv, "/env.js?loc=/control/", "localhost:9009", nil)
 	var cfg map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &cfg); err != nil {
@@ -208,7 +209,7 @@ func TestResolveNonceBareQueryBackcompat(t *testing.T) {
 // No nonce anywhere and no Referer: fail closed, never admin.
 func TestResolveNonceNoSignalFailsClosed(t *testing.T) {
 	srv := newTestServer(t)
-	srv.adminNonce = db.GenNonce()
+	srv.adminNonce = utils.GenNonce()
 	rr := envJSFor(t, srv, "/env.js", "localhost:9009", nil)
 	cfg := parseEnvJS(t, rr.Body.String())
 	if cfg["appNonce"] != "" {

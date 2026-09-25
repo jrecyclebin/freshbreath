@@ -23,6 +23,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // buildOIDCScopes splits the record scopes and ensures "openid" is always present.
@@ -616,7 +617,7 @@ type freshbreathRefreshData struct {
 // newRefreshFamily creates a refresh-family record and returns the family ID
 // and its initial JTI. The caller stamps both into the minted refresh token.
 func (s *Server) newRefreshFamily(subject string, authID int64, deviceLabel string) (familyID, jti string, err error) {
-	familyID = db.GenNonce()
+	familyID = utils.GenNonce()
 	jti = newJTI()
 	fam := &db.RefreshFamily{
 		ID:          familyID,

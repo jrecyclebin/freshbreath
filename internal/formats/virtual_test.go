@@ -3,11 +3,13 @@ package formats
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -2339,5 +2341,443 @@ HTTP 200
 	}
 	if tool.Steps[2].URL != "https://example.com/two" {
 		t.Errorf("step 2 URL = %q, want the trailing request", tool.Steps[2].URL)
+	}
+}
+
+// ── FORM / URL elicitation steps ─────────────────────────────────────
+
+func TestParseFormStep(t *testing.T) {
+	file := `[approve] Approve a payout.
+
+$amount = $.amount
+
+FORM "Approve payout of $amount USD?"
+    $approved is boolean
+    $note is string?
+    $region is "eu" | "us"?
+    $reply_to is email
+---
+[confirm] Confirm-only form.
+
+FORM Really delete $path?
+`
+	tools, err := ParseVirtualFile([]byte(file))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("want 2 tools, got %d", len(tools))
+	}
+	ap := tools[0]
+	// The assignment and the FORM share one step: assignments run before the
+	// step's work, so the form message can interpolate $amount.
+	if len(ap.Steps) != 1 || ap.Steps[0].Elicit == nil {
+		t.Fatalf("approve: want 1 assignment+FORM step, got %+v", ap.Steps)
+	}
+	f := ap.Steps[0].Elicit
+	if f.Form == nil {
+		t.Fatalf("approve: want FORM step, got %+v", f)
+	}
+	if f.Form.Message != "Approve payout of $amount USD?" {
+		t.Fatalf("message = %q", f.Form.Message)
+	}
+	want := []FormField{
+		{Name: "approved", Type: ParamBool},
+		{Name: "note", Type: ParamString, Optional: true},
+		{Name: "region", Type: ParamString, Values: []string{"eu", "us"}, Optional: true},
+		{Name: "reply_to", Type: ParamString, Format: "email"},
+	}
+	if len(f.Form.Fields) != len(want) {
+		t.Fatalf("fields = %+v", f.Form.Fields)
+	}
+	for i, w := range want {
+		got := f.Form.Fields[i]
+		if got.Name != w.Name || got.Type != w.Type || got.Format != w.Format || got.Optional != w.Optional || !slices.Equal(got.Values, w.Values) {
+			t.Errorf("field %d = %+v, want %+v", i, got, w)
+		}
+	}
+	// Form fields are runtime-bound, never caller params.
+	for _, p := range ap.Params {
+		if p.Name == "approved" || p.Name == "note" || p.Name == "region" || p.Name == "reply_to" {
+			t.Errorf("form field %q leaked into caller params", p.Name)
+		}
+	}
+	// The optional form field still needs a schema with optional-ness.
+	schema := BuildFormSchema(f.Form)
+	props := schema["properties"].(map[string]interface{})
+	if _, ok := props["note"].(map[string]interface{})["type"]; !ok {
+		t.Fatalf("schema properties: %+v", props)
+	}
+	if req := schema["required"].([]string); len(req) != 2 || req[0] != "approved" || req[1] != "reply_to" {
+		t.Fatalf("required = %v, want [approved reply_to]", req)
+	}
+	// Confirm-only tool: message resolved as plain text, zero fields.
+	cf := tools[1].Steps[0].Elicit
+	if cf == nil || cf.Form == nil || len(cf.Form.Fields) != 0 {
+		t.Fatalf("confirm tool: want bare FORM, got %+v", cf)
+	}
+	if cf.Form.Message != "Really delete $path?" {
+		t.Fatalf("confirm message = %q", cf.Form.Message)
+	}
+}
+
+func TestParseFormFieldObjectRejected(t *testing.T) {
+	_, err := ParseVirtualFile([]byte(`[t] Test.
+
+FORM Fill it
+    $meta is object
+`))
+	if err == nil || !strings.Contains(err.Error(), "object fields are not supported") {
+		t.Fatalf("want object-field rejection, got %v", err)
+	}
+}
+
+func TestParseFormUnquotedMessage(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[t] Test.
+
+FORM Approve payout of $amount?
+    $ok is boolean
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := tools[0].Steps[0].Elicit.Form.Message; got != "Approve payout of $amount?" {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+func TestParseFormFieldIndentation(t *testing.T) {
+	// Only indented lines belong to the FORM; an unindented annotation is a
+	// tool-level caller-param annotation in pre-request position, as
+	// everywhere else (annotations bind only to names referenced elsewhere,
+	// so $b gets a URL to live in).
+	tools, err := ParseVirtualFile([]byte(`[t] Test.
+
+$b is number
+
+FORM Fill it
+    $a is string
+
+GET https://example.com/x/$b
+
+HTTP 200
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	fields := tools[0].Steps[0].Elicit.Form.Fields
+	if len(fields) != 1 || fields[0].Name != "a" {
+		t.Fatalf("fields = %+v, want only $a", fields)
+	}
+	var hasB bool
+	for _, p := range tools[0].Params {
+		if p.Name == "b" {
+			hasB = true
+			if p.Type != ParamNumber {
+				t.Errorf("$b type = %s, want number", p.Type)
+			}
+		}
+	}
+	if !hasB {
+		t.Fatalf("$b should be a caller param, params = %+v", tools[0].Params)
+	}
+}
+
+func TestParseElicitURL(t *testing.T) {
+	file := `[handoff] Hand off to the user.
+
+URL https://example.com/auth?state=$state
+---
+[message] URL step with a quoted message.
+
+URL $verification_uri "Open this link to authorize the device"
+---
+[after-shaping] URL step following shaping starts a new step.
+
+GET https://example.com/data
+
+HTTP 200
+
+URL https://example.com/next
+`
+	tools, err := ParseVirtualFile([]byte(file))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("want 3 tools, got %d", len(tools))
+	}
+	stepped := []struct {
+		name, url, message string
+	}{
+		{"handoff", "https://example.com/auth?state=$state", ""},
+		{"message", "$verification_uri", "Open this link to authorize the device"},
+		{"after-shaping", "https://example.com/next", ""},
+	}
+	for i, w := range stepped {
+		el := tools[i].Steps[len(tools[i].Steps)-1].Elicit
+		if el == nil || el.Form != nil {
+			t.Fatalf("%s: want bare URL step, got %+v", w.name, el)
+		}
+		if el.URL != w.url {
+			t.Errorf("%s: url = %q, want %q", w.name, el.URL, w.url)
+		}
+		if el.Message != w.message {
+			t.Errorf("%s: message = %q, want %q", w.name, el.Message, w.message)
+		}
+	}
+}
+
+func TestExecuteFormSuspendAndResume(t *testing.T) {
+	file := `[approve] Approve a payout.
+
+GET https://example.com/payouts/$payout_id
+Authorization: Bearer $token
+
+HTTP 200
+
+FORM "Approve payout of $.amount USD?"
+    $approved is boolean
+    $note is string?
+    $region is "eu" | "us"?
+
+{
+  "verdict": $approved,
+  "note": $note,
+  "region": $region
+}
+`
+	tools, err := ParseVirtualFile([]byte(file))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"amount": 42.5}`)
+	}))
+	defer ts.Close()
+	tools[0].Steps[0].URL = ts.URL + "/payouts/$payout_id"
+
+	// First run suspends at the FORM step with the prior response in scope.
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "approve", map[string]interface{}{"payout_id": "p1"}, VirtualAuth{Token: "tok"}, nil)
+	var susp *ErrSuspend
+	if !errors.As(err, &susp) {
+		t.Fatalf("want suspension, got %v", err)
+	}
+	s := susp.Susp
+	if s.StepIdx != 1 {
+		t.Fatalf("StepIdx = %d, want 1", s.StepIdx)
+	}
+	if s.Elicit.Mode != "form" {
+		t.Fatalf("mode = %s", s.Elicit.Mode)
+	}
+	if s.Elicit.Message != "Approve payout of 42.5 USD?" {
+		t.Fatalf("message = %q", s.Elicit.Message)
+	}
+	props := s.Elicit.Schema["properties"].(map[string]interface{})
+	if _, ok := props["approved"]; !ok {
+		t.Fatalf("schema properties = %+v", props)
+	}
+	if s.Scope["amount"].(float64) != 42.5 {
+		t.Fatalf("suspension scope lost the prior response: %+v", s.Scope)
+	}
+
+	// Decline fails the tool.
+	declined := &ResumeState{ToolName: "approve", StepIdx: 1, Vars: s.Vars, Scope: s.Scope, Args: s.Args, Auth: s.Auth,
+		Response: &ElicitResponse{Action: "decline"}}
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "approve", nil, VirtualAuth{}, nil, &ExecContext{Resume: declined}); err == nil || !strings.Contains(err.Error(), "declined") {
+		t.Fatalf("decline: want error, got %v", err)
+	}
+
+	// Accept: content replaces scope; optional-blank resolves as ""; shaping runs.
+	resume := s.ResumeState()
+	resume.Response = &ElicitResponse{Action: "accept", Content: map[string]interface{}{
+		"approved": true,
+		"region":   "eu",
+	}}
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "approve", nil, VirtualAuth{}, nil, &ExecContext{Resume: resume})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	m := result.(map[string]interface{})
+	if m["verdict"] != true || m["note"] != "" || m["region"] != "eu" {
+		t.Fatalf("result = %+v", m)
+	}
+}
+
+func TestExecuteFormContentValidation(t *testing.T) {
+	file := `[ask] Ask.
+
+FORM Fill it
+    $when is date
+    $n is number
+    $pick is "a" | "b"
+`
+	tools, _ := ParseVirtualFile([]byte(file))
+	tools[0].Steps[0].Elicit.Message = "Fill it"
+	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "ask", nil, VirtualAuth{}, nil)
+	var susp *ErrSuspend
+	if !errors.As(err, &susp) {
+		t.Fatalf("want suspension, got %v", err)
+	}
+	s := susp.Susp
+	run := func(content map[string]interface{}) error {
+		r := s.ResumeState()
+		r.Response = &ElicitResponse{Action: "accept", Content: content}
+		_, err := ExecuteVirtualTool(http.DefaultClient, tools, "ask", nil, VirtualAuth{}, nil, &ExecContext{Resume: r})
+		return err
+	}
+	// Wrong primitive type.
+	if err := run(map[string]interface{}{"when": 123, "n": 1.0, "pick": "a"}); err == nil || !strings.Contains(err.Error(), "expected a string") {
+		t.Fatalf("number-in-date-slot: %v", err)
+	}
+	// Enum violation.
+	if err := run(map[string]interface{}{"when": "2026-01-01", "n": 1.0, "pick": "z"}); err == nil || !strings.Contains(err.Error(), "not one of the allowed values") {
+		t.Fatalf("bad enum: %v", err)
+	}
+	// Missing required.
+	if err := run(map[string]interface{}{"when": "2026-01-01", "n": 1.0}); err == nil || !strings.Contains(err.Error(), "missing required") {
+		t.Fatalf("missing required: %v", err)
+	}
+	// Extra junk the schema never asked for.
+	if err := run(map[string]interface{}{"when": "2026-01-01", "n": 1.0, "pick": "a", "hax": "x"}); err == nil || !strings.Contains(err.Error(), "unexpected field") {
+		t.Fatalf("extra field: %v", err)
+	}
+	// Clean content passes.
+	if err := run(map[string]interface{}{"when": "2026-01-01", "n": 1.0, "pick": "a"}); err != nil {
+		t.Fatalf("clean content rejected: %v", err)
+	}
+}
+
+func TestExecuteURLElicitation(t *testing.T) {
+	file := `[connect] Start an out-of-band flow.
+
+GET https://example.com/device
+Authorization: Bearer $token
+
+HTTP 200
+
+URL $verification_url "Open this link, then approve"
+
+GET https://example.com/status/$id
+
+HTTP 200
+`
+	tools, err := ParseVirtualFile([]byte(file))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var calls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"verification_url": "https://idp.example.com/link", "id": "d1", "status": "pending"}`)
+	}))
+	defer ts.Close()
+	tools[0].Steps[0].URL = ts.URL + "/device"
+	tools[0].Steps[2].URL = ts.URL + "/status/$id"
+
+	// Mid-script URL step suspends.
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "connect", nil, VirtualAuth{Token: "tok"}, nil)
+	var susp *ErrSuspend
+	if !errors.As(err, &susp) {
+		t.Fatalf("want suspension, got %v", err)
+	}
+	s := susp.Susp
+	if s.Handoff {
+		t.Fatal("mid-script URL step is not a hand-off")
+	}
+	if s.Elicit.URL != "https://idp.example.com/link" {
+		t.Fatalf("elicit url = %q", s.Elicit.URL)
+	}
+	if s.Elicit.Message != "Open this link, then approve" {
+		t.Fatalf("message = %q", s.Elicit.Message)
+	}
+	if s.ElicitationID == "" {
+		t.Fatal("elicitation id missing")
+	}
+
+	// Resume with a completion payload: scope is replaced, so the follow-up
+	// GET sees the callback data ($id from the payload).
+	resume := s.ResumeState()
+	resume.Response = &ElicitResponse{Action: "accept", Content: map[string]interface{}{"id": "cb-7"}}
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "connect", nil, VirtualAuth{}, nil, &ExecContext{Resume: resume})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (GET carried $id from the payload)", calls)
+	}
+}
+
+func TestExecuteURLHandoff(t *testing.T) {
+	file := `[go] Hand the link to the user and finish.
+
+GET https://example.com/device
+
+HTTP 200
+
+URL $verification_url "Visit to authorize"
+`
+	tools, _ := ParseVirtualFile([]byte(file))
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"verification_url": "https://idp.example.com/link"}`)
+	}))
+	defer ts.Close()
+	tools[0].Steps[0].URL = ts.URL + "/device"
+
+	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "go", nil, VirtualAuth{}, nil,
+		&ExecContext{Hooks: &VirtualHooks{ElicitationURL: func(id string) string { return "https://frbr.example/elicitation/" + id }}})
+	if err != nil {
+		t.Fatalf("hand-off: %v", err)
+	}
+	m := result.(map[string]interface{})
+	if m["verification_url"] != "https://idp.example.com/link" {
+		t.Fatalf("result = %+v", m)
+	}
+	if hu, ok := m["handoff_url"].(string); !ok || !strings.HasPrefix(hu, "https://idp.example.com/link") {
+		t.Fatalf("handoff_url missing from result: %+v", m)
+	}
+}
+
+func TestExecuteElicitationURLBuiltIn(t *testing.T) {
+	// $elicitation_url interpolates the hooks-built callback URL; it is a
+	// reserved name, so a caller can't shadow it.
+	file := `[go] Out-of-band flow with a callback.
+
+URL https://idp.example.com/authorize?redirect=$elicitation_url
+
+GET https://example.com/status
+
+HTTP 200
+`
+	tools, _ := ParseVirtualFile([]byte(file))
+	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "go", map[string]interface{}{"elicitation_url": "evil"}, VirtualAuth{}, nil,
+		&ExecContext{Hooks: &VirtualHooks{ElicitationURL: func(id string) string { return "https://frbr.example/elicitation/" + id }}})
+	var susp *ErrSuspend
+	if !errors.As(err, &susp) {
+		t.Fatalf("want suspension, got %v", err)
+	}
+	want := "https://idp.example.com/authorize?redirect=https%3A%2F%2Ffrbr.example%2Felicitation%2F"
+	if !strings.HasPrefix(susp.Susp.Elicit.URL, want) {
+		t.Fatalf("url = %q, want prefix %q", susp.Susp.Elicit.URL, want)
+	}
+	for _, p := range tools[0].Params {
+		if p.Name == "elicitation_url" {
+			t.Fatal("$elicitation_url must not surface as a caller param")
+		}
+	}
+}
+
+func TestExecuteElicitationWithoutSupport(t *testing.T) {
+	tools, _ := ParseVirtualFile([]byte(`[t] Test.
+
+FORM "Confirm?"
+    $ok is boolean
+`))
+	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "t", nil, VirtualAuth{}, nil)
+	if err == nil {
+		t.Fatal("nil elicitation hooks must surface as an error result, not suspension")
 	}
 }

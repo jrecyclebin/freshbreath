@@ -1,12 +1,13 @@
 package db
 
 import (
-	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
+
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 type Store struct {
@@ -284,7 +285,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 		}
 		protectedBy = &anonID
 	}
-	nonce := GenNonce()
+	nonce := utils.GenNonce()
 	for {
 		_, err := s.db.Exec(
 			"INSERT INTO apps (nonce, name, environment, url, owner_id, protected_by) VALUES (?, ?, ?, ?, ?, ?)",
@@ -293,7 +294,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 			return nonce, nil
 		}
 		if isUnique(err) {
-			nonce = GenNonce()
+			nonce = utils.GenNonce()
 			continue
 		}
 		return "", err
@@ -1052,27 +1053,6 @@ func (s *Store) ListServices() ([]*Service, error) {
 		out = append(out, svc)
 	}
 	return out, rows.Err()
-}
-
-// nonceAlphabet is the 64-symbol alphabet for fresh-minted nonces: 0-9,
-// A-Za-z, and -_. It packs 6 bits per symbol, so a 10-char nonce carries
-// ~60 bits of entropy — enough for every current use (app nonces, pending
-// states, refresh-family IDs, act-ticket IDs). 256 % 64 == 0, so byte%64
-// picks each symbol without bias. Existing 48-hex nonces minted before this
-// change stay valid and untouched; only new mints are short. Revisit only if
-// a nonce ever faces an unlimited-time online attacker.
-const nonceAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
-
-func GenNonce() string {
-	b := make([]byte, 10)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	out := make([]byte, 10)
-	for i, v := range b {
-		out[i] = nonceAlphabet[int(v)%64]
-	}
-	return string(out)
 }
 
 func isUnique(err error) bool {

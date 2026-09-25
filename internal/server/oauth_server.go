@@ -20,6 +20,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // ── OAuth Authorization Server ──────────────────────────────────────
@@ -340,7 +341,7 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 		serviceID:           serviceID,
 	})
 
-	contState := db.GenNonce()
+	contState := utils.GenNonce()
 	os.server.putPending(contState, &pendingAuth{
 		mcpKey:    mcpKey,
 		legs:      legs,

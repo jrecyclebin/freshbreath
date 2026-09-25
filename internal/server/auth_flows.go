@@ -13,6 +13,7 @@ import (
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
+	"poggers.institute/freshbreath/internal/utils"
 )
 
 // ── Login legs ──────────────────────────────────────────────────────
@@ -82,11 +83,11 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 	redirectURI := s.config.PublicBaseURL + "/service/callback"
 	switch rec.Kind {
 	case db.AuthSSHKey:
-		state := db.GenNonce()
+		state := utils.GenNonce()
 		s.putPending(state, p)
 		return fmt.Sprintf("%s/service/ssh-auth?state=%s", s.config.PublicBaseURL, state), nil
 	case db.AuthAPIKey:
-		state := db.GenNonce()
+		state := utils.GenNonce()
 		s.putPending(state, p)
 		return fmt.Sprintf("%s/service/apikey-auth?state=%s", s.config.PublicBaseURL, state), nil
 	case db.AuthOIDC:
