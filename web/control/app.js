@@ -378,7 +378,7 @@ function MobileTopBar({ onMenuOpen, pageLabel }) {
   return (
     <div className="mobile-topbar">
       <div className="mb-brand">
-        <img src="/control/freshbreath.svg" alt="Fresh Breath" className="brand-logo"/>
+        <img src="/control/images/frbr-sm.png" alt="Fresh Breath" className="brand-logo"/>
       </div>
       <div style={{display:'flex',alignItems:'center',gap:8}}>
         {pageLabel && <span className="mb-page">{pageLabel}</span>}
@@ -411,7 +411,7 @@ function Sidebar({ active, onNav, counts, user, onLogout, mobileOpen, onMobileCl
   return (
     <aside className={`sidebar${mobileOpen ? ' mobile-open' : ''}`}>
       <div className="sb-brand">
-        <img src="/control/freshbreath.svg" alt="Fresh Breath" className="brand-logo"/>
+        <img src="/control/images/frbr-sm.png" alt="Fresh Breath" className="brand-logo"/>
       </div>
       <div>
         <div className="sb-section sb-section-row">
