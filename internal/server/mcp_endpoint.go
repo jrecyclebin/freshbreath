@@ -123,6 +123,12 @@ func (s *Server) newVirtualMCPServer(svc *db.Service) (*mcp.Server, error) {
 			Description: vt.Description,
 			InputSchema: virtualToolInputSchema(vt, svc.Descriptor.DatabaseTarget),
 		}
+		// App-only tools (declared with "!") carry MCP Apps visibility metadata:
+		// hosts that support MCP Apps hide them from the model and let only the
+		// app UI call them. Plain hosts see the marker but enforce nothing yet.
+		if vt.AppOnly {
+			tool.Meta = mcp.Meta{"ui": map[string]any{"visibility": []string{"app"}}}
+		}
 		capturedName := vt.Name
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			// Re-resolve the gate and outbound credential per call: the

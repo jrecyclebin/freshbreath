@@ -183,6 +183,60 @@ HTTP 200
 	}
 }
 
+func TestParseAppOnlyTool(t *testing.T) {
+	input := `[send-email] Send one email
+POST https://api.example.com/send
+Authorization: Bearer $token
+Content-Type: application/json
+{
+  "to": $to
+}
+
+HTTP 200
+---
+[internal-check!] Only the app can call this
+GET https://api.example.com/check
+
+HTTP 200
+`
+	tools, err := ParseVirtualFile([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d", len(tools))
+	}
+	if tools[0].AppOnly {
+		t.Error("send-email should not be app-only")
+	}
+	if tools[1].Name != "internal-check" {
+		t.Errorf("app-only tool name should be stripped of !: %q", tools[1].Name)
+	}
+	if !tools[1].AppOnly {
+		t.Error("internal-check should be app-only")
+	}
+}
+
+func TestParseAppOnlyCollision(t *testing.T) {
+	input := `[send] One
+GET https://example.com/a
+
+HTTP 200
+---
+[send!] Two
+GET https://example.com/b
+
+HTTP 200
+`
+	_, err := ParseVirtualFile([]byte(input))
+	if err == nil {
+		t.Fatal("expected [send] and [send!] to collide")
+	}
+	if !strings.Contains(err.Error(), "duplicate tool name") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
 func TestParseMultiStep(t *testing.T) {
 	input := `[fetch-and-update] Fetch then update
 $hostname = host($url)
@@ -379,19 +433,19 @@ func TestParseHeaderLine(t *testing.T) {
 
 func TestParseVirtualToolHeader(t *testing.T) {
 	// Valid tool headers
-	_, _, ok := parseVirtualToolHeader("[get-site] Resolve a site")
+	_, _, _, ok := parseVirtualToolHeader("[get-site] Resolve a site")
 	if !ok {
 		t.Error("expected [get-site] to parse")
 	}
 
 	// Invalid: name contains spaces or special chars
-	_, _, ok = parseVirtualToolHeader(`["item1", "item2"]`)
+	_, _, _, ok = parseVirtualToolHeader(`["item1", "item2"]`)
 	if ok {
 		t.Error("JSON array should not parse as tool header")
 	}
 
 	// Invalid: empty name
-	_, _, ok = parseVirtualToolHeader("[] Description")
+	_, _, _, ok = parseVirtualToolHeader("[] Description")
 	if ok {
 		t.Error("empty name should not parse")
 	}

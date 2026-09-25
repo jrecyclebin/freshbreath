@@ -36,7 +36,7 @@ const (
 type ToolParam struct {
 	Name     string
 	Type     ParamType
-	Optional bool // from a `?` annotation; parameters are required by default
+	Optional bool     // from a `?` annotation; parameters are required by default
 	Values   []string // declared enum values; non-nil when the param is an enum
 }
 
@@ -44,6 +44,7 @@ type ToolParam struct {
 type VirtualTool struct {
 	Name            string
 	Description     string
+	AppOnly         bool        // declared with a trailing "!" — app-only visibility
 	Params          []ToolParam // input parameters inferred from template references
 	Steps           []VirtualStep
 	typeAnnotations []typeAnnotation // parsed from "$name is type" lines, unexported
@@ -90,7 +91,11 @@ type VirtualResponse struct {
 
 // ── Parser ───────────────────────────────────────────────────────────
 
-var toolNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+// A trailing "!" marks a tool app-only: it is listed with
+// _meta.ui.visibility: ["app"] (MCP Apps), meaning hosts hide it from the
+// model and only the app UI may call it. The mark is authoring syntax — the
+// exposed tool name is the part before it.
+var toolNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*!?$`)
 var plainVarRe = regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
 
 // ParseVirtualFile parses a virtual service description file into tools.
@@ -100,6 +105,7 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 	var cur *VirtualTool
 	var curLines []string
 
+	seenNames := map[string]bool{}
 	flush := func() error {
 		if cur != nil {
 			if err := parseVirtualToolBody(cur, curLines); err != nil {
@@ -109,6 +115,11 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 				return fmt.Errorf("tool %s: %w", cur.Name, err)
 			}
 			cur.Params = toolParams(*cur)
+			key := strings.ToLower(cur.Name)
+			if seenNames[key] {
+				return fmt.Errorf("duplicate tool name %q (tool names must be unique; [foo] and [foo!] collide)", cur.Name)
+			}
+			seenNames[key] = true
 			tools = append(tools, *cur)
 		}
 		cur = nil
@@ -126,11 +137,11 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 			continue
 		}
 
-		if name, desc, ok := parseVirtualToolHeader(trimmed); ok {
+		if name, desc, appOnly, ok := parseVirtualToolHeader(trimmed); ok {
 			if err := flush(); err != nil {
 				return nil, err
 			}
-			cur = &VirtualTool{Name: name, Description: desc}
+			cur = &VirtualTool{Name: strings.TrimSuffix(name, "!"), Description: desc, AppOnly: appOnly}
 			curLines = nil
 			continue
 		}
@@ -268,13 +279,14 @@ func toolParams(tool VirtualTool) []ToolParam {
 }
 
 // parseVirtualToolHeader validates a [name] header for virtual tools.
-// Names must be valid identifiers (letters, digits, underscores, hyphens).
-func parseVirtualToolHeader(line string) (name, desc string, ok bool) {
+// Names must be valid identifiers (letters, digits, underscores, hyphens),
+// optionally followed by "!" to mark the tool app-only.
+func parseVirtualToolHeader(line string) (name, desc string, appOnly, ok bool) {
 	name, desc, ok = parseHeader(line)
 	if !ok || !toolNameRe.MatchString(name) {
-		return "", "", false
+		return "", "", false, false
 	}
-	return name, desc, true
+	return name, desc, strings.HasSuffix(name, "!"), true
 }
 
 // parseVirtualToolBody parses the lines of a tool definition into steps.
@@ -1227,10 +1239,16 @@ func findVirtualTool(tools []VirtualTool, name string) *VirtualTool {
 }
 
 // VirtualToolSummaries returns lightweight tool descriptions for listing.
-func VirtualToolSummaries(tools []VirtualTool) []map[string]string {
-	out := make([]map[string]string, len(tools))
+// AppOnly flags tools declared with "!" so app UIs can tell which tools are
+// theirs alone.
+func VirtualToolSummaries(tools []VirtualTool) []map[string]any {
+	out := make([]map[string]any, len(tools))
 	for i, t := range tools {
-		out[i] = map[string]string{"name": t.Name, "description": t.Description}
+		m := map[string]any{"name": t.Name, "description": t.Description}
+		if t.AppOnly {
+			m["appOnly"] = true
+		}
+		out[i] = m
 	}
 	return out
 }

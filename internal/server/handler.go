@@ -749,6 +749,7 @@ func (s *Server) loadTasksForService(svc *db.Service) ([]formats.Task, error) {
 type serviceToolSummary struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	AppOnly     bool   `json:"appOnly,omitempty"`
 }
 
 // loadServiceToolSummaries returns the tool names and descriptions exposed by
@@ -779,7 +780,7 @@ func (s *Server) loadServiceToolSummaries(svc *db.Service) ([]serviceToolSummary
 		}
 		out := make([]serviceToolSummary, len(tools))
 		for i, t := range tools {
-			out[i] = serviceToolSummary{Name: t.Name, Description: t.Description}
+			out[i] = serviceToolSummary{Name: t.Name, Description: t.Description, AppOnly: t.AppOnly}
 		}
 		return out, nil
 	default:
