@@ -79,9 +79,6 @@ button { font-family: inherit; }
 
 /* Top bar: brand left, people/settings/theme/who's-logged-in right */
 .topbar {
-  position: sticky;
-  top: 0;
-  z-index: 60;
   background: var(--bg);
   padding: 16px 0 0;
 }
@@ -98,7 +95,7 @@ button { font-family: inherit; }
 
 .tb-brand {
   display: flex;
-  align-items: center;
+  align-items: start;
   gap: 10px;
   border: 0;
   background: transparent;
@@ -108,7 +105,7 @@ button { font-family: inherit; }
 }
 .tb-brand:hover { background: var(--hover); }
 .tb-brand .brand-logo {
-  width: 168px;
+  width: 204px;
   height: auto;
   display: block;
   object-fit: contain;
@@ -246,7 +243,7 @@ button { font-family: inherit; }
 .area-tabs {
   display: flex;
   gap: 2px;
-  margin: 20px 0 24px;
+  margin: 0px 0 24px;
   padding: 3px;
   background: var(--hover);
   border: 1px solid var(--line-soft);
@@ -1042,8 +1039,79 @@ select.input {
 
 /* ── Settings page ───────────────────────────────────────────────────── */
 
-.setting-section {
-  padding: 0 32px 32px;
+/* The frbr-concept layout: each area is a section with a fixed-width rail
+   naming it (plus a one-line “what this is”), and the controls beside it;
+   a rule between sections. */
+.settings-layout { margin-top: 18px; }
+.settings-section {
+  display: flex;
+  gap: 24px;
+  padding: 24px 0;
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.settings-rail { flex: 0 0 220px; }
+.settings-rail-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.settings-rail-desc {
+  font-size: 13px;
+  color: var(--ink-3);
+  margin-top: 4px;
+  line-height: 1.45;
+}
+.settings-body {
+  flex: 1 1 480px;
+  min-width: 0;
+}
+
+/* Update-feed rows — one bordered card, a row per feed: identity left,
+   applied/pending/error status beside it, actions right. */
+.feed-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: hidden;
+}
+.feed-empty { padding: 18px 16px; font-size: 13px; }
+.feed-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  flex-wrap: wrap;
+}
+.feed-row:last-child { border-bottom: 0; }
+.feed-id { flex: 1 1 260px; min-width: 0; }
+.feed-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  font-size: 14px;
+}
+.feed-url {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feed-status {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+.feed-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 /* ── Home page ──────────────────────────────────────────────────────────
@@ -1210,15 +1278,143 @@ select.input {
   gap: 20px;
 }
 
-/* The dropped-file modal */
+/* The dropped-file modal — header, tab bar and picker borrowed from the
+   frbr-concept mockup: the file itself leads (icon, name, meta), a segmented
+   control picks new vs replace, and the replace side is a searchable list
+   of rows rather than a <select>. */
 .upload-modal {
-  width: min(560px, 92vw);
+  width: min(640px, 92vw);
   max-height: min(780px, 88vh);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
 }
-.upload-head h3 { margin: 0 0 2px; }
+.upload-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.upload-file-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 11px;
+  background: var(--hover);
+  display: grid;
+  place-items: center;
+  color: var(--ink-2);
+  flex: none;
+}
+.upload-file-id { flex: 1; min-width: 0; }
+.upload-file-name {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-file-meta { font-size: 13px; color: var(--ink-3); margin-top: 2px; }
+.upload-close {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  border: 0;
+  background: none;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--ink-3);
+}
+.upload-close:hover { background: var(--hover); color: var(--ink); }
+.upload-body {
+  display: grid;
+  gap: 14px;
+}
+.replace-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--ink-3);
+}
+.replace-search:focus-within { border-color: var(--accent-border); }
+.replace-search input {
+  border: 0;
+  outline: none;
+  background: none;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--ink);
+  flex: 1;
+  min-width: 0;
+}
+.replace-list {
+  max-height: 300px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.replace-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+}
+.replace-row:last-child { border-bottom: 0; }
+.replace-row:hover { background: var(--hover); }
+.replace-row.active { background: var(--accent-tint); }
+.radio-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-3);
+}
+.replace-row.active .radio-dot { border: 5px solid var(--accent); }
+.replace-name {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.replace-sub {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.replace-when {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  text-align: right;
+  white-space: nowrap;
+}
+.replace-empty { padding: 16px 14px; font-size: 13px; }
+.replace-note {
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--hover);
+  border-radius: 10px;
+  padding: 10px 12px;
+  line-height: 1.45;
+}
 .upload-mode {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1292,6 +1488,14 @@ select.input {
   .upload-mode button { font-size: 11.5px; padding: 7px 6px; }
   .menu-pop { right: -6px; }
 
+  /* Settings sections stack: the rail names the area, the body follows. */
+  .settings-section { padding: 20px 0; gap: 16px; }
+  .settings-rail { flex-basis: 100%; }
+
+  /* Feed rows stack their three zones. */
+  .feed-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .feed-actions { width: 100%; }
+
   .drawer-head { padding: 16px 20px; }
   .drawer-body { padding: 20px; gap: 16px; }
   .drawer-foot { padding: 12px 20px; }
@@ -1358,12 +1562,6 @@ select.input {
   }
 }
 
-.setting-heading {
-  font-size: 14px;
-  font-weight: 500;
-  margin: 0 0 8px;
-  color: var(--ink);
-}
 .toast-error .check { background: oklch(from var(--tone-red) 0.70 calc(c * .83) h); color: white; }
 
 /* ── Service tool editor ─────────────────────────────────────────────── */
@@ -1378,7 +1576,19 @@ select.input {
   flex-direction: column;
   background: var(--bg);
   z-index: 5;
-  padding: 32px 40px 0;
+  padding: 32px 0 0;
+}
+/* The editor's column matches .main — the same 1080px box and the same
+   40px gutters — so the script spans exactly the width the pages do. */
+.editor-inner {
+  min-width: 0;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 40px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
 }
 
 .editor-page .page-head {
@@ -1388,7 +1598,10 @@ select.input {
 
 .editor-textarea {
   flex: 1;
-  width: 100%;
+  /* Bleeds back out to the inner's padding so the panel itself spans
+     the whole 1080px box while the text keeps the page gutters. */
+  width: calc(100% + 80px);
+  margin: 0 -40px;
   padding: 24px 40px 64px;
   border: none;
   border-top: 1px solid var(--line);
@@ -1410,9 +1623,12 @@ select.input {
   .editor-page {
     left: 0;
     top: 72px;
-    padding: 20px 16px 0;
+    padding: 20px 0 0;
   }
+  .editor-inner { padding: 0 16px; }
   .editor-textarea {
+    width: calc(100% + 32px);
+    margin: 0 -16px;
     padding: 20px 16px 64px;
   }
 }

@@ -495,26 +495,20 @@ function TopBar({ user, onNav, onLogout }) {
               <MenuItem key={p.id} onClick={() => onNav(p.id)}>{p.label}</MenuItem>
             )}
           </Menu>
-          {user ? (
-            <Menu avatar={<Avatar name={displayName} size={30}/>}>
-              <div className="menu-heading user">
-                <b>{displayName}</b>
-                <span>{displayRole}</span>
-              </div>
-              <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
-                {dark ? 'Light mode' : 'Dark mode'}
-              </MenuItem>
-              <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>
-              <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>
-              <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
-                {window.__HOMESLICE_CONFIG?.version || 'dev'}
-              </div>
-            </Menu>
-          ) : onLogout ? (
-            <button className="menu-btn" onClick={onLogout} title="Sign in">
-              <Icon name="lock" size={18}/>
-            </button>
-          ) : null}
+          <Menu avatar={<Avatar name={displayName} size={30}/>}>
+            <div className="menu-heading user">
+              <b>{displayName}</b>
+              <span>{displayRole}</span>
+            </div>
+            <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
+              {dark ? 'Light mode' : 'Dark mode'}
+            </MenuItem>
+            <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>
+            {user && user.id && <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>}
+            <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
+              {window.__HOMESLICE_CONFIG?.version || 'dev'}
+            </div>
+          </Menu>
         </div>
       </div>
     </header>
@@ -1081,7 +1075,7 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
       )}
       {isEdit && canManageSSH && (
         <>
-          <div style={{marginTop:20,borderTop:'1px solid var(--border)',paddingTop:16}}>
+          <div style={{marginTop:20,borderTop:'1px solid var(--line-soft)',paddingTop:16}}>
             <label style={{fontSize:13,fontWeight:600,color:'var(--ink-2)',marginBottom:12,display:'block'}}>SSH Key</label>
             {sshLoading ? <span className="muted">Loading…</span> : sshKey ? (
               <>
@@ -1093,7 +1087,7 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
                   <input className="input mono" value={sshKey.public_key?.trim()} readOnly style={{fontSize:11}} />
                   <button className="btn btn-ghost" onClick={() => copyText(sshKey.public_key?.trim(), toast)}><Icon name="copy" size={14}/></button>
                 </div>
-                <button className="btn btn-ghost" style={{color:'var(--red)',marginTop:8}} onClick={async () => {
+                <button className="btn btn-ghost" style={{color:'var(--tone-red)',marginTop:8}} onClick={async () => {
                   if (!confirm('Delete this user\'s SSH key? They\'ll need a new one to use SSH auth.')) return;
                   try { await api(session, 'DELETE','/api/users/'+user.id+'/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
                   catch(e) { toast(e.message, true); }
@@ -1195,7 +1189,12 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
 
   return (
     <>
-      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
+      <div className="field-row">
+        <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
+        <div className="field"><label>URL</label>
+          <input className="input" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
+        </div>
+      </div>
       {app && app.nonce && (
         <div className="field">
           <label>Nonce</label>
@@ -1207,9 +1206,6 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
           </div>
         </div>
       )}
-      <div className="field"><label>URL</label>
-        <input className="input" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
-      </div>
       <div className="field-row">
         <div className="field"><label>Default environment</label>
           <select className="input" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
@@ -1488,60 +1484,98 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
     ? (mode === 'new' ? !!appForm?.name : !!appNonce)
     : (mode === 'new' ? !!svcForm?.name : !!svcId);
 
+  const selApp = apps.find(a => a.nonce === appNonce);
+  const selSvc = txtServices.find(s => String(s.id) === svcId);
+  const confirmLabel = mode === 'new'
+    ? (isAppFile ? 'Create app' : 'Create service')
+    : (isAppFile
+        ? (selApp ? `Replace ${selApp.name}` : 'Replace')
+        : (selSvc ? `Replace ${selSvc.name}` : 'Replace'));
+
   return (
     <div className="modal-overlay" onClick={busy ? undefined : onClose}>
       <div className="modal upload-modal" onClick={e => e.stopPropagation()}>
         <div className="upload-head">
-          <h3>{isAppFile ? 'Publish app file' : 'Publish service definition'}</h3>
-          <div className="muted mono" style={{fontSize:12}}>{file.name} · {(file.size/1024).toFixed(1)} KB</div>
+          <div className="upload-file-icon"><Icon name={isAppFile ? 'apps' : 'log'} size={19}/></div>
+          <div className="upload-file-id">
+            <div className="upload-file-name mono">{file.name}</div>
+            <div className="upload-file-meta">{isAppFile ? 'App bundle' : 'Service definition'} · {(file.size/1024).toFixed(1)} KB</div>
+          </div>
+          <button className="upload-close" onClick={busy ? undefined : onClose} title="Close" disabled={busy}>
+            <Icon name="close" size={16}/>
+          </button>
         </div>
         <div className="upload-mode">
           <button className={mode === 'new' ? 'active' : ''} onClick={()=>setMode('new')}>
             {isAppFile ? 'New app' : 'New service'}
           </button>
           <button className={mode === 'replace' ? 'active' : ''} onClick={()=>setMode('replace')}>
-            {isAppFile ? 'Update existing app' : 'Update existing service'}
+            Replace existing
           </button>
         </div>
         {isAppFile ? (
           mode === 'new' ? (
             appForm && (
-              <AppFormFields form={appForm} setForm={setAppForm} app={null} services={services} users={users}
-                             auth={auth} adminAuthID={adminAuthID}
-                             onCreateGate={()=>setCreatingGate(true)}/>
+              <div className="upload-body">
+                <AppFormFields form={appForm} setForm={setAppForm} app={null} services={services} users={users}
+                               auth={auth} adminAuthID={adminAuthID}
+                               onCreateGate={()=>setCreatingGate(true)}/>
+              </div>
             )
           ) : (
-            <>
-              <div className="field"><label>App</label>
-                <select className="input" value={appNonce} onChange={e=>setAppNonce(e.target.value)}>
-                  <option value="">Select an app…</option>
-                  {apps.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(a=><option key={a.nonce} value={a.nonce}>{a.name}</option>)}
-                </select>
-                <span className="help">The upload replaces the chosen slot's current content.</span>
-              </div>
+            <div className="upload-body">
+              <ReplacePicker
+                placeholder="Find an app"
+                emptyLabel="No apps match."
+                items={apps.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(a => ({
+                  id: a.nonce, name: a.name, sub: a.url || a.nonce,
+                  badge: envShort(a.environment), badgeTone: envTone(a.environment),
+                  when: fmtAuditTime(a.updated_at),
+                }))}
+                value={appNonce}
+                onChange={setAppNonce}
+              />
+              {selApp && (
+                <div className="replace-note">
+                  {selApp.name} keeps its name, URL, environment, members and service links — only the web content changes.
+                </div>
+              )}
               <SlotPick slot={slot} setSlot={setSlot}/>
-            </>
+            </div>
           )
         ) : (
           mode === 'new' ? (
             svcForm && (
-              <ServiceFormFields form={svcForm} setForm={setSvcForm} auth={auth} adminAuthID={adminAuthID}
-                                 onCreateGate={()=>setCreatingGate(true)} types={['tasks','virtual']}/>
+              <div className="upload-body">
+                <ServiceFormFields form={svcForm} setForm={setSvcForm} auth={auth} adminAuthID={adminAuthID}
+                                   onCreateGate={()=>setCreatingGate(true)} types={['tasks','virtual']}/>
+              </div>
             )
           ) : (
-            <div className="field"><label>Service</label>
-              <select className="input" value={svcId} onChange={e=>setSvcId(e.target.value)}>
-                <option value="">Select a service…</option>
-                {txtServices.map(s=><option key={s.id} value={s.id}>{s.name} ({s.descriptor?.type})</option>)}
-              </select>
-              <span className="help">The file replaces the service's current definition.</span>
+            <div className="upload-body">
+              <ReplacePicker
+                placeholder="Find a service"
+                emptyLabel="No services match."
+                items={txtServices.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(s => ({
+                  id: String(s.id), name: s.name, sub: s.url || '—',
+                  badge: s.descriptor?.type, badgeTone: 'violet',
+                  when: fmtAuditTime(s.updated_at),
+                }))}
+                value={svcId}
+                onChange={setSvcId}
+              />
+              {selSvc && (
+                <div className="replace-note">
+                  {selSvc.name} keeps its settings, gates and links — only the definition text changes.
+                </div>
+              )}
             </div>
           )
         )}
         <div className="upload-foot">
           <button className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
           <button className="btn btn-primary" onClick={submit} disabled={busy || !ready}>
-            {busy ? 'Publishing…' : 'Publish'}
+            {busy ? 'Publishing…' : confirmLabel}
           </button>
         </div>
       </div>
@@ -1572,6 +1606,43 @@ function SlotPick({ slot, setSlot }) {
         <option value="prod">Production</option>
       </select>
       <span className="help">Development is the default. Staging and Production are deployed from the fresh upload.</span>
+    </div>
+  );
+}
+
+// The searchable list that stands in for a <select> when a dropped file
+// replaces an existing app or service (layout borrowed from the
+// frbr-concept mockup). A row can say what an <option> can't: identity,
+// environment or type, and when the entity last changed — with a radio dot
+// so exactly one row is picked, never several. The note under the list is
+// the caller's; it spells out what a replacement does and does not touch.
+function ReplacePicker({ placeholder, emptyLabel, items, value, onChange }) {
+  const [q, setQ] = useState('');
+  const query = q.trim().toLowerCase();
+  const filtered = items.filter(it =>
+    !query || (it.name + ' ' + (it.sub || '')).toLowerCase().includes(query));
+  return (
+    <div>
+      <div className="replace-search">
+        <Icon name="search" size={14}/>
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder={placeholder} spellCheck={false}/>
+      </div>
+      <div className="replace-list">
+        {filtered.map(it => (
+          <button key={String(it.id)} type="button"
+                  className={'replace-row' + (String(it.id) === String(value) ? ' active' : '')}
+                  onClick={()=>onChange(it.id)}>
+            <span className="radio-dot"/>
+            <span className="replace-id">
+              <span className="replace-name">{it.name}</span>
+              <span className="replace-sub mono">{it.sub}</span>
+            </span>
+            {it.badge && <Badge tone={it.badgeTone} dot={false}>{it.badge}</Badge>}
+            <span className="replace-when">{it.when}</span>
+          </button>
+        ))}
+        {filtered.length === 0 && <div className="replace-empty muted">{emptyLabel}</div>}
+      </div>
     </div>
   );
 }
@@ -2354,34 +2425,38 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
 
   return (
     <div className="editor-page">
-      <PageHead
-        title={`Edit ${isTasks ? 'tasks' : 'virtual'} script`}
-        sub={`Plain-text definition for ${service.name}.`}
-        back={onBack}
-        backLabel={service.name}
-        actions={
-          <>
-            <button className="btn btn-ghost" onClick={onBack} disabled={saving}>Cancel</button>
-            <button className="btn btn-primary" onClick={handleSave} disabled={saving || !dirty}>
-              {saving ? 'Saving…' : 'Save'} <span className="muted" style={{fontSize:11,marginLeft:6}}>⌘S</span>
-            </button>
-          </>
-        }
-      />
-      {loading ? (
-        <div style={{display:'grid',placeItems:'center',padding:48,color:'var(--ink-3)'}}>Loading…</div>
-      ) : (
-        <textarea
-          ref={textareaRef}
-          className="editor-textarea"
-          value={content}
-          onChange={e => { setContent(e.target.value); setDirty(true); }}
-          spellCheck={false}
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="off"
+      {/* .editor-inner matches .main — same 1080px box and gutters — so
+          the editor spans exactly the width the pages beneath it do. */}
+      <div className="editor-inner">
+        <PageHead
+          title={`Edit ${isTasks ? 'tasks' : 'virtual'} script`}
+          sub={`Plain-text definition for ${service.name}.`}
+          back={onBack}
+          backLabel={service.name}
+          actions={
+            <>
+              <button className="btn btn-ghost" onClick={onBack} disabled={saving}>Cancel</button>
+              <button className="btn btn-primary" onClick={handleSave} disabled={saving || !dirty}>
+                {saving ? 'Saving…' : 'Save'} <span className="muted" style={{fontSize:11,marginLeft:6}}>⌘S</span>
+              </button>
+            </>
+          }
         />
-      )}
+        {loading ? (
+          <div style={{display:'grid',placeItems:'center',padding:48,color:'var(--ink-3)'}}>Loading…</div>
+        ) : (
+          <textarea
+            ref={textareaRef}
+            className="editor-textarea"
+            value={content}
+            onChange={e => { setContent(e.target.value); setDirty(true); }}
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -2474,6 +2549,21 @@ function AuditView({ audit }) {
 
 // ── Settings ───────────────────────────────────────────────────────────
 
+// One settings section, borrowed from the frbr-concept mockup: a fixed-width
+// rail naming the area (plus a one-line “what this is”), and the controls
+// beside it — label left, data right, a rule between sections.
+function SettingSection({ title, desc, children }) {
+  return (
+    <section className="settings-section">
+      <div className="settings-rail">
+        <div className="settings-rail-title">{title}</div>
+        <div className="settings-rail-desc">{desc}</div>
+      </div>
+      <div className="settings-body">{children}</div>
+    </section>
+  );
+}
+
 function SettingsView({ session, services, apps, auth, user, onRefresh }) {
   const [selectedAuth, setSelectedAuth] = useState('');
   const [savedAuth, setSavedAuth] = useState('');
@@ -2544,13 +2634,11 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
   return (
     <>
       <PageHead title="Settings" sub="Control panel configuration."/>
-      <div className="setting-section">
-        <h3 className="setting-heading">Admin authentication</h3>
-        <p className="muted" style={{marginBottom:20,fontSize:13}}>
-          The auth record guarding this control panel — and the one every empty gate falls back to.
-          An app or service naming no record of its own inherits this one, so the lazy default is
-          the safe one. Leave it unset and the whole instance is open.
-        </p>
+      <div className="settings-layout">
+        <SettingSection
+          title="Admin authentication"
+          desc="The auth record guarding this control panel — and the one every empty gate falls back to. An app or service naming no record of its own inherits this one, so the lazy default is the safe one. Leave it unset and the whole instance is open."
+        >
         {loading ? <span className="muted">Loading…</span> : (
           <>
             <div style={{maxWidth:460}}>
@@ -2579,13 +2667,12 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
             )}
           </>
         )}
-      </div>
+        </SettingSection>
 
-      <div className="setting-section" style={{marginTop:32}}>
-        <h3 className="setting-heading">Default landing page</h3>
-        <p className="muted" style={{marginBottom:20,fontSize:13}}>
-          Choose where visitors land when they hit the root URL. Only hosted apps are available as targets.
-        </p>
+        <SettingSection
+          title="Default landing page"
+          desc="Choose where visitors land when they hit the root URL. Only hosted apps are available as targets."
+        >
         {loading ? <span className="muted">Loading…</span> : (
           <div className="field" style={{maxWidth:380}}>
             <label>Landing page</label>
@@ -2603,15 +2690,19 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
             </div>
           </div>
         )}
-      </div>
+        </SettingSection>
 
-      <RemoteUpdates session={session} apps={apps} services={services} />
+        <SettingSection
+          title="Update feeds"
+          desc="Track remote feeds of encrypted app/service updates (they land in staging), or publish your own for other Freshbreath instances. Archives are AES-GCM encrypted with a per-feed key — the host can't tamper with them."
+        >
+          <RemoteUpdates session={session} apps={apps} services={services}/>
+        </SettingSection>
 
-      <div className="setting-section" style={{marginTop:32}}>
-        <h3 className="setting-heading">MCP database mode</h3>
-        <p className="muted" style={{marginBottom:20,fontSize:13}}>
-          Whether the central MCP server's <code>db_execute</code> tool may write to databases. <code>db_query</code> is read-only no matter what; this only governs <code>db_execute</code>. Not a privilege boundary — an admin could do the same via the HTTP API — just accident prevention for a model asked to “clean up the old rows.”
-        </p>
+        <SettingSection
+          title="MCP database mode"
+          desc={<>Whether the central MCP server's <code>db_execute</code> tool may write to databases. <code>db_query</code> is read-only no matter what; this only governs <code>db_execute</code>. Not a privilege boundary — an admin could do the same via the HTTP API — just accident prevention for a model asked to “clean up the old rows”.</>}
+        >
         {loading ? <span className="muted">Loading…</span> : (
           <div className="field" style={{maxWidth:380}}>
             <label>Mode</label>
@@ -2624,14 +2715,12 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
             </div>
           </div>
         )}
-      </div>
+        </SettingSection>
 
-      {user && user.id > 0 && (
-      <div className="setting-section" style={{marginTop:32}}>
-        <h3 className="setting-heading">SSH Key</h3>
-        <p className="muted" style={{marginBottom:20,fontSize:13}}>
-          Generate an SSH key pair for authentication and agent forwarding. Only the public key is shown after creation.
-        </p>
+        <SettingSection
+          title="SSH key"
+          desc="Generate an SSH key pair for authentication and agent forwarding. Only the public key is shown after creation."
+        >
         {sshLoading ? <span className="muted">Loading…</span> : sshKey ? (
           <>
             <div style={{marginBottom:12}}>
@@ -2646,7 +2735,7 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
               </div>
             </div>
             <div style={{marginTop:12}}>
-              <button className="btn btn-ghost" style={{color:'var(--red)'}} onClick={async () => {
+              <button className="btn btn-ghost" style={{color:'var(--tone-red)'}} onClick={async () => {
                 if (!confirm('Delete your SSH key? You\'ll need to generate a new one to use SSH auth.')) return;
                 try { await api(session, 'DELETE', '/api/me/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
                 catch(e) { toast(e.message, true); }
@@ -2656,8 +2745,8 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
         ) : (
           <button className="btn btn-primary" onClick={() => setShowGenModal(true)}><Icon name="key" size={14}/> Generate SSH Key</button>
         )}
+        </SettingSection>
       </div>
-      )}
 
       {showGenModal && (
         <div className="modal-overlay" onClick={() => setShowGenModal(false)}>
@@ -2720,14 +2809,14 @@ function UpdateProgress({ events, onClose }) {
       case 'feed_error': text = `error at ${d.step ?? 'feed'}${d.id ? ` [${d.id}]` : ''}: ${d.message}`; break;
       default: text = e.event;
     }
-    const tone = e.event === 'feed_error' || e.event === 'error' ? 'var(--red)' :
+    const tone = e.event === 'feed_error' || e.event === 'error' ? 'var(--tone-red)' :
       e.event === 'done' || e.event === 'summary' ? 'var(--green)' : '';
     return <div key={i} style={{color: tone || undefined}}>{text}</div>;
   };
   return (
     <div style={{marginTop:16}}>
       <div ref={ref} className="mono" style={{
-        background:'var(--bg2, #16181d)', border:'1px solid var(--border, #2a2d33)', borderRadius:8,
+        background:'var(--panel)', border:'1px solid var(--line)', borderRadius:8,
         padding:'10px 12px', maxHeight:220, overflowY:'auto', fontSize:12, lineHeight:1.7,
       }}>
         {events.length === 0 ? <span className="muted">waiting for events…</span> : events.map(line)}
@@ -2753,6 +2842,8 @@ function RemoteUpdates({ session, apps, services }) {
   const [buildSel, setBuildSel] = useState({ apps: [], services: [] });
   const [buildVersion, setBuildVersion] = useState('');
   const [buildLog, setBuildLog] = useState(null); // {events: [], done: null}
+  const [available, setAvailable] = useState({}); // feed id → version pending, from the last check
+  const [checking, setChecking] = useState(false);
   const toast = useToast();
 
   const load = () => api(session, 'GET', '/api/updates')
@@ -2780,13 +2871,21 @@ function RemoteUpdates({ session, apps, services }) {
     catch (e) { toast(e.message, true); }
   };
 
+  // The check endpoint is instance-wide (it walks every receive feed), so a
+  // row's “Check now” refreshes them all — and the response is folded back
+  // into the rows, each showing its own pending version until applied.
   const checkNow = async () => {
+    setChecking(true);
     try {
       const d = await api(session, 'GET', '/api/updates/check');
       const ups = d.updates || [];
+      const map = {};
+      ups.forEach(u => { map[u.id] = u.version || '?'; });
+      setAvailable(map);
       toast(ups.length === 0 ? 'All feeds up to date' :
         `${ups.length} update${ups.length > 1 ? 's' : ''} available: ${ups.map(u => u.version || '?').join(', ')}`);
     } catch (e) { toast(e.message, true); }
+    finally { setChecking(false); }
   };
 
   const applyFeed = async (f) => {
@@ -2845,59 +2944,51 @@ function RemoteUpdates({ session, apps, services }) {
   const pubServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
 
   return (
-    <div className="setting-section" style={{marginTop:32}}>
-      <h3 className="setting-heading">Remote updates</h3>
-      <p className="muted" style={{marginBottom:20,fontSize:13}}>
-        Track remote feeds of encrypted app/service updates (landed in staging), or publish your own for other
-        Freshbreath instances. Archives are AES-GCM encrypted with a per-feed key — the host can't tamper with them.
-      </p>
-
-      {/* feed list */}
+    <div>
+      {/* feed list — one bordered card, a row per feed (frbr-concept layout):
+          identity left, applied/pending/error status beside it, actions right. */}
       {feeds === null ? <span className="muted">Loading…</span> : feeds.length === 0 ? (
-        <span className="muted" style={{fontSize:13}}>No update feeds yet.</span>
+        <div className="feed-card feed-empty muted">No update feeds yet.</div>
       ) : (
-        <div className="table-wrap" style={{marginBottom:24}}>
-          <table className="tbl">
-            <thead><tr>
-              <th>Feed</th><th>Mode</th><th>URL</th><th>Last applied</th><th></th>
-            </tr></thead>
-            <tbody>
-              {feeds.map(f => (
-                <tr key={f.id}>
-                  <td>
-                    <div style={{fontWeight:500}}>{f.name || <span className="muted">(unnamed)</span>}</div>
-                    {f.last_error && <div style={{fontSize:12,color:'var(--red)',marginTop:2}}>⚠ {f.last_error}</div>}
-                  </td>
-                  <td><Badge tone={f.mode === 'publish' ? 'violet' : 'blue'}>{f.mode}</Badge></td>
-                  <td className="mono" style={{fontSize:12,maxWidth:260,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{f.url || '—'}</td>
-                  <td style={{fontSize:13}}>
-                    {f.mode === 'publish' ? <span className="muted">publish feed</span> :
-                      f.last_applied_version
-                        ? <>{f.last_applied_version}<div className="muted" style={{fontSize:11}}>{fmtAuditTime(f.last_applied_at)}</div></>
-                        : <span className="muted">never</span>}
-                  </td>
-                  <td style={{whiteSpace:'nowrap',textAlign:'right'}}>
-                    {f.mode === 'receive' ? <>
-                      <button className="btn btn-ghost" onClick={checkNow}><Icon name="refresh" size={13}/> Check</button>{' '}
-                      <button className="btn btn-ghost" onClick={() => applyFeed(f)}><Icon name="download" size={13}/> Apply</button>{' '}
-                    </> : <>
-                      <button className="btn btn-ghost" onClick={() => {
-                        setBuildFor(f); setBuildSel({ apps: [], services: [] }); setBuildVersion(''); setBuildLog(null);
-                      }}><Icon name="sparkle" size={13}/> Build archive</button>{' '}
-                    </>}
-                    <button className="btn btn-ghost" style={{color:'var(--red)'}} onClick={() => remove(f)}><Icon name="trash" size={13}/></button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="feed-card" style={{marginBottom:24}}>
+          {feeds.map(f => (
+            <div key={f.id} className="feed-row">
+              <div className="feed-id">
+                <div className="feed-name">
+                  {f.name || <span className="muted">(unnamed)</span>}
+                  <Badge tone={f.mode === 'publish' ? 'violet' : 'blue'}>{f.mode}</Badge>
+                </div>
+                <div className="feed-url mono">{f.url || '—'}</div>
+              </div>
+              <div className="feed-status">
+                {f.mode === 'publish' ? <span className="muted">build and host archives for other instances</span> :
+                  f.last_applied_version
+                    ? <>{f.last_applied_version}<div className="muted" style={{fontSize:11}}>{fmtAuditTime(f.last_applied_at)}</div></>
+                    : <span className="muted">never applied</span>}
+                {f.mode === 'receive' && available[f.id] &&
+                  <div style={{color:'var(--tone-green)'}}>update {available[f.id]} available</div>}
+                {f.last_error && <div style={{color:'var(--tone-red)'}}>⚠ {f.last_error}</div>}
+              </div>
+              <div className="feed-actions">
+                {f.mode === 'receive' ? <>
+                  <button className="btn btn-ghost btn-sm" disabled={checking} onClick={checkNow}><Icon name="refresh" size={13}/> Check now</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => applyFeed(f)}><Icon name="download" size={13}/> Apply</button>
+                </> : <>
+                  <button className="btn btn-ghost btn-sm" onClick={() => {
+                    setBuildFor(f); setBuildSel({ apps: [], services: [] }); setBuildVersion(''); setBuildLog(null);
+                  }}><Icon name="sparkle" size={13}/> Build archive</button>
+                </>}
+                <button className="btn btn-ghost btn-sm" style={{color:'var(--tone-red)'}} onClick={() => remove(f)} title="Delete feed"><Icon name="trash" size={13}/></button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
       {applying && <UpdateProgress events={applying.events} onClose={() => setApplying(null)} />}
 
       {/* add form */}
-      <div style={{borderTop:feeds && feeds.length ? '1px solid var(--border,#2a2d33)' : undefined,paddingTop:20}}>
+      <div style={{borderTop:feeds && feeds.length ? '1px solid var(--line-soft)' : undefined,paddingTop:20}}>
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
           <div className="field" style={{width:110}}>
             <label>Mode</label>
@@ -2934,7 +3025,7 @@ function RemoteUpdates({ session, apps, services }) {
 
       {/* one-time key reveal */}
       {newKey && (
-        <div style={{marginTop:20,padding:16,border:'1px solid var(--border,#2a2d33)',borderRadius:8}}>
+        <div style={{marginTop:20,padding:16,border:'1px solid var(--line)',borderRadius:8}}>
           <div style={{fontWeight:500,marginBottom:6}}>Feed encryption key — shown once</div>
           <p className="muted" style={{fontSize:13,marginBottom:12}}>
             Give this key to whoever encrypts the archives for this feed (or, if you supplied a publisher's key
@@ -2963,7 +3054,7 @@ function RemoteUpdates({ session, apps, services }) {
             </div>
             <div className="field">
               <label>Apps ({buildSel.apps.length} selected)</label>
-              <div style={{maxHeight:140,overflowY:'auto',border:'1px solid var(--border,#2a2d33)',borderRadius:8,padding:'6px 10px'}}>
+              <div style={{maxHeight:140,overflowY:'auto',border:'1px solid var(--line)',borderRadius:8,padding:'6px 10px'}}>
                 {apps.length === 0 && <span className="muted" style={{fontSize:13}}>no apps</span>}
                 {apps.map(a => (
                   <label key={a.nonce} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
@@ -2975,7 +3066,7 @@ function RemoteUpdates({ session, apps, services }) {
             </div>
             <div className="field">
               <label>Services ({buildSel.services.length} selected)</label>
-              <div style={{maxHeight:120,overflowY:'auto',border:'1px solid var(--border,#2a2d33)',borderRadius:8,padding:'6px 10px'}}>
+              <div style={{maxHeight:120,overflowY:'auto',border:'1px solid var(--line)',borderRadius:8,padding:'6px 10px'}}>
                 {pubServices.length === 0 && <span className="muted" style={{fontSize:13}}>no tasks/virtual services</span>}
                 {pubServices.map(s => (
                   <label key={s.id} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
