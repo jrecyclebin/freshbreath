@@ -82,14 +82,18 @@ button { font-family: inherit; }
   position: sticky;
   top: 0;
   z-index: 60;
+  background: var(--bg);
+  padding: 16px 0 0;
+}
+.topbar-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   height: 56px;
-  padding: 0 24px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--line);
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 40px;
 }
 
 .tb-brand {
@@ -203,6 +207,40 @@ button { font-family: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The "+ New" entity dropdown above the table — its label keeps the caret
+   tucked against the word rather than the button's 8px icon gap. */
+.new-menu .new-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Copyable identifier subtitle shown under an entity's name in the table. */
+.id-sub {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  padding: 1px 0 0;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-family: inherit;
+  max-width: 100%;
+  min-width: 0;
+}
+.id-sub .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.id-sub svg { flex-shrink: 0; opacity: 0.55; }
+.id-sub:hover { color: var(--accent); }
+.id-sub:hover svg { opacity: 1; }
 
 /* Tabs linking the user-area pages (users / roles / audit) */
 .area-tabs {
@@ -693,7 +731,7 @@ table.tbl {
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 .drop-zone {
-  border: 1.5px dashed var(--border);
+  border: 1.5px dashed var(--line);
   border-radius: 8px;
   padding: 20px 16px;
   text-align: center;
@@ -998,7 +1036,7 @@ select.input {
   color: white;
   font-size: 13px;
   position: sticky;
-  top: 56px;
+  top: 72px;
   z-index: 50;
 }
 
@@ -1028,47 +1066,61 @@ select.input {
   letter-spacing: -0.01em;
 }
 
+.home-hosted {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
 .hosted-grid {
+  flex: 1;
+  min-width: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  grid-template-columns: repeat(2, 1fr);
   gap: 12px;
 }
+.hosted-empty { flex: 1; padding: 28px 16px; }
+.home-dropzone-wrap {
+  position: sticky;
+  top: 92px;
+  width: 300px;
+  flex-shrink: 0;
+}
 .hosted-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  padding: 8px 8px 8px 10px;
   cursor: pointer;
   transition: border-color .12s, background .12s;
 }
 .hosted-card:hover { border-color: var(--accent-border); background: var(--hover); }
-.hosted-card-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.hosted-fav {
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  object-fit: contain;
+  background: var(--bg);
+}
+.hosted-name {
+  flex: 1;
   min-width: 0;
-}
-.hosted-card-top b {
   font-weight: 500;
+  font-size: 13.5px;
+  color: var(--ink);
+  text-decoration: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hosted-card .hosted-app-link {
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.hosted-card-meta { font-size: 11.5px; }
+.hosted-name:hover { color: var(--accent); }
+.hosted-edit { flex-shrink: 0; }
 
 /* The home drop box — bigger than the in-form one, it's the front door */
 .home-dropzone {
-  margin-top: 12px;
+  margin-top: 0;
   padding: 34px 24px;
   border-radius: var(--radius-lg);
   display: flex;
@@ -1102,13 +1154,9 @@ select.input {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 5px;
-  border: 1px solid var(--line-soft);
-  border-radius: 11px;
-  background: var(--panel);
   height: fit-content;
   position: sticky;
-  top: 76px;
+  top: 92px;
 }
 .rail-btn {
   width: 36px; height: 36px;
@@ -1211,13 +1259,14 @@ select.input {
 /* ── Mobile breakpoint ───────────────────────────────────────────────── */
 
 @media (max-width: 640px) {
-  .topbar { padding: 0 14px; }
+  .topbar { padding: 40px 0 0; }
+  .topbar-inner { padding: 0 16px; }
   .tb-brand .brand-logo { width: 128px; }
 
   .main { padding: 20px 16px 64px; }
 
   .session-banner {
-    top: 56px;
+    top: 72px;
     margin: -16px -16px 16px;
   }
 
@@ -1236,6 +1285,8 @@ select.input {
   .entity-toolbar .search { max-width: none; flex: 1; }
 
   .hosted-grid { grid-template-columns: 1fr; }
+  .home-hosted { flex-direction: column; }
+  .home-dropzone-wrap { position: static; width: 100%; }
   .home-dropzone { padding: 24px 16px; }
   .page-form { max-width: none; }
   .upload-mode button { font-size: 11.5px; padding: 7px 6px; }
@@ -1319,7 +1370,7 @@ select.input {
 
 .editor-page {
   position: fixed;
-  top: 56px;
+  top: 72px;
   right: 0;
   bottom: 0;
   left: 0;
@@ -1358,7 +1409,7 @@ select.input {
 @media (max-width: 640px) {
   .editor-page {
     left: 0;
-    top: 56px;
+    top: 72px;
     padding: 20px 16px 0;
   }
   .editor-textarea {

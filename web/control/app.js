@@ -41,6 +41,7 @@ const Icon = ({ name, size = 16 }) => {
     upload:  <><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/></>,
     back:    <><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></>,
     tag:     <><path d="M20.6 13.4L13.4 20.6a2 2 0 0 1-2.8 0l-7.2-7.2A2 2 0 0 1 2.8 12V5a2 2 0 0 1 2-2h7a2 2 0 0 1 1.4.6l7.4 7.4a2 2 0 0 1 0 2.4z"/><circle cx="7.5" cy="7.5" r="1.2"/></>,
+    chevron: <><path d="M6 9l6 6 6-6"/></>,
   };
   return <svg {...c}>{p[name] || p.more}</svg>;
 };
@@ -55,6 +56,17 @@ const Avatar = ({ name, size = 32 }) => {
   const hue = hashHue(name);
   const bg = `linear-gradient(135deg, oklch(0.78 0.07 ${hue}), oklch(0.55 0.1 ${(hue+30)%360}))`;
   return <div className="avatar" style={{width:size,height:size,fontSize:size*0.36,background:bg}}>{initls(name)}</div>;
+};
+
+// A hosted app's favicon, if it serves one at /favicon.ico; otherwise the
+// app's first initial on a coloured tile. Tried per-card so a missing
+// icon never breaks the grid.
+const Favicon = ({ route, name }) => {
+  const [err, setErr] = useState(false);
+  if (err || !route) {
+    return <Icon name="apps" size={14}/>;
+  }
+  return <img className="hosted-fav" src={route + '/favicon.ico'} alt="" onError={()=>setErr(true)}/>;
 };
 
 const Badge = ({ tone = "gray", dot = true, children }) => (
@@ -418,6 +430,44 @@ function MenuItem({ icon, children, onClick, tone }) {
   );
 }
 
+// A "+ New" dropdown above the entity table — one entry per type, so any
+// kind of record can be added from any view without leaving the table.
+function NewEntityMenu({ navigate }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    const esc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', away);
+    window.addEventListener('keydown', esc);
+    return () => {
+      document.removeEventListener('mousedown', away);
+      window.removeEventListener('keydown', esc);
+    };
+  }, [open]);
+  const items = [
+    { id: 'app', label: 'New app', icon: 'apps', page: 'app', params: { isNew: true } },
+    { id: 'service', label: 'New service', icon: 'plug', page: 'service', params: { isNew: true } },
+    { id: 'auth', label: 'New auth record', icon: 'key', page: 'authrecord', params: { isNew: true } },
+  ];
+  return (
+    <div className="menu new-menu" ref={ref}>
+      <button className={'btn btn-primary btn-sm new-btn' + (open ? ' open' : '')} onClick={() => setOpen(o => !o)}>
+        <Icon name="plus" size={14}/>
+        <span className="new-label">New <Icon name="chevron" size={13}/></span>
+      </button>
+      {open && (
+        <div className="menu-pop" onClick={() => setOpen(false)}>
+          {items.map(it => (
+            <MenuItem key={it.id} icon={it.icon} onClick={() => navigate(it.page, it.params)}>{it.label}</MenuItem>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TopBar({ user, onNav, onLogout }) {
   const [dark, setDark] = useState(() => document.documentElement.dataset.theme === 'dark');
   useEffect(() => {
@@ -435,38 +485,37 @@ function TopBar({ user, onNav, onLogout }) {
   const displayRole = user?.role || 'Superuser';
   return (
     <header className="topbar">
-      <button className="tb-brand" onClick={() => onNav('home')} title="Fresh Breath">
-        <img src="/control/images/frbr-sm.png" alt="Fresh Breath" className="brand-logo"/>
-      </button>
-      <div className="tb-right">
-        <Menu label="Users, roles & audit" icon="users">
-          {USER_AREA.map(p =>
-            <MenuItem key={p.id} onClick={() => onNav(p.id)}>{p.label}</MenuItem>
-          )}
-        </Menu>
-        <button className="menu-btn" onClick={() => onNav('settings')} title="Settings">
-          <Icon name="cog" size={18}/>
+      <div className="topbar-inner">
+        <button className="tb-brand" onClick={() => onNav('home')} title="Fresh Breath">
+          <img src="/control/images/frbr-sm.png" alt="Fresh Breath" className="brand-logo"/>
         </button>
-        <button className="menu-btn" onClick={toggleTheme} title={dark ? 'Switch to light' : 'Switch to dark'}>
-          <Icon name={dark ? 'sun' : 'moon'} size={18}/>
-        </button>
-        {user ? (
-          <Menu avatar={<Avatar name={displayName} size={30}/>}>
-            <div className="menu-heading user">
-              <b>{displayName}</b>
-              <span>{displayRole}</span>
-            </div>
-            <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>
-            <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>
-            <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
-              {window.__HOMESLICE_CONFIG?.version || 'dev'}
-            </div>
+        <div className="tb-right">
+          <Menu label="Users, roles & audit" icon="users">
+            {USER_AREA.map(p =>
+              <MenuItem key={p.id} onClick={() => onNav(p.id)}>{p.label}</MenuItem>
+            )}
           </Menu>
-        ) : onLogout ? (
-          <button className="menu-btn" onClick={onLogout} title="Sign in">
-            <Icon name="lock" size={18}/>
-          </button>
-        ) : null}
+          {user ? (
+            <Menu avatar={<Avatar name={displayName} size={30}/>}>
+              <div className="menu-heading user">
+                <b>{displayName}</b>
+                <span>{displayRole}</span>
+              </div>
+              <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
+                {dark ? 'Light mode' : 'Dark mode'}
+              </MenuItem>
+              <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>
+              <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>
+              <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
+                {window.__HOMESLICE_CONFIG?.version || 'dev'}
+              </div>
+            </Menu>
+          ) : onLogout ? (
+            <button className="menu-btn" onClick={onLogout} title="Sign in">
+              <Icon name="lock" size={18}/>
+            </button>
+          ) : null}
+        </div>
       </div>
     </header>
   );
@@ -622,6 +671,20 @@ const authUsedBy = (id, services, apps) => [
   ...apps.filter(a => a.protected_by === id).map(a => `${a.name} (protects)`),
 ];
 
+// A copyable identifier shown under an entity's name in the table — the
+// app nonce or the service URL. Auth records aren't referred to
+// externally, so they get no subtitle.
+const IDSub = ({ value, toast }) => {
+  if (!value) return null;
+  return (
+    <button className="id-sub" title="Copy to clipboard"
+            onClick={ev => { ev.stopPropagation(); copyText(value, toast); }}>
+      <span className="mono">{value}</span>
+      <Icon name="copy" size={11}/>
+    </button>
+  );
+};
+
 // The drop box on the home page: one place to publish anything — a new
 // app or an app update (.html/.zip) or a tasks/virtual definition (.txt).
 // It only picks the file up; the modal does the asking.
@@ -724,8 +787,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
 
   const detailCell = (row) => {
     const e = row.entity;
-    if (row.kind === 'app') return e.owner_name || <span className="muted">—</span>;
-    if (row.kind === 'service') return <GateCell slot={e.protected_by} auth={auth} adminAuthID={adminAuthID}/>;
+    if (row.kind !== 'auth') return <GateCell slot={e.protected_by} auth={auth} adminAuthID={adminAuthID}/>;
     return e.descriptor?.provider
       ? <span className="mono" style={{fontSize:12.5}}>{e.descriptor.provider}</span>
       : <span className="muted">—</span>;
@@ -734,51 +796,38 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
   return (
     <>
       <div className="home-section">
-        <div className="home-section-head">
-          <h2>Hosted apps</h2>
-          <span className="muted" style={{fontSize:12.5}}>
-            {hosted.length} hosted · {apps.length - hosted.length} without content
-          </span>
-        </div>
-        {hosted.length === 0 ? (
-          <div className="empty" style={{padding:'28px 16px'}}>
-            <b>No hosted apps yet.</b><br/>
-            Drop an .html or .zip file below to publish your first one.
-          </div>
-        ) : (
-          <div className="hosted-grid">
-            {hosted.map(a => (
-              <div key={a.nonce} className="hosted-card" onClick={() => navigate('app', { nonce: a.nonce })} title="Open app settings">
-                <div className="hosted-card-top">
-                  <b>{a.name}</b>
+        <div className="home-hosted">
+          {hosted.length === 0 ? (
+            <div className="empty hosted-empty">
+              <b>No hosted apps yet.</b><br/>
+              Drop an .html or .zip file to publish your first one.
+            </div>
+          ) : (
+            <div className="hosted-grid">
+              {hosted.map(a => (
+                <div key={a.nonce} className="hosted-card" onClick={() => window.open(hostRoute(a), '_blank', 'noopener')} title="Open app">
+                  <Favicon route={hostRoute(a)} name={a.name}/>
+                  <a className="hosted-name" href={hostRoute(a)} target="_blank" rel="noopener noreferrer"
+                     onClick={ev => ev.stopPropagation()}>{a.name}</a>
                   <Badge tone={envTone(a.environment)}>
                     <span className="env-full">{a.environment || '—'}</span>
                     <span className="env-short">{envShort(a.environment)}</span>
                   </Badge>
+                  <button className="btn btn-icon btn-ghost hosted-edit" onClick={ev => { ev.stopPropagation(); navigate('app', { nonce: a.nonce }); }} title="Edit app settings"><Icon name="edit" size={14}/></button>
                 </div>
-                <a className="mono hosted-app-link" href={hostRoute(a)} target="_blank" rel="noopener noreferrer"
-                   onClick={ev => ev.stopPropagation()}>{hostRoute(a)}</a>
-                <div className="muted hosted-card-meta">
-                  {a.owner_name || 'No owner'} · edited {fmtAuditTime(a.updated_at)}
-                </div>
-              </div>
-            ))}
+              ))}
+            </div>
+          )}
+          <div className="home-dropzone-wrap">
+            <DropZone onFile={setDropFile}/>
           </div>
-        )}
-        <DropZone onFile={setDropFile}/>
+        </div>
       </div>
 
       <div className="home-section">
         <div className="home-section-head">
           <h2>{activeView.label}</h2>
-          {activeView.singular ? (
-            <button className="btn btn-primary btn-sm"
-                    onClick={() => navigate(view === 'apps' ? 'app' : view === 'services' ? 'service' : 'authrecord', { isNew: true })}>
-              <Icon name="plus" size={14}/> New {activeView.singular}
-            </button>
-          ) : (
-            <span className="muted" style={{fontSize:12.5}}>apps · services · auth</span>
-          )}
+          <NewEntityMenu navigate={navigate}/>
         </div>
         <div className="entity-wrap">
           <div className="entity-rail">
@@ -801,8 +850,8 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
             <table className="tbl" data-mobile>
               <thead><tr>
                 <th style={{width:'30%'}}>Name</th>
-                <th>{view === 'apps' ? 'Environment' : view === 'auth' ? 'Kind' : 'Type'}</th>
-                <th>{view === 'apps' ? 'Owner' : 'Detail'}</th>
+                {view !== 'recent' && <th>{view === 'apps' ? 'Environment' : view === 'auth' ? 'Kind' : 'Type'}</th>}
+                <th>Access</th>
                 <th>Edited</th>
                 <th style={{width:80}}></th>
               </tr></thead>
@@ -822,6 +871,8 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
                           </span>
                           <div className="meta">
                             <b>{row.name}</b>
+                            {row.kind === 'app' && <IDSub value={e.nonce} toast={toast}/>}
+                            {row.kind === 'service' && <IDSub value={e.url} toast={toast}/>}
                             {row.kind === 'auth' && e.builtin && <Badge tone="purple" dot={false}>Built-in</Badge>}
                             {row.kind === 'service' && unproxied(e) && (
                               <span className="unproxied-mark" title="Unproxied services are allowed to pass their creds to the user.">(!)</span>
@@ -829,11 +880,9 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
                           </div>
                         </div>
                       </td>
-                      <td data-col="badge">
-                        {view === 'recent'
-                          ? <Badge dot={false} tone="gray">{row.kind === 'app' ? 'App' : row.kind === 'service' ? 'Service' : 'Auth'}</Badge>
-                          : kindBadge(row)}
-                      </td>
+                      {view !== 'recent' && (
+                        <td data-col="badge">{kindBadge(row)}</td>
+                      )}
                       <td data-col="detail">{detailCell(row)}</td>
                       <td data-col="detail" className="muted">{fmtAuditTime(row.when)}</td>
                       <td data-col="actions" onClick={ev => ev.stopPropagation()}>
