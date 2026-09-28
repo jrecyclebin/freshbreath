@@ -1134,10 +1134,14 @@ select.input {
   letter-spacing: -0.01em;
 }
 
+/* A container, not a media query, drives the column count: what matters
+   is the width left for the grid after the drop pane's 300px, not the
+   viewport — so the row measures itself and the grid asks it. */
 .home-hosted {
   display: flex;
   gap: 16px;
   align-items: flex-start;
+  container-type: inline-size;
 }
 .hosted-grid {
   flex: 1;
@@ -1145,6 +1149,12 @@ select.input {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
+}
+/* Two comfortable card columns need ~510px (2 × 240 + gap); beside the
+   drop pane that's ~830px of row. Anything narrower: one column, the
+   rows stack and each card keeps its full width. */
+@container (max-width: 830px) {
+  .hosted-grid { grid-template-columns: 1fr; }
 }
 .hosted-empty { flex: 1; padding: 28px 16px; }
 .home-dropzone-wrap {
