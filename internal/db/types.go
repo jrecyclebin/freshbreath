@@ -84,6 +84,7 @@ type Service struct {
 	Descriptor  ServiceDescriptor `json:"descriptor"`
 	ProtectedBy *int64            `json:"protected_by"` // inbound gate auth record; nil = inherit admin
 	ActsAs      *int64            `json:"acts_as"`      // outbound credential record; nil = caller's own
+	UpdatedAt   time.Time         `json:"updated_at"`
 }
 
 // UpdateFeed is one remote-updates entry: either a receive feed (a remote URL

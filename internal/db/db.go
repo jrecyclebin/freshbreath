@@ -227,6 +227,23 @@ func (s *Store) Migrate() error {
 		}
 	}
 
+	// updated_at columns: the control panel's home page keeps one table of
+	// recently edited apps, services and auth records, so each needs a
+	// comparable last-touch timestamp. Backfilled from created_at so rows
+	// that predate the column don't start out at the bottom of the list.
+	for _, tbl := range []string{"apps", "services", "auth_records"} {
+		var has bool
+		s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info(?) WHERE name='updated_at'", tbl).Scan(&has)
+		if !has {
+			if _, err := s.db.Exec("ALTER TABLE " + tbl + " ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
+			if _, err := s.db.Exec("UPDATE " + tbl + " SET updated_at = created_at WHERE updated_at = ''"); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Seed the built-in auth records: the passphrase login and the explicit
 	// "open to anyone on the LAN" record. Undeletable; name/kind frozen.
 	for _, rec := range []struct{ name, kind string }{
@@ -288,7 +305,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 	nonce := utils.GenNonce()
 	for {
 		_, err := s.db.Exec(
-			"INSERT INTO apps (nonce, name, environment, url, owner_id, protected_by) VALUES (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO apps (nonce, name, environment, url, owner_id, protected_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, "+nowSQL+")",
 			nonce, name, env, url, ownerID, nullableID(protectedBy))
 		if err == nil {
 			return nonce, nil
@@ -303,7 +320,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 
 func (s *Store) ListApps() ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(`
-    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details, a.protected_by,
+    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.updated_at, a.details, a.protected_by,
            u.id, u.name,
            (SELECT COUNT(DISTINCT user_id) FROM app_members WHERE app_nonce = a.nonce) as member_count,
            (SELECT COUNT(DISTINCT service_id) FROM app_service_links WHERE app_nonce = a.nonce AND allowed = 1) as service_count
@@ -318,11 +335,11 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 
 	var apps []map[string]interface{}
 	for rows.Next() {
-		var nonce, name, env, url, created, detailsStr string
+		var nonce, name, env, url, created, updated, detailsStr string
 		var ownerID, protectedBy sql.NullInt64
 		var ownerName sql.NullString
 		var memberCount, serviceCount int
-		if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &protectedBy, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
+		if err := rows.Scan(&nonce, &name, &env, &url, &created, &updated, &detailsStr, &protectedBy, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
 			return nil, err
 		}
 		app := map[string]interface{}{
@@ -331,6 +348,7 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 			"environment":   env,
 			"url":           url,
 			"created_at":    created,
+			"updated_at":    updated,
 			"member_count":  memberCount,
 			"service_count": serviceCount,
 		}
@@ -355,7 +373,7 @@ func (s *Store) ListApps() ([]map[string]interface{}, error) {
 
 func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) {
 	rows, err := s.db.Query(`
-    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.details, a.protected_by,
+    SELECT a.nonce, a.name, a.environment, a.url, a.created_at, a.updated_at, a.details, a.protected_by,
            u.id, u.name,
            (SELECT COUNT(DISTINCT user_id) FROM app_members WHERE app_nonce = a.nonce) as member_count,
            (SELECT COUNT(DISTINCT service_id) FROM app_service_links WHERE app_nonce = a.nonce AND allowed = 1) as service_count
@@ -371,11 +389,11 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 
 	var apps []map[string]interface{}
 	for rows.Next() {
-		var nonce, name, env, url, created, detailsStr string
+		var nonce, name, env, url, created, updated, detailsStr string
 		var ownerID, protectedBy sql.NullInt64
 		var ownerName sql.NullString
 		var memberCount, serviceCount int
-		if err := rows.Scan(&nonce, &name, &env, &url, &created, &detailsStr, &protectedBy, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
+		if err := rows.Scan(&nonce, &name, &env, &url, &created, &updated, &detailsStr, &protectedBy, &ownerID, &ownerName, &memberCount, &serviceCount); err != nil {
 			return nil, err
 		}
 		app := map[string]interface{}{
@@ -384,6 +402,7 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 			"environment":   env,
 			"url":           url,
 			"created_at":    created,
+			"updated_at":    updated,
 			"member_count":  memberCount,
 			"service_count": serviceCount,
 		}
@@ -439,7 +458,14 @@ func (s *Store) UpdateAppDetails(nonce string, details *AppDetails) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec("UPDATE apps SET details = ? WHERE nonce = ?", string(data), nonce)
+	_, err = s.db.Exec("UPDATE apps SET details = ?, updated_at = "+nowSQL+" WHERE nonce = ?", string(data), nonce)
+	return err
+}
+
+// TouchApp stamps an app's updated_at for changes that edit an app without
+// going through UpdateApp — membership and service-link writes, file edits.
+func (s *Store) TouchApp(nonce string) error {
+	_, err := s.db.Exec("UPDATE apps SET updated_at = "+nowSQL+" WHERE nonce = ?", nonce)
 	return err
 }
 
@@ -472,7 +498,7 @@ func (s *Store) ListHostedApps() ([]*App, error) {
 
 func (s *Store) UpdateApp(nonce string, name, env string, url string, ownerID *int64, protectedBy *int64) error {
 	_, err := s.db.Exec(
-		"UPDATE apps SET name = ?, environment = ?, url = ?, owner_id = ?, protected_by = ? WHERE nonce = ?",
+		"UPDATE apps SET name = ?, environment = ?, url = ?, owner_id = ?, protected_by = ?, updated_at = "+nowSQL+" WHERE nonce = ?",
 		name, env, url, ownerID, nullableID(protectedBy), nonce,
 	)
 	return err
@@ -706,7 +732,11 @@ func (s *Store) ListAudit(limit int) ([]*AuditEntry, error) {
 
 // ── Services ──
 
-const serviceCols = "id, name, url, descriptor, protected_by, acts_as"
+const serviceCols = "id, name, url, descriptor, protected_by, acts_as, updated_at"
+
+// nowSQL stamps the current UTC time in the same format as the created_at
+// column defaults, so updated_at and created_at compare directly.
+const nowSQL = "strftime('%Y-%m-%dT%H:%M:%SZ','now')"
 
 // nullableID converts an optional record reference for binding: nil stays
 // NULL in the database rather than 0.
@@ -719,12 +749,13 @@ func nullableID(id *int64) interface{} {
 
 func scanService(row interface{ Scan(...any) error }) (*Service, error) {
 	svc := &Service{}
-	var descStr string
+	var descStr, updated string
 	var protectedBy, actsAs sql.NullInt64
-	err := row.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr, &protectedBy, &actsAs)
+	err := row.Scan(&svc.ID, &svc.Name, &svc.URL, &descStr, &protectedBy, &actsAs, &updated)
 	if err != nil {
 		return nil, err
 	}
+	svc.UpdatedAt = parseTime(updated)
 	if err := json.Unmarshal([]byte(descStr), &svc.Descriptor); err != nil {
 		return nil, err
 	}
@@ -743,7 +774,7 @@ func (s *Store) RegisterService(name, serviceURL string, descriptor ServiceDescr
 		return 0, err
 	}
 	res, err := s.db.Exec(
-		"INSERT INTO services (name, url, descriptor, protected_by, acts_as) VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO services (name, url, descriptor, protected_by, acts_as, updated_at) VALUES (?, ?, ?, ?, ?, "+nowSQL+")",
 		name, serviceURL, string(descJSON), nullableID(protectedBy), nullableID(actsAs),
 	)
 	if err != nil {
@@ -790,9 +821,16 @@ func (s *Store) UpdateService(id int64, name, serviceURL string, descriptor Serv
 		return err
 	}
 	_, err = s.db.Exec(
-		"UPDATE services SET name = ?, url = ?, descriptor = ?, protected_by = ?, acts_as = ? WHERE id = ?",
+		"UPDATE services SET name = ?, url = ?, descriptor = ?, protected_by = ?, acts_as = ?, updated_at = "+nowSQL+" WHERE id = ?",
 		name, serviceURL, string(descJSON), nullableID(protectedBy), nullableID(actsAs), id,
 	)
+	return err
+}
+
+// TouchService stamps a service's updated_at for definition-file writes,
+// which edit a service without going through UpdateService.
+func (s *Store) TouchService(id int64) error {
+	_, err := s.db.Exec("UPDATE services SET updated_at = "+nowSQL+" WHERE id = ?", id)
 	return err
 }
 

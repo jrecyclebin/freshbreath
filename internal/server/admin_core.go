@@ -275,6 +275,7 @@ func (s *Server) coreSetAppMembers(actor *db.User, nonce string, members []int64
 	if err := s.store.SetAppMembers(nonce, members); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
+	_ = s.store.TouchApp(nonce)
 	s.auditApp(actor, "updated app members", nonce)
 	return nil
 }
@@ -286,6 +287,7 @@ func (s *Server) coreSetAppServices(actor *db.User, nonce string, services []int
 	if err := s.store.SetAppServiceLinks(nonce, services); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
+	_ = s.store.TouchApp(nonce)
 	s.auditApp(actor, "updated app services", nonce)
 	return nil
 }
@@ -485,6 +487,10 @@ func (s *Server) coreSetUserApps(actor *db.User, id int64, apps []string) error 
 	}
 	if err := s.store.SetUserApps(id, apps); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
+	}
+	// The membership edit shows up on each app's own page too, so stamp them.
+	for _, nonce := range apps {
+		_ = s.store.TouchApp(nonce)
 	}
 	s.audit(actor, "updated user apps", fmt.Sprintf("user:%d", id))
 	return nil
@@ -1009,6 +1015,7 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data [
 		return cerr(http.StatusInternalServerError, "failed to save details")
 	}
 	s.rebuildHostedRoutes()
+	_ = s.store.TouchApp(nonce)
 	s.audit(actor, "wrote app file", app.Name+"/"+rel)
 	return nil
 }
@@ -1034,6 +1041,7 @@ func (s *Server) coreDeleteAppFile(actor *db.User, nonce, filePath string) error
 		return cerr(http.StatusInternalServerError, "delete failed")
 	}
 	s.rebuildHostedRoutes()
+	_ = s.store.TouchApp(nonce)
 	s.audit(actor, "deleted app file", app.Name+"/"+rel)
 	return nil
 }
@@ -1107,6 +1115,7 @@ func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, f
 		s.virtualMCPs.add(s, svc)
 	}
 
+	_ = s.store.TouchService(id)
 	s.audit(actor, "uploaded service files", svc.Name)
 	return svc.URL, nil
 }
@@ -1133,6 +1142,7 @@ func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
 		s.virtualMCPs.remove(trimMCPSlug(svc.URL))
 	}
 
+	_ = s.store.TouchService(id)
 	s.audit(actor, "removed service files", svc.Name)
 	return nil
 }
@@ -1231,6 +1241,7 @@ func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, old
 		s.virtualMCPs.add(s, svc)
 	}
 
+	_ = s.store.TouchService(id)
 	s.audit(actor, "wrote service file", svc.Name)
 	return nil
 }

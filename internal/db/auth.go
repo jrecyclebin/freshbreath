@@ -94,6 +94,7 @@ type AuthRecord struct {
 	Descriptor AuthDescriptor `json:"descriptor"`
 	Builtin    bool           `json:"builtin"`
 	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
 // Secret reports the record's stored secret (client secret or key),
@@ -131,7 +132,7 @@ func (s *Store) CreateAuthRecord(name, kind string, d AuthDescriptor) (*AuthReco
 		return nil, err
 	}
 	res, err := s.db.Exec(
-		"INSERT INTO auth_records (name, kind, descriptor) VALUES (?, ?, ?)",
+		"INSERT INTO auth_records (name, kind, descriptor, updated_at) VALUES (?, ?, ?, "+nowSQL+")",
 		name, kind, string(descJSON),
 	)
 	if err != nil {
@@ -146,9 +147,9 @@ func (s *Store) CreateAuthRecord(name, kind string, d AuthDescriptor) (*AuthReco
 
 func (s *Store) scanAuthRecord(row interface{ Scan(...any) error }) (*AuthRecord, error) {
 	a := &AuthRecord{}
-	var descStr, createdAt string
+	var descStr, createdAt, updatedAt string
 	var builtin int
-	err := row.Scan(&a.ID, &a.Name, &a.Kind, &descStr, &builtin, &createdAt)
+	err := row.Scan(&a.ID, &a.Name, &a.Kind, &descStr, &builtin, &createdAt, &updatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -160,10 +161,11 @@ func (s *Store) scanAuthRecord(row interface{ Scan(...any) error }) (*AuthRecord
 	}
 	a.Builtin = builtin != 0
 	a.CreatedAt = parseTime(createdAt)
+	a.UpdatedAt = parseTime(updatedAt)
 	return a, nil
 }
 
-const authRecordCols = "id, name, kind, descriptor, builtin, created_at"
+const authRecordCols = "id, name, kind, descriptor, builtin, created_at, updated_at"
 
 func (s *Store) GetAuthRecord(id int64) (*AuthRecord, error) {
 	a, err := s.scanAuthRecord(s.db.QueryRow(
@@ -238,7 +240,7 @@ func (s *Store) UpdateAuthRecord(id int64, name, kind string, d AuthDescriptor) 
 		return err
 	}
 	_, err = s.db.Exec(
-		"UPDATE auth_records SET name = ?, kind = ?, descriptor = ? WHERE id = ?",
+		"UPDATE auth_records SET name = ?, kind = ?, descriptor = ?, updated_at = "+nowSQL+" WHERE id = ?",
 		name, kind, string(descJSON), id,
 	)
 	if isUnique(err) {

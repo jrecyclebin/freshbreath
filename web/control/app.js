@@ -37,6 +37,10 @@ const Icon = ({ name, size = 16 }) => {
     menu:    <><path d="M3 6h18M3 12h18M3 18h18"/></>,
     moon:    <><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></>,
     sun:     <><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></>,
+    clock:   <><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></>,
+    upload:  <><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/></>,
+    back:    <><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></>,
+    tag:     <><path d="M20.6 13.4L13.4 20.6a2 2 0 0 1-2.8 0l-7.2-7.2A2 2 0 0 1 2.8 12V5a2 2 0 0 1 2-2h7a2 2 0 0 1 1.4.6l7.4 7.4a2 2 0 0 1 0 2.4z"/><circle cx="7.5" cy="7.5" r="1.2"/></>,
   };
   return <svg {...c}>{p[name] || p.more}</svg>;
 };
@@ -363,38 +367,58 @@ function SessionBanner({ onLogin, onDismiss }) {
 
 // ── Nav ────────────────────────────────────────────────────────────────
 
-const NAV = [
-  { id:'home',     label:'Overview', icon:'home' },
-  { id:'apps',     label:'Apps',     icon:'apps', countKey:'apps' },
-  { id:'services', label:'Services', icon:'plug', countKey:'services' },
-  { id:'auth',     label:'Auth',     icon:'key',  countKey:'auth' },
-  { id:'users',    label:'Users',    icon:'users', countKey:'users' },
-  { id:'roles',    label:'Roles',    icon:'shield' },
-  { id:'audit',    label:'Audit log',icon:'log' },
-  { id:'settings', label:'Settings', icon:'cog' },
+// The user area: three pages — people, their roles, what they did —
+// reachable from one icon in the top bar and cross-linked by tabs
+// once you're inside one of them.
+const USER_AREA = [
+  { id: 'users',  label: 'Users' },
+  { id: 'roles',  label: 'Roles' },
+  { id: 'audit',  label: 'Audit log' },
 ];
 
-function MobileTopBar({ onMenuOpen, pageLabel }) {
+// Menu is the one piece of shared chrome in the top bar: a button that
+// opens a small dropdown pinned under itself. Outside clicks and Escape
+// close it; choosing an item closes it too.
+function Menu({ label, icon, children, avatar }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e) => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    const esc = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', away);
+    window.addEventListener('keydown', esc);
+    return () => {
+      document.removeEventListener('mousedown', away);
+      window.removeEventListener('keydown', esc);
+    };
+  }, [open]);
   return (
-    <div className="mobile-topbar">
-      <div className="mb-brand">
-        <img src="/control/images/frbr-sm.png" alt="Fresh Breath" className="brand-logo"/>
-      </div>
-      <div style={{display:'flex',alignItems:'center',gap:8}}>
-        {pageLabel && <span className="mb-page">{pageLabel}</span>}
-        <button className="btn btn-icon btn-ghost" onClick={onMenuOpen} aria-label="Open menu">
-          <Icon name="menu" size={18}/>
-        </button>
-      </div>
+    <div className="menu" ref={ref}>
+      <button className={'menu-btn' + (open ? ' open' : '')} title={label}
+              onClick={() => setOpen(o => !o)}>
+        {avatar || <Icon name={icon} size={18}/>}
+      </button>
+      {open && (
+        <div className="menu-pop" onClick={() => setOpen(false)}>
+          {label && <div className="menu-heading">{label}</div>}
+          {children}
+        </div>
+      )}
     </div>
   );
 }
 
-function Sidebar({ active, onNav, counts, user, onLogout, mobileOpen, onMobileClose }) {
-  const workspace = NAV.slice(0,4);
-  const security  = NAV.slice(4);
-  const displayName = user?.name || 'Admin';
-  const displayRole = user?.role || 'Superuser';
+function MenuItem({ icon, children, onClick, tone }) {
+  return (
+    <button className={'menu-item' + (tone ? ' tone-' + tone : '')} onClick={onClick}>
+      {icon && <span className="icn"><Icon name={icon} size={15}/></span>}
+      {children}
+    </button>
+  );
+}
+
+function TopBar({ user, onNav, onLogout }) {
   const [dark, setDark] = useState(() => document.documentElement.dataset.theme === 'dark');
   useEffect(() => {
     const obs = new MutationObserver(() => setDark(document.documentElement.dataset.theme === 'dark'));
@@ -407,66 +431,70 @@ function Sidebar({ active, onNav, counts, user, onLogout, mobileOpen, onMobileCl
     localStorage.setItem('frebre_theme', next);
     setDark(next === 'dark');
   };
-  const handleNav = (id) => { onNav(id); onMobileClose?.(); };
+  const displayName = user?.name || 'Admin';
+  const displayRole = user?.role || 'Superuser';
   return (
-    <aside className={`sidebar${mobileOpen ? ' mobile-open' : ''}`}>
-      <div className="sb-brand">
+    <header className="topbar">
+      <button className="tb-brand" onClick={() => onNav('home')} title="Fresh Breath">
         <img src="/control/images/frbr-sm.png" alt="Fresh Breath" className="brand-logo"/>
-      </div>
-      <div>
-        <div className="sb-section sb-section-row">
-          <span>Workspace</span>
-          <button className="theme-toggle" onClick={toggleTheme} title={dark ? 'Switch to light' : 'Switch to dark'}>
-            <Icon name={dark ? 'sun' : 'moon'} size={16}/>
-          </button>
-        </div>
-        <div className="sb-nav">
-          {workspace.map(n=>NavLink(n,active,handleNav,counts))}
-        </div>
-      </div>
-      <div>
-        <div className="sb-section">Security</div>
-        <div className="sb-nav">
-          {security.map(n=>NavLink(n,active,handleNav,counts))}
-        </div>
-      </div>
-      <div className="sb-foot">
-        <div style={{display:'flex',alignItems:'center',gap:4}}>
-          <div className="sb-user" style={{flex:1}} title={displayName}>
-            <Avatar name={displayName} size={28}/>
-            <div className="sb-user-text"><b>{displayName}</b><span>{displayRole}</span></div>
-          </div>
-          {onLogout && (
-            <button className="btn btn-icon btn-ghost" onClick={onLogout} title="Sign out" style={{flexShrink:0}}>
-              <Icon name="signout" size={14}/>
-            </button>
+      </button>
+      <div className="tb-right">
+        <Menu label="Users, roles & audit" icon="users">
+          {USER_AREA.map(p =>
+            <MenuItem key={p.id} onClick={() => onNav(p.id)}>{p.label}</MenuItem>
           )}
-        </div>
-        <div className="sb-version" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
-          {window.__HOMESLICE_CONFIG?.version || 'dev'}
-        </div>
+        </Menu>
+        <button className="menu-btn" onClick={() => onNav('settings')} title="Settings">
+          <Icon name="cog" size={18}/>
+        </button>
+        <button className="menu-btn" onClick={toggleTheme} title={dark ? 'Switch to light' : 'Switch to dark'}>
+          <Icon name={dark ? 'sun' : 'moon'} size={18}/>
+        </button>
+        {user ? (
+          <Menu avatar={<Avatar name={displayName} size={30}/>}>
+            <div className="menu-heading user">
+              <b>{displayName}</b>
+              <span>{displayRole}</span>
+            </div>
+            <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>
+            <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>
+            <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
+              {window.__HOMESLICE_CONFIG?.version || 'dev'}
+            </div>
+          </Menu>
+        ) : onLogout ? (
+          <button className="menu-btn" onClick={onLogout} title="Sign in">
+            <Icon name="lock" size={18}/>
+          </button>
+        ) : null}
       </div>
-    </aside>
+    </header>
   );
 }
 
-function NavLink(n,active,onNav,counts) {
+// Tabs linking the three user-area pages together, shown above them.
+function UserAreaTabs({ active, onNav }) {
   return (
-    <button key={n.id} className={`sb-link ${active===n.id?'active':''}`} onClick={()=>onNav(n.id)}>
-      <span className="icn"><Icon name={n.icon}/></span>
-      {n.label}
-      {n.countKey && counts[n.countKey]!=null && <span className="count">{counts[n.countKey]}</span>}
-    </button>
+    <div className="area-tabs">
+      {USER_AREA.map(p =>
+        <button key={p.id} className={'area-tab' + (active === p.id ? ' active' : '')}
+                onClick={() => onNav(p.id)}>{p.label}</button>
+      )}
+    </div>
   );
 }
 
 // ── Shell ──────────────────────────────────────────────────────────────
 
-function PageHead({ crumbs, title, sub, actions }) {
+function PageHead({ title, sub, back, backLabel, actions }) {
   return (
     <div className="page-head">
       <div>
-        {crumbs && <div className="crumbs">{crumbs.map((c,i)=><React.Fragment key={i}>{i>0&&' / '}<span>{c}</span></React.Fragment>)}</div>}
+        {back && (
+          <button className="back-link" onClick={back}>
+            <Icon name="back" size={14}/> <span>{backLabel || 'Back'}</span>
+          </button>
+        )}
         <h1 className="page-title">{title}</h1>
         {sub && <p className="page-sub">{sub}</p>}
       </div>
@@ -585,87 +613,256 @@ function buildPrompt(app, appServices) {
 
 // ── Sections ───────────────────────────────────────────────────────────
 
-function Overview({ users, apps, services, audit }) {
-  const activeUsers = users.filter(u=>u.status==='Active').length;
-  const prodApps = apps.filter(a=>a.details?.last_deployed_production).length;
+// What points at an auth record, so deleting one is an informed choice
+// rather than a 409 from the server. Shared by the home table and the
+// auth record page.
+const authUsedBy = (id, services, apps) => [
+  ...services.filter(s => s.protected_by === id).map(s => `${s.name} (protects)`),
+  ...services.filter(s => s.acts_as === id).map(s => `${s.name} (acts as)`),
+  ...apps.filter(a => a.protected_by === id).map(a => `${a.name} (protects)`),
+];
+
+// The drop box on the home page: one place to publish anything — a new
+// app or an app update (.html/.zip) or a tasks/virtual definition (.txt).
+// It only picks the file up; the modal does the asking.
+function DropZone({ onFile }) {
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef(null);
+  return (
+    <div
+      className={'drop-zone home-dropzone' + (dragging ? ' drop-zone-active' : '')}
+      onDragOver={e => { e.preventDefault(); setDragging(true); }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={e => {
+        e.preventDefault();
+        setDragging(false);
+        const f = e.dataTransfer.files[0];
+        if (f) onFile(f);
+      }}
+      onClick={() => inputRef.current?.click()}
+    >
+      <span className="dz-icon"><Icon name="upload" size={22}/></span>
+      <b>Drop a new app or update</b>
+      <span>.html or .zip for apps · .txt for tasks & virtual services · or click to browse</span>
+      <input ref={inputRef} type="file" accept=".html,.zip,.txt" style={{display:'none'}}
+        onChange={e => { const f = e.target.files[0]; if (f) onFile(f); e.target.value = ''; }}/>
+    </div>
+  );
+}
+
+// The table's left-hand rail: one button per view — everything recently
+// edited together, or the alphabetized list of a single type.
+const ENTITY_VIEWS = [
+  { id: 'recent',   label: 'Recently edited', singular: null,           icon: 'clock' },
+  { id: 'apps',     label: 'Apps',            singular: 'app',          icon: 'apps'  },
+  { id: 'services', label: 'Services',        singular: 'service',     icon: 'plug'  },
+  { id: 'auth',     label: 'Auth',            singular: 'auth record', icon: 'key'   },
+];
+
+function HomePage({ session, navigate, apps, services, auth, users, adminAuthID, onRefresh }) {
+  const [view, setView] = useState('recent');
+  const [q, setQ] = useState('');
+  const [dropFile, setDropFile] = useState(null);
+  const toast = useToast();
+
+  const hosted = apps.filter(isHosted);
+
+  const appRows    = apps.map(a => ({ kind: 'app', id: a.nonce, name: a.name, when: a.updated_at, entity: a }));
+  const serviceRows = services.map(s => ({ kind: 'service', id: s.id, name: s.name, when: s.updated_at, entity: s }));
+  const authRows   = auth.map(r => ({ kind: 'auth', id: r.id, name: r.name, when: r.updated_at, entity: r }));
+
+  const recent = [...appRows, ...serviceRows, ...authRows]
+    .filter(e => e.when)
+    .sort((a, b) => String(b.when).localeCompare(String(a.when)))
+    .slice(0, 15);
+
+  const matches = (name) => !q || name.toLowerCase().includes(q.toLowerCase());
+  const rows =
+    view === 'recent'   ? recent.filter(e => matches(e.name)) :
+    view === 'apps'     ? appRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name)) :
+    view === 'services' ? serviceRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name)) :
+                          authRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name));
+
+  const open = (row) => navigate(
+    row.kind === 'app' ? 'app' : row.kind === 'service' ? 'service' : 'authrecord',
+    row.kind === 'app' ? { nonce: row.id }
+      : row.kind === 'service' ? { serviceId: String(row.id) }
+      : { authId: String(row.id) });
+
+  const remove = async (row) => {
+    const e = row.entity;
+    if (row.kind === 'app') {
+      if (!confirm('Delete this app?')) return;
+      try { await api(session, 'DELETE', '/api/apps/' + row.id); toast('App deleted'); onRefresh(); }
+      catch (err) { toast(err.message, true); }
+    } else if (row.kind === 'service') {
+      let usedBy = [];
+      try { const r = await api(session, 'GET', '/api/services/' + row.id + '/apps'); usedBy = r.apps || []; }
+      catch { /* ignore */ }
+      let msg = 'Delete this service?';
+      if (usedBy.length > 0) msg += `\n\nIt's used by ${usedBy.length} app${usedBy.length > 1 ? 's' : ''}:\n${usedBy.map(a => a.name).join(', ')}`;
+      if (!confirm(msg)) return;
+      try { await api(session, 'DELETE', '/api/services/' + row.id); toast('Service deleted'); onRefresh(); }
+      catch (err) { toast(err.message, true); }
+    } else {
+      const uses = authUsedBy(e.id, services, apps);
+      if (uses.length) { toast(`In use by ${uses.join(', ')} — unassign it first`, true); return; }
+      if (!confirm(`Delete "${e.name}"? Anyone holding a credential from it will have to log in again.`)) return;
+      try { await api(session, 'DELETE', '/api/auth/' + e.id); toast('Auth record deleted'); onRefresh(); }
+      catch (err) { toast(err.message, true); }
+    }
+  };
+
+  const activeView = ENTITY_VIEWS.find(v => v.id === view);
+  const railIcn = { app: 'apps', service: 'plug', auth: 'key' };
+  const railTone = { app: 'green', service: 'blue', auth: 'violet' };
+
+  const kindBadge = (row) =>
+    row.kind === 'app' ? <Badge tone={envTone(row.entity.environment)}>{envShort(row.entity.environment)}</Badge>
+    : row.kind === 'service' ? <Badge dot={false} tone="gray">{row.entity.descriptor?.type?.toLocaleUpperCase() || '—'}</Badge>
+    : <Badge dot={false} tone={authKindTone(row.entity.kind)}>{authKindLabel(row.entity.kind)}</Badge>;
+
+  const detailCell = (row) => {
+    const e = row.entity;
+    if (row.kind === 'app') return e.owner_name || <span className="muted">—</span>;
+    if (row.kind === 'service') return <GateCell slot={e.protected_by} auth={auth} adminAuthID={adminAuthID}/>;
+    return e.descriptor?.provider
+      ? <span className="mono" style={{fontSize:12.5}}>{e.descriptor.provider}</span>
+      : <span className="muted">—</span>;
+  };
+
   return (
     <>
-      <PageHead
-        crumbs={['Fresh Breath']}
-        title="Overview"
-        sub="A snapshot of your workspace."
-      />
-      <div className="stats">
-        <div className="stat">
-          <span className="lbl">Applications</span>
-          <span className="val">{apps.length}</span>
-          <span className="sub">{prodApps} in production</span>
+      <div className="home-section">
+        <div className="home-section-head">
+          <h2>Hosted apps</h2>
+          <span className="muted" style={{fontSize:12.5}}>
+            {hosted.length} hosted · {apps.length - hosted.length} without content
+          </span>
         </div>
-        <div className="stat">
-          <span className="lbl">Services</span>
-          <span className="val">{services.length}</span>
-          <span className="sub">registered providers</span>
-        </div>
-        <div className="stat">
-          <span className="lbl">Recent events</span>
-          <span className="val">{Math.min(audit.length,10)}</span>
-          <span className="sub">last {Math.min(audit.length,100)} records</span>
-        </div>
-        <div className="stat">
-          <span className="lbl">Users</span>
-          <span className="val">{users.length}</span>
-          <span className="sub">{activeUsers} active · {users.length-activeUsers} other</span>
-        </div>
+        {hosted.length === 0 ? (
+          <div className="empty" style={{padding:'28px 16px'}}>
+            <b>No hosted apps yet.</b><br/>
+            Drop an .html or .zip file below to publish your first one.
+          </div>
+        ) : (
+          <div className="hosted-grid">
+            {hosted.map(a => (
+              <div key={a.nonce} className="hosted-card" onClick={() => navigate('app', { nonce: a.nonce })} title="Open app settings">
+                <div className="hosted-card-top">
+                  <b>{a.name}</b>
+                  <Badge tone={envTone(a.environment)}>
+                    <span className="env-full">{a.environment || '—'}</span>
+                    <span className="env-short">{envShort(a.environment)}</span>
+                  </Badge>
+                </div>
+                <a className="mono hosted-app-link" href={hostRoute(a)} target="_blank" rel="noopener noreferrer"
+                   onClick={ev => ev.stopPropagation()}>{hostRoute(a)}</a>
+                <div className="muted hosted-card-meta">
+                  {a.owner_name || 'No owner'} · edited {fmtAuditTime(a.updated_at)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <DropZone onFile={setDropFile}/>
       </div>
 
-      <div className="overview-grid">
-        <div>
-          <h3 style={{margin:'0 0 12px',fontSize:14,fontWeight:500}}>Recent activity</h3>
-          <div className="table-wrap"><div style={{padding:'8px 16px'}}>
-            {audit.length === 0 ? (
-              <div className="empty" style={{padding:'24px 0'}}>
-                <b>No recent activity.</b><br/>Events will appear here as users interact with services.
+      <div className="home-section">
+        <div className="home-section-head">
+          <h2>{activeView.label}</h2>
+          {activeView.singular ? (
+            <button className="btn btn-primary btn-sm"
+                    onClick={() => navigate(view === 'apps' ? 'app' : view === 'services' ? 'service' : 'authrecord', { isNew: true })}>
+              <Icon name="plus" size={14}/> New {activeView.singular}
+            </button>
+          ) : (
+            <span className="muted" style={{fontSize:12.5}}>apps · services · auth</span>
+          )}
+        </div>
+        <div className="entity-wrap">
+          <div className="entity-rail">
+            {ENTITY_VIEWS.map(v => (
+              <button key={v.id} className={'rail-btn' + (view === v.id ? ' active' : '')}
+                      title={v.id === 'recent' ? 'Recently edited — apps, services and auth together' : `${v.label}, alphabetical`}
+                      aria-label={v.label}
+                      onClick={() => { setView(v.id); setQ(''); }}>
+                <Icon name={v.icon} size={17}/>
+              </button>
+            ))}
+          </div>
+          <div className="table-wrap entity-table">
+            <div className="entity-toolbar">
+              <div className="search">
+                <span className="icn"><Icon name="search" size={14}/></span>
+                <input value={q} onChange={e => setQ(e.target.value)} placeholder={`Search ${activeView.label.toLowerCase()}…`}/>
               </div>
-            ) : (
-              <div className="timeline">
-                {audit.slice(0,6).map(a=>{
-                  const ai = actionIcon(a.action);
+            </div>
+            <table className="tbl" data-mobile>
+              <thead><tr>
+                <th style={{width:'30%'}}>Name</th>
+                <th>{view === 'apps' ? 'Environment' : view === 'auth' ? 'Kind' : 'Type'}</th>
+                <th>{view === 'apps' ? 'Owner' : 'Detail'}</th>
+                <th>Edited</th>
+                <th style={{width:80}}></th>
+              </tr></thead>
+              <tbody>
+                {rows.map(row => {
+                  const e = row.entity;
+                  const deletable =
+                    (row.kind === 'auth' && !e.builtin) ||
+                    (row.kind === 'service' && e.descriptor?.type !== 'ssh') ||
+                    row.kind === 'app';
                   return (
-                    <div key={a.id} className="tl-row">
-                      <span className="tl-when">{fmtAuditTime(a.when)}</span>
-                      <span className={`tl-icn tone-${ai.tone}`}><Icon name={ai.icon} size={14}/></span>
-                      <div className="tl-body">
-                        <div><b>{a.actor}</b> <span className="muted">{a.action}</span></div>
-                        <div className="target">{a.target}</div>
-                      </div>
-                    </div>
+                    <tr key={row.kind + ':' + row.id} className="entity-row" onClick={() => open(row)}>
+                      <td data-col="identity">
+                        <div className="user-cell">
+                          <span className={'entity-icn tone-' + railTone[row.kind]}>
+                            <Icon name={railIcn[row.kind]} size={14}/>
+                          </span>
+                          <div className="meta">
+                            <b>{row.name}</b>
+                            {row.kind === 'auth' && e.builtin && <Badge tone="purple" dot={false}>Built-in</Badge>}
+                            {row.kind === 'service' && unproxied(e) && (
+                              <span className="unproxied-mark" title="Unproxied services are allowed to pass their creds to the user.">(!)</span>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td data-col="badge">
+                        {view === 'recent'
+                          ? <Badge dot={false} tone="gray">{row.kind === 'app' ? 'App' : row.kind === 'service' ? 'Service' : 'Auth'}</Badge>
+                          : kindBadge(row)}
+                      </td>
+                      <td data-col="detail">{detailCell(row)}</td>
+                      <td data-col="detail" className="muted">{fmtAuditTime(row.when)}</td>
+                      <td data-col="actions" onClick={ev => ev.stopPropagation()}>
+                        <div className="row-actions">
+                          <button className="btn btn-icon btn-ghost" onClick={() => open(row)} title="Open"><Icon name="edit" size={14}/></button>
+                          {deletable && (
+                            <button className="btn btn-icon btn-ghost" onClick={() => remove(row)} title="Delete"><Icon name="trash" size={14}/></button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
                   );
                 })}
+              </tbody>
+            </table>
+            {rows.length === 0 && (
+              <div className="empty">
+                <b>{view === 'recent' ? 'Nothing edited yet.' : `No ${activeView.label.toLowerCase()} found.`}</b>
               </div>
-            )}
-          </div></div>
-        </div>
-        <div>
-          <h3 style={{margin:'0 0 12px',fontSize:14,fontWeight:500}}>Hosted Apps</h3>
-          <div className="table-wrap" style={{padding:4}}>
-            {apps.filter(isHosted).length === 0 ? (
-              <div className="empty" style={{padding:'24px 16px'}}>
-                <b>No hosted apps yet.</b><br/>Upload web content to an app to make it reachable.
-              </div>
-            ) : (
-              apps.filter(isHosted).slice(0,6).map((a,i,arr)=>
-                <div key={a.nonce} style={{padding:'12px 16px',display:'flex',alignItems:'center',gap:16,borderBottom:i<arr.length-1?'1px solid var(--line-soft)':0}}>
-                  <div style={{flex:1,minWidth:0}}>
-                    <a className="mono hosted-app-link" href={hostRoute(a)} target="_blank" rel="noopener noreferrer">{a.name}</a>
-                    <div style={{fontSize:11.5,color:'var(--ink-3)'}}>{a.owner_name||'No owner'}</div>
-                  </div>
-                  <Badge tone={envTone(a.environment)}><span className="env-full">{a.environment||'—'}</span><span className="env-short">{envShort(a.environment)}</span></Badge>
-                </div>
-              )
             )}
           </div>
         </div>
       </div>
+
+      {dropFile && (
+        <UploadModal session={session} file={dropFile} apps={apps} services={services} auth={auth}
+                     users={users} adminAuthID={adminAuthID} onClose={() => setDropFile(null)}
+                     onSaved={onRefresh} navigate={navigate}/>
+      )}
     </>
   );
 }
@@ -693,7 +890,6 @@ function UsersView({ session, users, apps, onRefresh }) {
   return (
     <>
       <PageHead
-        crumbs={['Workspace','Users']}
         title="Users"
         sub="Say who can manage apps and services and their permissions."
         actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New user</button>}
@@ -927,96 +1123,407 @@ function UserAppTags({ apps, appList }) {
   );
 }
 
-function AppsView({ session, apps, services, users, auth, adminAuthID, onRefresh }) {
-  const [q,setQ] = useState('');
-  const [filter,setFilter] = useState(null);
-  const [editing,setEditing] = useState(null);
+// The app form's fields, shared by the app page and the upload modal's
+// new-app flow, so the two can't drift apart. `app` is null for a new one;
+// `onCreateGate` opens the inline auth-record modal from a gate slot.
+function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID, loading, onCreateGate }) {
   const toast = useToast();
 
-  const filtered = apps.filter(a=>{
-    if(q && !(`${a.name} ${a.owner_name||''}`.toLowerCase().includes(q.toLowerCase()))) return false;
-    if(filter && a.environment!==filter) return false;
-    return true;
-  });
+  // A service reached through an app answers to the *app's* gate — its own
+  // protected_by does not stack. So a service guarded more tightly than the
+  // app it is being linked into is about to become reachable by a wider
+  // audience than whoever set it up chose. Say so at the moment of the link;
+  // don't refuse it, because sometimes that is exactly the intent.
+  const appGate = effectiveGate(form.protected_by, auth, adminAuthID);
+  const exposed = form.services
+    .map(id => {
+      const service = services.find(s => s.id === id);
+      if (!service) return null;
+      const gate = effectiveGate(service.protected_by, auth, adminAuthID);
+      return gate && gateStrictness(gate) > gateStrictness(appGate) ? { service, gate } : null;
+    })
+    .filter(Boolean);
 
-  const remove = async (nonce) => {
-    if(!confirm('Delete this app?')) return;
-    try { await api(session, 'DELETE','/api/apps/'+nonce); toast('App deleted'); onRefresh(); }
+  return (
+    <>
+      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
+      {app && app.nonce && (
+        <div className="field">
+          <label>Nonce</label>
+          <div className="input" style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+            <span className="mono">{app.nonce}</span>
+            <button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:12}} onClick={()=>copyText(app.nonce, toast)}>
+              <Icon name="copy" size={14}/> Copy
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="field"><label>URL</label>
+        <input className="input" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
+      </div>
+      <div className="field-row">
+        <div className="field"><label>Default environment</label>
+          <select className="input" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
+            <option>Production</option><option>Staging</option><option>Development</option>
+          </select>
+          <span className="help">Which deployment slot the bare app URL serves.</span>
+        </div>
+        <div className="field"><label>Owner</label>
+          <select className="input" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
+            <option value="">No owner</option>
+            {users.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="field">
+        <label>Members</label>
+        <span className="help">Select which users are assigned to this app.</span>
+        {app && loading ? <span className="muted">Loading…</span> : (
+          <MultiSelect
+            options={users.map(u=>({value:u.id,label:u.name}))}
+            value={form.members}
+            onChange={(v)=>setForm(f=>({...f,members:v}))}
+            placeholder="No members"
+          />
+        )}
+      </div>
+      <AuthSlot
+        label="Protected by"
+        placeholder="— inherit (admin auth) —"
+        help={
+          appGate
+            ? (appGate.kind === 'anonymous'
+                ? 'Open to anyone who can reach this app.'
+                : `Visitors clear ${appGate.name}${form.protected_by == null ? ' (inherited from admin auth)' : ''} before the page loads — and everything it calls answers to this gate.`)
+            : 'No admin auth is configured, so this app is open to anyone who can reach it.'
+        }
+        records={auth}
+        value={form.protected_by}
+        onChange={v=>setForm(f=>({...f,protected_by:v}))}
+        onCreate={onCreateGate}
+      />
+      <div className="field">
+        <label>Service access</label>
+        <span className="help">Select which services this app can access. Linking a service with SQL tools also grants this app's pages its database — the link is the grant.</span>
+        {app && loading ? <span className="muted">Loading…</span> : (
+          <MultiSelect
+            options={services.map(s=>({value:s.id,label:s.name}))}
+            value={form.services}
+            onChange={(v)=>setForm(f=>({...f,services:v}))}
+            placeholder="No service access"
+          />
+        )}
+        {exposed.length > 0 && (
+          <div className="help" style={{color:'var(--amber, #b7791f)',marginTop:8,lineHeight:1.5}}>
+            <Icon name="bell" size={12}/>{' '}
+            <b>Wider than {exposed.length === 1 ? 'it asks for' : 'they ask for'}.</b>{' '}
+            This app's gate governs everything reached through it, so linking{' '}
+            {exposed.map(e => `${e.service.name} (${e.gate.name})`).join(', ')}{' '}
+            {exposed.length === 1 ? 'opens it' : 'opens them'} to everyone who clears{' '}
+            {appGate ? appGate.name : 'no gate at all'}. Link anyway if that's the intent.
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// The app settings page — what the edit drawer used to be, full-page now.
+function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuthID, onRefresh, navigate }) {
+  const app = isNew ? null : apps.find(a => a.nonce === nonce);
+  const [form, setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],protected_by:null});
+  const [creatingGate, setCreatingGate] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const toast = useToast();
+
+  // Keyed on the nonce (not the app object) so an onRefresh after saving
+  // doesn't stamp the form back to server state mid-edit.
+  useEffect(() => {
+    if (app) {
+      setForm({name:app.name||'',environment:app.environment||'Development',url:app.url,owner_id:app.owner_id?String(app.owner_id):'',services:[],members:[],protected_by:app.protected_by ?? null});
+      setLoading(true);
+      Promise.all([
+        api(session, 'GET','/api/apps/'+app.nonce+'/services'),
+        api(session, 'GET','/api/apps/'+app.nonce+'/members'),
+      ])
+        .then(([svcs,mems])=>{
+          const allowed = (svcs.services||[]).filter(l=>l.allowed).map(l=>l.service_id);
+          setForm(f=>({...f,services:allowed,members:mems.members||[]}));
+        })
+        .catch(e=>toast(e.message,true))
+        .finally(()=>setLoading(false));
+    } else {
+      // A new app defaults to Anonymous: an app is a door onto the LAN,
+      // and inheriting admin auth would gate every dashboard by surprise.
+      setForm({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],
+               protected_by: auth.find(r => r.kind === 'anonymous' && r.builtin)?.id ?? null});
+    }
+  }, [app ? app.nonce : null, isNew]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const save = async () => {
+    const payload = {name:form.name,environment:form.environment,url:form.url,owner_id:form.owner_id?Number(form.owner_id):null,protected_by:form.protected_by};
+    try {
+      let savedNonce;
+      if (app) {
+        await api(session, 'PUT','/api/apps/'+app.nonce,payload);
+        await api(session, 'PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
+        await api(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
+        toast('App updated');
+      } else {
+        const resp = await api(session, 'POST','/api/apps',payload);
+        savedNonce = resp.nonce;
+        await api(session, 'PUT','/api/apps/'+savedNonce+'/members',{members:form.members||[]});
+        await api(session, 'PUT','/api/apps/'+savedNonce+'/services',{services:form.services||[]});
+        toast('App created');
+      }
+      onRefresh();
+      if (savedNonce) navigate('app', { nonce: savedNonce });
+    } catch(e) { toast(e.message,true); }
+  };
+
+  const remove = async () => {
+    if (!app) return;
+    if (!confirm('Delete this app?')) return;
+    try { await api(session, 'DELETE','/api/apps/'+app.nonce); toast('App deleted'); navigate('home'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
-  const copyNonce = (nonce) => copyText(nonce, toast);
+  if (!isNew && !app) {
+    return (
+      <>
+        <PageHead title="App not found" back={()=>navigate('home')} backLabel="Home"/>
+        <div className="empty"><b>App not found.</b> It may have been deleted.</div>
+      </>
+    );
+  }
 
-  const copyPrompt = async (a) => {
-    try {
-      const r = await api(session, 'GET', '/api/apps/' + a.nonce + '/services');
-      const allowedIds = (r.services || []).filter(l => l.allowed).map(l => l.service_id);
-      const appSvcs = services.filter(s => allowedIds.includes(s.id));
-      copyText(buildPrompt(a, appSvcs), toast);
-    } catch(e) { toast(e.message, true); }
-  };
+  const setupPrompt = app && !loading
+    ? buildPrompt(app, services.filter(s => form.services.includes(s.id)))
+    : null;
 
   return (
     <>
       <PageHead
-        crumbs={['Workspace','Apps']}
-        title="Applications"
-        sub="Hosted user apps with managed access."
-        actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New app</button>}
+        title={app ? app.name : 'New app'}
+        sub={app ? 'Settings, hosting slots and access.' : 'Name it and set who it answers to.'}
+        back={()=>navigate('home')} backLabel="Home"
+        actions={<>
+          {app && <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>}
+          <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>
+        </>}
       />
-      <Toolbar
-        search={q} onSearch={setQ}
-        placeholder="Search apps…"
-        filters={[
-          {value:'Production', label:'Production', mobile:'Prod'},
-          {value:'Staging', label:'Staging', mobile:'Staging'},
-          {value:'Development', label:'Development', mobile:'Dev'}
-        ]}
-        activeFilter={filter} onFilter={setFilter}
-      />
-      <div className="table-wrap">
-        <table className="tbl" data-mobile>
-          <thead><tr><th style={{width:'26%'}}>Name</th><th>Environment</th><th>Owner</th><th>Members</th><th>Services</th><th style={{width:80}}></th></tr></thead>
-          <tbody>
-            {filtered.map(a=>
-              <tr key={a.nonce}>
-                <td data-col="identity">
-                  <div className="user-cell">
-                    <div className="avatar" style={{
-                      width:32,height:32,borderRadius:8,
-                      background:`linear-gradient(135deg,oklch(0.85 0.06 ${hashHue(a.name)}),oklch(0.55 0.1 ${(hashHue(a.name)+30)%360}))`,
-                      fontSize:13,color:'white',display:'grid',placeItems:'center'
-                    }}>{a.name?.[0]}</div>
-                    <div className="meta">
-                      <div style={{display:'flex',alignItems:'center',gap:6}}>
-                        <b>{a.name}</b>
-                        {isHosted(a) && <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'oklch(from var(--tone-green) var(--tone-bg-l) calc(c*.25) h)',color:'oklch(from var(--tone-green) var(--tone-fg-l) calc(c*.67) h)',border:'1px solid oklch(from var(--tone-green) var(--tone-border-l) calc(c*.33) h)',lineHeight:1.4}}>hosted</span>}
-                      </div>
-                      <span className="mono" style={{cursor:'pointer'}} onClick={()=>copyNonce(a.nonce)} title={`${a.nonce} — click to copy`}>
-                        {a.nonce} <span style={{opacity:0.6,verticalAlign:'middle',marginLeft:2}}><Icon name="copy" size={12}/></span>
-                      </span>
-                    </div>
-                  </div>
-                </td>
-                <td data-col="badge"><Badge tone={envTone(a.environment)}><span className="env-full">{a.environment||'—'}</span><span className="env-short">{envShort(a.environment)}</span></Badge></td>
-                <td data-col="detail">{a.owner_name||<span className="muted">—</span>}</td>
-                <td data-col="detail" className="mono">{a.member_count??0}</td>
-                <td data-col="detail" className="mono">{a.service_count??0}</td>
-                <td data-col="actions">
-                  <div className="row-actions">
-                    <button className="btn btn-icon btn-ghost" onClick={()=>copyPrompt(a)} title="Copy setup prompt"><Icon name="sparkle" size={14}/></button>
-                    <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(a)} title="Edit"><Icon name="edit" size={14}/></button>
-                    <button className="btn btn-icon btn-ghost" onClick={()=>remove(a.nonce)} title="Delete"><Icon name="trash" size={14}/></button>
-                  </div>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        {filtered.length===0 && <div className="empty"><b>No apps found.</b></div>}
+      <div className="page-form">
+        <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
+                       auth={auth} adminAuthID={adminAuthID} loading={loading}
+                       onCreateGate={()=>setCreatingGate(true)}/>
+        {setupPrompt && (
+          <div className="field">
+            <label>Setup prompt</label>
+            <span className="help">Paste into Claude Code to wire up this app with the freshbreath skill.</span>
+            <div style={{position:'relative'}}>
+              <textarea
+                className="input"
+                readOnly
+                style={{fontFamily:'var(--font-mono)',fontSize:11,lineHeight:1.6,resize:'vertical',paddingRight:38,width:'100%',fieldSizing:'content'}}
+                value={setupPrompt}
+                onClick={e=>e.target.select()}
+              />
+              <button
+                className="btn btn-ghost"
+                style={{position:'absolute',top:8,right:8,padding:'4px 6px'}}
+                title="Copy prompt"
+                onClick={()=>copyText(setupPrompt, toast)}
+              >
+                <Icon name="copy" size={13}/>
+              </button>
+            </div>
+          </div>
+        )}
+        {app && !loading && (
+          <HostUpload session={session} app={app} onRefresh={onRefresh}/>
+        )}
       </div>
-      <AppDrawer session={session} app={editing} services={services} users={users} apps={apps} auth={auth} adminAuthID={adminAuthID} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
+      {creatingGate && (
+        <AuthRecordModal
+          session={session}
+          onClose={()=>setCreatingGate(false)}
+          onSaved={(rec)=>{ setForm(f=>({...f,protected_by:rec.id})); setCreatingGate(false); onRefresh(); }}
+        />
+      )}
     </>
+  );
+}
+
+const SLOT_NAMES = { dev:'Development', staging:'Staging', prod:'Production' };
+
+// UploadModal asks what a dropped file should become. An .html/.zip lands
+// in an app slot — a brand-new app with the full settings form, or a
+// replacement upload for an existing one (defaults to Development; another
+// slot deploys there right after the upload). A .txt publishes a tasks or
+// virtual service definition — the type is asked here, not guessed,
+// because both formats are just bracketed headers over plain text.
+function UploadModal({ session, file, apps, services, users, auth, adminAuthID, onClose, onSaved, navigate }) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  const isAppFile = ext === 'html' || ext === 'zip';
+  const seeded = file.name.replace(/\.[^.]+$/, '');
+  const [mode, setMode] = useState('new');
+  const [slot, setSlot] = useState('dev');
+  const [appNonce, setAppNonce] = useState('');
+  const [svcId, setSvcId] = useState('');
+  const [appForm, setAppForm] = useState(null);
+  const [svcForm, setSvcForm] = useState(null);
+  const [creatingGate, setCreatingGate] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    if (isAppFile) {
+      setAppForm({name:seeded,environment:'Development',url:'',owner_id:'',services:[],members:[],
+        protected_by: auth.find(r => r.kind === 'anonymous' && r.builtin)?.id ?? null});
+    } else {
+      setSvcForm({name:seeded,url:'',descriptor:{type:'tasks'},protected_by:null,acts_as:null});
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const txtServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      if (isAppFile) {
+        let nonce;
+        if (mode === 'new') {
+          const resp = await api(session, 'POST', '/api/apps', {
+            name: appForm.name, environment: appForm.environment, url: appForm.url,
+            owner_id: appForm.owner_id ? Number(appForm.owner_id) : null,
+            protected_by: appForm.protected_by,
+          });
+          nonce = resp.nonce;
+          await api(session, 'PUT', '/api/apps/' + nonce + '/members', {members: appForm.members || []});
+          await api(session, 'PUT', '/api/apps/' + nonce + '/services', {services: appForm.services || []});
+        } else {
+          nonce = appNonce;
+        }
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await fetch('/api/apps/' + nonce + '/web', {method:'POST', headers: authHeaders(session), body: fd});
+        if (!res.ok) throw new Error(await res.text());
+        if (slot !== 'dev') await api(session, 'POST', '/api/apps/' + nonce + '/deploy', {target: slot});
+        toast(mode === 'new' ? 'App created and uploaded' : 'Uploaded to ' + SLOT_NAMES[slot]);
+        onClose(); onSaved?.();
+        navigate('app', { nonce });
+      } else {
+        let id;
+        if (mode === 'new') {
+          const type = svcForm.descriptor.type;
+          const payload = {...svcForm};
+          if (type === 'virtual') payload.url = '';
+          else { delete payload.descriptor.database_target; delete payload.descriptor.database_name; }
+          const resp = await api(session, 'POST', '/api/services', payload);
+          id = resp.id;
+        } else {
+          id = Number(svcId);
+        }
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        await api(session, 'POST', '/api/services/' + id + '/files', fd, {rawText: true});
+        toast(mode === 'new' ? 'Service created and published' : 'Definition published');
+        onClose(); onSaved?.();
+        navigate('service', { serviceId: String(id) });
+      }
+    } catch (e) { toast(e.message, true); }
+    finally { setBusy(false); }
+  };
+
+  const ready = isAppFile
+    ? (mode === 'new' ? !!appForm?.name : !!appNonce)
+    : (mode === 'new' ? !!svcForm?.name : !!svcId);
+
+  return (
+    <div className="modal-overlay" onClick={busy ? undefined : onClose}>
+      <div className="modal upload-modal" onClick={e => e.stopPropagation()}>
+        <div className="upload-head">
+          <h3>{isAppFile ? 'Publish app file' : 'Publish service definition'}</h3>
+          <div className="muted mono" style={{fontSize:12}}>{file.name} · {(file.size/1024).toFixed(1)} KB</div>
+        </div>
+        <div className="upload-mode">
+          <button className={mode === 'new' ? 'active' : ''} onClick={()=>setMode('new')}>
+            {isAppFile ? 'New app' : 'New service'}
+          </button>
+          <button className={mode === 'replace' ? 'active' : ''} onClick={()=>setMode('replace')}>
+            {isAppFile ? 'Update existing app' : 'Update existing service'}
+          </button>
+        </div>
+        {isAppFile ? (
+          mode === 'new' ? (
+            appForm && (
+              <AppFormFields form={appForm} setForm={setAppForm} app={null} services={services} users={users}
+                             auth={auth} adminAuthID={adminAuthID}
+                             onCreateGate={()=>setCreatingGate(true)}/>
+            )
+          ) : (
+            <>
+              <div className="field"><label>App</label>
+                <select className="input" value={appNonce} onChange={e=>setAppNonce(e.target.value)}>
+                  <option value="">Select an app…</option>
+                  {apps.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(a=><option key={a.nonce} value={a.nonce}>{a.name}</option>)}
+                </select>
+                <span className="help">The upload replaces the chosen slot's current content.</span>
+              </div>
+              <SlotPick slot={slot} setSlot={setSlot}/>
+            </>
+          )
+        ) : (
+          mode === 'new' ? (
+            svcForm && (
+              <ServiceFormFields form={svcForm} setForm={setSvcForm} auth={auth} adminAuthID={adminAuthID}
+                                 onCreateGate={()=>setCreatingGate(true)} types={['tasks','virtual']}/>
+            )
+          ) : (
+            <div className="field"><label>Service</label>
+              <select className="input" value={svcId} onChange={e=>setSvcId(e.target.value)}>
+                <option value="">Select a service…</option>
+                {txtServices.map(s=><option key={s.id} value={s.id}>{s.name} ({s.descriptor?.type})</option>)}
+              </select>
+              <span className="help">The file replaces the service's current definition.</span>
+            </div>
+          )
+        )}
+        <div className="upload-foot">
+          <button className="btn btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn btn-primary" onClick={submit} disabled={busy || !ready}>
+            {busy ? 'Publishing…' : 'Publish'}
+          </button>
+        </div>
+      </div>
+      {creatingGate && (
+        <AuthRecordModal
+          session={session}
+          onClose={()=>setCreatingGate(false)}
+          onSaved={(rec)=>{
+            if (isAppFile) setAppForm(f => ({...f, protected_by: rec.id}));
+            else setSvcForm(f => ({...f, protected_by: rec.id}));
+            setCreatingGate(false);
+            onSaved?.();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// The slot picker for dropped app files: uploads always write the
+// Development folder; picking another slot deploys there right after.
+function SlotPick({ slot, setSlot }) {
+  return (
+    <div className="field"><label>Slot</label>
+      <select className="input" value={slot} onChange={e=>setSlot(e.target.value)}>
+        <option value="dev">Development</option>
+        <option value="staging">Staging</option>
+        <option value="prod">Production</option>
+      </select>
+      <span className="help">Development is the default. Staging and Production are deployed from the fresh upload.</span>
+    </div>
   );
 }
 
@@ -1163,210 +1670,6 @@ function HostUpload({ session, app, onRefresh }) {
   );
 }
 
-function AppDrawer({ session, app, services, users, apps, auth, adminAuthID, onClose, onSaved }) {
-  const [form,setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],protected_by:null});
-  const [creatingGate,setCreatingGate] = useState(false);
-  const [loading,setLoading] = useState(false);
-  const toast = useToast();
-  const isNew = app==='new';
-  const isEdit = app && app.nonce;
-
-  useEffect(()=>{
-    if(isEdit) {
-      setForm({name:app.name||'',environment:app.environment||'Development',url:app.url,owner_id:app.owner_id?String(app.owner_id):'',services:[],members:[],protected_by:app.protected_by ?? null});
-      setLoading(true);
-      Promise.all([
-        api(session, 'GET','/api/apps/'+app.nonce+'/services'),
-        api(session, 'GET','/api/apps/'+app.nonce+'/members'),
-      ])
-        .then(([svcs,mems])=>{
-          const allowed = (svcs.services||[]).filter(l=>l.allowed).map(l=>l.service_id);
-          setForm(f=>({...f,services:allowed,members:mems.members||[]}));
-        })
-        .catch(e=>toast(e.message,true))
-        .finally(()=>setLoading(false));
-    } else {
-      // A new app defaults to Anonymous: an app is a door onto the LAN,
-      // and inheriting admin auth would gate every dashboard by surprise.
-      setForm({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],
-               protected_by: auth.find(r => r.kind === 'anonymous' && r.builtin)?.id ?? null});
-    }
-  },[app]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleServicesChange = (newServices) => {
-    setForm(f=>({...f,services:newServices}));
-  };
-
-  const save = async () => {
-    const payload = {name:form.name,environment:form.environment,url:form.url,owner_id:form.owner_id?Number(form.owner_id):null,protected_by:form.protected_by};
-    try {
-      let nonce;
-      if(isEdit) {
-        await api(session, 'PUT','/api/apps/'+app.nonce,payload);
-        await api(session, 'PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
-        await api(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
-        toast('App updated');
-      } else {
-        const resp = await api(session, 'POST','/api/apps',payload);
-        nonce = resp.nonce;
-        await api(session, 'PUT','/api/apps/'+nonce+'/members',{members:form.members||[]});
-        await api(session, 'PUT','/api/apps/'+nonce+'/services',{services:form.services||[]});
-        toast('App created');
-      }
-      onClose(); onSaved();
-    } catch(e) { toast(e.message,true); }
-  };
-
-  const copyNonce = (nonce) => copyText(nonce, toast);
-
-  // A service reached through an app answers to the *app's* gate — its own
-  // protected_by does not stack. So a service guarded more tightly than the
-  // app it is being linked into is about to become reachable by a wider
-  // audience than whoever set it up chose. Say so at the moment of the link;
-  // don't refuse it, because sometimes that is exactly the intent.
-  const appGate = effectiveGate(form.protected_by, auth, adminAuthID);
-  const exposed = form.services
-    .map(id => {
-      const service = services.find(s => s.id === id);
-      if (!service) return null;
-      const gate = effectiveGate(service.protected_by, auth, adminAuthID);
-      return gate && gateStrictness(gate) > gateStrictness(appGate) ? { service, gate } : null;
-    })
-    .filter(Boolean);
-
-  const setupPrompt = isEdit && !loading
-    ? buildPrompt(app, services.filter(s => form.services.includes(s.id)))
-    : null;
-
-  return (
-    <Drawer
-      open={isNew || isEdit} title={isNew?'New application':'Edit application'}
-      onClose={onClose}
-      footer={<>
-        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save}>{isNew?'Create':'Save'}</button>
-      </>}
-    >
-      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
-      {isEdit && app.nonce && (
-        <div className="field">
-          <label>Nonce</label>
-          <div className="input" style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-            <span className="mono">{app.nonce}</span>
-            <button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:12}} onClick={()=>copyNonce(app.nonce)}>
-              <Icon name="copy" size={14}/> Copy
-            </button>
-          </div>
-        </div>
-      )}
-      <div className="field"><label>URL</label>
-        <input className="input" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
-      </div>
-      <div className="field-row">
-        <div className="field"><label>Default environment</label>
-          <select className="input" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
-            <option>Production</option><option>Staging</option><option>Development</option>
-          </select>
-          <span className="help">Which deployment slot the bare app URL serves.</span>
-        </div>
-        <div className="field"><label>Owner</label>
-          <select className="input" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
-            <option value="">No owner</option>
-            {users.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
-          </select>
-        </div>
-      </div>
-      {(isNew || isEdit) && (
-        <div className="field">
-          <label>Members</label>
-          <span className="help">Select which users are assigned to this app.</span>
-          {isEdit && loading ? <span className="muted">Loading…</span> : (
-            <MultiSelect
-              options={users.map(u=>({value:u.id,label:u.name}))}
-              value={form.members}
-              onChange={(v)=>setForm(f=>({...f,members:v}))}
-              placeholder="No members"
-            />
-          )}
-        </div>
-      )}
-      <AuthSlot
-        label="Protected by"
-        placeholder="— inherit (admin auth) —"
-        help={
-          appGate
-            ? (appGate.kind === 'anonymous'
-                ? 'Open to anyone who can reach this app.'
-                : `Visitors clear ${appGate.name}${form.protected_by == null ? ' (inherited from admin auth)' : ''} before the page loads — and everything it calls answers to this gate.`)
-            : 'No admin auth is configured, so this app is open to anyone who can reach it.'
-        }
-        records={auth}
-        value={form.protected_by}
-        onChange={v=>setForm(f=>({...f,protected_by:v}))}
-        onCreate={()=>setCreatingGate(true)}
-      />
-      {(isNew || isEdit) && (
-        <div className="field">
-          <label>Service access</label>
-          <span className="help">Select which services this app can access. Linking a service with SQL tools also grants this app's pages its database — the link is the grant.</span>
-          {isEdit && loading ? <span className="muted">Loading…</span> : (
-            <MultiSelect
-              options={services.map(s=>({value:s.id,label:s.name}))}
-              value={form.services}
-              onChange={handleServicesChange}
-              placeholder="No service access"
-            />
-          )}
-          {exposed.length > 0 && (
-            <div className="help" style={{color:'var(--amber, #b7791f)',marginTop:8,lineHeight:1.5}}>
-              <Icon name="bell" size={12}/>{' '}
-              <b>Wider than {exposed.length === 1 ? 'it asks for' : 'they ask for'}.</b>{' '}
-              This app's gate governs everything reached through it, so linking{' '}
-              {exposed.map(e => `${e.service.name} (${e.gate.name})`).join(', ')}{' '}
-              {exposed.length === 1 ? 'opens it' : 'opens them'} to everyone who clears{' '}
-              {appGate ? appGate.name : 'no gate at all'}. Link anyway if that's the intent.
-            </div>
-          )}
-        </div>
-      )}
-      {setupPrompt && (
-        <div className="field">
-          <label>Setup prompt</label>
-          <span className="help">Paste into Claude Code to wire up this app with the freshbreath skill.</span>
-          <div style={{position:'relative'}}>
-            <textarea
-              className="input"
-              readOnly
-              style={{fontFamily:'var(--font-mono)',fontSize:11,lineHeight:1.6,resize:'vertical',paddingRight:38,width:'100%',fieldSizing:'content'}}
-              value={setupPrompt}
-              onClick={e=>e.target.select()}
-            />
-            <button
-              className="btn btn-ghost"
-              style={{position:'absolute',top:8,right:8,padding:'4px 6px'}}
-              title="Copy prompt"
-              onClick={()=>copyText(setupPrompt, toast)}
-            >
-              <Icon name="copy" size={13}/>
-            </button>
-          </div>
-        </div>
-      )}
-      {isEdit && !loading && (
-        <HostUpload session={session} app={app} onRefresh={onSaved}/>
-      )}
-      {creatingGate && (
-        <AuthDrawer
-          session={session}
-          record="new"
-          onClose={()=>setCreatingGate(false)}
-          onSaved={(rec)=>{ setForm(f=>({...f,protected_by:rec.id})); setCreatingGate(false); onSaved(); }}
-        />
-      )}
-    </Drawer>
-  );
-}
-
 // ── Auth records ───────────────────────────────────────────────────────
 //
 // An auth record is a credential or a login method, standing on its own.
@@ -1450,101 +1753,15 @@ function AuthSlot({ label, help, placeholder, records, value, onChange, onCreate
   );
 }
 
-function AuthView({ session, auth, services, apps, onRefresh }) {
-  const [q,setQ] = useState('');
-  const [editing,setEditing] = useState(null);
-  const toast = useToast();
-
-  const filtered = auth.filter(r =>
-    !q || `${r.name} ${r.kind}`.toLowerCase().includes(q.toLowerCase()));
-
-  // What points at a record, so deleting one is an informed choice rather
-  // than a 409 from the server.
-  const usedBy = (id) => [
-    ...services.filter(s => s.protected_by === id).map(s => `${s.name} (protects)`),
-    ...services.filter(s => s.acts_as === id).map(s => `${s.name} (acts as)`),
-    ...apps.filter(a => a.protected_by === id).map(a => `${a.name} (protects)`),
-  ];
-
-  const remove = async (rec) => {
-    const uses = usedBy(rec.id);
-    if (uses.length) {
-      toast(`In use by ${uses.join(', ')} — unassign it first`, true);
-      return;
-    }
-    if (!confirm(`Delete "${rec.name}"? Anyone holding a credential from it will have to log in again.`)) return;
-    try { await api(session, 'DELETE', '/api/auth/' + rec.id); toast('Auth record deleted'); onRefresh(); }
-    catch(e) { toast(e.message, true); }
-  };
-
-  return (
-    <>
-      <PageHead
-        crumbs={['Security','Auth']}
-        title="Auth"
-        sub="Credentials and login methods, each standing on its own."
-        actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New auth record</button>}
-      />
-      <Toolbar search={q} onSearch={setQ} placeholder="Search auth records…"/>
-      <div className="table-wrap">
-        <table className="tbl" data-mobile>
-          <thead><tr><th style={{width:'28%'}}>Name</th><th>Kind</th><th>Provider</th><th>Used by</th><th style={{width:80}}></th></tr></thead>
-          <tbody>
-            {filtered.map(r => {
-              const uses = usedBy(r.id);
-              return (
-                <tr key={r.id}>
-                  <td data-col="identity">
-                    <b>{r.name}</b>
-                    {r.builtin && <Badge tone="purple" dot={false}>Built-in</Badge>}
-                  </td>
-                  <td data-col="badge"><Badge dot={false} tone={authKindTone(r.kind)}>{authKindLabel(r.kind)}</Badge></td>
-                  <td data-col="detail">
-                    {r.descriptor?.provider
-                      ? <span className="mono" style={{fontSize:12.5}}>{r.descriptor.provider}</span>
-                      : <span className="muted">—</span>}
-                  </td>
-                  <td data-col="detail">
-                    {uses.length ? <span className="muted" style={{fontSize:12.5}}>{uses.join(', ')}</span> : <span className="muted">—</span>}
-                  </td>
-                  <td data-col="actions">
-                    <div className="row-actions">
-                      <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(r)} title="Edit"><Icon name="edit" size={14}/></button>
-                      {!r.builtin && <button className="btn btn-icon btn-ghost" onClick={()=>remove(r)} title="Delete"><Icon name="trash" size={14}/></button>}
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {filtered.length===0 && <div className="empty"><b>No auth records found.</b></div>}
-      </div>
-      <AuthDrawer session={session} record={editing} onClose={()=>setEditing(null)} onSaved={onRefresh}/>
-    </>
-  );
-}
-
 /**
- * Create or edit one auth record. The form is per-kind because the kinds
- * genuinely have nothing in common — an issuer URL means nothing to a
- * stored key, and asking for one anyway is how config screens get their
- * reputation. `onSaved` receives the saved record, so a drawer that opened
- * this one inline can pick the new record up without a round trip.
+ * The auth record form, shared by the auth record page and the inline
+ * "New…" modal. The form is per-kind because the kinds genuinely have
+ * nothing in common — an issuer URL means nothing to a stored key, and
+ * asking for one anyway is how config screens get their reputation.
  */
-function AuthDrawer({ session, record, onClose, onSaved, defaultKind }) {
-  const [form,setForm] = useState({name:'',kind:defaultKind||'oidc',descriptor:{}});
-  const [saving,setSaving] = useState(false);
-  const toast = useToast();
-  const isNew = record === 'new';
-  const isEdit = record && record.id;
+function AuthForm({ form, setForm, record }) {
+  const isEdit = !!record;
   const builtin = isEdit && record.builtin;
-
-  useEffect(()=>{
-    if (isEdit) setForm({name:record.name, kind:record.kind, descriptor:{...record.descriptor}});
-    else setForm({name:'', kind:defaultKind||'oidc', descriptor:{}});
-  },[record]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const upd = (k,v) => setForm(f=>({...f, descriptor:{...f.descriptor, [k]:v}}));
 
   // Switching kind starts the descriptor over. Carrying stale fields across
@@ -1552,37 +1769,12 @@ function AuthDrawer({ session, record, onClose, onSaved, defaultKind }) {
   // way to tell which one is live.
   const setKind = (kind) => setForm(f=>({...f, kind, descriptor:{}}));
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      // PUT answers 204, so an edit reports the record it just sent; a
-      // create gets the real one back, id and all.
-      let saved;
-      if (isEdit) {
-        await api(session, 'PUT', '/api/auth/' + record.id, form);
-        saved = {...record, ...form};
-      } else {
-        saved = await api(session, 'POST', '/api/auth', form);
-      }
-      toast(isEdit ? 'Auth record updated' : 'Auth record created');
-      onClose(); onSaved?.(saved);
-    } catch(e) { toast(e.message, true); }
-    finally { setSaving(false); }
-  };
-
   const kind = form.kind;
   const d = form.descriptor;
   const secretPlaceholder = isEdit && record.has_secret ? 'Stored — leave blank to keep' : '';
 
   return (
-    <Drawer
-      open={isNew || isEdit} title={isNew?'New auth record':'Edit auth record'}
-      onClose={onClose}
-      footer={<>
-        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save} disabled={saving || !form.name}>{isNew?'Create':'Save'}</button>
-      </>}
-    >
+    <>
       <div className="field">
         <label>Name</label>
         <input className="input" value={form.name} disabled={builtin}
@@ -1676,124 +1868,137 @@ function AuthDrawer({ session, record, onClose, onSaved, defaultKind }) {
           <span className="help">Nothing to configure. That is the entire point of it.</span>
         </div>
       )}
-    </Drawer>
+    </>
+  );
+}
+
+// The auth record settings page — what the edit drawer used to be.
+function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, navigate }) {
+  const record = isNew ? null : auth.find(r => String(r.id) === String(authId));
+  const [form, setForm] = useState({name:'',kind:'oidc',descriptor:{}});
+  const [saving, setSaving] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    if (record) setForm({name:record.name, kind:record.kind, descriptor:{...record.descriptor}});
+    else setForm({name:'', kind:'oidc', descriptor:{}});
+  }, [record ? record.id : null, isNew]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      if (record) {
+        // PUT answers 204, so an edit reports the record it just sent.
+        await api(session, 'PUT', '/api/auth/' + record.id, form);
+        toast('Auth record updated');
+        onRefresh();
+      } else {
+        const saved = await api(session, 'POST', '/api/auth', form);
+        toast('Auth record created');
+        onRefresh();
+        navigate('authrecord', { authId: String(saved.id) });
+      }
+    } catch(e) { toast(e.message, true); }
+    finally { setSaving(false); }
+  };
+
+  const remove = async () => {
+    if (!record) return;
+    const uses = authUsedBy(record.id, services, apps);
+    if (uses.length) { toast(`In use by ${uses.join(', ')} — unassign it first`, true); return; }
+    if (!confirm(`Delete "${record.name}"? Anyone holding a credential from it will have to log in again.`)) return;
+    try { await api(session, 'DELETE', '/api/auth/' + record.id); toast('Auth record deleted'); navigate('home'); onRefresh(); }
+    catch(e) { toast(e.message, true); }
+  };
+
+  if (!isNew && !record) {
+    return (
+      <>
+        <PageHead title="Auth record not found" back={()=>navigate('home')} backLabel="Home"/>
+        <div className="empty"><b>Auth record not found.</b> It may have been deleted.</div>
+      </>
+    );
+  }
+
+  const uses = record ? authUsedBy(record.id, services, apps) : [];
+
+  return (
+    <>
+      <PageHead
+        title={record ? record.name : 'New auth record'}
+        sub={record ? 'A credential and login method, standing on its own.' : 'Name a credential and login method.'}
+        back={()=>navigate('home')} backLabel="Home"
+        actions={<>
+          {record && !record.builtin && (
+            <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>
+          )}
+          <button className="btn btn-primary" onClick={save} disabled={saving || !form.name}>
+            {saving ? 'Saving…' : record ? 'Save' : 'Create record'}
+          </button>
+        </>}
+      />
+      <div className="page-form">
+        <AuthForm form={form} setForm={setForm} record={record}/>
+        {record && (
+          <div className="field"><label>Used by</label>
+            <span className="help">
+              {uses.length ? uses.join(', ') : 'Nothing points at this record yet.'}
+            </span>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// The inline "New…" record creator, opened from a gate slot or a settings
+// dropdown. A modal rather than a page, so the half-filled form that asked
+// for a record is still there when this one closes. `onSaved` receives the
+// saved record, so the slot that asked can pick it up without a round trip.
+function AuthRecordModal({ session, onClose, onSaved, defaultKind }) {
+  const [form, setForm] = useState({name:'',kind:defaultKind||'oidc',descriptor:{}});
+  const [saving, setSaving] = useState(false);
+  const toast = useToast();
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const saved = await api(session, 'POST', '/api/auth', form);
+      toast('Auth record created');
+      onClose(); onSaved?.(saved);
+    } catch(e) { toast(e.message, true); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={saving ? undefined : onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:480}}>
+        <h3 style={{marginBottom:16}}>New auth record</h3>
+        <AuthForm form={form} setForm={setForm} record={null}/>
+        <div className="upload-foot" style={{marginTop:20}}>
+          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn btn-primary" onClick={save} disabled={saving || !form.name}>
+            {saving ? 'Creating…' : 'Create record'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
 // ── Services ───────────────────────────────────────────────────────────
 
-function ServicesView({ session, services, auth, adminAuthID, onRefresh, onEditTools }) {
-  const [q,setQ] = useState('');
-  const [editing,setEditing] = useState(null);
-  const toast = useToast();
-
-  const filtered = services.filter(s=>{
-    if(q && !(`${s.name} ${s.url}`.toLowerCase().includes(q.toLowerCase()))) return false;
-    return true;
-  });
-
-  const remove = async (id) => {
-    let apps = [];
-    try { const r = await api(session, 'GET','/api/services/'+id+'/apps'); apps = r.apps||[]; }
-    catch(e) { /* ignore */ }
-    let msg = 'Delete this service?';
-    if(apps.length>0) {
-      msg += `\n\nIt's used by ${apps.length} app${apps.length>1?'s':''}:\n${apps.map(a=>a.name).join(', ')}`;
-    }
-    if(!confirm(msg)) return;
-    try { await api(session, 'DELETE','/api/services/'+id); toast('Service deleted'); onRefresh(); }
-    catch(e) { toast(e.message,true); }
-  };
-
-  return (
-    <>
-      <PageHead
-        crumbs={['Workspace','Services']}
-        title="Services"
-        sub="Registered MCP, OAuth, API, and task providers."
-        actions={<button className="btn btn-primary" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/> New service</button>}
-      />
-      <Toolbar search={q} onSearch={setQ} placeholder="Search services…"/>
-      <div className="table-wrap">
-        <table className="tbl" data-mobile>
-          <thead><tr><th style={{width:'22%'}}>Name</th><th>URL</th><th>Type</th><th>Protected by</th><th>Acts as</th><th style={{width:80}}></th></tr></thead>
-          <tbody>
-            {filtered.map(s=>
-              <tr key={s.id}>
-                <td data-col="identity">
-                  <b>{s.name}</b>
-                  {unproxied(s) && <span className="unproxied-mark" title="Unproxied services are allowed to pass their creds to the user.">(!)</span>}
-                  {s.descriptor?.type==='ssh' && <Badge tone="purple" style={{marginLeft:6}}>Built-in</Badge>}
-                </td>
-                <td data-col="url">
-                  <span
-                    className="mono"
-                    style={{fontSize:12.5, color:'var(--ink-3)', cursor:'pointer'}}
-                    onClick={()=>copyText(s.url, toast)}
-                    title={`${s.url} — click to copy`}
-                  >
-                    {s.url.length>48?s.url.slice(0,48)+'…':s.url} <span style={{opacity:0.6,verticalAlign:'middle',marginLeft:2}}><Icon name="copy" size={12}/></span>
-                  </span>
-                </td>
-                <td data-col="badge"><Badge dot={false} tone="gray">{s.descriptor?.type?.toLocaleUpperCase()||'—'}</Badge></td>
-                <td data-col="detail"><GateCell slot={s.protected_by} auth={auth} adminAuthID={adminAuthID}/></td>
-                <td data-col="detail">
-                  {authRecord(auth, s.acts_as)
-                    ? <Badge dot={false} tone={authKindTone(authRecord(auth, s.acts_as).kind)}>{authRecord(auth, s.acts_as).name}</Badge>
-                    : <span className="muted" title="Whatever credential the caller brought">the caller’s</span>}
-                </td>
-                <td data-col="actions">
-                  <div className="row-actions">
-                    <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(s)} title="Edit"><Icon name="edit" size={14}/></button>
-                    {s.descriptor?.type!=='ssh' && <button className="btn btn-icon btn-ghost" onClick={()=>remove(s.id)} title="Delete"><Icon name="trash" size={14}/></button>}
-                  </div>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-        {filtered.length===0 && <div className="empty"><b>No services found.</b></div>}
-      </div>
-      <ServiceDrawer session={session} services={services} auth={auth} adminAuthID={adminAuthID} service={editing} onClose={()=>setEditing(null)} onSaved={onRefresh} onEditTools={onEditTools}/>
-    </>
-  );
-}
-
-function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose, onSaved, onEditTools }) {
-  const [form,setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
-  const [tools,setTools] = useState([]);
-  const [toolsLoading,setToolsLoading] = useState(false);
-  const [toolsError,setToolsError] = useState('');
-  // Which slot is waiting on the inline "+ New…" drawer, so the record it
-  // creates lands in the slot that asked for it.
-  const [creatingFor,setCreatingFor] = useState(null);
-  const toast = useToast();
-  const isNew = service==='new';
-  const isEdit = service && service.id;
-
-  useEffect(()=>{
-    if(isEdit) setForm({
-      name:service.name, url:service.url, descriptor:{...service.descriptor},
-      protected_by:service.protected_by ?? null, acts_as:service.acts_as ?? null,
-    });
-    else setForm({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
-  },[service]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(()=>{
-    if(!isEdit) { setTools([]); setToolsError(''); return; }
-    const type = service.descriptor?.type;
-    if(type !== 'tasks' && type !== 'virtual') { setTools([]); setToolsError(''); return; }
-    let cancelled = false;
-    setToolsLoading(true);
-    setToolsError('');
-    api(session,'GET','/api/services/'+service.id+'/tools')
-      .then(r => { if(!cancelled){ setTools(r.tools||[]); setToolsError(''); } })
-      .catch(e => { if(!cancelled){ setTools([]); setToolsError(e.message); } })
-      .finally(() => { if(!cancelled) setToolsLoading(false); });
-    return () => { cancelled = true; };
-  },[service,session]); // eslint-disable-line react-hooks/exhaustive-deps
-
+// The service form's fields, shared by the service page and the upload
+// modal's new-service flow. `types` narrows the type picker — a dropped
+// .txt can only ever be tasks or virtual.
+function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, types, service }) {
+  // onCreateGate receives the slot key ('protected_by' | 'acts_as') so a
+  // page can drop the record it creates into the slot that asked.
   const updDesc = (k,v) => setForm(f=>({...f,descriptor:{...f.descriptor,[k]:v}}));
+  const isSSH = !!service && service.descriptor?.type === 'ssh';
+  const isTasks = form.descriptor.type === 'tasks';
+  const isVirtual = form.descriptor.type === 'virtual';
+  const typeOptions = types || ['mcp','api','tasks','virtual'];
 
   // The descriptor is down to four fields, and which ones apply still turns
   // on the type. Auth is no longer among them — that lives in the slots now.
@@ -1803,21 +2008,6 @@ function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose,
     if (t !== 'virtual') { delete d.database_target; delete d.database_name; }
     setForm(f=>({...f, descriptor: d}));
   };
-
-  const save = async () => {
-    try {
-      const payload = {...form};
-      // Virtual services don't need a URL — the server mints /mcp/{slug}.
-      if (payload.descriptor.type === 'virtual') payload.url = '';
-      if(isEdit) { await api(session, 'PUT','/api/services/'+service.id,payload); toast('Service updated'); }
-      else { await api(session, 'POST','/api/services',payload); toast('Service created'); }
-      onClose(); onSaved();
-    } catch(e) { toast(e.message,true); }
-  };
-
-  const isSSH = isEdit && service.descriptor?.type === 'ssh';
-  const isTasks = form.descriptor.type === 'tasks';
-  const isVirtual = form.descriptor.type === 'virtual';
 
   const gate = effectiveGate(form.protected_by, auth, adminAuthID);
   const actsAs = authRecord(auth, form.acts_as);
@@ -1831,23 +2021,16 @@ function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose,
     : `The caller's own ${gate.name} credential is forwarded.`;
 
   return (
-    <Drawer
-      open={isNew || isEdit} title={isNew?'New service':'Edit service'}
-      onClose={onClose}
-      footer={<>
-        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save}>{isNew?'Create':'Save'}</button>
-      </>}
-    >
+    <>
       <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} disabled={isSSH}/></div>
-      {!isTasks && !isVirtual && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>}
+      {!isTasks && !isVirtual && !isSSH && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>}
       {isSSH ? (
         <div className="field"><label>Type</label><Badge tone="purple">SSH</Badge></div>
       ) : (
       <div className="field-row">
         <div className="field"><label>Type</label>
           <select className="input" value={form.descriptor.type} onChange={e=>setType(e.target.value)}>
-            <option value="mcp">MCP</option><option value="api">API</option><option value="tasks">Tasks</option><option value="virtual">Virtual</option>
+            {typeOptions.map(t=><option key={t} value={t}>{t.toLocaleUpperCase()}</option>)}
           </select>
         </div>
         {!isTasks && !isVirtual && <div className="field"><label>Proxied</label>
@@ -1871,7 +2054,7 @@ function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose,
         records={auth}
         value={form.protected_by}
         onChange={v=>setForm(f=>({...f,protected_by:v}))}
-        onCreate={()=>setCreatingFor('protected_by')}
+        onCreate={()=>onCreateGate?.('protected_by')}
       />
 
       <AuthSlot
@@ -1881,7 +2064,7 @@ function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose,
         records={auth}
         value={form.acts_as}
         onChange={v=>setForm(f=>({...f,acts_as:v}))}
-        onCreate={()=>setCreatingFor('acts_as')}
+        onCreate={()=>onCreateGate?.('acts_as')}
       />
 
       {isVirtual && (
@@ -1913,47 +2096,143 @@ function ServiceDrawer({ session, services, auth, adminAuthID, service, onClose,
           )}
         </>
       )}
-      {isEdit && (isTasks || isVirtual) && (
-        <div className="field" style={{marginTop:16}}>
-          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-            <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
-            <button className="btn btn-sm btn-primary" onClick={()=>onEditTools?.(service.id)}>
-              <Icon name="edit" size={12}/> Edit
-            </button>
-          </div>
-          {toolsLoading && <span className="muted">Loading…</span>}
-          {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
-          {!toolsLoading && !toolsError && tools.length===0 && (
-            <span className="muted">No tools found. Publish a {isTasks?'tasks':'virtual'} file to define tools.</span>
-          )}
-          {!toolsLoading && !toolsError && tools.length>0 && (
-            <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
-              {tools.map((t,i)=>
-                <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
-                  <b>{t.name}</b>
-                  {t.description && <span className="muted"> — {t.description}</span>}
-                </li>
-              )}
-            </ul>
-          )}
-        </div>
-      )}
+    </>
+  );
+}
 
+// The service settings page — what the edit drawer used to be.
+function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, apps, onRefresh, navigate }) {
+  const service = isNew ? null : services.find(s => String(s.id) === String(serviceId));
+  const [form, setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
+  const [tools, setTools] = useState([]);
+  const [toolsLoading, setToolsLoading] = useState(false);
+  const [toolsError, setToolsError] = useState('');
+  // Which slot is waiting on the inline "New…" modal, so the record it
+  // creates lands in the slot that asked for it.
+  const [creatingFor, setCreatingFor] = useState(null);
+  const toast = useToast();
+  const isEdit = !!service;
+
+  useEffect(()=>{
+    if (isEdit) setForm({
+      name:service.name, url:service.url, descriptor:{...service.descriptor},
+      protected_by:service.protected_by ?? null, acts_as:service.acts_as ?? null,
+    });
+    else setForm({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
+  },[service ? service.id : null, isNew]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const type = isEdit && service.descriptor?.type;
+  const hasTools = type === 'tasks' || type === 'virtual';
+
+  useEffect(()=>{
+    if (!isEdit || !hasTools) { setTools([]); setToolsError(''); return; }
+    let cancelled = false;
+    setToolsLoading(true);
+    setToolsError('');
+    api(session,'GET','/api/services/'+service.id+'/tools')
+      .then(r => { if(!cancelled){ setTools(r.tools||[]); setToolsError(''); } })
+      .catch(e => { if(!cancelled){ setTools([]); setToolsError(e.message); } })
+      .finally(() => { if(!cancelled) setToolsLoading(false); });
+    return () => { cancelled = true; };
+  },[service ? service.id : null, isEdit, session]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const save = async () => {
+    try {
+      const payload = {...form};
+      // Virtual services don't need a URL — the server mints /mcp/{slug}.
+      if (payload.descriptor.type === 'virtual') payload.url = '';
+      if (isEdit) {
+        await api(session, 'PUT','/api/services/'+service.id,payload);
+        toast('Service updated'); onRefresh();
+      } else {
+        const resp = await api(session, 'POST','/api/services',payload);
+        toast('Service created');
+        onRefresh();
+        navigate('service', { serviceId: String(resp.id) });
+      }
+    } catch(e) { toast(e.message,true); }
+  };
+
+  const remove = async () => {
+    if (!service) return;
+    let usedBy = [];
+    try { const r = await api(session, 'GET','/api/services/'+service.id+'/apps'); usedBy = r.apps||[]; }
+    catch(e) { /* ignore */ }
+    let msg = 'Delete this service?';
+    if (usedBy.length > 0) msg += `\n\nIt's used by ${usedBy.length} app${usedBy.length>1?'s':''}:\n${usedBy.map(a=>a.name).join(', ')}`;
+    if (!confirm(msg)) return;
+    try { await api(session, 'DELETE','/api/services/'+service.id); toast('Service deleted'); navigate('home'); onRefresh(); }
+    catch(e) { toast(e.message,true); }
+  };
+
+  if (!isNew && !service) {
+    return (
+      <>
+        <PageHead title="Service not found" back={()=>navigate('home')} backLabel="Home"/>
+        <div className="empty"><b>Service not found.</b> It may have been deleted.</div>
+      </>
+    );
+  }
+
+  const isTasks = form.descriptor.type === 'tasks';
+  const isVirtual = form.descriptor.type === 'virtual';
+
+  return (
+    <>
+      <PageHead
+        title={service ? service.name : 'New service'}
+        sub={service ? 'A registered provider — MCP, API, tasks, virtual or SSH.' : 'Name it and say what it is.'}
+        back={()=>navigate('home')} backLabel="Home"
+        actions={<>
+          {service && service.descriptor?.type !== 'ssh' && (
+            <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>
+          )}
+          <button className="btn btn-primary" onClick={save} disabled={!form.name}>{service ? 'Save' : 'Create service'}</button>
+        </>}
+      />
+      <div className="page-form">
+        <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
+                           service={service} onCreateGate={(slot)=>setCreatingFor(slot)}/>
+        {isEdit && (isTasks || isVirtual) && (
+          <div className="field" style={{marginTop:16}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+              <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
+              <button className="btn btn-sm btn-primary" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
+                <Icon name="edit" size={12}/> Edit
+              </button>
+            </div>
+            {toolsLoading && <span className="muted">Loading…</span>}
+            {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
+            {!toolsLoading && !toolsError && tools.length===0 && (
+              <span className="muted">No tools found. Publish a {isTasks?'tasks':'virtual'} file to define tools.</span>
+            )}
+            {!toolsLoading && !toolsError && tools.length>0 && (
+              <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
+                {tools.map((t,i)=>
+                  <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
+                    <b>{t.name}</b>
+                    {t.description && <span className="muted"> — {t.description}</span>}
+                  </li>
+                )}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
       {creatingFor && (
-        <AuthDrawer
+        <AuthRecordModal
           session={session}
-          record="new"
           onClose={()=>setCreatingFor(null)}
           onSaved={(rec)=>{
             // Drop the new record straight into the slot that asked for it,
             // then refresh so every other dropdown sees it too.
             setForm(f=>({...f,[creatingFor]:rec.id}));
             setCreatingFor(null);
-            onSaved();
+            onRefresh();
           }}
         />
       )}
-    </Drawer>
+    </>
   );
 }
 
@@ -2018,7 +2297,7 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
   if (!service) {
     return (
       <>
-        <PageHead crumbs={['Workspace','Services']} title="Service not found" actions={<button className="btn btn-ghost" onClick={onBack}>Back</button>}/>
+        <PageHead title="Service not found" back={onBack} backLabel="Back"/>
         <div className="empty"><b>Service not found.</b></div>
       </>
     );
@@ -2027,9 +2306,10 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
   return (
     <div className="editor-page">
       <PageHead
-        crumbs={['Workspace','Services', service.name]}
         title={`Edit ${isTasks ? 'tasks' : 'virtual'} script`}
         sub={`Plain-text definition for ${service.name}.`}
+        back={onBack}
+        backLabel={service.name}
         actions={
           <>
             <button className="btn btn-ghost" onClick={onBack} disabled={saving}>Cancel</button>
@@ -2075,7 +2355,6 @@ function RolesView({ roles }) {
   return (
     <>
       <PageHead
-        crumbs={['Security','Roles']}
         title="Roles & permissions"
         sub="Built-in roles. Custom roles coming later."
       />
@@ -2119,7 +2398,6 @@ function AuditView({ audit }) {
   return (
     <>
       <PageHead
-        crumbs={['Security','Audit log']}
         title="Audit log"
         sub="Recent changes across the system."
       />
@@ -2216,7 +2494,7 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
 
   return (
     <>
-      <PageHead crumbs={['Security','Settings']} title="Settings" sub="Control panel configuration."/>
+      <PageHead title="Settings" sub="Control panel configuration."/>
       <div className="setting-section">
         <h3 className="setting-heading">Admin authentication</h3>
         <p className="muted" style={{marginBottom:20,fontSize:13}}>
@@ -2244,9 +2522,8 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
               {savedAuth && <button className="btn btn-ghost" onClick={unlink}>Unlink</button>}
             </div>
             {creatingGate && (
-              <AuthDrawer
+              <AuthRecordModal
                 session={session}
-                record="new"
                 onClose={()=>setCreatingGate(false)}
                 onSaved={(rec)=>{ setSelectedAuth(String(rec.id)); setCreatingGate(false); onRefresh?.(); }}
               />
@@ -2688,25 +2965,39 @@ const fmtAuditTime = (iso) => {
 
 // ── Routing ────────────────────────────────────────────────────────────
 
-// ── Routing ────────────────────────────────────────────────────────────
-
-// Parses /control and /control/:page/:... into a stable route object.
-// Top-level pages are the NAV ids. Nested routes:
-//   /control/services/:id/edit-tools  -> page='services', params={serviceId, screen:'edit-tools'}
+// Parses /control/... into a stable route object.
+//   /control                                  -> home
+//   /control/apps/new · /control/apps/:nonce  -> app page
+//   /control/services/new · /control/services/:id
+//     · /control/services/:id/edit-tools      -> service page / tools editor
+//   /control/auth/new · /control/auth/:id     -> auth record page
+//   /control/users|roles|audit|settings       -> the user area and settings
 const parseRoute = () => {
   const parts = window.location.pathname.replace(/^\/control\/?/, '').split('/').filter(Boolean);
-  const top = parts[0] || 'home';
-  if (!NAV.some(n => n.id === top)) return { page: 'home', params: {} };
-  if (top === 'services' && parts.length === 3 && parts[2] === 'edit-tools') {
-    return { page: 'services', params: { serviceId: parts[1], screen: 'edit-tools' } };
+  const [a, b, c] = parts;
+  if (!a) return { page: 'home', params: {} };
+  if (a === 'apps') {
+    if (b === 'new') return { page: 'app', params: { isNew: true } };
+    if (b) return { page: 'app', params: { nonce: b } };
   }
-  return { page: top, params: {} };
+  if (a === 'services') {
+    if (b === 'new') return { page: 'service', params: { isNew: true } };
+    if (b && c === 'edit-tools') return { page: 'tools', params: { serviceId: b } };
+    if (b) return { page: 'service', params: { serviceId: b } };
+  }
+  if (a === 'auth') {
+    if (b === 'new') return { page: 'authrecord', params: { isNew: true } };
+    if (b) return { page: 'authrecord', params: { authId: b } };
+  }
+  if (!b && ['users', 'roles', 'audit', 'settings'].includes(a)) return { page: a, params: {} };
+  return { page: 'home', params: {} };
 };
 
 const buildPath = (page, params = {}) => {
-  if (page === 'services' && params.screen === 'edit-tools' && params.serviceId) {
-    return `/control/services/${params.serviceId}/edit-tools`;
-  }
+  if (page === 'app') return params.isNew ? '/control/apps/new' : `/control/apps/${params.nonce}`;
+  if (page === 'service') return params.isNew ? '/control/services/new' : `/control/services/${params.serviceId}`;
+  if (page === 'tools') return `/control/services/${params.serviceId}/edit-tools`;
+  if (page === 'authrecord') return params.isNew ? '/control/auth/new' : `/control/auth/${params.authId}`;
   return page === 'home' ? '/control' : `/control/${page}`;
 };
 
@@ -2714,8 +3005,7 @@ const buildPath = (page, params = {}) => {
 
 function AppShell() {
   const { user, session, authRequired, gateName, login, logout, sessionExpired, clearExpired, authError } = useAuth();
-  const [route,setRoute] = useState(parseRoute);
-  const [sidebarOpen,setSidebarOpen] = useState(false);
+  const [route, setRoute] = useState(parseRoute);
 
   useEffect(() => {
     const onPop = () => setRoute(parseRoute());
@@ -2766,27 +3056,23 @@ function AppShell() {
 
   if (authRequired && !user) return <LoginScreen gateName={gateName} onLogin={login} authError={authError}/>;
 
-  const counts = { users:users.length, apps:apps.length, services:services.length, auth:auth.length };
-
   if(loading) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
-  const activeLabel = NAV.find(n=>n.id===route.page)?.label;
   return (
     <div className="app-shell">
-      <div className={`sidebar-scrim${sidebarOpen?' open':''}`} onClick={()=>setSidebarOpen(false)}/>
-      <Sidebar active={route.page} onNav={(id)=>navigate(id)} counts={counts} user={user} onLogout={user ? logout : null} mobileOpen={sidebarOpen} onMobileClose={()=>setSidebarOpen(false)}/>
-      <main className="main" data-screen-label={activeLabel}>
-        <MobileTopBar onMenuOpen={()=>setSidebarOpen(true)} pageLabel={activeLabel}/>
+      <TopBar user={user} onNav={(id)=>navigate(id)} onLogout={user ? logout : null}/>
+      <main className="main">
         {sessionExpired && <SessionBanner onLogin={login} onDismiss={clearExpired}/>}
-        {route.page==='home'     && <Overview users={users} apps={apps} services={services} audit={audit}/>}
-        {route.page==='apps'     && <AppsView session={session} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load}/>}
-        {route.page==='services' && route.params.screen !== 'edit-tools' && <ServicesView session={session} services={services} auth={auth} adminAuthID={adminAuthID} onRefresh={load} onEditTools={(id)=>navigate('services',{serviceId:String(id),screen:'edit-tools'})}/>}
-        {route.page==='auth'     && <AuthView session={session} auth={auth} services={services} apps={apps} onRefresh={load}/>}
-        {route.page==='services' && route.params.screen === 'edit-tools' && <ServiceToolsEditor session={session} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('services')} onSaved={load}/>}
-        {route.page==='users'    && <UsersView session={session} users={users} apps={apps} onRefresh={load}/>}
-        {route.page==='roles'    && <RolesView roles={roles}/>}
-        {route.page==='audit'    && <AuditView audit={audit}/>}
-        {route.page==='settings' && <SettingsView session={session} services={services} apps={apps} auth={auth} user={user} onRefresh={load}/>}
+        {['users','roles','audit'].includes(route.page) && <UserAreaTabs active={route.page} onNav={navigate}/>}
+        {route.page==='home'      && <HomePage session={session} navigate={navigate} apps={apps} services={services} auth={auth} users={users} adminAuthID={adminAuthID} onRefresh={load}/>}
+        {route.page==='app'       && <AppPage session={session} nonce={route.params.nonce} isNew={route.params.isNew} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load} navigate={navigate}/>}
+        {route.page==='service'   && <ServicePage session={session} serviceId={route.params.serviceId} isNew={route.params.isNew} services={services} auth={auth} adminAuthID={adminAuthID} apps={apps} onRefresh={load} navigate={navigate}/>}
+        {route.page==='tools'     && <ServiceToolsEditor session={session} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('service',{serviceId:route.params.serviceId})} onSaved={load}/>}
+        {route.page==='authrecord'&& <AuthPage session={session} authId={route.params.authId} isNew={route.params.isNew} auth={auth} services={services} apps={apps} onRefresh={load} navigate={navigate}/>}
+        {route.page==='users'     && <UsersView session={session} users={users} apps={apps} onRefresh={load}/>}
+        {route.page==='roles'     && <RolesView roles={roles}/>}
+        {route.page==='audit'     && <AuditView audit={audit}/>}
+        {route.page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} user={user} onRefresh={load}/>}
       </main>
     </div>
   );
