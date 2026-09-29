@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/oauth2"
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
 	"poggers.institute/freshbreath/internal/utils"
@@ -273,7 +276,7 @@ func returnAllowed(app *db.App, ret string) bool {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return false
 	}
-	return u.Scheme + "://" + u.Host == appRegisteredOrigin(app)
+	return u.Scheme+"://"+u.Host == appRegisteredOrigin(app)
 }
 
 // ── /service/login ──────────────────────────────────────────────
@@ -489,7 +492,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		claims, accessToken, refreshToken, err = s.oauth2ExchangeCode(r.Context(), rec, p.tokenEndpoint, code, p.verifier, p.clientID, p.clientSecret, redirectURI)
 	}
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Code exchange failed: %v", err), http.StatusInternalServerError)
+		s.callbackError(w, r, rec, "Code exchange failed", err)
 		return
 	}
 
@@ -508,7 +511,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	next, err := s.completeLeg(w, r, p, leg)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Login completion failed: %v", err), http.StatusInternalServerError)
+		s.callbackError(w, r, rec, "Login completion failed", err)
 		return
 	}
 	if next != "" {
@@ -522,6 +525,70 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 // responses are uniform: JSON {"redirect": url} when the browser should
 // move on (next leg, MCP client), else the final postMessage page as HTML —
 // the form JS navigates or document.writes accordingly.
+
+// oauthHint maps common RFC 6749 token-endpoint error codes to a
+// plain-language hint for the callback error page.
+func oauthHint(ierr *oauth2.RetrieveError) string {
+	switch ierr.ErrorCode {
+	case "invalid_client":
+		return "The provider rejected the client credentials — the client ID or client secret configured for this service is likely wrong."
+	case "invalid_grant":
+		return "The authorization code was rejected — it may have expired, already been used, or not match this redirect URI / client."
+	case "redirect_uri_mismatch":
+		return "The provider says the redirect URI does not match one registered for this client."
+	case "unauthorized_client":
+		return "The client is not authorized to use this grant type."
+	case "invalid_scope":
+		return "The provider rejected one of the requested scopes."
+	}
+	return ""
+}
+
+// callbackError renders the auth-form-styled error page for a failed
+// callback. Errors are HTML-escaped; a nested oauth2.RetrieveError gets an
+// operator hint appended.
+func (s *Server) callbackError(w http.ResponseWriter, r *http.Request, rec *db.AuthRecord, title string, err error) {
+	hint := ""
+	var rerr *oauth2.RetrieveError
+	if errors.As(err, &rerr) {
+		hint = oauthHint(rerr)
+	}
+
+	log.Printf("callback (%s) %s: %v", rec.Name, title, err)
+
+	page := callbackErrorHTML
+	page = strings.Replace(page, "{{TITLE}}", html.EscapeString(title), 1)
+	page = strings.Replace(page, "{{DETAIL}}", html.EscapeString(err.Error()), 1)
+	page = strings.Replace(page, "{{HINT}}", html.EscapeString(hint), 1)
+
+	// Collapse the hint block when there is nothing actionable to show.
+	if hint == "" {
+		page = strings.Replace(page, "<div class=\"hint\">", "<div class=\"hint\" style=\"display:none\">", 1)
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusInternalServerError)
+	w.Write([]byte(page))
+}
+
+const callbackErrorHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fresh Breath — Sign-in error</title>
+<style>` + authFormStyle + `
+  .detail{color:#a1a1aa;font-size:13px;line-height:1.6;word-break:break-word;background:#0f0f11;border:1px solid #27272a;border-radius:8px;padding:12px;margin-top:12px}
+  .hint{color:#fbbf24;font-size:13px;line-height:1.6;margin-top:16px;background:rgba(99,102,241,.08);border:1px solid #27272a;border-radius:8px;padding:12px}
+  .hint strong{display:block;color:#fbbf24;margin-bottom:4px}
+</style></head><body>
+<div class="card">
+  <h1>{{TITLE}}</h1>
+  <p class="lead">The sign-in flow for this service could not continue. Details below for the server log.</p>
+  <div class="detail">{{DETAIL}}</div>
+  <div class="hint">
+    <strong>Likely cause</strong>
+    {{HINT}}
+  </div>
+</div>
+</body></html>`
 
 // respondLeg completes a form-cleared leg and writes the right response:
 // JSON {"redirect"} to move the browser on, or the final page as HTML.

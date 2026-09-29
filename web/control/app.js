@@ -2197,15 +2197,17 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
         onCreate={()=>onCreateGate?.('protected_by')}
       />
 
-      <AuthSlot
-        label="Service acts as"
-        placeholder="— the caller's credential —"
-        help={outboundHelp}
-        records={auth}
-        value={form.acts_as}
-        onChange={v=>setForm(f=>({...f,acts_as:v}))}
-        onCreate={()=>onCreateGate?.('acts_as')}
-      />
+      {form.descriptor.type !== 'mcp' &&
+        <AuthSlot
+          label="Service acts as"
+          placeholder="— the caller's credential —"
+          help={outboundHelp}
+          records={auth}
+          value={form.acts_as}
+          onChange={v=>setForm(f=>({...f,acts_as:v}))}
+          onCreate={()=>onCreateGate?.('acts_as')}
+        />
+      }
 
       {isVirtual && (
         <>

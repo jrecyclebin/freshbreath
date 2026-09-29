@@ -70,10 +70,35 @@ func randomNonce() string {
 
 // ── OIDC (discovery-based) ──────────────────────────────────────────
 
+// AudienceClaims accepts either a single string or an array of strings
+// for the "aud" claim, since OIDC allows both encodings and providers
+// like Dropbox emit a bare string.
+type AudienceClaims []string
+
+func (a *AudienceClaims) UnmarshalJSON(data []byte) error {
+	switch data[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*a = AudienceClaims{s}
+	case '[', 'n':
+		var arr []string
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*a = AudienceClaims(arr)
+	default:
+		return fmt.Errorf("aud must be a string or array of strings")
+	}
+	return nil
+}
+
 type OIDCClaims struct {
 	Issuer   string                 `json:"iss"`
 	Subject  string                 `json:"sub"`
-	Audience []string               `json:"aud"`
+	Audience AudienceClaims         `json:"aud"`
 	Expiry   int64                  `json:"exp"`
 	IssuedAt int64                  `json:"iat"`
 	Nonce    string                 `json:"nonce,omitempty"`
