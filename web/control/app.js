@@ -796,6 +796,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
 
   return (
     <>
+      <p>Connect to the MCP at <strong>{window.__HOMESLICE_CONFIG.apiBase}/mcp</strong>. <a href="https://freshbreath.dev/" target="_blank">Read more.</a></p>
       <div className="home-section">
         <div className="home-hosted">
           {hosted.length === 0 ? (
