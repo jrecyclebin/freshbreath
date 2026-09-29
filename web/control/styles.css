@@ -1287,7 +1287,77 @@ select.input {
   gap: 20px;
 }
 
-/* The dropped-file modal — header, tab bar and picker borrowed from the
+/* Two-column entity pages (service, app): the settings form on the left,
+   the page's side panels — tools, hosting, the setup prompt — stacked to
+   the right. The form keeps its 720px cap; the side column takes what's
+   left and can't shrink past hosting's slot rows. */
+.page-cols {
+  max-width: none;
+  display: grid;
+  grid-template-columns: minmax(0, 720px) minmax(280px, 1fr);
+  gap: 20px 40px;
+  align-items: start;
+}
+.page-col {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+/* Deployment slots — one bordered card, a row per slot. Each row is two
+   lines: the badge, the slot's state and its action up top, the slot's URL
+   underneath — so a long route ellipsizes on its own line instead of
+   wrapping into whatever was beside it. */
+.slot-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.slot-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.slot-row:last-child { border-bottom: 0; }
+.slot-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.slot-when {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slot-btn { padding: 2px 8px; font-size: 12px; }
+.slot-url {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slot-url:hover { color: var(--accent); }
+/* An empty slot's URL isn't a link — keep it visibly inert, and keep
+   .slot-url (which comes after .muted in the file) from winning. */
+.slot-url.muted {
+  color: var(--ink-3);
+  text-decoration: none;
+}
+.slot-url.muted:hover { color: var(--ink-3); }
+
+/* The dropped-file modal
    frbr-concept mockup: the file itself leads (icon, name, meta), a segmented
    control picks new vs replace, and the replace side is a searchable list
    of rows rather than a <select>. */
@@ -1494,6 +1564,7 @@ select.input {
   .home-dropzone-wrap { position: static; width: 100%; }
   .home-dropzone { padding: 24px 16px; }
   .page-form { max-width: none; }
+  .page-cols { grid-template-columns: 1fr; }
   .upload-mode button { font-size: 11.5px; padding: 7px 6px; }
   .menu-pop { right: -6px; }
 

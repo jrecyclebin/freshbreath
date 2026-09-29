@@ -1364,35 +1364,39 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
           <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>
         </>}
       />
-      <div className="page-form">
-        <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
-                       auth={auth} adminAuthID={adminAuthID} loading={loading}
-                       onCreateGate={()=>setCreatingGate(true)}/>
-        {setupPrompt && (
-          <div className="field">
-            <label>Setup prompt</label>
-            <span className="help">Paste into Claude Code to wire up this app with the freshbreath skill.</span>
-            <div style={{position:'relative'}}>
-              <textarea
-                className="input"
-                readOnly
-                style={{fontFamily:'var(--font-mono)',fontSize:11,lineHeight:1.6,resize:'vertical',paddingRight:38,width:'100%',fieldSizing:'content'}}
-                value={setupPrompt}
-                onClick={e=>e.target.select()}
-              />
-              <button
-                className="btn btn-ghost"
-                style={{position:'absolute',top:8,right:8,padding:'4px 6px'}}
-                title="Copy prompt"
-                onClick={()=>copyText(setupPrompt, toast)}
-              >
-                <Icon name="copy" size={13}/>
-              </button>
-            </div>
-          </div>
-        )}
+      <div className={'page-form' + (app && !loading ? ' page-cols' : '')}>
+        <div className="page-col">
+          <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
+                         auth={auth} adminAuthID={adminAuthID} loading={loading}
+                         onCreateGate={()=>setCreatingGate(true)}/>
+        </div>
         {app && !loading && (
-          <HostUpload session={session} app={app} onRefresh={onRefresh}/>
+          <div className="page-col">
+            <HostUpload session={session} app={app} onRefresh={onRefresh}/>
+            {setupPrompt && (
+              <div className="field">
+                <label>Setup prompt</label>
+                <span className="help">Paste into Claude Code to wire up this app with the freshbreath skill.</span>
+                <div style={{position:'relative'}}>
+                  <textarea
+                    className="input"
+                    readOnly
+                    style={{fontFamily:'var(--font-mono)',fontSize:11,lineHeight:1.6,resize:'vertical',paddingRight:38,width:'100%',fieldSizing:'content'}}
+                    value={setupPrompt}
+                    onClick={e=>e.target.select()}
+                  />
+                  <button
+                    className="btn btn-ghost"
+                    style={{position:'absolute',top:8,right:8,padding:'4px 6px'}}
+                    title="Copy prompt"
+                    onClick={()=>copyText(setupPrompt, toast)}
+                  >
+                    <Icon name="copy" size={13}/>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
       {creatingGate && (
@@ -1654,6 +1658,11 @@ function ReplacePicker({ placeholder, emptyLabel, items, value, onChange }) {
   );
 }
 
+// The app page's hosting panel. The drop zone wears the home page's clothes
+// (the same classes) but uploads straight into this app's Development
+// slot — no modal to ask what the file should become, since the page
+// already knows. Below it the three deployment slots, with hosting's
+// Remove link living on the Development line.
 function HostUpload({ session, app, onRefresh }) {
   const [hosted, setHosted] = useState(!!(app.details?.last_uploaded));
   const [uploadedAt, setUploadedAt] = useState(app.details?.last_uploaded || null);
@@ -1742,62 +1751,58 @@ function HostUpload({ session, app, onRefresh }) {
   ];
 
   return (
-    <div className="field">
-      <label>Web hosting</label>
-      {hosted ? (
-        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:4}}>
-          <Badge tone="green">Hosted</Badge>
-          <span className="mono" style={{fontSize:13}}>{route}</span>
-          <span className="muted" style={{fontSize:12,flex:1}}>uploaded {fmtAuditTime(uploadedAt)}</span>
-          <button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:12,color:'var(--tone-red)'}} onClick={remove}>Remove</button>
-        </div>
-      ) : (
-        <span className="help">Upload an HTML file or a ZIP containing your app.</span>
-      )}
+    <>
       <div
-        className={'drop-zone' + (dragging ? ' drop-zone-active' : '')}
+        className={'drop-zone home-dropzone' + (dragging ? ' drop-zone-active' : '')}
         onDragOver={e=>{e.preventDefault();setDragging(true);}}
         onDragLeave={()=>setDragging(false)}
         onDrop={onDrop}
         onClick={()=>inputRef.current?.click()}
       >
-        {uploading ? 'Uploading…' : (hosted ? 'Drop to replace' : 'Drop .html or .zip here, or click to browse')}
+        <span className="dz-icon"><Icon name="upload" size={22}/></span>
+        <b>{uploading ? 'Uploading…' : (hosted ? 'Drop to replace' : 'Drop an app bundle')}</b>
+        <span>.html or .zip · or click to browse</span>
         <input ref={inputRef} type="file" accept=".html,.zip" style={{display:'none'}}
           onChange={e=>upload(e.target.files[0])}/>
       </div>
 
-      <div style={{marginTop:16}}>
-        <div style={{fontSize:13,fontWeight:500,marginBottom:4}}>Deployment slots</div>
-        <span className="help" style={{display:'block',marginBottom:10}}>
-          Deploying copies the Development folder into a slot. The bare {route} URL serves the default environment (above); each slot also has its own URL.
+      <div className="field">
+        <label>Deployment slots</label>
+        <span className="help">
+          Deploying copies the Development folder into a slot. The bare {route} URL serves the app's default environment; each slot also has its own URL.
         </span>
-        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+        <div className="slot-card">
           {slots.map(s=>(
-            <div key={s.suffix} style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-              <Badge tone={envTone(s.name)}><span className="env-full">{s.name}</span><span className="env-short">{envShort(s.name)}</span></Badge>
-              {s.when ? (
-                <a className="mono hosted-app-link" style={{fontSize:12.5}} href={route + s.suffix} target="_blank" rel="noopener noreferrer">{route + s.suffix}</a>
-              ) : (
-                <span className="mono muted" style={{fontSize:12.5}}>{route + s.suffix}</span>
-              )}
-              <span className="muted" style={{fontSize:12,flex:1}}>{s.when ? s.verb + ' ' + fmtAuditTime(s.when) : s.empty}</span>
-              {s.target && (
-                <button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:12}}
-                  disabled={!hosted || deploying===s.target}
-                  title={hosted ? 'Copy Development into ' + s.name : 'Upload to Development first'}
-                  onClick={()=>deploy(s.target)}>
-                  {deploying===s.target ? 'Deploying…' : 'Deploy'}
+            <div key={s.suffix} className="slot-row">
+              <div className="slot-top">
+                <Badge tone={envTone(s.name)}><span className="env-full">{s.name}</span><span className="env-short">{envShort(s.name)}</span></Badge>
+                <span className="slot-when" title={s.when ? s.verb + ' ' + fmtAuditTime(s.when) : undefined}>{s.when ? fmtShortTime(s.when) : s.empty}</span>
+                {s.name === 'Development' && hosted && (
+                  <button className="btn btn-ghost slot-btn" style={{color:'var(--tone-red)'}} onClick={remove}>Remove</button>
+                )}
+                {s.target && (
+                  <button className="btn btn-ghost slot-btn"
+                    disabled={!hosted || deploying===s.target}
+                    title={hosted ? 'Copy Development into ' + s.name : 'Upload to Development first'}
+                    onClick={()=>deploy(s.target)}>
+                    {deploying===s.target ? 'Deploying…' : 'Deploy'}
                 </button>
+                )}
+              </div>
+              {s.when ? (
+                <a className="slot-url" href={route + s.suffix} target="_blank" rel="noopener noreferrer">{route + s.suffix}</a>
+              ) : (
+                <span className="slot-url muted">{route + s.suffix}</span>
               )}
             </div>
           ))}
         </div>
       </div>
-    </div>
+    </>
   );
 }
 
-// ── Auth records ───────────────────────────────────────────────────────
+// ── Auth records ──
 //
 // An auth record is a credential or a login method, standing on its own.
 // Services and apps point at one from either of two slots: "protected by"
@@ -2317,32 +2322,36 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
           <button className="btn btn-primary" onClick={save} disabled={!form.name}>{service ? 'Save' : 'Create service'}</button>
         </>}
       />
-      <div className="page-form">
-        <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
-                           service={service} onCreateGate={(slot)=>setCreatingFor(slot)}/>
+      <div className={'page-form' + (isEdit && (isTasks || isVirtual) ? ' page-cols' : '')}>
+        <div className="page-col">
+          <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
+                             service={service} onCreateGate={(slot)=>setCreatingFor(slot)}/>
+        </div>
         {isEdit && (isTasks || isVirtual) && (
-          <div className="field" style={{marginTop:16}}>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+          <div className="page-col">
+            <div className="field">
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
               <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
-              <button className="btn btn-sm btn-primary" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
+              <button className="btn btn-sm" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
                 <Icon name="edit" size={12}/> Edit
               </button>
             </div>
-            {toolsLoading && <span className="muted">Loading…</span>}
-            {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
-            {!toolsLoading && !toolsError && tools.length===0 && (
-              <span className="muted">No tools found. Publish a {isTasks?'tasks':'virtual'} file to define tools.</span>
-            )}
-            {!toolsLoading && !toolsError && tools.length>0 && (
-              <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
-                {tools.map((t,i)=>
-                  <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
-                    <b>{t.name}</b>
-                    {t.description && <span className="muted"> — {t.description}</span>}
-                  </li>
-                )}
-              </ul>
-            )}
+              {toolsLoading && <span className="muted">Loading…</span>}
+              {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
+              {!toolsLoading && !toolsError && tools.length===0 && (
+                <span className="muted">No tools found. Publish a {isTasks?'tasks':'virtual'} file to define tools.</span>
+              )}
+              {!toolsLoading && !toolsError && tools.length>0 && (
+                <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
+                  {tools.map((t,i)=>
+                    <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
+                      <b>{t.name}</b>
+                      {t.description && <span className="muted"> — {t.description}</span>}
+                    </li>
+                  )}
+                </ul>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -3107,6 +3116,24 @@ const fmtAuditTime = (iso) => {
     month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit',
     ...(sameYear ? {} : { year: 'numeric' }),
+  });
+};
+
+// The short stamp for the slot rows' narrow column: relative while it still
+// reads ("5m ago"), then just the date. fmtAuditTime's full "Sep 28, 2:04 PM"
+// is the table/timeline width; this is the sidebar one.
+const fmtShortTime = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  if (mins < 1440) return Math.floor(mins / 60) + 'h ago';
+  if (mins < 1440 * 14) return Math.floor(mins / 1440) + 'd ago';
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric',
+    ...(sameYear ? {} : { year: '2-digit' }),
   });
 };
 
