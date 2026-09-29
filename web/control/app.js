@@ -497,7 +497,7 @@ function TopBar({ user, onNav, onLogout }) {
           <img src="/control/images/frbr-sm.png" alt="Fresh Breath" className="brand-logo"/>
         </button>
         <div className="tb-right">
-          <Menu label="Users, roles & audit" icon="users">
+          <Menu icon="users">
             {USER_AREA.map(p =>
               <MenuItem key={p.id} onClick={() => onNav(p.id)}>{p.label}</MenuItem>
             )}
@@ -718,8 +718,8 @@ function DropZone({ onFile }) {
 // edited together, or the alphabetized list of a single type.
 const ENTITY_VIEWS = [
   { id: 'recent',   label: 'Recently edited', singular: null,           icon: 'clock' },
-  { id: 'apps',     label: 'Apps',            singular: 'app',          icon: 'apps'  },
-  { id: 'services', label: 'Services',        singular: 'service',     icon: 'plug'  },
+  { id: 'app',      label: 'Apps',            singular: 'app',          icon: 'apps'  },
+  { id: 'service',  label: 'Services',        singular: 'service',     icon: 'plug'  },
   { id: 'auth',     label: 'Auth',            singular: 'auth record', icon: 'key'   },
 ];
 
@@ -743,8 +743,8 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
   const matches = (name) => !q || name.toLowerCase().includes(q.toLowerCase());
   const rows =
     view === 'recent'   ? recent.filter(e => matches(e.name)) :
-    view === 'apps'     ? appRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name)) :
-    view === 'services' ? serviceRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name)) :
+    view === 'app'      ? appRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name)) :
+    view === 'service' ? serviceRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name)) :
                           authRows.filter(e => matches(e.name)).sort((a, b) => a.name.localeCompare(b.name));
 
   const open = (row) => navigate(
@@ -833,7 +833,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
         <div className="entity-wrap">
           <div className="entity-rail">
             {ENTITY_VIEWS.map(v => (
-              <button key={v.id} className={'rail-btn' + (view === v.id ? ' active' : '')}
+              <button key={v.id} className={'rail-btn tone-' + (railTone[v.id] || 'white') + (view === v.id ? ' active' : '')}
                       title={v.id === 'recent' ? 'Recently edited — apps, services and auth together' : `${v.label}, alphabetical`}
                       aria-label={v.label}
                       onClick={() => { setView(v.id); setQ(''); }}>
@@ -851,7 +851,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
             <table className="tbl" data-mobile>
               <thead><tr>
                 <th style={{width:'30%'}}>Name</th>
-                {view !== 'recent' && <th>{view === 'apps' ? 'Environment' : view === 'auth' ? 'Kind' : 'Type'}</th>}
+                {view !== 'recent' && <th>{view === 'app' ? 'Environment' : view === 'auth' ? 'Kind' : 'Type'}</th>}
                 <th>Access</th>
                 <th>Edited</th>
                 <th style={{width:80}}></th>

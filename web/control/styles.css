@@ -1248,9 +1248,9 @@ select.input {
 }
 .rail-btn:hover { background: var(--hover); color: var(--ink); }
 .rail-btn.active {
-  background: var(--accent-tint);
-  color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent-border);
+  color: var(--ink);
+  border: solid 1px var(--line);
+  background: var(--hover);
 }
 .entity-table { flex: 1; min-width: 0; }
 .entity-toolbar {
@@ -1273,11 +1273,11 @@ select.input {
   color: var(--ink-2);
   flex-shrink: 0;
 }
-.badge.green,  .tl-icn.tone-green,  .entity-icn.tone-green  { background: oklch(from var(--tone-green)  var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-green)  var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-green)  var(--tone-border-l) calc(c * .33) h); }
-.badge.amber,  .tl-icn.tone-amber,  .entity-icn.tone-amber  { background: oklch(from var(--tone-amber)  var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-amber)  var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-amber)  var(--tone-border-l) calc(c * .33) h); }
-.badge.red,    .tl-icn.tone-red,    .entity-icn.tone-red    { background: oklch(from var(--tone-red)    var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-red)    var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-red)    var(--tone-border-l) calc(c * .33) h); }
-.badge.blue,   .tl-icn.tone-blue,   .entity-icn.tone-blue   { background: oklch(from var(--tone-blue)   var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-blue)   var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-blue)   var(--tone-border-l) calc(c * .33) h); }
-.badge.violet, .tl-icn.tone-violet, .entity-icn.tone-violet { background: oklch(from var(--tone-violet) var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-violet) var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-violet) var(--tone-border-l) calc(c * .33) h); }
+.badge.green,  .rail-btn.active.tone-green,  .tl-icn.tone-green,  .entity-icn.tone-green  { background: oklch(from var(--tone-green)  var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-green)  var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-green)  var(--tone-border-l) calc(c * .33) h); }
+.badge.amber,  .rail-btn.active.tone-amber,  .tl-icn.tone-amber,  .entity-icn.tone-amber  { background: oklch(from var(--tone-amber)  var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-amber)  var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-amber)  var(--tone-border-l) calc(c * .33) h); }
+.badge.red,    .rail-btn.active.tone-red,    .tl-icn.tone-red,    .entity-icn.tone-red    { background: oklch(from var(--tone-red)    var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-red)    var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-red)    var(--tone-border-l) calc(c * .33) h); }
+.badge.blue,   .rail-btn.active.tone-blue,   .tl-icn.tone-blue,   .entity-icn.tone-blue   { background: oklch(from var(--tone-blue)   var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-blue)   var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-blue)   var(--tone-border-l) calc(c * .33) h); }
+.badge.violet, .rail-btn.active.tone-violet, .tl-icn.tone-violet, .entity-icn.tone-violet { background: oklch(from var(--tone-violet) var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-violet) var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-violet) var(--tone-border-l) calc(c * .33) h); }
 
 /* Full-page settings forms (the old drawers, promoted) */
 .page-form {
@@ -1577,7 +1577,7 @@ select.input {
 
 .editor-page {
   position: fixed;
-  top: 72px;
+  top: 112px;
   right: 0;
   bottom: 0;
   left: 0;
@@ -1631,7 +1631,7 @@ select.input {
 @media (max-width: 640px) {
   .editor-page {
     left: 0;
-    top: 72px;
+    top: 88px;
     padding: 20px 0 0;
   }
   .editor-inner { padding: 0 16px; }
