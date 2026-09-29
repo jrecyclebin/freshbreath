@@ -1893,7 +1893,6 @@ function AuthSlot({ label, help, placeholder, records, value, onChange, onCreate
  */
 function AuthForm({ form, setForm, record }) {
   const isEdit = !!record;
-  const builtin = isEdit && record.builtin;
   const upd = (k,v) => setForm(f=>({...f, descriptor:{...f.descriptor, [k]:v}}));
 
   // Switching kind starts the descriptor over. Carrying stale fields across
@@ -1909,18 +1908,14 @@ function AuthForm({ form, setForm, record }) {
     <>
       <div className="field">
         <label>Name</label>
-        <input className="input" value={form.name} disabled={builtin}
+        <input className="input" value={form.name}
                onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Company SSO"/>
       </div>
       <div className="field">
         <label>Kind</label>
-        {builtin ? (
-          <div><Badge tone={authKindTone(kind)} dot={false}>{authKindLabel(kind)}</Badge></div>
-        ) : (
-          <select className="input" value={kind} onChange={e=>setKind(e.target.value)}>
-            {AUTH_KINDS.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
-          </select>
-        )}
+        <select className="input" value={kind} onChange={e=>setKind(e.target.value)}>
+          {AUTH_KINDS.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
+        </select>
         <span className="help">{authKind(kind)?.blurb}</span>
       </div>
 
@@ -2053,6 +2048,9 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
   }
 
   const uses = record ? authUsedBy(record.id, services, apps) : [];
+  // The seeded anonymous and SSH-key records are the instance's own. Their
+  // meaning is fixed by their kind, so there is nothing to edit or save.
+  const isBuiltin = !!record?.builtin;
 
   return (
     <>
@@ -2061,16 +2059,30 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
         sub={record ? 'A credential and login method, standing on its own.' : 'Name a credential and login method.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
-          {record && !record.builtin && (
+          {record && !isBuiltin && (
             <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>
           )}
-          <button className="btn btn-primary" onClick={save} disabled={saving || !form.name}>
-            {saving ? 'Saving…' : record ? 'Save' : 'Create record'}
-          </button>
+          {!isBuiltin && (
+            <button className="btn btn-primary" onClick={save} disabled={saving || !form.name}>
+              {saving ? 'Saving…' : record ? 'Save' : 'Create record'}
+            </button>
+          )}
         </>}
       />
       <div className="page-form">
-        <AuthForm form={form} setForm={setForm} record={record}/>
+        {isBuiltin ? (
+          <div className="field">
+            <label>Built-in auth record</label>
+            <div><Badge tone={authKindTone(record.kind)} dot={false}>{authKindLabel(record.kind)}</Badge></div>
+            <span className="help">{authKind(record.kind)?.blurb}</span>
+            <span className="help">
+              Seeded at startup and maintained by the instance, it has no editable settings.
+              Services and apps point at it the same as any other record.
+            </span>
+          </div>
+        ) : (
+          <AuthForm form={form} setForm={setForm} record={record}/>
+        )}
         {record && (
           <div className="field"><label>Used by</label>
             <span className="help">
@@ -2127,7 +2139,6 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
   // onCreateGate receives the slot key ('protected_by' | 'acts_as') so a
   // page can drop the record it creates into the slot that asked.
   const updDesc = (k,v) => setForm(f=>({...f,descriptor:{...f.descriptor,[k]:v}}));
-  const isSSH = !!service && service.descriptor?.type === 'ssh';
   const isTasks = form.descriptor.type === 'tasks';
   const isVirtual = form.descriptor.type === 'virtual';
   const typeOptions = types || ['mcp','api','tasks','virtual'];
@@ -2154,11 +2165,8 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
 
   return (
     <>
-      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} disabled={isSSH}/></div>
-      {!isTasks && !isVirtual && !isSSH && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} disabled={isSSH}/></div>}
-      {isSSH ? (
-        <div className="field"><label>Type</label><Badge tone="purple">SSH</Badge></div>
-      ) : (
+      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
+      {!isTasks && !isVirtual && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))}/></div>}
       <div className="field-row">
         <div className="field"><label>Type</label>
           <select className="input" value={form.descriptor.type} onChange={e=>setType(e.target.value)}>
@@ -2171,7 +2179,6 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
           </select>
         </div>}
       </div>
-      )}
 
       <AuthSlot
         label="Protected by"
@@ -2308,6 +2315,9 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
 
   const isTasks = form.descriptor.type === 'tasks';
   const isVirtual = form.descriptor.type === 'virtual';
+  // The SSH service is the instance's own — seeded at startup, fronting
+  // users' keys and each app's known hosts. It has no editable settings.
+  const isBuiltin = isEdit && service.descriptor?.type === 'ssh';
 
   return (
     <>
@@ -2316,26 +2326,39 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
         sub={service ? 'A registered provider — MCP, API, tasks, virtual or SSH.' : 'Name it and say what it is.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
-          {service && service.descriptor?.type !== 'ssh' && (
+          {service && !isBuiltin && (
             <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>
           )}
-          <button className="btn btn-primary" onClick={save} disabled={!form.name}>{service ? 'Save' : 'Create service'}</button>
+          {!isBuiltin && (
+            <button className="btn btn-primary" onClick={save} disabled={!form.name}>{service ? 'Save' : 'Create service'}</button>
+          )}
         </>}
       />
-      <div className={'page-form' + (isEdit && (isTasks || isVirtual) ? ' page-cols' : '')}>
-        <div className="page-col">
-          <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
-                             service={service} onCreateGate={(slot)=>setCreatingFor(slot)}/>
-        </div>
-        {isEdit && (isTasks || isVirtual) && (
+      <div className={'page-form' + (!isBuiltin && isEdit && (isTasks || isVirtual) ? ' page-cols' : '')}>
+        {isBuiltin && (
+          <div className="field">
+            <label>Built-in service</label>
+            <span className="help">
+              The SSH service is part of the instance — seeded at startup, it fronts users' SSH keys and each app's known hosts.
+              There is nothing to edit or save here; apps get SSH access by linking this service on their own page.
+            </span>
+          </div>
+        )}
+        {!isBuiltin && (
+          <div className="page-col">
+            <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
+                               service={service} onCreateGate={(slot)=>setCreatingFor(slot)}/>
+          </div>
+        )}
+        {!isBuiltin && isEdit && (isTasks || isVirtual) && (
           <div className="page-col">
             <div className="field">
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-              <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
-              <button className="btn btn-sm" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
-                <Icon name="edit" size={12}/> Edit
-              </button>
-            </div>
+                <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
+                <button className="btn btn-sm btn-primary" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
+                  <Icon name="edit" size={12}/> Edit
+                </button>
+              </div>
               {toolsLoading && <span className="muted">Loading…</span>}
               {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
               {!toolsLoading && !toolsError && tools.length===0 && (
