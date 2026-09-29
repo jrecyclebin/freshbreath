@@ -48,14 +48,21 @@ const Icon = ({ name, size = 16 }) => {
 
 // ── UI primitives ──────────────────────────────────────────────────────
 
-const AVATAR_HUES = [20, 60, 110, 150, 200, 240, 280, 320];
-const initls = (n) => n?.split(/\s+/).map(s=>s[0]).slice(0,2).join('').toUpperCase() || '??';
-const hashHue = (s='') => { let h=0; for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0; return AVATAR_HUES[h%AVATAR_HUES.length]; };
-
-const Avatar = ({ name, size = 32 }) => {
-  const hue = hashHue(name);
-  const bg = `linear-gradient(135deg, oklch(0.78 0.07 ${hue}), oklch(0.55 0.1 ${(hue+30)%360}))`;
-  return <div className="avatar" style={{width:size,height:size,fontSize:size*0.36,background:bg}}>{initls(name)}</div>;
+// A hand-drawn "window with a view", deterministic from the user's email
+// (falling back to their name). The drawing lives in window-avatar.js, a
+// dependency-free ES module that also works in Node for SSR / .svg
+// caching; control.html bridges it onto window.windowAvatar (same pattern
+// as frbr.js → window.FrBr) so this script-mode app can reach it.
+const Avatar = ({ name, email, size = 32 }) => {
+  const seed = (email || name || '').trim();
+  if (!window.windowAvatar) {
+    // Bootstrap hasn't run — shouldn't happen (control.html's module
+    // ordering guarantees it). Don't paint a blank box.
+    const initial = ((name || '?').trim()[0] || '?').toUpperCase();
+    return <div className="avatar" style={{width:size,height:size,fontSize:size*0.42,fontWeight:600}}>{initial}</div>;
+  }
+  return <div className="avatar" style={{width:size,height:size}}
+    dangerouslySetInnerHTML={{__html: window.windowAvatar(seed, {size, color: 'currentColor'})}}/>;
 };
 
 // A hosted app's favicon, if it serves one at /favicon.ico; otherwise the
@@ -495,7 +502,7 @@ function TopBar({ user, onNav, onLogout }) {
               <MenuItem key={p.id} onClick={() => onNav(p.id)}>{p.label}</MenuItem>
             )}
           </Menu>
-          <Menu avatar={<Avatar name={displayName} size={30}/>}>
+          <Menu avatar={<Avatar name={displayName} email={user?.email} size={30}/>}>
             <div className="menu-heading user">
               <b>{displayName}</b>
               <span>{displayRole}</span>
@@ -951,7 +958,7 @@ function UsersView({ session, users, apps, onRefresh }) {
               <tr key={u.id}>
                 <td data-col="identity">
                   <div className="user-cell">
-                    <Avatar name={u.name}/>
+                    <Avatar name={u.name} email={u.email}/>
                     <div className="meta"><b>{u.name}</b><span>{u.email}</span></div>
                   </div>
                 </td>

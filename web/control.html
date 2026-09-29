@@ -15,6 +15,15 @@
   <link rel="stylesheet" href="/control/fonts.css">
   <link rel="stylesheet" href="/control/styles.css">
   <script type="module" src="/frbr.js"></script>
+  <!-- window-avatar.js is an ES module (also used in Node for SSR / .svg
+       caching), so the script-mode app can't import it. Bridge it onto window
+       the way frbr.js exposes window.FrBr. A deferred module always beats the
+       text/babel app (dev); in dist, modules run in document order before
+       app.compiled.js. build.sh leaves this tag in place. -->
+  <script type="module">
+    import { windowAvatar } from "/control/window-avatar.js";
+    window.windowAvatar = windowAvatar;
+  </script>
   <script src="/control/vendor/react-18.3.1.production.min.js"></script>
   <script src="/control/vendor/react-dom-18.3.1.production.min.js"></script>
   <!-- Dev mode: vendored babel compiles app.js (JSX) in-browser; build.sh swaps to app.compiled.js for dists. -->

@@ -80,11 +80,11 @@ button { font-family: inherit; }
 /* Top bar: brand left, people/settings/theme/who's-logged-in right */
 .topbar {
   background: var(--bg);
-  padding: 16px 0 0;
+  padding: 40px 0 0;
 }
 .topbar-inner {
   display: flex;
-  align-items: center;
+  align-items: start;
   justify-content: space-between;
   gap: 12px;
   height: 56px;
@@ -95,7 +95,7 @@ button { font-family: inherit; }
 
 .tb-brand {
   display: flex;
-  align-items: start;
+  align-items: center;
   gap: 10px;
   border: 0;
   background: transparent;
@@ -133,7 +133,7 @@ button { font-family: inherit; }
   transition: background .12s, color .12s;
 }
 .menu-btn:hover, .menu-btn.open { background: var(--hover); color: var(--ink); }
-.menu-btn .avatar { width: 28px; height: 28px; font-size: 11px; }
+.menu-btn .avatar { width: 28px; height: 28px; }
 
 .menu-pop {
   position: absolute;
@@ -481,10 +481,9 @@ table.tbl {
 .user-cell .meta span { font-size: 12px; color: var(--ink-3); }
 
 .avatar {
-  width: 32px; height: 32px; border-radius: 999px;
+  width: 32px; height: 32px;
   display: grid; place-items: center;
-  font-size: 12px; font-weight: 600;
-  color: white;
+  color: var(--ink);   /* window-avatar strokes inherit currentColor */
   flex-shrink: 0;
 }
 
@@ -1174,7 +1173,7 @@ select.input {
   cursor: pointer;
   transition: border-color .12s, background .12s;
 }
-.hosted-card:hover { border-color: var(--accent-border); background: var(--hover); }
+.hosted-card:hover { border-color: var(--tone-blue); background: var(--hover); }
 .hosted-fav {
   width: 22px; height: 22px;
   border-radius: 6px;
@@ -1193,7 +1192,7 @@ select.input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hosted-name:hover { color: var(--accent); }
+.hosted-name:hover { color: var(--tone-blue); text-decoration: underline; }
 .hosted-edit { flex-shrink: 0; }
 
 /* The home drop box — bigger than the in-form one, it's the front door */
