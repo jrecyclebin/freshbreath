@@ -1086,8 +1086,37 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	text := taskResultText(result)
+	if result.IsError {
+		// The browser path speaks plain JSON, not MCP's CallToolResult
+		// envelope; a failed script is a 500 carrying what it printed.
+		http.Error(w, text, http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	// A script's stdout is the result: sent as JSON when it is JSON,
+	// string-wrapped when it isn't — the same output toolOutput() used
+	// to hand an app.
+	var out interface{}
+	if json.Unmarshal([]byte(text), &out) == nil {
+		json.NewEncoder(w).Encode(out)
+	} else {
+		json.NewEncoder(w).Encode(text)
+	}
+}
+
+// taskResultText flattens a task run's MCP result back to the text its
+// script produced — stdout, plus stderr on a failure. Everything the
+// /mcp/ mount needs from runTask but the browser path shouldn't see.
+func taskResultText(result *mcp.CallToolResult) string {
+	var texts []string
+	for _, c := range result.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			texts = append(texts, tc.Text)
+		}
+	}
+	return strings.Join(texts, "\n")
 }
 
 // taskFile is a file argument to a task: written to a temp dir under its
@@ -1098,9 +1127,9 @@ type taskFile struct {
 }
 
 // runTask runs one task's script and returns the outcome as an MCP tool
-// result — the shape /service/call and the /mcp/ mount both answer with.
-// Stdout is the result text; a failed script is an error result, with
-// stderr alongside.
+// result — the shape the /mcp/ mount answers with, and the shape
+// /service/call unwraps via taskResultText. Stdout is the result text;
+// a failed script is an error result, with stderr alongside.
 //
 // Arguments reach the script as TASK_<NAME> environment variables, file
 // arguments as TASK_<NAME>=<path>. TASK names the task, and TASK_TOKEN

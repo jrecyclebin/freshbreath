@@ -345,6 +345,8 @@ function popupLogin(url, state) {
 
 // What a tool call returns to the app: the result's text, parsed as JSON
 // when it is JSON. An error result throws, carrying the text.
+// Tasks and virtual services answer /service/call in this shape already,
+// so only MCP-transport results get unwrapped here.
 function toolOutput(result) {
   const text = result.content
     .filter(c => c.type === "text")
@@ -559,9 +561,7 @@ export class ServiceProxy {
 
   async callTool(name, args = {}) {
     if (this.#serviceSlug()) {
-      const result = await this.#callTask(name, args);
-      // A task answers in MCP's result shape; a virtual tool with its result.
-      return this.#serviceURL.startsWith("tasks://") ? toolOutput(result) : result;
+      return await this.#callTask(name, args);
     }
     return toolOutput(await this.#withReconnect(() => this.#client.callTool({ name, arguments: args })));
   }
