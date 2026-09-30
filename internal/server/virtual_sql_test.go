@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -560,5 +561,97 @@ func TestBrowserSQLRunnerFTS5(t *testing.T) {
 	// splices anything into the SQL.
 	if got := call(`{"task": "search-notes", "args": {"query": "sky"}}`); !strings.Contains(got, "Birds") {
 		t.Errorf("search sky = %s", got)
+	}
+}
+
+// TestEncryptedParamRoundTrip drives the use case end to end on the
+// browser path: one tool stores an encrypted API key, another reads it
+// back, decrypts it, and spends it upstream — the database only ever holds
+// ciphertext and no tool result carries the plaintext.
+func TestEncryptedParamRoundTrip(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"ok": true}`))
+	}))
+	defer upstream.Close()
+
+	toolFile := fmt.Sprintf(`[migrate] Create the keys table.
+
+CREATE TABLE IF NOT EXISTS keys (id INTEGER PRIMARY KEY, secret TEXT)
+---
+[store-key] Remember an API key.
+
+$api_key is encrypted
+INSERT INTO keys (secret)
+  VALUES ($api_key)
+---
+[call-api] Call upstream with the stored key.
+
+SELECT secret FROM keys ORDER BY id DESC LIMIT 1
+
+$key = decrypt($.rows.0.0)
+GET %s/whoami
+Authorization: Bearer $key
+
+HTTP 200
+`, upstream.URL)
+	srv, svc, nonce := newVirtualSvcServer(t, toolFile, db.ServiceDescriptor{})
+
+	call := func(body string) string {
+		t.Helper()
+		rr := testRequest(t, srv, http.MethodPost, "/service/call/keeper",
+			strings.NewReader(body), map[string]string{"X-App-Nonce": nonce})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", body, rr.Code, rr.Body.String())
+		}
+		return rr.Body.String()
+	}
+	call(`{"task": "migrate", "args": {}}`)
+	if out := call(`{"task": "store-key", "args": {"api_key": "sk-live-123"}}`); strings.Contains(out, "sk-live-123") {
+		t.Errorf("store-key result leaks the key: %s", out)
+	}
+	if out := call(`{"task": "call-api", "args": {}}`); strings.Contains(out, "sk-live-123") {
+		t.Errorf("call-api result leaks the key: %s", out)
+	}
+	if gotAuth != "Bearer sk-live-123" {
+		t.Errorf("upstream Authorization = %q", gotAuth)
+	}
+
+	admin := &db.User{ID: 1, Role: "Admin"}
+	res, err := srv.coreDBQuery(admin, "app:"+nonce, dbQueryRequest{SQL: "SELECT secret FROM keys"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := res.Rows[0][0].(string)
+	if stored == "" || strings.Contains(stored, "sk-live-123") {
+		t.Fatalf("stored secret = %q, want ciphertext", stored)
+	}
+
+	// The ciphertext is the service's own: another service can't open it.
+	other := srv.virtualHooks(&db.Service{ID: svc.ID + 1})
+	if _, err := other.Open(stored); err == nil {
+		t.Error("another service opened this service's ciphertext")
+	}
+	if plain, err := srv.virtualHooks(svc).Open(stored); err != nil || plain != "sk-live-123" {
+		t.Errorf("own service open = %q, %v", plain, err)
+	}
+}
+
+// TestVirtualToolInputSchemaEncrypted: an encrypted param is a plain
+// string on the wire — the sealing happens server-side.
+func TestVirtualToolInputSchemaEncrypted(t *testing.T) {
+	tools, err := formats.ParseVirtualFile([]byte(`[store] Store.
+
+$api_key is encrypted
+INSERT INTO keys (secret) VALUES ($api_key)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := virtualToolInputSchema(tools[0], "global")["properties"].(map[string]interface{})
+	prop := props["api_key"].(map[string]interface{})
+	if prop["type"] != "string" {
+		t.Errorf("api_key schema = %v, want type string", prop)
 	}
 }

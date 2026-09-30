@@ -983,7 +983,7 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 	sqlRunner := s.browserSQLRunner(svc, r.Header.Get("X-App-Nonce"), body.Args)
 
 	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, auth, sqlRunner,
-		&formats.ExecContext{})
+		&formats.ExecContext{Hooks: s.virtualHooks(svc)})
 	if err != nil {
 		// A FORM/URL step suspends the run waiting for an elicitation —
 		// only an MCP client can supply that. Surface a clean message

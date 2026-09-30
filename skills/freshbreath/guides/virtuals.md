@@ -56,7 +56,8 @@ Aside from the request and response layouts, tool scripts can also include:
 
 - Comments: Lines starting with `#` are comments and are ignored by the parser.
 - Type annotations: Lines starting with `$arg is type` indicate that the argument
-  is expected to be of a certain type (string, object, number, boolean, array)
+  is expected to be of a certain type (string, object, number, boolean, array,
+  encrypted)
   and whether it is optional with a question mark (`number?`).
 - Assignments: Lines starting with `$var = expression` assign a value to a
   variable. The expression can be a string, number, boolean, object, or array.
@@ -190,7 +191,8 @@ be typed that way in the tool definition in the Fresh Breath MCP endpoint for
 this service.
 
 Possible types for tool arguments are: 'string', 'object', 'number', 'boolean',
-and 'array'. The default type is 'string' if no type is specified.
+'array' and 'encrypted' (see Encrypted Parameters below). The default type is
+'string' if no type is specified.
 
 If multiple variables share a type, they can also share a definition:
 
@@ -263,6 +265,58 @@ Since the spread takes an expression, you can use the `base64dec` and
 Here `$content` is the base64 text of the PNG; `base64dec($content)` decodes it
 and the raw PNG bytes are what hits the wire. (`base64enc` is the inverse — it
 encodes a string to base64 text.)
+
+## Encrypted Parameters
+
+An argument typed `encrypted` is sent in plaintext by the caller — over MCP or
+the API, it's just a string in the tool's schema — but the tool never sees
+that plaintext. Fresh Breath encrypts it on arrival, and from then on `$var`
+*is* the ciphertext: store it, pass it along, return it; it's opaque.
+(Non-string values are JSON-stringified before they're encrypted.)
+
+`decrypt()` turns it back into plaintext, inside the tool, for the one place
+that needs it. The classic use is an API key a user hands over once and the
+tool spends many times — without the key ever coming back out of a tool:
+
+```
+[save-api-key] Remember the caller's Acme API key.
+
+$api_key is encrypted
+INSERT INTO settings (name, value)
+  VALUES ('acme_key', $api_key)
+  ON CONFLICT (name) DO UPDATE SET value = excluded.value
+---
+[list-widgets] List widgets from Acme with the saved key.
+
+SELECT value FROM settings WHERE name = 'acme_key'
+
+$key = decrypt($.rows.0.0)
+GET https://api.acme.example/widgets
+Authorization: Bearer $key
+
+HTTP 200
+```
+
+Like `base64dec`, `decrypt` works wherever an expression does: assignments,
+assertions and string-spread bodies (`...decrypt($blob)`). Headers, URLs and
+JSON bodies take variables, so decrypt into a variable first, as above.
+
+Worth knowing:
+
+- **Each service has its own key.** A value encrypted by one service's tool
+  can only be decrypted by a tool in that same service. Two services sharing
+  a `global` database can't read each other's encrypted columns — and
+  deleting a service and creating it again makes its old ciphertext
+  unreadable. (Renaming is fine.)
+- **Plaintext is yours to guard once decrypted.** `decrypt()` hands back the
+  real value; if a tool returns it in a shaping block or writes it to a
+  column, it's out. That's occasionally what you want — mostly it isn't.
+- **Encrypting is not hiding from the caller.** The caller typed the
+  plaintext; this keeps it out of the database, the tool results and the
+  model's context afterwards.
+- Encrypted values can't be searched or compared in SQL — every encryption
+  of the same value comes out different.
+- FORM fields can't be `encrypted`.
 
 ## Response Shaping
 

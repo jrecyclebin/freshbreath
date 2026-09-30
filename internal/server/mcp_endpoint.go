@@ -159,6 +159,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 		}
 		capturedName := vt.Name
 		svcSlug := mcpSlug(svc.URL)
+		hooks := s.virtualHooks(svc)
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			token, claims, denied := s.mcpCallerCred(svc, req)
 			if denied != nil {
@@ -185,10 +186,10 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 			auth := s.virtualAuth(token, claims)
 			sqlRunner := s.mcpSQLRunner(svc, claims, args)
 			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, auth, sqlRunner,
-				&formats.ExecContext{Hooks: s.elicitHooks()})
+				&formats.ExecContext{Hooks: hooks})
 			var susp *formats.ErrSuspend
 			if errors.As(err, &susp) {
-				return s.suspendVirtualTool(susp.Susp, svcSlug, req.Session, sqlRunner), nil
+				return s.suspendVirtualTool(susp.Susp, svcSlug, req.Session, hooks, sqlRunner), nil
 			}
 			if err != nil {
 				return &mcp.CallToolResult{
@@ -340,6 +341,10 @@ func virtualToolInputSchema(vt formats.VirtualTool, dbTarget string) map[string]
 	required := []string{}
 	for _, p := range vt.Params {
 		prop := map[string]interface{}{"type": string(p.Type)}
+		if p.Type == formats.ParamEncrypted {
+			// Plaintext on the wire; the executor seals it on arrival.
+			prop["type"] = "string"
+		}
 		if p.Format != "" {
 			// Format-typed strings (email/uri/date/date-time): JSON Schema
 			// type string + format — the type word itself isn't a schema type.

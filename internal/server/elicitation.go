@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/formats"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -53,6 +54,7 @@ type pendingElicit struct {
 	session   *mcp.ServerSession
 	resume    *formats.ResumeState
 	sqlRunner formats.SQLRunner
+	hooks     *formats.VirtualHooks
 	mode      string // "form" | "url"
 	completed bool
 	payload   map[string]interface{} // completion-callback data (url mode)
@@ -158,17 +160,17 @@ func (s *Server) resumeVirtualTool(tools []formats.VirtualTool, req *mcp.CallToo
 		response.Content = entry.payload
 	}
 	entry.resume.Response = response
-	return s.answerRun(tools, entry.resume, entry.sqlRunner, entry.slug, req.Session)
+	return s.answerRun(tools, entry.resume, entry.hooks, entry.sqlRunner, entry.slug, req.Session)
 }
 
 // answerRun resumes a suspended run and converts a suspension into the
 // input-required result (a resumed run may reach another elicitation).
-func (s *Server) answerRun(tools []formats.VirtualTool, resume *formats.ResumeState, sqlRunner formats.SQLRunner, slug string, session *mcp.ServerSession) (*mcp.CallToolResult, error) {
+func (s *Server) answerRun(tools []formats.VirtualTool, resume *formats.ResumeState, hooks *formats.VirtualHooks, sqlRunner formats.SQLRunner, slug string, session *mcp.ServerSession) (*mcp.CallToolResult, error) {
 	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, resume.ToolName, resume.Args, resume.Auth, sqlRunner,
-		&formats.ExecContext{Hooks: s.elicitHooks(), Resume: resume})
+		&formats.ExecContext{Hooks: hooks, Resume: resume})
 	var susp *formats.ErrSuspend
 	if errors.As(err, &susp) {
-		return s.suspendVirtualTool(susp.Susp, slug, session, sqlRunner), nil
+		return s.suspendVirtualTool(susp.Susp, slug, session, hooks, sqlRunner), nil
 	}
 	if err != nil {
 		return mcpToolError("%v", err), nil
@@ -179,28 +181,47 @@ func (s *Server) answerRun(tools []formats.VirtualTool, resume *formats.ResumeSt
 	}, nil
 }
 
-// elicitHooks wires the public completion-callback URL into the executor.
-// The callback is global (IDs are unguessable and never scoped by service),
-// so no per-service knowledge is needed.
-func (s *Server) elicitHooks() *formats.VirtualHooks {
+// virtualHooks wires server knowledge into the executor for one service:
+// the public completion-callback URL (global — elicitation IDs are
+// unguessable and never scoped by service) and the service's secret key,
+// which backs encrypted parameters and decrypt().
+//
+// The key is derived per service ID, so a value one service encrypts is
+// opaque to every other service, and to the at-rest and token seals that
+// share the master key. Renaming a service keeps its key; deleting and
+// recreating it does not.
+func (s *Server) virtualHooks(svc *db.Service) *formats.VirtualHooks {
+	key := s.deriveSubkey(fmt.Sprintf("%s%d", serviceSecretLabel, svc.ID))
 	return &formats.VirtualHooks{
 		ElicitationURL: func(elicitationID string) string {
 			return s.config.PublicBaseURL + "/elicitation/" + elicitationID
 		},
+		Seal: func(plain string) (string, error) {
+			return seal(key, []byte(plain))
+		},
+		Open: func(sealed string) (string, error) {
+			plain, err := open(key, sealed)
+			return string(plain), err
+		},
 	}
 }
+
+// serviceSecretLabel prefixes the HKDF label for a service's secret key;
+// the service ID completes it.
+const serviceSecretLabel = "freshbreath/service-secret/"
 
 // suspendVirtualTool stores a suspended execution and returns the
 // input-required result the host fulfills and retries. slug and session come
 // from the serving request; the suspension itself carries the executor state
 // and the elicitation ID it generated.
-func (s *Server) suspendVirtualTool(susp *formats.Suspension, slug string, session *mcp.ServerSession, sqlRunner formats.SQLRunner) *mcp.CallToolResult {
+func (s *Server) suspendVirtualTool(susp *formats.Suspension, slug string, session *mcp.ServerSession, hooks *formats.VirtualHooks, sqlRunner formats.SQLRunner) *mcp.CallToolResult {
 	entry := &pendingElicit{
 		id:        susp.ElicitationID,
 		slug:      slug,
 		session:   session,
 		resume:    susp.ResumeState(),
 		sqlRunner: sqlRunner,
+		hooks:     hooks,
 		mode:      susp.Elicit.Mode,
 	}
 	s.pendingElicits.add(entry, time.Now())

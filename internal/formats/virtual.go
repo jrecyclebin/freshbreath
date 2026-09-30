@@ -33,6 +33,12 @@ const (
 	ParamBool   ParamType = "boolean"
 	ParamArray  ParamType = "array"
 
+	// ParamEncrypted is a string the caller sends in plaintext and the tool
+	// only ever sees sealed: the executor encrypts it on the way in, so it
+	// can be stored as-is and opened later with decrypt(). Non-string values
+	// are JSON-stringified first. It's a plain string on the wire.
+	ParamEncrypted ParamType = "encrypted"
+
 	// String-constrained types: variables typed with these carry a JSON
 	// Schema `format` on the wire (tool input schemas and elicitation form
 	// schemas), which helps models and host form UIs; they resolve as plain
@@ -216,7 +222,7 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 //   - All other parameters default to "string".
 var spreadVarRe = regexp.MustCompile(`\.\.\.\$([a-zA-Z_]\w*)`)
 var typeAnnotationRe = regexp.MustCompile(
-	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array|email|uri|date-time|date)(\?)?$`)
+	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array|encrypted|email|uri|date-time|date)(\?)?$`)
 
 // enumAnnotationRe matches an enum declaration: "$name is "a" | 'b' | ..." with
 // an optional trailing `?`. The values are quote-delimited (double or single,
@@ -845,7 +851,7 @@ func parseFormField(line string) (FormField, error) {
 	if len(ann.names) != 1 {
 		return FormField{}, fmt.Errorf("FORM fields are declared one per line: %q", line)
 	}
-	if ann.typ == ParamObject || ann.typ == ParamArray {
+	if ann.typ == ParamObject || ann.typ == ParamArray || ann.typ == ParamEncrypted {
 		return FormField{}, fmt.Errorf("FORM field $%s: %s fields are not supported (forms take string, number, boolean, enum, or a formatted string)", ann.names[0], ann.typ)
 	}
 	return FormField{Name: ann.names[0], Type: ann.typ, Format: ann.format, Optional: ann.optional, Values: ann.values}, nil
@@ -1237,14 +1243,14 @@ func gjsonQuery(scope interface{}, path []string) (interface{}, error) {
 // ── Expression Evaluation ────────────────────────────────────────────
 
 // evalExpr evaluates an expression string and returns its value.
-func evalExpr(expr string, vars map[string]interface{}, scope interface{}, token string) (interface{}, error) {
+func evalExpr(expr string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks) (interface{}, error) {
 	expr = strings.TrimSpace(expr)
 
 	// Function call: name(args)
 	if idx := strings.Index(expr, "("); idx > 0 && strings.HasSuffix(expr, ")") {
 		fnName := expr[:idx]
 		argsStr := expr[idx+1 : len(expr)-1]
-		return evalFunction(fnName, argsStr, vars, scope, token)
+		return evalFunction(fnName, argsStr, vars, scope, token, hooks)
 	}
 
 	// JSON path or variable: $.field, $['key'], $name
@@ -1266,11 +1272,11 @@ func evalExpr(expr string, vars map[string]interface{}, scope interface{}, token
 	return nil, fmt.Errorf("unsupported expression: %s", expr)
 }
 
-func evalFunction(name, argsStr string, vars map[string]interface{}, scope interface{}, token string) (interface{}, error) {
+func evalFunction(name, argsStr string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks) (interface{}, error) {
 	args := splitFunctionArgs(argsStr)
 	resolved := make([]interface{}, len(args))
 	for i, arg := range args {
-		val, err := evalExpr(strings.TrimSpace(arg), vars, scope, token)
+		val, err := evalExpr(strings.TrimSpace(arg), vars, scope, token, hooks)
 		if err != nil {
 			return nil, fmt.Errorf("%s arg %d: %w", name, i+1, err)
 		}
@@ -1318,6 +1324,24 @@ func evalFunction(name, argsStr string, vars map[string]interface{}, scope inter
 			return nil, fmt.Errorf("base64enc() requires a string argument, got %T", resolved[0])
 		}
 		return base64.StdEncoding.EncodeToString([]byte(s)), nil
+	case "decrypt":
+		if len(resolved) != 1 {
+			return nil, fmt.Errorf("decrypt() takes 1 argument, got %d", len(resolved))
+		}
+		s, ok := resolved[0].(string)
+		if !ok {
+			return nil, fmt.Errorf("decrypt() requires a string argument, got %T", resolved[0])
+		}
+		if hooks == nil || hooks.Open == nil {
+			return nil, fmt.Errorf("decrypt(): this server has no secret key for the service")
+		}
+		plain, err := hooks.Open(s)
+		if err != nil {
+			// Never echo the argument: it's either ciphertext or something
+			// that was meant to be.
+			return nil, fmt.Errorf("decrypt(): value was not encrypted by this service")
+		}
+		return plain, nil
 	default:
 		return nil, fmt.Errorf("unknown function: %s", name)
 	}
@@ -1350,12 +1374,12 @@ func splitFunctionArgs(s string) []string {
 // ── Assertion Evaluation ─────────────────────────────────────────────
 
 // evalAssertion evaluates an assertion expression. Returns nil on success.
-func evalAssertion(expr, msg string, vars map[string]interface{}, scope interface{}, token string) error {
+func evalAssertion(expr, msg string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks) error {
 	if parts := splitComparison(expr, "=="); len(parts) == 2 {
-		return evalComparison(parts[0], parts[1], msg, vars, scope, token, false)
+		return evalComparison(parts[0], parts[1], msg, vars, scope, token, hooks, false)
 	}
 	if parts := splitComparison(expr, "!="); len(parts) == 2 {
-		return evalComparison(parts[0], parts[1], msg, vars, scope, token, true)
+		return evalComparison(parts[0], parts[1], msg, vars, scope, token, hooks, true)
 	}
 	return fmt.Errorf("unsupported assertion: %s", expr)
 }
@@ -1372,12 +1396,12 @@ func splitComparison(expr, op string) []string {
 	}
 }
 
-func evalComparison(leftExpr, rightExpr, msg string, vars map[string]interface{}, scope interface{}, token string, negate bool) error {
-	left, err := evalExpr(leftExpr, vars, scope, token)
+func evalComparison(leftExpr, rightExpr, msg string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks, negate bool) error {
+	left, err := evalExpr(leftExpr, vars, scope, token, hooks)
 	if err != nil {
 		return fmt.Errorf("%s: %w", msg, err)
 	}
-	right, err := evalExpr(rightExpr, vars, scope, token)
+	right, err := evalExpr(rightExpr, vars, scope, token, hooks)
 	if err != nil {
 		return fmt.Errorf("%s: %w", msg, err)
 	}
@@ -1541,6 +1565,12 @@ type VirtualHooks struct {
 	// elicitation ID; it backs the $elicitation_url built-in in URL step
 	// templates. Nil when the server has no public completion route.
 	ElicitationURL func(elicitationID string) string
+
+	// Seal and Open back the encrypted parameter type and decrypt(), under a
+	// key scoped to the service — ciphertext one service seals, no other
+	// service opens. Nil means neither is available and both fail the tool.
+	Seal func(plain string) (string, error)
+	Open func(sealed string) (string, error)
 }
 
 // ExecContext is the optional server-provided context for a run: the hooks
@@ -1594,6 +1624,38 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			args = rs.Args
 		}
 	} else {
+		// Encrypted params are sealed before anything else sees them, and
+		// the sealed value replaces the argument outright — SQL binds fall
+		// back to args, and a suspension stores them, so the plaintext must
+		// not survive there either. Omitted and null values stay as they
+		// are: there's nothing to hide.
+		sealed := make(map[string]interface{}, len(args))
+		for k, v := range args {
+			sealed[k] = v
+		}
+		for _, p := range tool.Params {
+			v, ok := sealed[p.Name]
+			if p.Type != ParamEncrypted || !ok || v == nil {
+				continue
+			}
+			if hooks == nil || hooks.Seal == nil {
+				return nil, fmt.Errorf("parameter %q is encrypted, but this server has no secret key for the service", p.Name)
+			}
+			plain, isString := v.(string)
+			if !isString {
+				j, err := json.Marshal(v)
+				if err != nil {
+					return nil, fmt.Errorf("parameter %q: %w", p.Name, err)
+				}
+				plain = string(j)
+			}
+			c, err := hooks.Seal(plain)
+			if err != nil {
+				return nil, fmt.Errorf("parameter %q: %w", p.Name, err)
+			}
+			sealed[p.Name] = c
+		}
+		args = sealed
 		// Input args become the initial scope for JSON path queries.
 		for k, v := range args {
 			scope[k] = v
@@ -1675,7 +1737,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		// Execute assignments first.
 		// Execute assignments first.
 		for _, a := range step.Assignments {
-			val, err := evalExpr(a.Expr, vars, scope, token)
+			val, err := evalExpr(a.Expr, vars, scope, token, hooks)
 			if err != nil {
 				return nil, fmt.Errorf("step %d, assignment $%s: %w", stepIdx, a.VarName, err)
 			}
@@ -1684,7 +1746,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 
 		// Run assertions.
 		for _, a := range step.Assertions {
-			if err := evalAssertion(a.Expr, a.Msg, vars, scope, token); err != nil {
+			if err := evalAssertion(a.Expr, a.Msg, vars, scope, token, hooks); err != nil {
 				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
 			}
 		}
@@ -1856,7 +1918,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			// String-spread body: evaluate the expression and send the
 			// resulting string's bytes verbatim (no JSON encoding, no
 			// $-interpolation, so $ in file data survives intact).
-			val, err := evalExpr(step.BodyRaw, vars, scope, token)
+			val, err := evalExpr(step.BodyRaw, vars, scope, token, hooks)
 			if err != nil {
 				return nil, fmt.Errorf("step %d, raw body: %w", stepIdx, err)
 			}

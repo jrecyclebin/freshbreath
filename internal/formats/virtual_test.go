@@ -743,7 +743,7 @@ func TestEvalExprHost(t *testing.T) {
 	scope := map[string]interface{}{
 		"url": "https://contoso.sharepoint.com/sites/my-site",
 	}
-	val, err := evalExpr("host($url)", nil, scope, "")
+	val, err := evalExpr("host($url)", nil, scope, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -756,7 +756,7 @@ func TestEvalExprPath(t *testing.T) {
 	scope := map[string]interface{}{
 		"url": "https://contoso.sharepoint.com/sites/my-site",
 	}
-	val, err := evalExpr("path($url)", nil, scope, "")
+	val, err := evalExpr("path($url)", nil, scope, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func TestEvalExprJSONPath(t *testing.T) {
 	scope := map[string]interface{}{
 		"value": []interface{}{1, 2, 3},
 	}
-	val, err := evalExpr("$.value", nil, scope, "")
+	val, err := evalExpr("$.value", nil, scope, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -780,7 +780,7 @@ func TestEvalExprJSONPath(t *testing.T) {
 }
 
 func TestEvalExprStringLiteral(t *testing.T) {
-	val, err := evalExpr(`"hello world"`, nil, nil, "")
+	val, err := evalExpr(`"hello world"`, nil, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +790,7 @@ func TestEvalExprStringLiteral(t *testing.T) {
 }
 
 func TestEvalExprNumberLiteral(t *testing.T) {
-	val, err := evalExpr("42", nil, nil, "")
+	val, err := evalExpr("42", nil, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +801,7 @@ func TestEvalExprNumberLiteral(t *testing.T) {
 
 func TestEvalExprVariable(t *testing.T) {
 	vars := map[string]interface{}{"name": "Alice"}
-	val, err := evalExpr("$name", vars, nil, "")
+	val, err := evalExpr("$name", vars, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +811,7 @@ func TestEvalExprVariable(t *testing.T) {
 }
 
 func TestEvalExprUnknownFunction(t *testing.T) {
-	_, err := evalExpr("unknown($x)", nil, nil, "")
+	_, err := evalExpr("unknown($x)", nil, nil, "", nil)
 	if err == nil {
 		t.Error("expected error for unknown function")
 	}
@@ -823,7 +823,7 @@ func TestEvalAssertionEqual(t *testing.T) {
 	scope := map[string]interface{}{
 		"next_link": "https://graph.microsoft.com/v1.0/next",
 	}
-	err := evalAssertion(`host($next_link) == "graph.microsoft.com"`, "Invalid nextLink", nil, scope, "")
+	err := evalAssertion(`host($next_link) == "graph.microsoft.com"`, "Invalid nextLink", nil, scope, "", nil)
 	if err != nil {
 		t.Errorf("assertion should pass: %v", err)
 	}
@@ -833,7 +833,7 @@ func TestEvalAssertionNotEqual(t *testing.T) {
 	scope := map[string]interface{}{
 		"next_link": "https://evil.com/next",
 	}
-	err := evalAssertion(`host($next_link) == "graph.microsoft.com"`, "Invalid nextLink", nil, scope, "")
+	err := evalAssertion(`host($next_link) == "graph.microsoft.com"`, "Invalid nextLink", nil, scope, "", nil)
 	if err == nil {
 		t.Error("assertion should fail for evil.com")
 	}
@@ -841,7 +841,7 @@ func TestEvalAssertionNotEqual(t *testing.T) {
 
 func TestEvalAssertionNE(t *testing.T) {
 	vars := map[string]interface{}{"status": "ok"}
-	err := evalAssertion(`$status != "error"`, "", vars, nil, "")
+	err := evalAssertion(`$status != "error"`, "", vars, nil, "", nil)
 	if err != nil {
 		t.Errorf("!= assertion should pass: %v", err)
 	}
@@ -1229,7 +1229,7 @@ HTTP 200
 }
 
 func TestEvalExprBase64Dec(t *testing.T) {
-	val, err := evalExpr(`base64dec("aGVsbG8=")`, nil, nil, "")
+	val, err := evalExpr(`base64dec("aGVsbG8=")`, nil, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1239,7 +1239,7 @@ func TestEvalExprBase64Dec(t *testing.T) {
 }
 
 func TestEvalExprBase64Enc(t *testing.T) {
-	val, err := evalExpr(`base64enc("hello")`, nil, nil, "")
+	val, err := evalExpr(`base64enc("hello")`, nil, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1249,7 +1249,7 @@ func TestEvalExprBase64Enc(t *testing.T) {
 }
 
 func TestEvalExprBase64DecInvalid(t *testing.T) {
-	_, err := evalExpr(`base64dec("not valid b64!!!")`, nil, nil, "")
+	_, err := evalExpr(`base64dec("not valid b64!!!")`, nil, nil, "", nil)
 	if err == nil {
 		t.Fatal("expected error for invalid base64")
 	}
@@ -2779,5 +2779,97 @@ FORM "Confirm?"
 	_, err := ExecuteVirtualTool(http.DefaultClient, tools, "t", nil, VirtualAuth{}, nil)
 	if err == nil {
 		t.Fatal("nil elicitation hooks must surface as an error result, not suspension")
+	}
+}
+
+// toySecretHooks seals by prefixing — enough to see where sealing happens.
+var toySecretHooks = &VirtualHooks{
+	Seal: func(plain string) (string, error) { return "sealed:" + plain, nil },
+	Open: func(sealed string) (string, error) {
+		if !strings.HasPrefix(sealed, "sealed:") {
+			return "", fmt.Errorf("not sealed")
+		}
+		return strings.TrimPrefix(sealed, "sealed:"), nil
+	},
+}
+
+func TestExecuteVirtualToolEncryptedParam(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[store] Store a secret.
+
+$secret is encrypted
+$count is number
+INSERT INTO secrets (value, count) VALUES ($secret, $count)
+---
+[store-many] Store a non-string secret.
+
+$secret is encrypted
+INSERT INTO secrets (value) VALUES ($secret)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tools[0].Params[1].Name != "secret" || tools[0].Params[1].Type != ParamEncrypted {
+		t.Fatalf("params = %+v", tools[0].Params)
+	}
+
+	var bound map[string]interface{}
+	runner := func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		bound = params
+		return map[string]interface{}{"rowsAffected": 1}, nil
+	}
+	args := map[string]interface{}{"secret": "hunter2", "count": 3}
+	ctx := &ExecContext{Hooks: toySecretHooks}
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "store", args, VirtualAuth{}, runner, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if bound["secret"] != "sealed:hunter2" || bound["count"] != 3 {
+		t.Errorf("bound = %v", bound)
+	}
+	if args["secret"] != "hunter2" {
+		t.Errorf("caller's args were modified: %v", args)
+	}
+
+	// Non-strings are JSON-stringified before sealing.
+	args = map[string]interface{}{"secret": map[string]interface{}{"k": "v"}}
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "store-many", args, VirtualAuth{}, runner, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if bound["secret"] != `sealed:{"k":"v"}` {
+		t.Errorf("bound = %v", bound)
+	}
+
+	// No key, no plaintext fallback.
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "store-many", args, VirtualAuth{}, runner)
+	if err == nil || !strings.Contains(err.Error(), "no secret key") {
+		t.Errorf("want no-key error, got %v", err)
+	}
+}
+
+func TestEvalExprDecrypt(t *testing.T) {
+	val, err := evalExpr(`decrypt("sealed:hunter2")`, nil, nil, "", toySecretHooks)
+	if err != nil || val != "hunter2" {
+		t.Errorf("decrypt() = %v, %v", val, err)
+	}
+
+	// A failed open never echoes what it was given.
+	_, err = evalExpr(`decrypt("hunter2")`, nil, nil, "", toySecretHooks)
+	if err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("decrypt(plaintext) error = %v", err)
+	}
+
+	_, err = evalExpr(`decrypt("sealed:x")`, nil, nil, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "no secret key") {
+		t.Errorf("decrypt without hooks error = %v", err)
+	}
+}
+
+func TestParseFormFieldRejectsEncrypted(t *testing.T) {
+	_, err := ParseVirtualFile([]byte(`[ask] Ask.
+
+FORM "Key?"
+    $key is encrypted
+`))
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("want unsupported-field error, got %v", err)
 	}
 }
