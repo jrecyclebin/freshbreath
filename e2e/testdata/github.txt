@@ -1,0 +1,23 @@
+[whoami] The signed-in GitHub user.
+
+GET {{GITHUB}}/user
+Authorization: Bearer $token
+Accept: application/vnd.github+json
+
+HTTP 200
+---
+[get-repo] One repository.
+
+GET {{GITHUB}}/repos/$owner/$repo
+Authorization: Bearer $token
+Accept: application/vnd.github+json
+
+HTTP 200
+---
+[list-issues] Open issues in a repository.
+
+GET {{GITHUB}}/repos/$owner/$repo/issues?state=open
+Authorization: Bearer $token
+Accept: application/vnd.github+json
+
+HTTP 200

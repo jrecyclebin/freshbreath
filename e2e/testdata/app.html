@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Fresh Breath e2e</title>
+  <!-- The tests sign in by clicking Run, so the load-time redirect stays off. -->
+  <script>window.__FRBR_AUTO_LOGIN = false</script>
+</head>
+<body>
+  <!--
+    The e2e suite's test app. ?scenario= picks what Run does; the other
+    query parameters say which services to use. The outcome lands in #out
+    as JSON, with data-done set once it's there.
+  -->
+  <button id="run">Run</button>
+  <pre id="out"></pre>
+  <script type="module">
+    import { login } from "/frbr.js";
+
+    const params = new URLSearchParams(location.search);
+
+    const scenarios = {
+      // A virtual service over GitHub, behind a GitHub login.
+      async github() {
+        const gh = await login(params.get("service"));
+        const tools = (await gh.listTools()).map(t => t.name).sort();
+        const user = await gh.callTool("whoami");
+        const repo = await gh.callTool("get-repo", { owner: "octo-fixture", repo: "hello-fixture" });
+        const issues = await gh.callTool("list-issues", { owner: "octo-fixture", repo: "hello-fixture" });
+        return { tools, user, repo, issues, session: gh.session && { kind: gh.session.kind, subject: gh.session.subject } };
+      },
+
+      // An OAuth MCP server (Notion-shaped), proxied through Fresh Breath.
+      async notion() {
+        const notion = await login(params.get("service"));
+        const tools = (await notion.listTools()).map(t => t.name).sort();
+        const search = await notion.callTool("notion-search", { query: "fixture" });
+        return { tools, search };
+      },
+
+      // A task service.
+      async tasks() {
+        const tasks = await login(params.get("service"));
+        const tools = (await tasks.listTools()).map(t => t.name).sort();
+        const echo = await tasks.callTool("echo", { message: "hello from the app" });
+        return { tools, echo };
+      },
+    };
+
+    document.getElementById("run").addEventListener("click", async () => {
+      const out = document.getElementById("out");
+      try {
+        const result = await scenarios[params.get("scenario")]();
+        out.textContent = JSON.stringify({ ok: true, result });
+      } catch (e) {
+        out.textContent = JSON.stringify({ ok: false, error: String(e?.stack || e) });
+      }
+      out.dataset.done = "1";
+    });
+  </script>
+</body>
+</html>

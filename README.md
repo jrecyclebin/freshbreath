@@ -323,7 +323,20 @@ mise build        # builds the 'freshbreath' binary
 mise test         # runs the tests
 mise check        # lint + tests
 mise run          # run the dev server, reloads from code changes (requires `entr`)
+mise e2e          # end-to-end suite (needs Chromium)
 ```
+
+### End-to-end tests
+
+`e2e/` runs a real server against in-process fakes of GitHub (an OAuth App
+plus a few REST routes) and a Notion-shaped MCP server behind OAuth. Each
+test sets things up over the admin API, then checks the data two ways: an
+uploaded app driven in headless Chromium, and an MCP client that logs in
+through the browser the way Claude Desktop does. No accounts, no network.
+
+It's behind the `e2e` build tag, so `mise test` skips it. Chromium is found
+the way [chromedp](https://github.com/chromedp/chromedp) looks for it; set
+`FRBR_E2E_CHROME` to use a particular binary.
 
 ### Building Docker Images
 

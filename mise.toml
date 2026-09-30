@@ -167,6 +167,10 @@ run = "go test -cover ./... -v"
 description = "Run all tests with race detector"
 run = "go test ./... -race"
 
+[tasks.e2e]
+description = "Run the end-to-end suite (headless Chromium; FRBR_E2E_CHROME picks the binary)"
+run = "go test -tags e2e,sqlite_fts5 ./e2e/ -v"
+
 [tasks.lint]
 description = "Run go vet"
 run = "go vet ./..."

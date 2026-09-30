@@ -1,0 +1,3 @@
+[echo] Echo a message back.
+
+printf '{"echo":"%s","task":"%s"}' "$TASK_MESSAGE" "$TASK"
