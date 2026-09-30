@@ -407,10 +407,16 @@ export function currentSession() {
   return e ? AuthSession.for(e) : null;
 }
 
-/** Forget a cleared record — this page's gate unless told otherwise. */
+/**
+ * Forget a cleared record — this page's gate unless told otherwise. The
+ * server revokes the login behind it and drops it from the gate pass, the
+ * cookie that lets hosted pages through their gate.
+ */
 export function signOut(authID = GATE_ID) {
   if (!authID) return;
   (AuthSession.get(authID) ?? new AuthSession({ auth_id: authID })).forget();
+  fetch(`${API}/service/logout?auth_id=${authID}`, { method: "POST", credentials: "include" })
+    .catch(err => console.warn("frbr sign-out:", err?.message ?? err));
 }
 
 // ── Auto-login at load ───────────────────────────────────────────────

@@ -5,8 +5,8 @@
 * For hosting apps.
 * For writing quick MCP wrappers around SQLite queries, HTTP APIs, or scripts.
 * For setting up connections (like Github or Google Drive) and giving apps
-  access to them.
-* Hook an agent up and build directly on it.
+  access to their calls or their auth.
+* Fresh Breath itself talks MCP. Hook an agent up and build directly on it.
 
 **QUICK NOTE ON THAT:** *Personal* not *public*. Don't just host this on the
 Internet!!

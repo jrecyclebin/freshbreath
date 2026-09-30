@@ -131,6 +131,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/service/callback", s.handleCallback)
 	s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
 	s.mux.HandleFunc("/service/apikey-auth", s.handleAPIKeyAuth)
+	s.mux.HandleFunc("/service/logout", s.handleLogout)
 	s.mux.HandleFunc("/service/{id}/", s.handleServiceProxy)
 	s.mux.HandleFunc("/service/call/{name}", s.handleServiceCall)
 
@@ -337,6 +338,21 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The app's gate covers everything it serves, assets included.
+	app, err := s.store.GetApp(ha.nonce)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	gate, err := s.resolveAppGate(app)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Gate resolution failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !s.passPageGate(w, r, ha.nonce, gate) {
+		return
+	}
+
 	// Redirect /app-name → /app-name/ so relative asset paths resolve
 	// correctly, keeping the query string: it's the app's, not ours.
 	if rest == "" && !strings.HasSuffix(r.URL.Path, "/") {
@@ -410,6 +426,14 @@ func slotDirName(slot string, explicit bool, environment string) string {
 }
 
 func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
+	gate, err := s.adminAuthRecord()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Gate resolution failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !s.passPageGate(w, r, s.adminNonce, gate) {
+		return
+	}
 	data, err := os.ReadFile(filepath.Join(s.config.Dir, "web", "control.html"))
 	if err != nil {
 		http.Error(w, "control.html not found", http.StatusInternalServerError)

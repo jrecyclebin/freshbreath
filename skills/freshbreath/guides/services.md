@@ -82,10 +82,20 @@ For `file://` apps use the full server URL with the nonce; the server can't
 infer the app from a `file://` page. For apps hosted on the server's own
 origin, `/frbr.js` is enough.
 
+### The page gate
+
+If your app is hosted on the server and has a gate, the server enforces it
+before serving anything — HTML and assets alike. A browser that hasn't
+cleared the gate is sent through the login and back to the page it asked for.
+What lets it through afterwards is the gate pass: an HttpOnly cookie listing
+the records this browser has cleared. It is not a credential — API calls
+still carry the token from the store — and your app never touches it.
+
 ### Auto-login at load
 
-If your app is hosted on the server's origin and has a gate, loading frbr.js
-is itself a login event: when the store holds no credential for the gate, the
+The page gate normally fills the store on its way in, but the store can still
+come up empty (cleared site data, say). So loading frbr.js is itself a login
+event: when the store holds no credential for the gate, the
 page navigates into the login and comes back with one — before your first
 frame draws.
 
@@ -185,7 +195,7 @@ const session = currentSession();   // null when the store holds nothing live
 To sign out:
 
 ```js
-signOut();   // forgets this app's gate
+signOut();   // forgets this app's gate, and ends that login on the server
 ```
 
 What's stored is always a Fresh Breath token, never a provider's. Upstream

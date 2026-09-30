@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +13,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -170,6 +175,14 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	// the proxy injects it upstream (FRBR-7).
 	if p.mcpKey == "" && len(p.done) == 1 && p.done[0].rec.Kind == db.AuthAPIKey && s.appNeedsClientKey(p.appNonce) {
 		rec := p.done[0].rec
+		// No token, so no refresh family of its own — but the gate pass
+		// needs one to be revocable, so the key handoff gets one too.
+		subject, _ := s.legIdentity(p.done[0])
+		familyID, _, err := s.newRefreshFamily(subject, rec.ID, deviceLabelFromUA(r.UserAgent()))
+		if err != nil {
+			return "", err
+		}
+		s.grantGatePass(w, r, subject, familyID, []int64{rec.ID})
 		writeCallbackPage(w, p, map[string]interface{}{
 			"v": 1, "auth_id": rec.ID, "kind": rec.Kind,
 			"key": p.done[0].presentedKey, "header": rec.Descriptor.Header,
@@ -205,6 +218,9 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	}
 	if _, err := s.makeRefreshCookie(w, r, rd); err != nil {
 		return "", err
+	}
+	if rd.FamilyID != "" {
+		s.grantGatePass(w, r, rd.Subject, rd.FamilyID, append([]int64{rd.AuthID}, rd.Legs...))
 	}
 
 	primary := p.done[len(p.done)-1].rec
@@ -293,6 +309,252 @@ func returnAllowed(app *db.App, ret string) bool {
 		return false
 	}
 	return u.Scheme+"://"+u.Host == appRegisteredOrigin(app)
+}
+
+// ── The gate pass ───────────────────────────────────────────────────
+//
+// A signed cookie listing the inbound records this browser has cleared,
+// each paired with the refresh family its login created. It lets the page
+// handlers (hosted apps, the control panel) enforce a gate before serving
+// anything. It holds no credential — tokens stay in the client's store —
+// and it is a view pass only: no API route may read it, or it becomes an
+// ambient credential open to CSRF.
+//
+// Liveness comes from the family, not the cookie: a signed-out, revoked or
+// expired family voids its grants at once, and a deleted user voids them
+// all. The families table holds JTIs, never credentials.
+
+const (
+	gatePassCookie = "frbr_gate"
+	gatePassLabel  = "freshbreath/gate-pass"
+)
+
+type gatePass struct {
+	Subject string      `json:"sub"`
+	Grants  []gateGrant `json:"grants"`
+}
+
+type gateGrant struct {
+	AuthID   int64  `json:"a"`
+	FamilyID string `json:"f"`
+}
+
+func (s *Server) signGatePass(payload string) string {
+	mac := hmac.New(sha256.New, s.deriveSubkey(gatePassLabel))
+	mac.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// readGatePass returns the request's gate pass, or nil when there is none
+// or its signature doesn't hold.
+func (s *Server) readGatePass(r *http.Request) *gatePass {
+	c, err := r.Cookie(gatePassCookie)
+	if err != nil {
+		return nil
+	}
+	payload, sig, ok := strings.Cut(c.Value, ".")
+	if !ok || !hmac.Equal([]byte(sig), []byte(s.signGatePass(payload))) {
+		return nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil
+	}
+	var pass gatePass
+	if json.Unmarshal(raw, &pass) != nil {
+		return nil
+	}
+	return &pass
+}
+
+// writeGatePass sets the cookie, or clears it when no grants remain.
+// SameSite=Lax: the pass must ride a top-level navigation in from another
+// site, and nothing else cross-site needs it.
+func (s *Server) writeGatePass(w http.ResponseWriter, r *http.Request, pass *gatePass) {
+	cookie := &http.Cookie{
+		Name:     gatePassCookie,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   schemeOf(r) == "https" || s.config.TLSCertFile != "",
+		SameSite: http.SameSiteLaxMode,
+	}
+	if pass == nil || len(pass.Grants) == 0 {
+		cookie.MaxAge = -1
+	} else {
+		raw, _ := json.Marshal(pass)
+		payload := base64.RawURLEncoding.EncodeToString(raw)
+		cookie.Value = payload + "." + s.signGatePass(payload)
+		cookie.MaxAge = int(refreshTokenTTL.Seconds())
+	}
+	http.SetCookie(w, cookie)
+}
+
+// grantGatePass records a finished browser login on the pass: each cleared
+// record, under the login's family. A different subject starts a fresh
+// pass — one browser, one person's grants.
+func (s *Server) grantGatePass(w http.ResponseWriter, r *http.Request, subject, familyID string, authIDs []int64) {
+	pass := s.readGatePass(r)
+	if pass == nil || pass.Subject != subject {
+		pass = &gatePass{Subject: subject}
+	}
+	kept := pass.Grants[:0]
+	for _, g := range pass.Grants {
+		if !slices.Contains(authIDs, g.AuthID) {
+			kept = append(kept, g)
+		}
+	}
+	for _, id := range authIDs {
+		kept = append(kept, gateGrant{AuthID: id, FamilyID: familyID})
+	}
+	pass.Grants = kept
+	s.writeGatePass(w, r, pass)
+}
+
+// gatePassUser checks the request's pass against a gate. ok reports a live
+// grant for the record; user is the subject's row (nil for ext: subjects).
+func (s *Server) gatePassUser(r *http.Request, gate *db.AuthRecord) (user *db.User, ok bool) {
+	pass := s.readGatePass(r)
+	if pass == nil {
+		return nil, false
+	}
+	user, err := s.userFromSubject(pass.Subject)
+	if err != nil {
+		return nil, false // a frbr: subject whose user is gone
+	}
+	for _, g := range pass.Grants {
+		if g.AuthID != gate.ID {
+			continue
+		}
+		fam, found, err := s.store.GetRefreshFamily(g.FamilyID)
+		if err == nil && found && !fam.Revoked && fam.ExpiresAt.After(time.Now()) && fam.Subject == pass.Subject {
+			return user, true
+		}
+	}
+	return nil, false
+}
+
+// passPageGate decides whether a page request may be served behind gate.
+// It writes the response itself when not: a navigation is sent into the
+// login, which comes back here with the pass set; anything else (an asset,
+// a fetch) gets a 401, since redirecting a subresource into a login helps
+// no one. The control panel additionally wants a real user, as its API
+// does.
+func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce string, gate *db.AuthRecord) bool {
+	if gateIsOpen(gate) {
+		return true
+	}
+	user, ok := s.gatePassUser(r, gate)
+	if ok && (appNonce != s.adminNonce || user != nil) {
+		return true
+	}
+	if ok {
+		gatePageError(w, http.StatusForbidden, "Not a Fresh Breath user",
+			"You signed in, but that account has no Fresh Breath user. Ask an admin to add you.")
+		return false
+	}
+	if !isNavigation(r) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	// A login that just finished and still left no pass means the browser
+	// isn't keeping the cookie. Sending it round again would loop forever.
+	if cameFromLogin(r) {
+		gatePageError(w, http.StatusUnauthorized, "Sign-in didn't stick",
+			"You signed in, but this browser didn't keep the sign-in cookie. Check that cookies are allowed for this site.")
+		return false
+	}
+
+	legs, err := s.legsForLogin(r.Context(), gate, nil)
+	if err != nil || len(legs) == 0 {
+		http.Error(w, fmt.Sprintf("Gate resolution failed: %v", err), http.StatusInternalServerError)
+		return false
+	}
+	p := &pendingAuth{
+		appNonce:  appNonce,
+		appState:  utils.GenNonce(),
+		returnTo:  r.URL.RequestURI(),
+		legs:      legs,
+		primaryID: legs[len(legs)-1].ID,
+	}
+	next, err := s.beginLeg(r.Context(), p)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to begin auth: %v", err), http.StatusInternalServerError)
+		return false
+	}
+	http.Redirect(w, r, next, http.StatusFound)
+	return false
+}
+
+// isNavigation reports whether a request is the browser loading a page, as
+// opposed to a subresource or a script's fetch.
+func isNavigation(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if mode := r.Header.Get("Sec-Fetch-Mode"); mode != "" {
+		return mode == "navigate"
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// cameFromLogin reports whether a request was sent by one of our own login
+// pages — the callback bouncing back, or a form that finished in place.
+func cameFromLogin(r *http.Request) bool {
+	ref, err := url.Parse(r.Header.Get("Referer"))
+	if err != nil || ref.Host != r.Host {
+		return false
+	}
+	switch ref.Path {
+	case "/service/callback", "/service/ssh-auth", "/service/apikey-auth":
+		return true
+	}
+	return false
+}
+
+func gatePageError(w http.ResponseWriter, status int, title, detail string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	title, detail = html.EscapeString(title), html.EscapeString(detail)
+	io.WriteString(w, `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fresh Breath — `+title+`</title>
+<style>`+authFormStyle+`</style></head><body>
+<div class="card"><h1>`+title+`</h1><p class="lead">`+detail+`</p></div>
+</body></html>`)
+}
+
+// handleLogout signs this browser out of one record: every family that
+// cleared it is revoked, and every grant riding those families leaves the
+// pass. The refresh cookies die with their families.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	authID, err := strconv.ParseInt(r.URL.Query().Get("auth_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "auth_id required", http.StatusBadRequest)
+		return
+	}
+	pass := s.readGatePass(r)
+	if pass == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var ended []string
+	for _, g := range pass.Grants {
+		if g.AuthID == authID && !slices.Contains(ended, g.FamilyID) {
+			if err := s.store.RevokeRefreshFamily(g.FamilyID); err != nil {
+				log.Printf("logout: revoke family: %v", err)
+			}
+			ended = append(ended, g.FamilyID)
+		}
+	}
+	pass.Grants = slices.DeleteFunc(pass.Grants, func(g gateGrant) bool {
+		return slices.Contains(ended, g.FamilyID)
+	})
+	s.writeGatePass(w, r, pass)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ── /service/login ──────────────────────────────────────────────
