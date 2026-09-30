@@ -238,6 +238,12 @@ func TestHostedAppSlotSlashRedirect(t *testing.T) {
 	if loc := rr.Header().Get("Location"); loc != "/slotredir@staging/" {
 		t.Errorf("Location = %q, want /slotredir@staging/", loc)
 	}
+
+	// The query string belongs to the app and survives the redirect.
+	rr = testRequest(t, srv, http.MethodGet, "/slotredir@staging?view=board&id=7", nil, nil)
+	if loc := rr.Header().Get("Location"); loc != "/slotredir@staging/?view=board&id=7" {
+		t.Errorf("Location = %q, want /slotredir@staging/?view=board&id=7", loc)
+	}
 }
 
 // TestHostedAppDefaultSlotFollowsEnvironment pins that the bare /<slug> path

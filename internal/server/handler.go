@@ -338,9 +338,14 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Redirect /app-name → /app-name/ so relative asset paths resolve correctly.
+	// Redirect /app-name → /app-name/ so relative asset paths resolve
+	// correctly, keeping the query string: it's the app's, not ours.
 	if rest == "" && !strings.HasSuffix(r.URL.Path, "/") {
-		http.Redirect(w, r, r.URL.Path+"/", http.StatusMovedPermanently)
+		target := r.URL.Path + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
 		return
 	}
 
