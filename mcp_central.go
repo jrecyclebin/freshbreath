@@ -745,7 +745,12 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			return mcpToolError("file too large (50MB max)"), nil
 		}
 
-		route, err := s.coreUploadAppWeb(e.Actor, e.Nonce, data, e.Filename)
+		var route string
+		if e.appTarget() {
+			route, err = s.coreUploadAppWeb(e.Actor, e.Nonce, data, e.Filename)
+		} else {
+			route, err = s.coreUploadServiceFiles(e.Actor, e.ServiceID, data, e.Filename)
+		}
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -781,6 +786,119 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 // ── Service Tools ───────────────────────────────────────────────────
 
 func (s *Server) registerServiceTools(mcps *mcp.Server) {
+	// download_service_files
+	mcps.AddTool(&mcp.Tool{
+		Name:        "download_service_files",
+		Description: "Get a single-use URL to download a service's definition file as plain text. GET the returned URL within 5 minutes to fetch the .txt file. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{"type": "number", "description": "Service ID"},
+			},
+			"required": []string{"id"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		id, _ := args["id"].(float64)
+		if id == 0 {
+			return mcpToolError("id is required"), nil
+		}
+		if err := s.gate(user, rolesAdminPlus); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		svc, err := s.store.GetService(int64(id))
+		if err != nil {
+			return mcpToolError("service not found: %v", err), nil
+		}
+		if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+			return mcpToolError("service type %q does not support file publishing", svc.Descriptor.Type), nil
+		}
+
+		url := s.newServiceTransfer("download", int64(id), "", user)
+		return mcpToolResult(map[string]interface{}{
+			"url":      url,
+			"filename": svc.Name + ".txt",
+		})
+	})
+
+	// publish_service_files
+	mcps.AddTool(&mcp.Tool{
+		Name:        "publish_service_files",
+		Description: "Get a single-use URL to upload a plain-text definition file for a service. POST the raw file bytes to the returned URL within 5 minutes. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":       map[string]interface{}{"type": "number", "description": "Service ID"},
+				"filename": map[string]interface{}{"type": "string", "description": "Filename (any plain-text name; .zip is rejected)"},
+			},
+			"required": []string{"id", "filename"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		id, _ := args["id"].(float64)
+		filename, _ := args["filename"].(string)
+		if id == 0 {
+			return mcpToolError("id is required"), nil
+		}
+		if err := s.gate(user, rolesAdminPlus); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		if filename == "" {
+			return mcpToolError("filename is required"), nil
+		}
+		if strings.HasSuffix(strings.ToLower(filename), ".zip") {
+			return mcpToolError("zip uploads are not supported for service files"), nil
+		}
+		svc, err := s.store.GetService(int64(id))
+		if err != nil {
+			return mcpToolError("service not found: %v", err), nil
+		}
+		if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+			return mcpToolError("service type %q does not support file publishing", svc.Descriptor.Type), nil
+		}
+
+		url := s.newServiceTransfer("upload", int64(id), filename, user)
+		return mcpToolResult(map[string]interface{}{"url": url})
+	})
+
+	// delete_service_files
+	mcps.AddTool(&mcp.Tool{
+		Name:        "delete_service_files",
+		Description: "Remove a service's published definition file. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{"type": "number", "description": "Service ID"},
+			},
+			"required": []string{"id"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		id, _ := args["id"].(float64)
+		if id == 0 {
+			return mcpToolError("id is required"), nil
+		}
+		if err := s.coreDeleteServiceFiles(user, int64(id)); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]string{"status": "deleted"})
+	})
+
 	// list_services
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_services",

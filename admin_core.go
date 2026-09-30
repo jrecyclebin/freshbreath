@@ -610,6 +610,105 @@ func (s *Server) coreDeleteAppWeb(actor *User, nonce string) error {
 	return nil
 }
 
+// ── Service File operations ─────────────────────────────────────────
+
+// serviceDefinitionPath returns the on-disk definition path for tasks and
+// virtual services, or "" for other service types.
+func serviceDefinitionPath(dataDir string, svc *Service) string {
+	switch svc.Descriptor.Type {
+	case "tasks":
+		return filepath.Join(dataDir, "tasks", svc.Name+".txt")
+	case "virtual":
+		return filepath.Join(dataDir, "virtual", svc.Name+".txt")
+	}
+	return ""
+}
+
+// coreDownloadServiceFiles returns a service's published definition file.
+// Only tasks and virtual services support file publishing; the returned file
+// is the raw plain-text definition.
+func (s *Server) coreDownloadServiceFiles(actor *User, id int64) ([]byte, string, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return nil, "", err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return nil, "", cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return nil, "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+
+	path := serviceDefinitionPath(s.config.DataDir, svc)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", cerr(http.StatusNotFound, "no service files uploaded")
+		}
+		return nil, "", cerr(http.StatusInternalServerError, "read failed: %v", err)
+	}
+	return data, filepath.Base(path), nil
+}
+
+// coreUploadServiceFiles writes files for a service from raw content.
+// Only tasks and virtual services support file publishing; they each accept a
+// single plain-text file stored in their existing definition directory.
+func (s *Server) coreUploadServiceFiles(actor *User, id int64, data []byte, filename string) (string, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return "", err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return "", cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+	if strings.HasSuffix(strings.ToLower(filename), ".zip") {
+		return "", cerr(http.StatusBadRequest, "zip uploads are not supported for %s services", svc.Descriptor.Type)
+	}
+
+	path := serviceDefinitionPath(s.config.DataDir, svc)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return "", cerr(http.StatusInternalServerError, "failed to create service dir")
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", cerr(http.StatusInternalServerError, "write failed")
+	}
+	if svc.Descriptor.Type == "virtual" {
+		s.virtualMCPs.add(s, svc)
+	}
+
+	s.audit(actor, "uploaded service files", svc.Name)
+	return svc.URL, nil
+}
+
+// coreDeleteServiceFiles removes a service's published definition file.
+// Only tasks and virtual services support file publishing.
+func (s *Server) coreDeleteServiceFiles(actor *User, id int64) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+
+	path := serviceDefinitionPath(s.config.DataDir, svc)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return cerr(http.StatusInternalServerError, "failed to remove service file")
+	}
+	if svc.Descriptor.Type == "virtual" {
+		s.virtualMCPs.remove(trimMCPSlug(svc.URL))
+	}
+
+	s.audit(actor, "removed service files", svc.Name)
+	return nil
+}
+
 // extractZip extracts a zip archive to destDir, auto-detecting the content
 // root (unwrapping a single top-level folder if present) and ensuring an
 // index.html exists (renaming the first .html alphabetically if absent).

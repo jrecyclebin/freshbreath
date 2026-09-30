@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +17,7 @@ import (
 // callCentralTool invokes a tool on the central MCP server via an in-memory
 // transport. With no admin auth service configured, the call runs as the
 // synthetic Superuser.
-func callCentralTool(t *testing.T, srv *Server, name string, args map[string]string) *mcp.CallToolResult {
+func callCentralTool(t *testing.T, srv *Server, name string, args map[string]interface{}) *mcp.CallToolResult {
 	t.Helper()
 	ctx := context.Background()
 	t1, t2 := mcp.NewInMemoryTransports()
@@ -61,7 +64,7 @@ func TestXferFallbackHappy(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
-	pub := callCentralTool(t, srv, "publish_app_files", map[string]string{
+	pub := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
 		"nonce":    nonce,
 		"filename": "index.html",
 	})
@@ -76,7 +79,7 @@ func TestXferFallbackHappy(t *testing.T) {
 	}
 
 	data := base64.StdEncoding.EncodeToString([]byte("<h1>hello</h1>"))
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]string{
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
 		"url":  pubRes.URL,
 		"data": data,
 	})
@@ -104,7 +107,7 @@ func TestXferFallbackHappy(t *testing.T) {
 
 func TestXferFallbackInvalidURL(t *testing.T) {
 	srv := newTestServer(t)
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]string{
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
 		"url":  "not-a-url",
 		"data": base64.StdEncoding.EncodeToString([]byte("x")),
 	})
@@ -128,7 +131,7 @@ func TestXferFallbackExpiredToken(t *testing.T) {
 	}
 	url := srv.config.PublicBaseURL + "/api/xfer/" + tok
 
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]string{
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
 		"url":  url,
 		"data": base64.StdEncoding.EncodeToString([]byte("x")),
 	})
@@ -147,7 +150,7 @@ func TestXferFallbackDownloadURL(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
-	dl := callCentralTool(t, srv, "download_app_files", map[string]string{"nonce": nonce})
+	dl := callCentralTool(t, srv, "download_app_files", map[string]interface{}{"nonce": nonce})
 	if dl.IsError {
 		t.Fatalf("download_app_files failed: %s", toolResultText(t, dl))
 	}
@@ -158,7 +161,7 @@ func TestXferFallbackDownloadURL(t *testing.T) {
 		t.Fatalf("parse download result: %v", err)
 	}
 
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]string{
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
 		"url":  dlRes.URL,
 		"data": base64.StdEncoding.EncodeToString([]byte("x")),
 	})
@@ -182,7 +185,7 @@ func TestXferFallbackWrongUser(t *testing.T) {
 	}
 	url := srv.config.PublicBaseURL + "/api/xfer/" + tok
 
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]string{
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
 		"url":  url,
 		"data": base64.StdEncoding.EncodeToString([]byte("x")),
 	})
@@ -201,7 +204,7 @@ func TestXferFallbackBadBase64(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
-	pub := callCentralTool(t, srv, "publish_app_files", map[string]string{
+	pub := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
 		"nonce":    nonce,
 		"filename": "index.html",
 	})
@@ -210,7 +213,7 @@ func TestXferFallbackBadBase64(t *testing.T) {
 	}
 	json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes)
 
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]string{
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
 		"url":  pubRes.URL,
 		"data": "!!!not-base64!!!",
 	})
@@ -229,7 +232,7 @@ func TestXferFallbackTooLarge(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 
-	pub := callCentralTool(t, srv, "publish_app_files", map[string]string{
+	pub := callCentralTool(t, srv, "publish_app_files", map[string]interface{}{
 		"nonce":    nonce,
 		"filename": "index.html",
 	})
@@ -239,7 +242,7 @@ func TestXferFallbackTooLarge(t *testing.T) {
 	json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes)
 
 	data := base64.StdEncoding.EncodeToString(make([]byte, xferMaxUpload+1))
-	res := callCentralTool(t, srv, "xfer_fallback", map[string]string{
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
 		"url":  pubRes.URL,
 		"data": data,
 	})
@@ -248,5 +251,135 @@ func TestXferFallbackTooLarge(t *testing.T) {
 	}
 	if !strings.Contains(toolResultText(t, res), "too large") {
 		t.Errorf("error = %q, want too large", toolResultText(t, res))
+	}
+}
+
+func TestServiceFileMCPDownloadUpload(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &User{ID: 1, Role: "Superuser"}
+
+	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	// Publish via MCP.
+	pub := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
+		"id":       float64(svc.ID),
+		"filename": "deploy.txt",
+	})
+	if pub.IsError {
+		t.Fatalf("publish_service_files failed: %s", toolResultText(t, pub))
+	}
+	var pubRes struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, pub)), &pubRes); err != nil {
+		t.Fatalf("parse publish result: %v", err)
+	}
+
+	// Redeem with xfer_fallback.
+	content := []byte("[build]\nmake all\n")
+	res := callCentralTool(t, srv, "xfer_fallback", map[string]interface{}{
+		"url":  pubRes.URL,
+		"data": base64.StdEncoding.EncodeToString(content),
+	})
+	if res.IsError {
+		t.Fatalf("xfer_fallback failed: %s", toolResultText(t, res))
+	}
+	var upRes struct {
+		Route string `json:"route"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, res)), &upRes); err != nil {
+		t.Fatalf("parse upload result: %v", err)
+	}
+	if upRes.Route != svc.URL {
+		t.Errorf("route = %q, want %q", upRes.Route, svc.URL)
+	}
+
+	// Verify file written.
+	path := filepath.Join(srv.config.DataDir, "tasks", svc.Name+".txt")
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read legacy file: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("legacy file = %q, want %q", got, content)
+	}
+
+	// Download via MCP.
+	dl := callCentralTool(t, srv, "download_service_files", map[string]interface{}{
+		"id": float64(svc.ID),
+	})
+	if dl.IsError {
+		t.Fatalf("download_service_files failed: %s", toolResultText(t, dl))
+	}
+	var dlRes struct {
+		URL      string `json:"url"`
+		Filename string `json:"filename"`
+	}
+	if err := json.Unmarshal([]byte(toolResultText(t, dl)), &dlRes); err != nil {
+		t.Fatalf("parse download result: %v", err)
+	}
+	if dlRes.Filename != svc.Name+".txt" {
+		t.Errorf("filename = %q, want %q", dlRes.Filename, svc.Name+".txt")
+	}
+
+	tok := strings.TrimPrefix(dlRes.URL, srv.config.PublicBaseURL+"/api/xfer/")
+	e := srv.takeTransfer(tok)
+	if e == nil || e.ServiceID != svc.ID || e.Action != "download" {
+		t.Fatalf("download transfer entry mismatch")
+	}
+
+	// Delete via MCP.
+	del := callCentralTool(t, srv, "delete_service_files", map[string]interface{}{
+		"id": float64(svc.ID),
+	})
+	if del.IsError {
+		t.Fatalf("delete_service_files failed: %s", toolResultText(t, del))
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected file to be removed")
+	}
+}
+
+func TestServiceFileMCPZipRejected(t *testing.T) {
+	srv := newTestServer(t)
+	admin := &User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "deploy", "", ServiceDescriptor{Type: "tasks"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	res := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
+		"id":       float64(svc.ID),
+		"filename": "site.zip",
+	})
+	if !res.IsError {
+		t.Fatal("expected error for zip filename")
+	}
+	if !strings.Contains(toolResultText(t, res), "zip") {
+		t.Errorf("error = %q, want zip rejection", toolResultText(t, res))
+	}
+}
+
+func TestServiceFileMCPUnsupportedType(t *testing.T) {
+	srv := newTestServer(t)
+	admin := &User{ID: 1, Role: "Superuser"}
+	svc, err := srv.coreCreateService(admin, "api-svc", "http://example.com", ServiceDescriptor{Type: "api"})
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+
+	res := callCentralTool(t, srv, "publish_service_files", map[string]interface{}{
+		"id":       float64(svc.ID),
+		"filename": "x.txt",
+	})
+	if !res.IsError {
+		t.Fatal("expected error for unsupported service type")
+	}
+	if !strings.Contains(toolResultText(t, res), "does not support file publishing") {
+		t.Errorf("error = %q, want unsupported type", toolResultText(t, res))
 	}
 }

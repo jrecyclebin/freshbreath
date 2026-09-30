@@ -44,14 +44,14 @@ func toolNamesViaInMemory(t *testing.T, mcps *mcp.Server) []string {
 func TestCentralMCPToolsPerRole(t *testing.T) {
 	srv := newTestServer(t)
 
-	// The full admin-API tool surface (38 tools) bucketed by minimum role.
+	// The full admin-API tool surface (41 tools) bucketed by minimum role.
 	// Mirrors the HTTP routes in handler.go's requireAnyRole groups.
 	allAppTools := []string{
 		"list_apps", "get_app", "get_app_members", "get_app_services", // all-roles
 		"list_app_files", "download_app_files", "publish_app_files", "delete_app_files", "xfer_fallback", // all-roles
 	}
 	allAppManageTools := []string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services"}
-	allServiceTools := []string{"list_services", "get_service", "create_service", "update_service", "delete_service", "get_service_apps"}
+	allServiceTools := []string{"list_services", "get_service", "create_service", "update_service", "delete_service", "get_service_apps", "download_service_files", "publish_service_files", "delete_service_files"}
 	allUserTools := []string{"list_users", "get_user", "create_user", "update_user", "delete_user", "get_user_apps", "set_user_apps", "get_user_ssh_key", "generate_user_ssh_key", "delete_user_ssh_key"}
 	allRoleTools := []string{"list_roles"}
 	allAuditTools := []string{"list_audit"}

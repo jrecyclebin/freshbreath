@@ -1636,6 +1636,12 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/services/{id}/files
+	if len(parts) >= 4 && parts[3] == "files" {
+		s.handleServiceFiles(w, r, serviceID)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Content-Type", "application/json")
@@ -1685,6 +1691,57 @@ func (s *Server) handleServiceTools(w http.ResponseWriter, r *http.Request, svc 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
+}
+
+func (s *Server) handleServiceFiles(w http.ResponseWriter, r *http.Request, serviceID int64) {
+	actor := userFromContext(r.Context())
+
+	switch r.Method {
+	case http.MethodGet:
+		data, filename, err := s.coreDownloadServiceFiles(actor, serviceID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		w.Write(data)
+
+	case http.MethodPost:
+		if err := r.ParseMultipartForm(50 << 20); err != nil {
+			http.Error(w, "file too large (50MB max)", http.StatusBadRequest)
+			return
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "missing 'file' field", http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		data, readErr := io.ReadAll(file)
+		if readErr != nil {
+			http.Error(w, "read failed", http.StatusInternalServerError)
+			return
+		}
+		route, err := s.coreUploadServiceFiles(actor, serviceID, data, header.Filename)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"route": route})
+
+	case http.MethodDelete:
+		if err := s.coreDeleteServiceFiles(actor, serviceID); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // users
