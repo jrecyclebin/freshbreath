@@ -158,7 +158,25 @@ type outboundCred struct {
 //     gate's stored key when the caller cleared it by token instead
 //   - acts_as empty, gate open: leave the caller's Authorization alone
 //   - acts_as empty, gate ssh_key: nothing — a passphrase yields no upstream
+//
+// An mcp service skips all of that: its MCP server decides. The caller's
+// token for that server when the login got one; otherwise, behind an open
+// gate, a caller's own non-Fresh-Breath bearer rides through; otherwise
+// nothing, and the server answers for itself.
 func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claims *freshbreathClaims, presentedKey string) (outboundCred, error) {
+	if svc.Descriptor.Type == "mcp" {
+		if claims != nil {
+			if cred, ok := claims.Creds[mcpProvider(svc.ID)]; ok {
+				return outboundCred{Token: cred.UpstreamToken}, nil
+			}
+			return outboundCred{}, nil
+		}
+		if gateIsOpen(gate) {
+			return outboundCred{Verbatim: true}, nil
+		}
+		return outboundCred{}, nil
+	}
+
 	if svc.ActsAs != nil {
 		rec, err := s.store.GetAuthRecord(*svc.ActsAs)
 		if err != nil {

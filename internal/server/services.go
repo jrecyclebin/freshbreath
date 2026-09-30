@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -59,7 +60,7 @@ func authProvider(rec *db.AuthRecord) string {
 // authInteractive reports whether the record's kind runs a human through an
 // upstream OAuth flow (and therefore yields a sealable upstream credential).
 func authInteractive(rec *db.AuthRecord) bool {
-	return rec.Kind == db.AuthOIDC || rec.Kind == db.AuthOAuth2
+	return rec.Kind == db.AuthOIDC || rec.Kind == db.AuthOAuth2 || rec.Kind == db.AuthMCP
 }
 
 func randomNonce() string {
@@ -252,7 +253,11 @@ func (s *Server) oauth2BeginAuth(ctx context.Context, rec *db.AuthRecord, redire
 		RedirectURL: redirectURI,
 		Scopes:      strings.Fields(rec.Descriptor.Scopes),
 	}
-	authURL = cfg.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
+	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
+	if rec.Descriptor.Resource != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("resource", rec.Descriptor.Resource))
+	}
+	authURL = cfg.AuthCodeURL(state, opts...)
 	return authURL, clientID, clientSecret, tokenURL, state, verifier, nil
 }
 
@@ -380,6 +385,189 @@ func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, p
 		Subject: sub,
 		Raw:     map[string]interface{}{},
 	}, nil
+}
+
+// ── MCP (discovered at login) ───────────────────────────────────────
+//
+// An "mcp" service's outbound auth is whatever its MCP server asks for, so
+// there is no auth record to point at. At login we knock on the server: no
+// 401 means it is open; a 401 starts the MCP authorization discovery —
+// protected resource metadata, then authorization server metadata, then
+// dynamic client registration — and the result is an in-memory record of
+// kind mcp that rides the ordinary login-leg machinery. Its id is the
+// negated service id, so it can never collide with a stored record, and its
+// provider slug keys the upstream token in the Fresh Breath token's Creds.
+
+// mcpOpenRecheck is how long an "open" verdict stands before the next login
+// knocks again. An OAuth verdict carries a registered client and is held
+// until the service URL changes or the process restarts.
+const mcpOpenRecheck = 5 * time.Minute
+
+// mcpAuthEntry is one cached discovery verdict; rec is nil for an open server.
+type mcpAuthEntry struct {
+	url       string
+	rec       *db.AuthRecord
+	checkedAt time.Time
+}
+
+// mcpAuthID is the id of an mcp service's in-memory auth record.
+func mcpAuthID(serviceID int64) int64 { return -serviceID }
+
+// mcpProvider is the Creds key for an mcp service's upstream token.
+func mcpProvider(serviceID int64) string { return fmt.Sprintf("mcp-%d", serviceID) }
+
+// mcpAuthRecord returns the auth an mcp service's server demands, or nil
+// when it lets anyone in.
+func (s *Server) mcpAuthRecord(ctx context.Context, svc *db.Service) (*db.AuthRecord, error) {
+	if v, ok := s.mcpAuth.Load(svc.ID); ok {
+		e := v.(mcpAuthEntry)
+		if e.url == svc.URL && (e.rec != nil || time.Since(e.checkedAt) < mcpOpenRecheck) {
+			return e.rec, nil
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	// Knock with an initialize — the first thing any MCP client sends, so
+	// it is what a server's auth guards.
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"freshbreath","version":"auth-probe"}}}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, svc.URL, strings.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q: %w", svc.Name, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q unreachable: %w", svc.Name, err)
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		s.mcpAuth.Store(svc.ID, mcpAuthEntry{url: svc.URL, checkedAt: time.Now()})
+		return nil, nil
+	}
+
+	challenges, err := oauthex.ParseWWWAuthenticate(resp.Header.Values("WWW-Authenticate"))
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q: bad WWW-Authenticate: %w", svc.Name, err)
+	}
+	var metadataURL, challengeScope string
+	for _, c := range challenges {
+		if u := c.Params["resource_metadata"]; u != "" && metadataURL == "" {
+			metadataURL = u
+		}
+		if c.Scheme == "bearer" && c.Params["scope"] != "" {
+			challengeScope = c.Params["scope"]
+		}
+	}
+
+	// Protected resource metadata names the authorization server: first
+	// wherever the challenge pointed, then the well-known spots at the
+	// endpoint's path and at the root. A server publishing none is the
+	// older shape, where the server's own origin is the authorization server.
+	target, err := url.Parse(svc.URL)
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q: %w", svc.Name, err)
+	}
+	origin := target.Scheme + "://" + target.Host
+	type prmCandidate struct{ metadataURL, resource string }
+	candidates := []prmCandidate{
+		{origin + "/.well-known/oauth-protected-resource/" + strings.TrimLeft(target.Path, "/"), svc.URL},
+		{origin + "/.well-known/oauth-protected-resource", origin},
+	}
+	if metadataURL != "" {
+		candidates = append([]prmCandidate{{metadataURL, svc.URL}}, candidates...)
+	}
+	authServer, resource := origin, svc.URL
+	var scopes []string
+	for _, c := range candidates {
+		prm, err := oauthex.GetProtectedResourceMetadata(ctx, c.metadataURL, c.resource, s.httpClient)
+		if err != nil || prm == nil {
+			continue
+		}
+		if len(prm.AuthorizationServers) == 0 {
+			return nil, fmt.Errorf("MCP server %q publishes resource metadata with no authorization server", svc.Name)
+		}
+		authServer, resource, scopes = prm.AuthorizationServers[0], prm.Resource, prm.ScopesSupported
+		break
+	}
+	if challengeScope != "" {
+		scopes = strings.Fields(challengeScope)
+	}
+
+	asm, err := auth.GetAuthServerMetadata(ctx, authServer, s.httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q: authorization server metadata: %w", svc.Name, err)
+	}
+	if asm == nil {
+		asm = &oauthex.AuthServerMeta{
+			AuthorizationEndpoint: authServer + "/authorize",
+			TokenEndpoint:         authServer + "/token",
+			RegistrationEndpoint:  authServer + "/register",
+		}
+	}
+	if asm.RegistrationEndpoint == "" {
+		return nil, fmt.Errorf("MCP server %q needs OAuth but its authorization server offers no dynamic client registration", svc.Name)
+	}
+	// Ask for a refresh token where the server says it hands them out, so
+	// the session outlives the first upstream access token.
+	if slices.Contains(asm.ScopesSupported, "offline_access") && !slices.Contains(scopes, "offline_access") {
+		scopes = append(scopes, "offline_access")
+	}
+
+	reg, err := oauthex.RegisterClient(ctx, asm.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
+		ClientName:              "freshbreath",
+		RedirectURIs:            []string{s.config.PublicBaseURL + "/service/callback"},
+		GrantTypes:              []string{"authorization_code", "refresh_token"},
+		ResponseTypes:           []string{"code"},
+		Scope:                   strings.Join(scopes, " "),
+		TokenEndpointAuthMethod: "none",
+	}, s.httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("MCP server %q: client registration: %w", svc.Name, err)
+	}
+
+	rec := &db.AuthRecord{
+		ID:   mcpAuthID(svc.ID),
+		Name: svc.Name,
+		Kind: db.AuthMCP,
+		Descriptor: db.AuthDescriptor{
+			AuthorizeURL: asm.AuthorizationEndpoint,
+			TokenURL:     asm.TokenEndpoint,
+			ClientID:     reg.ClientID,
+			ClientSecret: reg.ClientSecret,
+			Scopes:       strings.Join(scopes, " "),
+			Resource:     resource,
+			Provider:     mcpProvider(svc.ID),
+		},
+	}
+	s.mcpAuth.Store(svc.ID, mcpAuthEntry{url: svc.URL, rec: rec, checkedAt: time.Now()})
+	return rec, nil
+}
+
+// mcpExchangeCode trades an MCP server's authorization code for its
+// tokens. MCP servers prove no identity — there is no id_token or userinfo
+// to ask — so only the tokens come back.
+func (s *Server) mcpExchangeCode(ctx context.Context, rec *db.AuthRecord, code, verifier, redirectURI string) (accessToken, refreshToken string, err error) {
+	cfg := &oauth2.Config{
+		ClientID:     rec.Descriptor.ClientID,
+		ClientSecret: rec.Descriptor.ClientSecret,
+		// Registered as a public client ("none"): client_id goes in the
+		// body, never a Basic header.
+		Endpoint:    oauth2.Endpoint{TokenURL: rec.Descriptor.TokenURL, AuthStyle: oauth2.AuthStyleInParams},
+		RedirectURL: redirectURI,
+	}
+	clientCtx := context.WithValue(ctx, oauth2.HTTPClient, s.httpClient)
+	tok, err := cfg.Exchange(clientCtx, code,
+		oauth2.VerifierOption(verifier),
+		oauth2.SetAuthURLParam("resource", rec.Descriptor.Resource),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("token exchange: %w", err)
+	}
+	return tok.AccessToken, tok.RefreshToken, nil
 }
 
 // ── Fresh Breath JWT ────────────────────────────────────────────────

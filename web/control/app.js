@@ -2197,6 +2197,15 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
         onCreate={()=>onCreateGate?.('protected_by')}
       />
 
+      {form.descriptor.type === 'mcp' &&
+        <div className="field">
+          <label>Service acts as</label>
+          <span className="help">
+            The MCP server decides: open servers need nothing, and OAuth servers are signed in to at login.
+            OAuth only works when the service is proxied.
+          </span>
+        </div>
+      }
       {form.descriptor.type !== 'mcp' &&
         <AuthSlot
           label="Service acts as"

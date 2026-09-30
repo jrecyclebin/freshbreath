@@ -23,6 +23,12 @@ const (
 	AuthOIDC      = "oidc"      // discovery-based OpenID Connect provider
 	AuthOAuth2    = "oauth2"    // explicit-endpoint OAuth2 (GitHub-shaped, no id_token)
 	AuthAPIKey    = "api_key"   // stored key, injected under a header
+
+	// AuthMCP is never stored: an "mcp" service's outbound auth is whatever
+	// its MCP server asks for, discovered at login, and the record standing
+	// in for it lives only in memory. Not in authKinds, so nothing can
+	// create one.
+	AuthMCP = "mcp"
 )
 
 var authKinds = map[string]bool{
@@ -74,6 +80,10 @@ type AuthDescriptor struct {
 	ClientID     string `json:"client_id,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
 	Scopes       string `json:"scopes,omitempty"`
+
+	// mcp: the RFC 8707 resource indicator sent with authorization and
+	// token requests.
+	Resource string `json:"resource,omitempty"`
 
 	// Provider is a slug distinct from the record name: it keys ext:
 	// subjects and the sealed-credential map, so two records over the same

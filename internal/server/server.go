@@ -39,6 +39,7 @@ type Server struct {
 	httpClient        *http.Client
 	oidcProviders     map[int64]*oidc.Provider
 	oidcProvidersMu   sync.RWMutex
+	mcpAuth           sync.Map // service id → mcpAuthEntry (discovered MCP server auth)
 	localKey          []byte
 	version           string                 // build version, threaded from cmd via -X main.version
 	commit            string                 // build commit, threaded from cmd via -X main.commit

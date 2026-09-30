@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -147,7 +148,7 @@ func TestDoorOwnsTheGate(t *testing.T) {
 
 	// legsForLogin walks from the app's gate — the service's ProtectedBy is
 	// never consulted for legs at all, only its ActsAs.
-	legs, err := srv.legsForLogin(gate, svc)
+	legs, err := srv.legsForLogin(context.Background(), gate, svc)
 	if err != nil {
 		t.Fatalf("legsForLogin: %v", err)
 	}

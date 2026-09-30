@@ -35,6 +35,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		// A proxied MCP session lives in this header; the browser's MCP
+		// client must be able to read it back.
+		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
 	}
 
 	if r.Method == http.MethodOptions {
@@ -695,6 +698,19 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
 		return
+	}
+
+	// An open gate reads no token, but an mcp service's upstream token
+	// rides in one: a Fresh Breath bearer here must be bound to the
+	// service's MCP login, and a stale one earns a 401 so the caller
+	// refreshes rather than reaching upstream empty-handed.
+	if claims == nil && svc.Descriptor.Type == "mcp" {
+		if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); isFreshbreathToken(raw) {
+			if claims, err = s.verifyAndUnwrapToken(raw, mcpAuthID(svc.ID)); err != nil {
+				http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+		}
 	}
 
 	// claims == nil means the api_key gate was cleared by key, not by a
