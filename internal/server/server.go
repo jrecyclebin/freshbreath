@@ -37,7 +37,7 @@ type Server struct {
 	pending           map[string]*pendingAuth
 	pendingMu         sync.Mutex
 	httpClient        *http.Client
-	oidcProviders     map[int64]*oidc.Provider
+	oidcProviders     map[string]*oidc.Provider // issuer → discovered provider
 	oidcProvidersMu   sync.RWMutex
 	mcpAuth           sync.Map // service id → mcpAuthEntry (discovered MCP server auth)
 	localKey          []byte
@@ -193,7 +193,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		lastSeenAt:     make(map[int64]time.Time),
 		hostedRoutes:   make(map[string]hostedApp),
 		httpClient:     &http.Client{Timeout: 300 * time.Second},
-		oidcProviders:  make(map[int64]*oidc.Provider),
+		oidcProviders:  make(map[string]*oidc.Provider),
 		localKey:       localKey,
 		version:        version,
 		commit:         commit,

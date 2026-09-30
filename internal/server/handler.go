@@ -2182,9 +2182,13 @@ func isFreshbreathToken(raw string) bool {
 	return peek.Iss == "freshbreath"
 }
 
-func (s *Server) getOIDCProvider(ctx context.Context, serviceID int64, issuer string) (*oidc.Provider, error) {
+// getOIDCProvider returns the discovered provider for an issuer. The cache
+// is keyed by issuer rather than record id: a provider is a function of its
+// issuer alone, so an edited issuer or a reused record id can't be served
+// someone else's discovery, and records sharing an issuer share one entry.
+func (s *Server) getOIDCProvider(ctx context.Context, issuer string) (*oidc.Provider, error) {
 	s.oidcProvidersMu.RLock()
-	p, ok := s.oidcProviders[serviceID]
+	p, ok := s.oidcProviders[issuer]
 	s.oidcProvidersMu.RUnlock()
 	if ok {
 		return p, nil
@@ -2196,7 +2200,7 @@ func (s *Server) getOIDCProvider(ctx context.Context, serviceID int64, issuer st
 	}
 
 	s.oidcProvidersMu.Lock()
-	s.oidcProviders[serviceID] = p
+	s.oidcProviders[issuer] = p
 	s.oidcProvidersMu.Unlock()
 	return p, nil
 }

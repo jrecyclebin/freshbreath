@@ -110,7 +110,7 @@ type OIDCClaims struct {
 }
 
 func (s *Server) oidcBeginAuth(ctx context.Context, rec *db.AuthRecord, redirectURI string) (authURL, state, verifier, oidcNonce, tokenURL string, err error) {
-	provider, err := s.getOIDCProvider(ctx, rec.ID, rec.Descriptor.Issuer)
+	provider, err := s.getOIDCProvider(ctx, rec.Descriptor.Issuer)
 	if err != nil {
 		return "", "", "", "", "", fmt.Errorf("OIDC discovery for %s: %w", rec.Descriptor.Issuer, err)
 	}
@@ -139,7 +139,7 @@ func (s *Server) oidcBeginAuth(ctx context.Context, rec *db.AuthRecord, redirect
 // verifies the id_token. Providers that complete OAuth without an id_token
 // fall back to userinfo resolution.
 func (s *Server) oidcExchangeCode(ctx context.Context, rec *db.AuthRecord, code, verifier, oidcNonce, redirectURI string) (*OIDCClaims, string, string, error) {
-	provider, err := s.getOIDCProvider(ctx, rec.ID, rec.Descriptor.Issuer)
+	provider, err := s.getOIDCProvider(ctx, rec.Descriptor.Issuer)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("OIDC discovery: %w", err)
 	}

@@ -56,7 +56,7 @@ func newTestServer(t *testing.T) *Server {
 		store:          store,
 		pending:        make(map[string]*pendingAuth),
 		httpClient:     &http.Client{},
-		oidcProviders:  make(map[int64]*oidc.Provider),
+		oidcProviders:  make(map[string]*oidc.Provider),
 		hostedRoutes:   make(map[string]hostedApp),
 		actTickets:     actTickets{tix: make(map[string]actTicketPayload)},
 		lastSeenAt:     make(map[int64]time.Time),

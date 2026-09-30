@@ -538,3 +538,39 @@ func TestMCPServiceLegFollowsGate(t *testing.T) {
 		t.Errorf("acts_as = %d, want nil for an mcp service", *svc.ActsAs)
 	}
 }
+
+// ── OIDC discovery cache ────────────────────────────────────────────
+
+// An edited issuer is discovered afresh: the cache is keyed by issuer, so
+// the record's old provider can't answer for its new one.
+func TestOIDCProviderFollowsIssuerEdit(t *testing.T) {
+	newIssuer := func() *httptest.Server {
+		var s *httptest.Server
+		s = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"issuer": s.URL, "authorization_endpoint": s.URL + "/authorize",
+				"token_endpoint": s.URL + "/token", "jwks_uri": s.URL + "/jwks",
+			})
+		}))
+		t.Cleanup(s.Close)
+		return s
+	}
+	first, second := newIssuer(), newIssuer()
+
+	srv := newTestServer(t)
+	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: first.URL, ClientID: "c"})
+	authURL, _, _, _, _, err := srv.oidcBeginAuth(context.Background(), rec, "http://localhost:9009/service/callback")
+	if err != nil || !strings.HasPrefix(authURL, first.URL+"/authorize") {
+		t.Fatalf("first auth url = %q, err = %v", authURL, err)
+	}
+
+	if err := srv.store.UpdateAuthRecord(rec.ID, rec.Name, rec.Kind, db.AuthDescriptor{Issuer: second.URL, ClientID: "c"}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	rec, _ = srv.store.GetAuthRecord(rec.ID)
+	authURL, _, _, _, _, err = srv.oidcBeginAuth(context.Background(), rec, "http://localhost:9009/service/callback")
+	if err != nil || !strings.HasPrefix(authURL, second.URL+"/authorize") {
+		t.Fatalf("after edit auth url = %q, err = %v; want the new issuer", authURL, err)
+	}
+}
