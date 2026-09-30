@@ -373,9 +373,10 @@ function toolOutput(result) {
  *
  * @param {string} [serviceURL] — a registered service URL, or omitted for
  *                                the app's own gate
+ * @param {boolean} [initiate] — initiate login if we're not logged in
  * @returns {Promise<ServiceProxy|AuthSession|null>}
  */
-export async function login(serviceURL) {
+export async function login(serviceURL, initiate = true) {
   const door = await resolveDoor(serviceURL);
   const proxyFor = (service, session) =>
     serviceURL ? new ServiceProxy({ serviceURL, service, session }) : session;
@@ -384,15 +385,17 @@ export async function login(serviceURL) {
 
   const legIDs = (door.legs || []).map(l => l.auth_id);
   let session = await candidateSession(legIDs);
+  let service = door.service;
+  if (initiate) {
+    const state = uuidv4();
+    const d = await beginLogin(serviceURL, state, session);
+    service = d.service ?? door.service;
 
-  const state = uuidv4();
-  const d = await beginLogin(serviceURL, state, session);
-  const service = d.service ?? door.service;
+    if (d.type === "anonymous") return proxyFor(service, null);
+    if (d.type === "ok") return proxyFor(service, session);
 
-  if (d.type === "anonymous") return proxyFor(service, null);
-  if (d.type === "ok") return proxyFor(service, session);
-
-  session = AuthSession.for(writeEntry(await popupLogin(d.url, state)));
+    session = AuthSession.for(writeEntry(await popupLogin(d.url, state)));
+  }
   return proxyFor(service, session);
 }
 
