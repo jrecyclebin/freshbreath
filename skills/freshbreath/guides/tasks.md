@@ -60,8 +60,30 @@ bash) to parse them.
 The example also illustrates receiving JSON back from a script. The `callTool`
 method will automatically parse the JSON output and return it as an object. If
 the script does not return valid JSON, then `callTool` will just return the raw
-string output.
+string output. A script that exits non-zero makes `callTool` throw, with the
+script's output and stderr in the error message.
 
 Tools can also be listed using the `listTools` method of the task service. This
 will return an array of objects, each containing the name and description of a
 tool.
+
+## As an MCP
+
+A task service is also an MCP server, mounted at `/mcp/{name}` like a virtual
+service and behind the same gate. Point Claude Desktop (or any MCP client) at
+it and each task is a tool.
+
+Scripts don't declare their arguments, so the tool's argument list is read off
+the script: every `$TASK_NAME`, `${TASK_NAME}` or `$env:TASK_NAME` it mentions
+becomes a `name` argument, typed as a string and optional. (`$TASK_TOKEN` is
+left out — the server fills that in.) Mention every argument you expect in the
+script itself, even ones you only pass along, or an MCP client won't know to
+send it.
+
+The result is the script's stdout, and a non-zero exit is a tool error
+carrying stderr.
+
+There's no file upload over MCP: tool arguments are plain JSON, with no way
+to attach a file. An argument that's a file when an app calls the task is just
+a string when an MCP client does — a path on the server, say, or whatever the
+client sends.

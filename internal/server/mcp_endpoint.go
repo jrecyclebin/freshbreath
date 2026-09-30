@@ -19,34 +19,46 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 )
 
-// virtualMCPEntry holds the MCP server for a virtual service. The gate is
+// mcpMountEntry holds the MCP server for a virtual or task service. The gate is
 // NOT baked in: it resolves per request, so a changed protected_by (or a
 // changed admin auth record, which empty slots inherit) takes effect
 // without a remount.
-type virtualMCPEntry struct {
+type mcpMountEntry struct {
 	svc     *db.Service
 	mcps    *mcp.Server
 	handler http.Handler
 }
 
-// virtualMCPRegistry manages MCP server instances for virtual services.
+// mcpMountRegistry manages MCP server instances for virtual and task
+// services, each mounted at /mcp/<slug>.
 // It supports dynamic registration — services can be added/updated at runtime.
-type virtualMCPRegistry struct {
+type mcpMountRegistry struct {
 	mu      sync.RWMutex
-	entries map[string]*virtualMCPEntry // slug → entry
+	entries map[string]*mcpMountEntry // slug → entry
 }
 
-func newVirtualMCPRegistry() *virtualMCPRegistry {
-	return &virtualMCPRegistry{entries: make(map[string]*virtualMCPEntry)}
+func newMCPMountRegistry() *mcpMountRegistry {
+	return &mcpMountRegistry{entries: make(map[string]*mcpMountEntry)}
 }
 
-// add builds and registers an MCP server for the given virtual service.
-func (r *virtualMCPRegistry) add(s *Server, svc *db.Service) {
-	slug := strings.TrimPrefix(svc.URL, "/mcp/")
-
-	mcps, err := s.newVirtualMCPServer(svc)
+// add builds and registers an MCP server for a virtual or task service.
+// Any other service has no mount of its own and is skipped.
+func (r *mcpMountRegistry) add(s *Server, svc *db.Service) {
+	slug := mcpSlug(svc.URL)
+	var mcps *mcp.Server
+	var err error
+	switch {
+	case slug == "":
+		return
+	case svc.Descriptor.Type == "virtual":
+		mcps, err = s.newVirtualMCPServer(svc)
+	case svc.Descriptor.Type == "tasks":
+		mcps, err = s.newTaskMCPServer(svc)
+	default:
+		return
+	}
 	if err != nil {
-		fmt.Printf("warning: virtual MCP server for %s: %v\n", slug, err)
+		fmt.Printf("warning: %s MCP server for %s: %v\n", svc.Descriptor.Type, slug, err)
 		return
 	}
 
@@ -64,7 +76,7 @@ func (r *virtualMCPRegistry) add(s *Server, svc *db.Service) {
 	})
 
 	r.mu.Lock()
-	r.entries[slug] = &virtualMCPEntry{
+	r.entries[slug] = &mcpMountEntry{
 		svc:     svc,
 		mcps:    mcps,
 		handler: s.requireMCPGate(svc, handler),
@@ -73,14 +85,14 @@ func (r *virtualMCPRegistry) add(s *Server, svc *db.Service) {
 }
 
 // get returns the entry for a slug, or nil.
-func (r *virtualMCPRegistry) get(slug string) *virtualMCPEntry {
+func (r *mcpMountRegistry) get(slug string) *mcpMountEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.entries[slug]
 }
 
 // remove deletes the entry for a slug.
-func (r *virtualMCPRegistry) remove(slug string) {
+func (r *mcpMountRegistry) remove(slug string) {
 	r.mu.Lock()
 	delete(r.entries, slug)
 	r.mu.Unlock()
@@ -92,7 +104,7 @@ func (r *virtualMCPRegistry) remove(slug string) {
 // open. This inverts the old behavior where a service with no auth fields
 // mounted with no check at all.
 func (s *Server) requireMCPGate(svc *db.Service, next http.Handler) http.Handler {
-	slug := strings.TrimPrefix(svc.URL, "/mcp/")
+	slug := mcpSlug(svc.URL)
 	prmURL := s.config.PublicBaseURL + "/.well-known/oauth-protected-resource/mcp/" + slug
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gate, err := s.resolveServiceGate(svc)
@@ -146,46 +158,11 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 			tool.Meta = mcp.Meta{"ui": map[string]any{"visibility": []string{"app"}}}
 		}
 		capturedName := vt.Name
-		svcSlug := strings.TrimPrefix(svc.URL, "/mcp/")
+		svcSlug := mcpSlug(svc.URL)
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			// Re-resolve the gate and outbound credential per call: the
-			// middleware verified admission, but $token and the identity
-			// built-ins need the claims and the resolver's verdict here.
-			gate, err := s.resolveServiceGate(svc)
-			if err != nil {
-				return mcpAuthError("gate resolution: %v", err), nil
-			}
-
-			raw := ""
-			var header http.Header
-			if req.Extra != nil && req.Extra.Header != nil {
-				header = req.Extra.Header
-				if ah := header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
-					raw = strings.TrimPrefix(ah, "Bearer ")
-				}
-			}
-
-			var claims *freshbreathClaims
-			var presentedKey string
-			if !gateIsOpen(gate) {
-				claims, _, err = s.verifyGateHeader(gate, header)
-				if err != nil {
-					return mcpAuthError("auth error: %v", err), nil
-				}
-				if gate.Kind == db.AuthAPIKey && header != nil {
-					presentedKey = headerGateKey(gate, header)
-				}
-			}
-
-			cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
-			if err != nil {
-				return mcpAuthError("%v", err), nil
-			}
-			token := cred.Token
-			if cred.Verbatim && !isFreshbreathToken(raw) {
-				// An open gate passes a caller's own upstream bearer
-				// through verbatim; a Fresh Breath token is not one.
-				token = raw
+			token, claims, denied := s.mcpCallerCred(svc, req)
+			if denied != nil {
+				return denied, nil
 			}
 
 			// Parse arguments from raw JSON.
@@ -228,6 +205,99 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 	}
 
 	return mcps, nil
+}
+
+// newTaskMCPServer creates an MCP server exposing a task service's tasks
+// as tools. A task declares no arguments, so each tool's schema lists the
+// TASK_<NAME> variables its script reads, all as strings (see
+// formats.Task.Args). A file argument is a path on this machine over MCP —
+// JSON has no way to carry a file.
+func (s *Server) newTaskMCPServer(svc *db.Service) (*mcp.Server, error) {
+	tasks, err := s.loadTasksForService(svc)
+	if err != nil {
+		return nil, err
+	}
+	mcps := mcp.NewServer(&mcp.Implementation{
+		Name:    fmt.Sprintf("frbr-%s", slugify(svc.Name)),
+		Version: "1.0.0",
+	}, &mcp.ServerOptions{
+		Instructions: fmt.Sprintf("Task service: %s", svc.Name),
+	})
+
+	for i := range tasks {
+		task := &tasks[i]
+		properties := map[string]interface{}{}
+		for _, arg := range task.Args() {
+			properties[arg] = map[string]interface{}{"type": "string"}
+		}
+		tool := &mcp.Tool{
+			Name:        task.Name,
+			Description: task.Desc,
+			InputSchema: map[string]interface{}{"type": "object", "properties": properties},
+		}
+		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			token, _, denied := s.mcpCallerCred(svc, req)
+			if denied != nil {
+				return denied, nil
+			}
+			var args map[string]interface{}
+			if len(req.Params.Arguments) > 0 {
+				if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+					return mcpAuthError("arguments must be an object: %v", err), nil
+				}
+			}
+			result, err := runTask(ctx, task, args, nil, token)
+			if err != nil {
+				return mcpAuthError("%v", err), nil
+			}
+			return result, nil
+		})
+	}
+	return mcps, nil
+}
+
+// mcpCallerCred re-resolves, per tool call, the caller's claims and the
+// credential that goes upstream for a mounted service. The gate middleware
+// already admitted the request; the tools need the claims (identity
+// built-ins) and the resolver's verdict ($token, TASK_TOKEN). A non-nil
+// denied is the error result to hand back instead.
+func (s *Server) mcpCallerCred(svc *db.Service, req *mcp.CallToolRequest) (token string, claims *freshbreathClaims, denied *mcp.CallToolResult) {
+	gate, err := s.resolveServiceGate(svc)
+	if err != nil {
+		return "", nil, mcpAuthError("gate resolution: %v", err)
+	}
+
+	raw := ""
+	var header http.Header
+	if req.Extra != nil && req.Extra.Header != nil {
+		header = req.Extra.Header
+		if ah := header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
+			raw = strings.TrimPrefix(ah, "Bearer ")
+		}
+	}
+
+	var presentedKey string
+	if !gateIsOpen(gate) {
+		claims, _, err = s.verifyGateHeader(gate, header)
+		if err != nil {
+			return "", nil, mcpAuthError("auth error: %v", err)
+		}
+		if gate.Kind == db.AuthAPIKey && header != nil {
+			presentedKey = headerGateKey(gate, header)
+		}
+	}
+
+	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
+	if err != nil {
+		return "", nil, mcpAuthError("%v", err)
+	}
+	token = cred.Token
+	if cred.Verbatim && !isFreshbreathToken(raw) {
+		// An open gate passes a caller's own upstream bearer through
+		// verbatim; a Fresh Breath token is not one.
+		token = raw
+	}
+	return token, claims, nil
 }
 
 func mcpAuthError(format string, a ...interface{}) *mcp.CallToolResult {
@@ -315,7 +385,7 @@ func hasSQLSteps(vt formats.VirtualTool) bool {
 // The authorization_servers field points to Freshbreath itself, since Freshbreath
 // acts as the OAuth authorization server for MCP clients.
 func (s *Server) virtualPRM(svc *db.Service) *oauthex.ProtectedResourceMetadata {
-	slug := strings.TrimPrefix(svc.URL, "/mcp/")
+	slug := mcpSlug(svc.URL)
 	return &oauthex.ProtectedResourceMetadata{
 		Resource:               s.config.PublicBaseURL + "/mcp/" + slug,
 		AuthorizationServers:   []string{s.config.PublicBaseURL},
@@ -331,7 +401,7 @@ func (s *Server) virtualPRM(svc *db.Service) *oauthex.ProtectedResourceMetadata 
 // It looks up the virtual service by slug and dispatches to its MCP server.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("name")
-	entry := s.virtualMCPs.get(slug)
+	entry := s.mcpMounts.get(slug)
 	if entry == nil {
 		http.Error(w, "virtual service not found", http.StatusNotFound)
 		return
@@ -344,7 +414,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 // clients at Fresh Breath's own authorization server.
 func (s *Server) handleMCPPRM(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("name")
-	entry := s.virtualMCPs.get(slug)
+	entry := s.mcpMounts.get(slug)
 	if entry == nil {
 		http.Error(w, "virtual service not found", http.StatusNotFound)
 		return

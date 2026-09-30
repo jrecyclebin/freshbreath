@@ -306,9 +306,9 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	} else {
-		svc, err = os.server.store.GetServiceByURL(slug)
-		if err != nil || svc.Descriptor.Type != "virtual" {
-			oauthWriteError(w, http.StatusNotFound, "invalid_scope", "virtual service not found for resource")
+		svc, err = os.server.serviceBySlug(strings.TrimPrefix(slug, "/mcp/"))
+		if err != nil {
+			oauthWriteError(w, http.StatusNotFound, "invalid_scope", "MCP service not found for resource")
 			return
 		}
 		serviceID = svc.ID

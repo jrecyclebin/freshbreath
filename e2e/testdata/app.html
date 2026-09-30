@@ -38,12 +38,18 @@
         return { tools, search };
       },
 
-      // A task service.
+      // A task service: one script that answers, one that fails.
       async tasks() {
         const tasks = await login(params.get("service"));
         const tools = (await tasks.listTools()).map(t => t.name).sort();
         const echo = await tasks.callTool("echo", { message: "hello from the app" });
-        return { tools, echo };
+        let failure = null;
+        try {
+          await tasks.callTool("fail", { reason: "on purpose" });
+        } catch (e) {
+          failure = e.message;
+        }
+        return { tools, echo, failure };
       },
     };
 

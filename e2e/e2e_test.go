@@ -5,7 +5,10 @@ package e2e
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -157,7 +160,8 @@ func TestNotionMCPFromApp(t *testing.T) {
 	}
 }
 
-// An open app runs a task service's script and gets its output back.
+// An open app runs a task service's scripts: callTool hands back a
+// script's JSON output parsed, and throws with stderr when one fails.
 func TestTaskServiceFromApp(t *testing.T) {
 	fb := startFreshbreath(t)
 	open := fb.builtinAuth(db.AuthAnonymous)
@@ -168,26 +172,80 @@ func TestTaskServiceFromApp(t *testing.T) {
 	browser := newBrowser(t)
 	raw := runScenario(t, browser, fb.URL+a.Route, "tasks", map[string]string{"service": svc.URL})
 
-	// callTool on a task hands the app the server's MCP-shaped envelope as
-	// is: the script's stdout sits in content[0].text, unparsed. (The tasks
-	// guide promises the parsed JSON instead — frbr.js doesn't do that yet.)
 	var got struct {
-		Tools []string `json:"tools"`
-		Echo  struct {
-			Content []struct{ Text string } `json:"content"`
-			IsError bool                    `json:"isError"`
-		} `json:"echo"`
+		Tools   []string          `json:"tools"`
+		Echo    map[string]string `json:"echo"`
+		Failure string            `json:"failure"`
 	}
 	json.Unmarshal(raw, &got)
-	if !reflect.DeepEqual(got.Tools, []string{"echo"}) {
-		t.Errorf("tools = %v, want [echo]", got.Tools)
+	if !reflect.DeepEqual(got.Tools, taskTools) {
+		t.Errorf("tools = %v, want %v", got.Tools, taskTools)
 	}
-	if got.Echo.IsError || len(got.Echo.Content) != 1 {
-		t.Fatalf("echo = %+v", got.Echo)
+	if got.Echo["echo"] != "hello from the app" || got.Echo["task"] != "echo" {
+		t.Errorf("echo = %v", got.Echo)
 	}
+	if !strings.Contains(got.Failure, "it broke: on purpose") {
+		t.Errorf("fail threw %q, want the script's stderr", got.Failure)
+	}
+}
+
+var taskTools = []string{"echo", "fail", "token-kind"}
+
+// An MCP client connects to a task service behind the GitHub login. Each
+// task's arguments show up as strings in its schema, the script gets the
+// caller's GitHub token as TASK_TOKEN, and a failing script is a tool
+// error carrying its stderr.
+func TestTaskServiceOverMCP(t *testing.T) {
+	gh := newFakeGitHub(t)
+	fb := startFreshbreath(t)
+	gate := githubAuth(fb, gh)
+	svc := fb.createService("e2e-tasks", "", db.ServiceDescriptor{Type: "tasks"}, &gate)
+	fb.uploadServiceFile(svc, "tasks.txt", testdata(t, "tasks.txt", nil))
+
+	browser := newBrowser(t)
+	session := connectMCP(t, browser, fb.URL+"/mcp/e2e-tasks")
+
+	tools, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	schemas := map[string]string{}
+	for _, tool := range tools.Tools {
+		b, _ := json.Marshal(tool.InputSchema.(map[string]any)["properties"])
+		schemas[tool.Name] = string(b)
+	}
+	want := map[string]string{
+		"echo":       `{"message":{"type":"string"}}`,
+		"fail":       `{"reason":{"type":"string"}}`,
+		"token-kind": `{}`,
+	}
+	if !reflect.DeepEqual(schemas, want) {
+		t.Errorf("tool properties = %v, want %v", schemas, want)
+	}
+
 	var echo map[string]string
-	json.Unmarshal([]byte(got.Echo.Content[0].Text), &echo)
-	if echo["echo"] != "hello from the app" || echo["task"] != "echo" {
-		t.Errorf("echo output = %q", got.Echo.Content[0].Text)
+	callTool(t, session, "echo", map[string]any{"message": "hello over MCP"}, &echo)
+	if echo["echo"] != "hello over MCP" || echo["task"] != "echo" {
+		t.Errorf("echo = %v", echo)
+	}
+	var tokenKind map[string]string
+	callTool(t, session, "token-kind", nil, &tokenKind)
+	if tokenKind["token_kind"] != "gho_access" {
+		t.Errorf("token-kind = %v, want the caller's GitHub token (gho_access)", tokenKind)
+	}
+
+	res, err := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "fail", Arguments: map[string]any{"reason": "on purpose"}})
+	if err != nil {
+		t.Fatalf("call fail: %v", err)
+	}
+	var text strings.Builder
+	for _, c := range res.Content {
+		text.WriteString(c.(*mcp.TextContent).Text)
+	}
+	if !res.IsError || !strings.Contains(text.String(), "it broke: on purpose") {
+		t.Errorf("fail = %+v (%q), want a tool error with the script's stderr", res, text.String())
+	}
+	if gh.Logins() != 1 {
+		t.Errorf("GitHub logins = %d, want 1", gh.Logins())
 	}
 }

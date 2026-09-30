@@ -137,7 +137,7 @@ func mountVirtual(t *testing.T, srv *Server, svc *db.Service) {
 	if err := os.WriteFile(filepath.Join(dataDir, "virtual", svc.Name+".txt"), []byte(toolFile), 0o644); err != nil {
 		t.Fatalf("write tool file: %v", err)
 	}
-	srv.virtualMCPs.add(srv, svc)
+	srv.mcpMounts.add(srv, svc)
 }
 
 // A mount's gate is its protected_by record: no bearer 401s with a PRM

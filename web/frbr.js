@@ -343,6 +343,21 @@ function popupLogin(url, state) {
   });
 }
 
+// What a tool call returns to the app: the result's text, parsed as JSON
+// when it is JSON. An error result throws, carrying the text.
+function toolOutput(result) {
+  const text = result.content
+    .filter(c => c.type === "text")
+    .map(c => c.text)
+    .join("\n");
+  if (result.isError) throw new Error(`Tool error: ${text}`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 /**
  * Log in to a service and get back a proxy for it.
  *
@@ -543,19 +558,12 @@ export class ServiceProxy {
   }
 
   async callTool(name, args = {}) {
-    const task = this.#serviceSlug()
-    if (task) return await this.#callTask(name, args);
-    const result = await this.#withReconnect(() => this.#client.callTool({ name, arguments: args }));
-    const text = result.content
-        .filter(c => c.type === "text")
-        .map(c => c.text)
-        .join("\n");
-    if (result.isError) throw new Error(`Tool error: ${text}`);
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
+    if (this.#serviceSlug()) {
+      const result = await this.#callTask(name, args);
+      // A task answers in MCP's result shape; a virtual tool with its result.
+      return this.#serviceURL.startsWith("tasks://") ? toolOutput(result) : result;
     }
+    return toolOutput(await this.#withReconnect(() => this.#client.callTool({ name, arguments: args })));
   }
 
   /**

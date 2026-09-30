@@ -25,6 +25,7 @@ import (
 	"poggers.institute/freshbreath/internal/sshkit"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -224,19 +225,17 @@ func (s *Server) SetupRoutes() {
 	s.rebuildHostedRoutes()
 
 	// Mount MCP endpoints for existing virtual services.
-	s.mountAllVirtualMCP()
+	s.mountAllMCP()
 }
 
-// mountAllVirtualMCP discovers all virtual services and registers their MCP entries.
-func (s *Server) mountAllVirtualMCP() {
+// mountAllMCP mounts every virtual and task service at /mcp/<slug>.
+func (s *Server) mountAllMCP() {
 	services, err := s.store.ListServices()
 	if err != nil {
 		return
 	}
 	for _, svc := range services {
-		if svc.Descriptor.Type == "virtual" && strings.HasPrefix(svc.URL, "/mcp/") {
-			s.virtualMCPs.add(s, svc)
-		}
+		s.mcpMounts.add(s, svc)
 	}
 }
 
@@ -760,6 +759,17 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 // ── Tasks service ───────────────────────────────────────────────────────
 
 // loadTasksForService reads and parses the tasks file for a service.
+// serviceBySlug finds the task or virtual service answering at
+// /service/call/<slug> and /mcp/<slug>: tasks://<slug> first, then
+// /mcp/<slug>.
+func (s *Server) serviceBySlug(slug string) (*db.Service, error) {
+	svc, err := s.store.GetServiceByURL("tasks://" + slug)
+	if err != nil {
+		svc, err = s.store.GetServiceByURL("/mcp/" + slug)
+	}
+	return svc, err
+}
+
 func (s *Server) loadTasksForService(svc *db.Service) ([]formats.Task, error) {
 	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
 	data, err := os.ReadFile(path)
@@ -823,14 +833,10 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 
 	slug := r.PathValue("name")
 
-	// Try tasks:// first, then /mcp/ for virtual services.
-	svc, err := s.store.GetServiceByURL("tasks://" + slug)
+	svc, err := s.serviceBySlug(slug)
 	if err != nil {
-		svc, err = s.store.GetServiceByURL("/mcp/" + slug)
-		if err != nil {
-			http.Error(w, "Service not found", http.StatusNotFound)
-			return
-		}
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
 	}
 
 	app, err := s.store.GetApp(nonce)
@@ -1005,11 +1011,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 	// ── Parse request: JSON or multipart (for file uploads) ──────────────
 	var taskName string
 	var args map[string]interface{}
-	type fileArg struct {
-		name string // original filename (e.g. "test.png")
-		data []byte
-	}
-	var fileArgs map[string]fileArg // arg name → file arg
+	var fileArgs map[string]taskFile // arg name → file arg
 
 	contentType := r.Header.Get("Content-Type")
 	if strings.HasPrefix(contentType, "multipart/form-data") {
@@ -1019,7 +1021,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 			return
 		}
 		args = make(map[string]interface{})
-		fileArgs = make(map[string]fileArg)
+		fileArgs = make(map[string]taskFile)
 		for {
 			part, err := reader.NextPart()
 			if err == io.EOF {
@@ -1035,7 +1037,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 				taskName = strings.TrimSpace(string(b))
 			} else if part.FileName() != "" {
 				b, _ := io.ReadAll(part)
-				fileArgs[name] = fileArg{name: part.FileName(), data: b}
+				fileArgs[name] = taskFile{name: part.FileName(), data: b}
 			} else {
 				b, _ := io.ReadAll(part)
 				// Try to parse as JSON value; fall back to string.
@@ -1079,72 +1081,76 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 		return
 	}
 
-	// ── Prepare env vars ────────────────────────────────────────────────
-	env := os.Environ()
-	env = append(env, "TASK="+taskName)
-	// The resolved outbound credential reaches the shell as TASK_TOKEN —
-	// how a scheduled task acts as a stored api_key record with nobody
-	// present (design/decoupled-auth.md, stated limit).
-	if token != "" {
-		env = append(env, "TASK_TOKEN="+token)
+	result, err := runTask(r.Context(), task, args, fileArgs, token)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	if args != nil {
-		for k, v := range args {
-			env = append(env, "TASK_"+strings.ToUpper(k)+"="+taskArgValue(v))
-		}
-	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
 
-	// ── Write file args to temp dir ─────────────────────────────────────
-	var tmpDir string
-	if len(fileArgs) > 0 {
-		tmpDir, err = os.MkdirTemp("", "fbr-task-*")
+// taskFile is a file argument to a task: written to a temp dir under its
+// original name, and the script gets the path.
+type taskFile struct {
+	name string // original filename (e.g. "test.png")
+	data []byte
+}
+
+// runTask runs one task's script and returns the outcome as an MCP tool
+// result — the shape /service/call and the /mcp/ mount both answer with.
+// Stdout is the result text; a failed script is an error result, with
+// stderr alongside.
+//
+// Arguments reach the script as TASK_<NAME> environment variables, file
+// arguments as TASK_<NAME>=<path>. TASK names the task, and TASK_TOKEN
+// carries the resolved outbound credential — how a scheduled task acts as
+// a stored api_key record with nobody present (design/decoupled-auth.md,
+// stated limit). TASK_TOKEN goes in last so no argument can stand in for
+// it.
+func runTask(ctx context.Context, task *formats.Task, args map[string]interface{}, files map[string]taskFile, token string) (*mcp.CallToolResult, error) {
+	env := os.Environ()
+	env = append(env, "TASK="+task.Name)
+	for k, v := range args {
+		env = append(env, "TASK_"+strings.ToUpper(k)+"="+taskArgValue(v))
+	}
+	if len(files) > 0 {
+		tmpDir, err := os.MkdirTemp("", "fbr-task-*")
 		if err != nil {
-			http.Error(w, "Failed to create temp dir", http.StatusInternalServerError)
-			return
+			return nil, fmt.Errorf("failed to create temp dir")
 		}
 		defer os.RemoveAll(tmpDir)
-
-		for key, fa := range fileArgs {
-			fp := filepath.Join(tmpDir, fa.name)
-			if err := os.WriteFile(fp, fa.data, 0600); err != nil {
-				http.Error(w, fmt.Sprintf("Failed to write file arg %q", key), http.StatusInternalServerError)
-				return
+		for key, f := range files {
+			fp := filepath.Join(tmpDir, f.name)
+			if err := os.WriteFile(fp, f.data, 0600); err != nil {
+				return nil, fmt.Errorf("failed to write file arg %q", key)
 			}
 			env = append(env, "TASK_"+strings.ToUpper(key)+"="+fp)
 		}
 	}
+	if token != "" {
+		env = append(env, "TASK_TOKEN="+token)
+	}
 
-	// ── Execute ─────────────────────────────────────────────────────────
 	shell, flag := "sh", "-c"
 	if runtime.GOOS == "windows" {
 		shell, flag = "powershell", "-Command"
 	}
-	cmd := exec.CommandContext(r.Context(), shell, flag, task.Script)
+	cmd := exec.CommandContext(ctx, shell, flag, task.Script)
 	cmd.Env = env
-
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
 	execErr := cmd.Run()
 
-	// ── Build MCP-format response ───────────────────────────────────────
-	result := map[string]interface{}{
-		"content": []map[string]interface{}{{
-			"type": "text",
-			"text": stdout.String(),
-		}},
-		"isError": execErr != nil,
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: stdout.String()}},
+		IsError: execErr != nil,
 	}
 	if execErr != nil && stderr.Len() > 0 {
-		result["content"] = append(
-			result["content"].([]map[string]interface{}),
-			map[string]interface{}{"type": "text", "text": stderr.String()},
-		)
+		result.Content = append(result.Content, &mcp.TextContent{Text: stderr.String()})
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	return result, nil
 }
 
 // taskArgValue formats a task argument for injection into a shell environment.

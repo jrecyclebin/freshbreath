@@ -1,6 +1,10 @@
 package formats
 
-import "strings"
+import (
+	"regexp"
+	"slices"
+	"strings"
+)
 
 // Task represents a single named script parsed from a tasks file.
 type Task struct {
@@ -68,4 +72,24 @@ func ParseTasksFile(data []byte) []Task {
 		tasks = append(tasks, *cur)
 	}
 	return tasks
+}
+
+// taskArgRef matches a script's reference to a TASK_<NAME> environment
+// variable: $TASK_X and ${TASK_X} in sh, $env:TASK_X in PowerShell.
+var taskArgRef = regexp.MustCompile(`\$(?:\{|(?i:env):)?TASK_([A-Za-z0-9_]+)`)
+
+// Args lists the arguments a task's script reads, lowercased and sorted:
+// each $TASK_<NAME> it references, less TASK_TOKEN, which the server
+// supplies. Scripts don't declare their arguments, so this is the only
+// signature an MCP client gets to see.
+func (t Task) Args() []string {
+	var args []string
+	for _, m := range taskArgRef.FindAllStringSubmatch(t.Script, -1) {
+		name := strings.ToLower(m[1])
+		if name != "token" && !slices.Contains(args, name) {
+			args = append(args, name)
+		}
+	}
+	slices.Sort(args)
+	return args
 }

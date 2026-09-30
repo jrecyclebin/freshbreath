@@ -186,14 +186,14 @@ func TestServiceFileVirtualReload(t *testing.T) {
 	}
 
 	slug := strings.TrimPrefix(svc.URL, "/mcp/")
-	if srv.virtualMCPs.get(slug) == nil {
+	if srv.mcpMounts.get(slug) == nil {
 		t.Errorf("virtual MCP registry should contain %q after upload", slug)
 	}
 
 	if err := srv.coreDeleteServiceFiles(admin, svc.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if srv.virtualMCPs.get(slug) != nil {
+	if srv.mcpMounts.get(slug) != nil {
 		t.Errorf("virtual MCP registry should not contain %q after delete", slug)
 	}
 }

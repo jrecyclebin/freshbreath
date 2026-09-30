@@ -18,9 +18,18 @@ import (
 	"poggers.institute/freshbreath/internal/sshkit"
 )
 
-// trimMCPSlug returns the virtual-service slug from a /mcp/<slug> URL.
-func trimMCPSlug(url string) string {
-	return strings.TrimPrefix(url, "/mcp/")
+// mcpSlug returns the slug a service answers MCP at (/mcp/<slug>), or ""
+// for a URL with no MCP mount of its own. Virtual services are registered
+// as /mcp/<slug>, task services as tasks://<slug>; the two share the /mcp/
+// namespace, as they already share /service/call/<slug>.
+func mcpSlug(url string) string {
+	if slug, ok := strings.CutPrefix(url, "/mcp/"); ok {
+		return slug
+	}
+	if slug, ok := strings.CutPrefix(url, "tasks://"); ok {
+		return slug
+	}
+	return ""
 }
 
 // ── Admin Core ──────────────────────────────────────────────────────
@@ -178,15 +187,14 @@ func defaultServiceURL(url, name string, d db.ServiceDescriptor) string {
 	return ""
 }
 
-// syncVirtualMCP keeps the in-memory virtual MCP registry in step with a
-// service write: virtual services are (re)registered; anything else has its
-// old /mcp/ slug removed.
-func (s *Server) syncVirtualMCP(svc *db.Service, oldURL string) {
-	if svc.Descriptor.Type == "virtual" {
-		s.virtualMCPs.add(s, svc)
-	} else if oldURL != "" {
-		s.virtualMCPs.remove(trimMCPSlug(oldURL))
+// syncMCPMount keeps the in-memory MCP mounts in step with a service
+// write: a renamed service leaves its old /mcp/ slug behind, and virtual
+// and task services are (re)mounted at their current one.
+func (s *Server) syncMCPMount(svc *db.Service, oldURL string) {
+	if oldURL != "" && oldURL != svc.URL {
+		s.mcpMounts.remove(mcpSlug(oldURL))
 	}
+	s.mcpMounts.add(s, svc)
 }
 
 // publicSSHInfo returns the non-secret view of an SSH key (public key,
@@ -325,7 +333,7 @@ func (s *Server) coreCreateService(actor *db.User, name, url string, d db.Servic
 		return nil, cerr(http.StatusInternalServerError, "%v", err)
 	}
 	svc := &db.Service{ID: id, Name: name, URL: url, Descriptor: d, ProtectedBy: protectedBy, ActsAs: actsAs}
-	s.syncVirtualMCP(svc, "")
+	s.syncMCPMount(svc, "")
 	s.audit(actor, "created service", name)
 	return svc, nil
 }
@@ -370,7 +378,7 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	if err := s.store.UpdateService(id, name, url, d, protectedBy, actsAs); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
-	s.syncVirtualMCP(&db.Service{ID: id, Name: name, URL: url, Descriptor: d, ProtectedBy: protectedBy, ActsAs: actsAs}, existing.URL)
+	s.syncMCPMount(&db.Service{ID: id, Name: name, URL: url, Descriptor: d, ProtectedBy: protectedBy, ActsAs: actsAs}, existing.URL)
 	s.audit(actor, "updated service", name)
 	return nil
 }
@@ -441,9 +449,7 @@ func (s *Server) coreDeleteService(actor *db.User, id int64) error {
 	if err := s.store.DeleteService(id); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
-	if svc.Descriptor.Type == "virtual" {
-		s.virtualMCPs.remove(trimMCPSlug(svc.URL))
-	}
+	s.mcpMounts.remove(mcpSlug(svc.URL))
 	s.audit(actor, "deleted service", svc.Name)
 	return nil
 }
@@ -1117,9 +1123,7 @@ func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, f
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return "", cerr(http.StatusInternalServerError, "write failed")
 	}
-	if svc.Descriptor.Type == "virtual" {
-		s.virtualMCPs.add(s, svc)
-	}
+	s.mcpMounts.add(s, svc)
 
 	_ = s.store.TouchService(id)
 	s.audit(actor, "uploaded service files", svc.Name)
@@ -1144,9 +1148,7 @@ func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return cerr(http.StatusInternalServerError, "failed to remove service file")
 	}
-	if svc.Descriptor.Type == "virtual" {
-		s.virtualMCPs.remove(trimMCPSlug(svc.URL))
-	}
+	s.mcpMounts.remove(mcpSlug(svc.URL))
 
 	_ = s.store.TouchService(id)
 	s.audit(actor, "removed service files", svc.Name)
@@ -1243,9 +1245,7 @@ func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, old
 	if err := os.WriteFile(path, newData, 0644); err != nil {
 		return cerr(http.StatusInternalServerError, "write failed")
 	}
-	if svc.Descriptor.Type == "virtual" {
-		s.virtualMCPs.add(s, svc)
-	}
+	s.mcpMounts.add(s, svc)
 
 	_ = s.store.TouchService(id)
 	s.audit(actor, "wrote service file", svc.Name)

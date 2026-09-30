@@ -53,7 +53,7 @@ type Server struct {
 	hostedMu          sync.RWMutex
 	actTickets        actTickets // /api/act capability tickets (in-memory only)
 	pendingElicits    pendingElicits // virtual-tool elicitation suspend/resume state (in-memory only)
-	virtualMCPs       *virtualMCPRegistry                // slug → MCP server entries
+	mcpMounts         *mcpMountRegistry                  // slug → MCP server entries
 	mcpAuthPending    *sync.Map                          // key → *mcpPendingAuth (MCP OAuth flow state)
 	oauthSrv          *oauthServer                       // Freshbreath OAuth authorization server
 	centralMCPHandler http.Handler                       // central MCP at /mcp
@@ -201,7 +201,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		agentMgr:       agentMgr,
 		sessionMgr:     sessionMgr,
 		gitGw:          sshkit.NewGitGateway(agentMgr, store),
-		virtualMCPs:    newVirtualMCPRegistry(),
+		mcpMounts:      newMCPMountRegistry(),
 		mcpAuthPending: &sync.Map{},
 		actTickets:     actTickets{tix: make(map[string]actTicketPayload)},
 	}

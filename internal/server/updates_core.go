@@ -199,9 +199,7 @@ func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
 		if err := os.WriteFile(path, data, 0644); err != nil {
 			return fmt.Errorf("write failed: %w", err)
 		}
-		if svc.Descriptor.Type == "virtual" {
-			s.virtualMCPs.add(s, svc)
-		}
+		s.mcpMounts.add(s, svc)
 		return nil
 	}
 	return fmt.Errorf("unknown action %q", op.Action)

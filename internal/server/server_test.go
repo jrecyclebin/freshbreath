@@ -63,7 +63,7 @@ func newTestServer(t *testing.T) *Server {
 		localKey:       localKey,
 		agentMgr:       agentMgr,
 		gitGw:          sshkit.NewGitGateway(agentMgr, store),
-		virtualMCPs:    newVirtualMCPRegistry(),
+		mcpMounts:      newMCPMountRegistry(),
 		mcpAuthPending: &sync.Map{},
 	}
 	srv.oauthSrv = newOAuthServer(srv)
