@@ -497,13 +497,20 @@ export class ServiceProxy {
     return res;
   }
 
+  // A proxied MCP service is reached through the server, which swaps the
+  // session's token for the upstream credential; anything else directly.
   async #connect() {
     const headers = new Headers();
+    let url = new URL(this.#serviceURL, window.location.href);
+    if (this.#proxied && this.#serviceID) {
+      url = new URL(`${API}/service/${this.#serviceID}/`, window.location.href);
+      headers.set("X-App-Nonce", APP_NONCE);
+    }
     if (this.#session) {
       await this.#session.check();
       this.#session.addAuth(headers);
     }
-    const transport = new StreamableHTTPClientTransport(new URL(this.#serviceURL, window.location.href), {
+    const transport = new StreamableHTTPClientTransport(url, {
       requestInit: { headers },
     });
     this.#client = new McpClient({ name: "mcp-client", version: "1.0.0" });

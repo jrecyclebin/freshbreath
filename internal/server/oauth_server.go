@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -318,7 +319,7 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	legs, err := os.server.legsForLogin(gate, svc)
+	legs, err := os.server.legsForLogin(r.Context(), gate, svc)
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", fmt.Sprintf("legs resolution: %v", err))
 		return
@@ -764,7 +765,7 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	accessToken, newRefreshData, err := os.refreshLegs(data)
+	accessToken, newRefreshData, err := os.refreshLegs(r.Context(), data)
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
@@ -777,12 +778,38 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 	os.writeTokenResponse(w, r, accessToken, newRefreshData, "", fromForm)
 }
 
+// refreshRecord finds the record an upstream refresh leg authenticates
+// with: a stored record, or — for a negative id — the in-memory record of
+// the mcp service it names. After a restart that record comes from a fresh
+// client registration, which the old refresh token won't know; the refresh
+// fails and the user logs in again.
+func (s *Server) refreshRecord(ctx context.Context, authID int64) (*db.AuthRecord, error) {
+	if authID >= 0 {
+		return s.store.GetAuthRecord(authID)
+	}
+	svc, err := s.store.GetService(-authID)
+	if err != nil {
+		return nil, err
+	}
+	if svc.Descriptor.Type != "mcp" {
+		return nil, fmt.Errorf("service %d is not an MCP service", svc.ID)
+	}
+	rec, err := s.mcpAuthRecord(ctx, svc)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return nil, fmt.Errorf("MCP server %q no longer asks for auth — log in again", svc.Name)
+	}
+	return rec, nil
+}
+
 // refreshLegs re-mints an access token from refresh data: the identity is
 // re-resolved from the subject (a deleted user can't extend a session; a
 // role change propagates within one cycle), and every upstream leg with a
 // refresh token is rotated against its record's provider. An upstream that
 // refuses costs the whole refresh — re-login is the honest answer.
-func (os *oauthServer) refreshLegs(data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
+func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
 	s := os.server
 
 	var email, role, name string
@@ -799,7 +826,7 @@ func (os *oauthServer) refreshLegs(data *freshbreathRefreshData) (string, freshb
 	creds := sealedCreds{}
 	newUpstreams := map[string]upstreamRefreshLeg{}
 	for provider, leg := range data.Upstreams {
-		rec, err := s.store.GetAuthRecord(leg.AuthID)
+		rec, err := s.refreshRecord(ctx, leg.AuthID)
 		if err != nil {
 			return "", freshbreathRefreshData{}, fmt.Errorf("auth record for %s: %w", provider, err)
 		}
@@ -821,6 +848,9 @@ func (os *oauthServer) refreshLegs(data *freshbreathRefreshData) (string, freshb
 		}
 		if leg.Scopes != "" {
 			form.Set("scope", leg.Scopes)
+		}
+		if rec.Descriptor.Resource != "" {
+			form.Set("resource", rec.Descriptor.Resource)
 		}
 		resp, err := s.httpClient.PostForm(tokenEndpoint, form)
 		if err != nil {
@@ -954,6 +984,9 @@ func (s *Server) appMayRefreshRecord(appNonce string, authID int64) bool {
 			continue
 		}
 		if (svc.ActsAs != nil && *svc.ActsAs == authID) || (svc.ProtectedBy != nil && *svc.ProtectedBy == authID) {
+			return true
+		}
+		if svc.Descriptor.Type == "mcp" && mcpAuthID(svc.ID) == authID {
 			return true
 		}
 	}

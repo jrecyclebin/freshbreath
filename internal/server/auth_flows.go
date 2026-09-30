@@ -23,15 +23,31 @@ import (
 //
 // A login clears one or more auth records ("legs"): the inbound gate, plus
 // the service's acts_as record when it is interactive and different from
-// the gate. One pendingAuth walks the whole flow — each leg re-keys it
+// the gate — or, for an mcp service, whatever auth its MCP server demands. One pendingAuth walks the whole flow — each leg re-keys it
 // under a fresh state — and the final leg mints one token carrying every
 // cleared record.
 
-// legsForLogin computes the records a login must clear, gate first.
-func (s *Server) legsForLogin(gate *db.AuthRecord, svc *db.Service) ([]*db.AuthRecord, error) {
+// legsForLogin computes the records a login must clear, gate first. An mcp
+// service ignores acts_as: its MCP server says what it wants, and an OAuth
+// answer only works proxied — the upstream token stays server-side and the
+// proxy injects it, so the browser never holds it.
+func (s *Server) legsForLogin(ctx context.Context, gate *db.AuthRecord, svc *db.Service) ([]*db.AuthRecord, error) {
 	var legs []*db.AuthRecord
 	if gate != nil && gate.Kind != db.AuthAnonymous {
 		legs = append(legs, gate)
+	}
+	if svc != nil && svc.Descriptor.Type == "mcp" {
+		rec, err := s.mcpAuthRecord(ctx, svc)
+		if err != nil {
+			return nil, err
+		}
+		if rec != nil {
+			if !svc.Descriptor.Proxied {
+				return nil, fmt.Errorf("MCP server %q requires OAuth, which only works through the proxy — mark the service proxied", svc.Name)
+			}
+			legs = append(legs, rec)
+		}
+		return legs, nil
 	}
 	if svc != nil && svc.ActsAs != nil {
 		rec, err := s.store.GetAuthRecord(*svc.ActsAs)
@@ -102,7 +118,7 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 		p.clientID, p.clientSecret = rec.Descriptor.ClientID, rec.Descriptor.ClientSecret
 		s.putPending(state, p)
 		return authURL, nil
-	case db.AuthOAuth2:
+	case db.AuthOAuth2, db.AuthMCP:
 		authURL, clientID, clientSecret, tokenURL, state, verifier, err := s.oauth2BeginAuth(ctx, rec, redirectURI)
 		if err != nil {
 			return "", err
@@ -382,7 +398,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	legs, err := s.legsForLogin(gate, svc)
+	legs, err := s.legsForLogin(r.Context(), gate, svc)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Legs resolution failed: %v", err), http.StatusInternalServerError)
 		return
@@ -486,9 +502,15 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var claims *OIDCClaims
 	var accessToken, refreshToken string
 	var err error
-	if rec.Kind == db.AuthOIDC {
+	switch rec.Kind {
+	case db.AuthOIDC:
 		claims, accessToken, refreshToken, err = s.oidcExchangeCode(r.Context(), rec, code, p.verifier, p.oidcNonce, redirectURI)
-	} else {
+	case db.AuthMCP:
+		// No identity to learn: a random subject keeps each MCP-only
+		// login its own session rather than one shared by every visitor.
+		claims = &OIDCClaims{Subject: utils.GenNonce()}
+		accessToken, refreshToken, err = s.mcpExchangeCode(r.Context(), rec, code, p.verifier, redirectURI)
+	default:
 		claims, accessToken, refreshToken, err = s.oauth2ExchangeCode(r.Context(), rec, p.tokenEndpoint, code, p.verifier, p.clientID, p.clientSecret, redirectURI)
 	}
 	if err != nil {

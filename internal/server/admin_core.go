@@ -314,6 +314,9 @@ func (s *Server) coreCreateService(actor *db.User, name, url string, d db.Servic
 	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
 		return nil, err
 	}
+	if d.Type == "mcp" {
+		actsAs = nil // the MCP server decides its own outbound auth
+	}
 	if err := s.validateAuthSlot("acts_as", actsAs); err != nil {
 		return nil, err
 	}
@@ -357,6 +360,9 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	}
 	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
 		return err
+	}
+	if d.Type == "mcp" {
+		actsAs = nil // the MCP server decides its own outbound auth
 	}
 	if err := s.validateAuthSlot("acts_as", actsAs); err != nil {
 		return err

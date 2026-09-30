@@ -1415,7 +1415,7 @@ func TestLoginResolveListsLegs(t *testing.T) {
 	out := newAuthRecord(t, srv, "Jira", db.AuthOAuth2,
 		db.AuthDescriptor{AuthorizeURL: "https://jira.example/authorize", TokenURL: "https://jira.example/token", ClientID: "j", Provider: "jira"})
 	id := registerService(t, srv, "tickets", "https://jira.example/mcp",
-		db.ServiceDescriptor{Type: "mcp", Proxied: true})
+		db.ServiceDescriptor{Type: "api", Proxied: true})
 	setServiceActsAs(t, srv, id, out.ID)
 	linkServiceToApp(t, srv, nonce, id)
 

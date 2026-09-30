@@ -36,6 +36,11 @@ login method standing on its own, shared by everything that names it:
 - **Protected by** — who may call in. Empty means *inherit the admin record*,
   not *open*; only an explicit Anonymous record means open.
 - **Acts as** — what credential goes upstream. Empty means *the caller's own*.
+  **mcp** services have no acts-as: the MCP server decides. An open server
+  needs nothing; an OAuth one (Notion, say) is signed in to as a step of
+  `login()` for that service's URL, and works only when the service is
+  proxied. Behind an open app that login is optional — the app runs without
+  it and connects when the user asks.
 
 Two consequences worth stopping at, because they're what make `login()` so
 quiet in practice:
