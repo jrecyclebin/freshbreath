@@ -3,6 +3,11 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,6 +134,26 @@ func (s *Server) gateApp(actor *db.User, nonce string) error {
 	return nil
 }
 
+// gateServiceFile returns a 403 *coreErr unless the actor is Admin+ or one
+// of the service's members — the users an admin has trusted with its
+// definition file. The service-file twin of gateApp.
+func (s *Server) gateServiceFile(actor *db.User, serviceID int64) error {
+	if actor != nil && roleIn(actor.Role, rolesAdminPlus) {
+		return nil
+	}
+	if actor == nil {
+		return cerr(http.StatusForbidden, "forbidden: not a member of this service")
+	}
+	ok, err := s.store.IsServiceMember(serviceID, actor.ID)
+	if err != nil {
+		return cerr(http.StatusInternalServerError, "membership check failed: %v", err)
+	}
+	if !ok {
+		return cerr(http.StatusForbidden, "forbidden: not a member of this service")
+	}
+	return nil
+}
+
 // gateSelfOrAdmin allows the action when actor operates on their own account,
 // or when actor is Admin+. Backs the SSH-key ops that serve both the
 // self-service (generate_my_ssh_key) and admin (generate_user_ssh_key)
@@ -158,7 +184,23 @@ func actorName(u *db.User) string {
 
 // audit logs an audit entry attributed to the given actor.
 func (s *Server) audit(actor *db.User, action, target string) {
-	_ = s.store.LogAudit(actorName(actor), action, target)
+	var id int64
+	if actor != nil {
+		id = actor.ID
+	}
+	_ = s.store.LogAudit(id, actorName(actor), action, target)
+}
+
+// auditScope is the actor filter for reading the audit log: Admin+ see
+// everyone's entries (0), everyone else only their own.
+func auditScope(actor *db.User) int64 {
+	if actor == nil {
+		return -1 // matches no row
+	}
+	if roleIn(actor.Role, rolesAdminPlus) {
+		return 0
+	}
+	return actor.ID
 }
 
 // auditApp logs an app action, resolving the app's display name from its
@@ -383,6 +425,29 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	return nil
 }
 
+// coreSetServiceMembers replaces the users trusted with a service's
+// definition file.
+func (s *Server) coreSetServiceMembers(actor *db.User, id int64, members []int64) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	for _, uid := range members {
+		if _, err := s.store.GetUser(uid); err != nil {
+			return cerr(http.StatusBadRequest, "user %d: %v", uid, err)
+		}
+	}
+	if err := s.store.SetServiceMembers(id, members); err != nil {
+		return cerr(http.StatusInternalServerError, "%v", err)
+	}
+	_ = s.store.TouchService(id)
+	s.audit(actor, "updated service members", svc.Name)
+	return nil
+}
+
 // ── Auth record operations ──────────────────────────────────────────
 
 func (s *Server) coreCreateAuth(actor *db.User, name, kind string, d db.AuthDescriptor) (*db.AuthRecord, error) {
@@ -543,11 +608,138 @@ func (s *Server) coreDeleteSSHKey(actor, target *db.User) error {
 	if target.Metadata == nil || target.Metadata.SSHKey == nil {
 		return cerr(http.StatusNotFound, "no SSH key to delete")
 	}
-	if err := s.store.UpdateUser(target.ID, target.Name, target.Email, target.Role, target.Status, &db.UserMetadata{}); err != nil {
+	meta := *target.Metadata
+	meta.SSHKey = nil
+	if err := s.store.UpdateUser(target.ID, target.Name, target.Email, target.Role, target.Status, &meta); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
 	s.audit(actor, "deleted SSH key for user", target.Email)
 	return nil
+}
+
+// coreUpdateProfile lets a user change their own name and email. Role,
+// status and metadata stay as they are. The email is also what an OIDC or
+// OAuth2 login is matched on, so changing it changes which upstream
+// identity lands on this account.
+func (s *Server) coreUpdateProfile(actor *db.User, name, email string) (*db.User, error) {
+	if actor == nil || actor.ID <= 0 {
+		return nil, cerr(http.StatusBadRequest, "no user account to update")
+	}
+	name, email = strings.TrimSpace(name), strings.TrimSpace(email)
+	if name == "" || email == "" {
+		return nil, cerr(http.StatusBadRequest, "name and email required")
+	}
+	u, err := s.store.GetUser(actor.ID)
+	if err != nil {
+		return nil, cerr(http.StatusNotFound, "%v", err)
+	}
+	if err := s.store.UpdateUser(u.ID, name, email, u.Role, u.Status, u.Metadata); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return nil, cerr(http.StatusConflict, "that name or email is already taken")
+		}
+		return nil, cerr(http.StatusInternalServerError, "%v", err)
+	}
+	u.Name, u.Email = name, email
+	s.audit(u, "updated own profile", email)
+	return u, nil
+}
+
+// ── Passphrase links ────────────────────────────────────────────────
+//
+// A passphrase link lets a user choose their own SSH key passphrase: an
+// admin mints one (an invite for a new user, a reset for anyone else) and
+// sends it on. Opening it sets a new passphrase, which means a new SSH key —
+// the private key is sealed under the passphrase, so the old one can't be
+// re-sealed without it.
+
+// passphraseLinkTTL is how long a minted passphrase link stays usable.
+const passphraseLinkTTL = 7 * 24 * time.Hour
+
+// hashLinkToken is the stored form of a passphrase link token.
+func hashLinkToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// coreCreatePassphraseLink mints a passphrase link for target, replacing any
+// earlier one, and returns its URL and expiry.
+func (s *Server) coreCreatePassphraseLink(actor, target *db.User) (string, time.Time, error) {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return "", time.Time{}, err
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", time.Time{}, cerr(http.StatusInternalServerError, "token generation failed: %v", err)
+	}
+	token := fmt.Sprintf("%d.%s", target.ID, base64.RawURLEncoding.EncodeToString(secret))
+	expires := time.Now().UTC().Add(passphraseLinkTTL).Truncate(time.Second)
+	meta := db.UserMetadata{}
+	if target.Metadata != nil {
+		meta = *target.Metadata
+	}
+	meta.PassphraseReset = &db.PassphraseReset{TokenHash: hashLinkToken(token), ExpiresAt: expires}
+	if err := s.store.UpdateUser(target.ID, target.Name, target.Email, target.Role, target.Status, &meta); err != nil {
+		return "", time.Time{}, cerr(http.StatusInternalServerError, "%v", err)
+	}
+	s.audit(actor, "created passphrase link for user", target.Email)
+	return s.config.PublicBaseURL + "/service/passphrase?token=" + token, expires, nil
+}
+
+// passphraseLinkUser resolves a link token to its user. Unknown, used and
+// expired tokens all fail alike.
+func (s *Server) passphraseLinkUser(token string) (*db.User, error) {
+	invalid := cerr(http.StatusBadRequest, "This link is invalid or has expired — ask an admin for a new one.")
+	idStr, _, ok := strings.Cut(token, ".")
+	if !ok {
+		return nil, invalid
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return nil, invalid
+	}
+	u, err := s.store.GetUser(id)
+	if err != nil || u.Metadata == nil || u.Metadata.PassphraseReset == nil {
+		return nil, invalid
+	}
+	pr := u.Metadata.PassphraseReset
+	if subtle.ConstantTimeCompare([]byte(pr.TokenHash), []byte(hashLinkToken(token))) != 1 || time.Now().After(pr.ExpiresAt) {
+		return nil, invalid
+	}
+	return u, nil
+}
+
+// coreSetPassphraseByLink spends a passphrase link: the user gets a fresh
+// SSH key sealed under the new passphrase, an invited user becomes active,
+// and the link stops working.
+func (s *Server) coreSetPassphraseByLink(token, passphrase string) (*db.User, error) {
+	u, err := s.passphraseLinkUser(token)
+	if err != nil {
+		return nil, err
+	}
+	if len(passphrase) < 8 {
+		return nil, cerr(http.StatusBadRequest, "passphrase must be at least 8 characters")
+	}
+	keyInfo, err := sshkit.GenerateSSHKey(passphrase)
+	if err != nil {
+		return nil, cerr(http.StatusInternalServerError, "key generation failed: %v", err)
+	}
+	meta := *u.Metadata
+	meta.SSHKey = keyInfo
+	meta.PassphraseReset = nil
+	status := u.Status
+	if status == "Invited" {
+		status = "Active"
+	}
+	if err := s.store.UpdateUser(u.ID, u.Name, u.Email, u.Role, status, &meta); err != nil {
+		return nil, cerr(http.StatusInternalServerError, "%v", err)
+	}
+	// The agent may still hold the old key, decrypted at the last login.
+	if s.agentMgr != nil {
+		s.agentMgr.RemoveKey(u.ID)
+	}
+	u.Status, u.Metadata = status, &meta
+	s.audit(u, "set passphrase from link", u.Email)
+	return u, nil
 }
 
 // ── Settings operations ─────────────────────────────────────────────
@@ -1076,7 +1268,7 @@ func serviceDefinitionPath(dataDir string, svc *db.Service) string {
 // Only tasks and virtual services support file publishing; the returned file
 // is the raw plain-text definition.
 func (s *Server) coreDownloadServiceFiles(actor *db.User, id int64) ([]byte, string, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateServiceFile(actor, id); err != nil {
 		return nil, "", err
 	}
 	svc, err := s.store.GetService(id)
@@ -1102,7 +1294,7 @@ func (s *Server) coreDownloadServiceFiles(actor *db.User, id int64) ([]byte, str
 // Only tasks and virtual services support file publishing; they each accept a
 // single plain-text file stored in their existing definition directory.
 func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, filename string) (string, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateServiceFile(actor, id); err != nil {
 		return "", err
 	}
 	svc, err := s.store.GetService(id)
@@ -1133,7 +1325,7 @@ func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, f
 // coreDeleteServiceFiles removes a service's published definition file.
 // Only tasks and virtual services support file publishing.
 func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateServiceFile(actor, id); err != nil {
 		return err
 	}
 	svc, err := s.store.GetService(id)
@@ -1159,7 +1351,7 @@ func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
 // file. offset is a zero-based byte position; limit is the maximum bytes to
 // return. A zero limit reads to the end of the file.
 func (s *Server) coreReadServiceFile(actor *db.User, id int64, offset, limit int64) ([]byte, string, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateServiceFile(actor, id); err != nil {
 		return nil, "", err
 	}
 	svc, err := s.store.GetService(id)
@@ -1185,7 +1377,7 @@ func (s *Server) coreReadServiceFile(actor *db.User, id int64, offset, limit int
 // tasks/virtual service definition file without reading the whole file.
 // Symmetric to coreStatAppFile for the MCP service-file read paths.
 func (s *Server) coreStatServiceFile(actor *db.User, id int64) (int64, string, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateServiceFile(actor, id); err != nil {
 		return 0, "", err
 	}
 	svc, err := s.store.GetService(id)
@@ -1209,7 +1401,7 @@ func (s *Server) coreStatServiceFile(actor *db.User, id int64) (int64, string, e
 // file. If oldText is empty the entire file is replaced. Otherwise the single
 // occurrence of oldText in the existing file is replaced with data.
 func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, oldText string) error {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateServiceFile(actor, id); err != nil {
 		return err
 	}
 	svc, err := s.store.GetService(id)
@@ -1256,7 +1448,7 @@ func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, old
 // single-item listing. If search is non-empty, the file is only returned when
 // its content contains the term (case-insensitive).
 func (s *Server) coreListServiceFiles(actor *db.User, id int64, search string) ([]appFile, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateServiceFile(actor, id); err != nil {
 		return nil, err
 	}
 	svc, err := s.store.GetService(id)

@@ -171,15 +171,12 @@ Fresh Breath server URL: %q`, s.config.PublicBaseURL),
 	// ── Databases (all roles; gateDBTarget decides per call) ──────────
 	s.registerDatabaseTools(mcps)
 
-	// ── Services (admin+) ─────────────────────────────────────────
-	if roleIn(role, rolesAdminPlus) {
-		s.registerServiceTools(mcps)
-	}
+	// ── Services (mixed: reads are all-roles; definition files are
+	//    admin+ or service members; mutate is admin+) ──────────────
+	s.registerServiceTools(mcps, role)
 
-	// ── Auth records (admin+) ─────────────────────────────────────
-	if roleIn(role, rolesAdminPlus) {
-		s.registerAuthTools(mcps)
-	}
+	// ── Auth records (mixed: list is all-roles; mutate is admin+) ──
+	s.registerAuthTools(mcps, role)
 
 	// ── Users (admin+) ────────────────────────────────────────────
 	if roleIn(role, rolesAdminPlus) {
@@ -905,11 +902,13 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 
 // ── Service Tools ───────────────────────────────────────────────────
 
-func (s *Server) registerServiceTools(mcps *mcp.Server) {
+func (s *Server) registerServiceTools(mcps *mcp.Server, role string) {
+	admin := roleIn(role, rolesAdminPlus)
+
 	// list_service_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_service_files",
-		Description: "List a virtual or task service's definition file. Empty if nothing is published. Optionally search the file's content. Admin+ only.",
+		Description: "List a virtual or task service's definition file. Empty if nothing is published. Optionally search the file's content. Admin+ or a member of the service.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -927,9 +926,6 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		name, _ := args["name"].(string)
 		search, _ := args["search"].(string)
-		if err := s.gate(user, rolesAdminPlus); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 		svc, err := s.serviceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
@@ -944,7 +940,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server) {
 	// read_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "read_service_file",
-Description: "Read all or part of a virtual or task service's definition file. Admin+ only. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
+Description: "Read all or part of a virtual or task service's definition file. Admin+ or a member of the service. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -968,9 +964,6 @@ Description: "Read all or part of a virtual or task service's definition file. A
 		transport, _ := args["transport"].(string)
 		chunked := offset != 0 || limit != 0
 
-		if err := s.gate(user, rolesAdminPlus); err != nil {
-			return mcpToolError("%v", err), nil
-		}
 		svc, err := s.serviceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
@@ -1037,7 +1030,7 @@ Description: "Read all or part of a virtual or task service's definition file. A
 	// write_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_service_file",
-Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band. Admin+ only.",
+Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band. Admin+ or a member of the service.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1065,9 +1058,6 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			if content == "" && oldText == "" {
 				return mcpToolError("transport:\"inline\" requires new_text or old_text"), nil
 			}
-			if err := s.gate(user, rolesAdminPlus); err != nil {
-				return mcpToolError("%v", err), nil
-			}
 			svc, err := s.serviceByName(name)
 			if err != nil {
 				return mcpToolError("%v", err), nil
@@ -1080,9 +1070,6 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 		case actTokenTransportHTTP:
 			if oldText != "" {
 				return mcpToolError("transport:\"http\" is incompatible with old_text (patches stay inline)"), nil
-			}
-			if err := s.gate(user, rolesAdminPlus); err != nil {
-				return mcpToolError("%v", err), nil
 			}
 			svc, err := s.serviceByName(name)
 			if err != nil {
@@ -1102,7 +1089,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 	// delete_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "delete_service_file",
-		Description: "Delete a virtual or task service's definition file. Admin+ only.",
+		Description: "Delete a virtual or task service's definition file. Admin+ or a member of the service.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1131,7 +1118,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 	// list_services
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_services",
-		Description: "List all services. Admin+ only.",
+		Description: "List all services. members lists the users trusted with each one's definition file.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1146,13 +1133,16 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 		if err != nil {
 			return mcpToolError("db error: %v", err), nil
 		}
+		for _, svc := range services {
+			svc.Members, _ = s.store.ListServiceMembers(svc.ID)
+		}
 		return mcpToolResult(map[string]interface{}{"services": services})
 	})
 
 	// get_service
 	mcps.AddTool(&mcp.Tool{
 		Name:        "get_service",
-		Description: "Get details for a specific service. Admin+ only.",
+		Description: "Get details for a specific service.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1174,11 +1164,12 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
+		svc.Members, _ = s.store.ListServiceMembers(svc.ID)
 		return mcpToolResult(svc)
 	})
 
 	// create_service
-	mcps.AddTool(&mcp.Tool{
+	addToolIf(admin, mcps, &mcp.Tool{
 		Name:        "create_service",
 		Description: "Create a new service. Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -1228,7 +1219,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 	})
 
 	// update_service
-	mcps.AddTool(&mcp.Tool{
+	addToolIf(admin, mcps, &mcp.Tool{
 		Name:        "update_service",
 		Description: "Update an existing service. Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -1295,7 +1286,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 	})
 
 	// delete_service
-	mcps.AddTool(&mcp.Tool{
+	addToolIf(admin, mcps, &mcp.Tool{
 		Name:        "delete_service",
 		Description: "Delete a service (cannot delete the built-in SSH service). Admin+ only.",
 		InputSchema: map[string]interface{}{
@@ -1328,7 +1319,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 	// get_service_apps
 	mcps.AddTool(&mcp.Tool{
 		Name:        "get_service_apps",
-		Description: "Get the apps using a specific service. Admin+ only.",
+		Description: "Get the apps using a specific service.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1355,6 +1346,43 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			return mcpToolError("db error: %v", err), nil
 		}
 		return mcpToolResult(map[string]interface{}{"apps": apps})
+	})
+
+	// set_service_members
+	addToolIf(admin, mcps, &mcp.Tool{
+		Name:        "set_service_members",
+		Description: "Set the users trusted with a virtual or task service's definition file. They may read and write it; nothing else about the service. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name":    map[string]interface{}{"type": "string", "description": "Service name"},
+				"members": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "number"}, "description": "User IDs"},
+			},
+			"required": []string{"name", "members"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		name, _ := args["name"].(string)
+		svc, err := s.serviceByName(name)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		rawMembers, _ := args["members"].([]interface{})
+		var members []int64
+		for _, m := range rawMembers {
+			if f, ok := m.(float64); ok {
+				members = append(members, int64(f))
+			}
+		}
+		if err := s.coreSetServiceMembers(user, svc.ID, members); err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]string{"status": "updated"})
 	})
 }
 
@@ -1406,12 +1434,14 @@ var authDescriptorSchema = map[string]interface{}{
 	"header":              map[string]interface{}{"type": "string", "description": "api_key: header to send it under; empty means Authorization: Bearer"},
 }
 
-func (s *Server) registerAuthTools(mcps *mcp.Server) {
+func (s *Server) registerAuthTools(mcps *mcp.Server, role string) {
+	admin := roleIn(role, rolesAdminPlus)
+
 	// list_auth
 	mcps.AddTool(&mcp.Tool{
 		Name: "list_auth",
 		Description: "List auth records — the credentials and login methods services and apps point at. " +
-			"Secrets are masked; has_secret says whether one is on file. Admin+ only.",
+			"Secrets are masked; has_secret says whether one is on file.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
@@ -1431,7 +1461,7 @@ func (s *Server) registerAuthTools(mcps *mcp.Server) {
 	})
 
 	// create_auth
-	mcps.AddTool(&mcp.Tool{
+	addToolIf(admin, mcps, &mcp.Tool{
 		Name: "create_auth",
 		Description: "Create an auth record. Point a service or app at it with the protected_by " +
 			"(who may call in) or acts_as (what goes upstream) slots. Admin+ only.",
@@ -1477,7 +1507,7 @@ func (s *Server) registerAuthTools(mcps *mcp.Server) {
 	})
 
 	// update_auth
-	mcps.AddTool(&mcp.Tool{
+	addToolIf(admin, mcps, &mcp.Tool{
 		Name: "update_auth",
 		Description: "Update an auth record. A patch: omitted fields keep their stored values, and an " +
 			"omitted client_secret or key keeps the stored secret. Built-in records keep their name " +
@@ -1529,7 +1559,7 @@ func (s *Server) registerAuthTools(mcps *mcp.Server) {
 	})
 
 	// delete_auth
-	mcps.AddTool(&mcp.Tool{
+	addToolIf(admin, mcps, &mcp.Tool{
 		Name: "delete_auth",
 		Description: "Delete an auth record. Refused while any service or app still points at it, and " +
 			"for built-in records. Admin+ only.",
@@ -1924,6 +1954,39 @@ func (s *Server) registerUserTools(mcps *mcp.Server) {
 		}
 		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
+
+	// create_user_passphrase_link
+	mcps.AddTool(&mcp.Tool{
+		Name:        "create_user_passphrase_link",
+		Description: "Create a link the user opens to choose their own SSH key passphrase — an invite for a new user, a reset for anyone else. Setting it generates a new SSH key. Valid for 7 days; a new link replaces the old one. Admin+ only.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{"type": "number", "description": "User ID"},
+			},
+			"required": []string{"id"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		id, _ := args["id"].(float64)
+		if id == 0 {
+			return mcpToolError("id is required"), nil
+		}
+		u, err := s.store.GetUser(int64(id))
+		if err != nil {
+			return mcpToolError("user not found: %v", err), nil
+		}
+		link, expires, err := s.coreCreatePassphraseLink(user, u)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]interface{}{"url": link, "expires_at": expires})
+	})
 }
 
 // ── Role Tools ──────────────────────────────────────────────────────
@@ -1955,18 +2018,18 @@ func (s *Server) registerRoleTools(mcps *mcp.Server) {
 func (s *Server) registerAuditTools(mcps *mcp.Server) {
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_audit",
-		Description: "List the last 100 audit log entries.",
+		Description: "List the last 100 audit log entries. Admin+ see everyone's; other roles see only their own.",
 		InputSchema: map[string]interface{}{
 			"type":       "object",
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		_, err := s.mcpUser(req)
+		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
 
-		entries, err := s.store.ListAudit(100)
+		entries, err := s.store.ListAudit(100, auditScope(user))
 		if err != nil {
 			return mcpToolError("db error: %v", err), nil
 		}
@@ -1991,6 +2054,39 @@ func (s *Server) registerPersonalTools(mcps *mcp.Server) {
 			return mcpToolError("auth: %v", err), nil
 		}
 		return mcpToolResult(map[string]interface{}{"user": user})
+	})
+
+	// update_me
+	mcps.AddTool(&mcp.Tool{
+		Name:        "update_me",
+		Description: "Change the currently authenticated user's own name and email. Omitted fields keep their current value.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name":  map[string]interface{}{"type": "string", "description": "New display name"},
+				"email": map[string]interface{}{"type": "string", "description": "New email (also what OIDC/OAuth2 logins are matched on)"},
+			},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		name, _ := args["name"].(string)
+		email, _ := args["email"].(string)
+		if name == "" {
+			name = user.Name
+		}
+		if email == "" {
+			email = user.Email
+		}
+		updated, err := s.coreUpdateProfile(user, name, email)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]interface{}{"user": updated})
 	})
 
 	// get_my_ssh_key

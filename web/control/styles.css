@@ -170,6 +170,16 @@ button { font-family: inherit; }
   margin-bottom: 4px;
 }
 .menu-heading.user span { font-size: 11px; color: var(--ink-3); }
+/* The name heading opens the user's own profile page. */
+.menu-heading-link {
+  width: 100%;
+  border: 0;
+  border-radius: 7px 7px 0 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.menu-heading-link:hover { background: var(--hover); }
 
 .menu-item {
   display: flex;
@@ -1715,3 +1725,7 @@ select.input {
 
 /* Orange (!) beside a service name whose creds may reach the browser. */
 .unproxied-mark { margin-left: 6px; color: var(--warn); font-weight: 700; cursor: help; }
+
+/* Wraps a form so one `disabled` makes it read-only for roles that can't
+   save it; the fieldset itself draws nothing. */
+.read-only-fields { border: 0; padding: 0; margin: 0; min-width: 0; }

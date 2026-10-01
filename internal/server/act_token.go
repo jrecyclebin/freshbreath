@@ -73,7 +73,7 @@ func (s *Server) mintActToken(user *db.User, method, pathQuery string, ttl time.
 		if _, exists := s.actTickets.tix[id]; !exists {
 			s.actTickets.tix[id] = p
 			s.actTickets.mu.Unlock()
-			_ = s.store.LogAudit(subjectForUser(user), "act_token_mint", pathQuery)
+			_ = s.store.LogAudit(user.ID, subjectForUser(user), "act_token_mint", pathQuery)
 			return id, nil
 		}
 		s.actTickets.mu.Unlock()

@@ -972,7 +972,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 				log.Printf("agent add key for user %d: %v", user.ID, err)
 			}
 		}
-		_ = s.store.LogAudit(req.Email, "login", "passphrase")
+		_ = s.store.LogAudit(user.ID, req.Email, "login", "passphrase")
 
 		s.respondLeg(w, r, p, &completedLeg{rec: p.current(), user: user})
 
@@ -1101,6 +1101,104 @@ const sshAuthFormHTML = `<!doctype html>
   };
 })();
 </script></body></html>`
+
+// handlePassphraseLink is the page behind an invite or reset link: the
+// link's token is the whole credential, so it is mounted bare. GET shows
+// the form for the link's user; POST sets the passphrase.
+func (s *Server) handlePassphraseLink(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		token := r.URL.Query().Get("token")
+		u, err := s.passphraseLinkUser(token)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(strings.Replace(passphraseLinkErrorHTML, "{{MESSAGE}}", html.EscapeString(err.Error()), 1)))
+			return
+		}
+		tokenJS, _ := json.Marshal(token)
+		page := strings.NewReplacer(
+			"{{EMAIL}}", html.EscapeString(u.Email),
+			"{{TOKEN}}", string(tokenJS),
+		).Replace(passphraseLinkFormHTML)
+		w.Write([]byte(page))
+
+	case http.MethodPost:
+		var req struct {
+			Token      string `json:"token"`
+			Passphrase string `json:"passphrase"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if _, err := s.coreSetPassphraseByLink(req.Token, req.Passphrase); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+const passphraseLinkFormHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set passphrase — Fresh Breath</title>
+<style>` + authFormStyle + `
+  .ok{color:#4ade80;font-size:14px;line-height:1.5}
+  .ok a{color:#a5b4fc}
+</style></head><body>
+<div class="card">
+  <h1>Set your passphrase</h1>
+  <p class="lead">For <b>{{EMAIL}}</b>. You'll use it to sign in to Fresh Breath. Setting it creates a new SSH key for your account.</p>
+  <div class="err" id="err"></div>
+  <form id="f">
+    <label for="p">New passphrase</label>
+    <input id="p" type="password" required minlength="8" autocomplete="new-password" autofocus/>
+    <label for="c">Confirm passphrase</label>
+    <input id="c" type="password" required minlength="8" autocomplete="new-password"/>
+    <button type="submit" id="btn">Set passphrase</button>
+  </form>
+  <p class="ok" id="ok" style="display:none">Your passphrase is set. <a href="/control">Sign in to the control panel</a>.</p>
+</div>
+<script>
+(function(){
+  var token={{TOKEN}};
+  document.getElementById('f').onsubmit=function(ev){
+    ev.preventDefault();
+    var btn=document.getElementById('btn'), errEl=document.getElementById('err');
+    var p=document.getElementById('p').value, c=document.getElementById('c').value;
+    errEl.className='err';
+    if (p.length<8) { errEl.textContent='Use at least 8 characters.'; errEl.className='err show'; return; }
+    if (p!==c) { errEl.textContent='The passphrases don\'t match.'; errEl.className='err show'; return; }
+    btn.disabled=true; btn.textContent='Saving…';
+    fetch('/service/passphrase', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token:token, passphrase:p})})
+      .then(function(r){
+        if (r.ok) {
+          document.getElementById('f').style.display='none';
+          document.getElementById('ok').style.display='block';
+          return;
+        }
+        r.text().then(function(t){errEl.textContent=t||'Could not set passphrase';errEl.className='err show'});
+        btn.disabled=false; btn.textContent='Set passphrase';
+      })
+      .catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Set passphrase'});
+  };
+})();
+</script></body></html>`
+
+const passphraseLinkErrorHTML = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Link expired — Fresh Breath</title>
+<style>` + authFormStyle + `</style></head><body>
+<div class="card">
+  <h1>Link not valid</h1>
+  <p class="lead">{{MESSAGE}}</p>
+</div>
+</body></html>`
 
 const apiKeyAuthFormHTML = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

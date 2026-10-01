@@ -39,25 +39,38 @@ type User struct {
 
 type UserMetadata struct {
 	SSHKey *SSHKeyInfo `json:"ssh_key,omitempty"`
+
+	// PassphraseReset is the user's one outstanding passphrase link (an
+	// invite or a reset). Only the token's hash is kept; minting a new link
+	// replaces it and using it clears it.
+	PassphraseReset *PassphraseReset `json:"passphrase_reset,omitempty"`
+}
+
+type PassphraseReset struct {
+	TokenHash string    `json:"token_hash"` // hex SHA-256 of the link token
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // SSHKeyInfo is an alias for sshkit.SSHKeyInfo so that the root package
 // (and future internal/server) can reference it without qualification.
 type SSHKeyInfo = sshkit.SSHKeyInfo
 
-// MarshalJSON masks sensitive SSH key fields before sending to the frontend.
+// MarshalJSON masks sensitive metadata before sending to the frontend: the
+// SSH key keeps only its public half, and the reset link hash is dropped.
 // The DB stores metadata separately via json.Marshal(metadata) which is unaffected.
 func (u User) MarshalJSON() ([]byte, error) {
 	type Alias User
 	out := Alias(u)
-	if out.Metadata != nil && out.Metadata.SSHKey != nil {
-		out.Metadata = &UserMetadata{
-			SSHKey: &SSHKeyInfo{
-				PublicKey:   out.Metadata.SSHKey.PublicKey,
-				Fingerprint: out.Metadata.SSHKey.Fingerprint,
-				KeyType:     out.Metadata.SSHKey.KeyType,
-			},
+	if out.Metadata != nil {
+		masked := &UserMetadata{}
+		if k := out.Metadata.SSHKey; k != nil {
+			masked.SSHKey = &SSHKeyInfo{
+				PublicKey:   k.PublicKey,
+				Fingerprint: k.Fingerprint,
+				KeyType:     k.KeyType,
+			}
 		}
+		out.Metadata = masked
 	}
 	return json.Marshal(out)
 }
@@ -85,6 +98,7 @@ type Service struct {
 	ProtectedBy *int64            `json:"protected_by"` // inbound gate auth record; nil = inherit admin
 	ActsAs      *int64            `json:"acts_as"`      // outbound credential record; nil = caller's own
 	UpdatedAt   time.Time         `json:"updated_at"`
+	Members     []int64           `json:"members,omitempty"` // users trusted with the definition file
 }
 
 // UpdateFeed is one remote-updates entry: either a receive feed (a remote URL

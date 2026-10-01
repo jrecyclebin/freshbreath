@@ -41,7 +41,7 @@ func (s *Server) handleGitSign(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, err)
 		return
 	}
-	_ = s.store.LogAudit(au.Email, "git_sign", fmt.Sprintf("%d commit(s)", len(signed)))
+	_ = s.store.LogAudit(au.ID, au.Email, "git_sign", fmt.Sprintf("%d commit(s)", len(signed)))
 	writeJSON(w, map[string]interface{}{"commits": signed})
 }
 
@@ -145,7 +145,7 @@ func (s *Server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, err)
 		return
 	}
-	_ = s.store.LogAudit(au.Email, "git_commit", fmt.Sprintf("%s @ %s", sha, req.URL))
+	_ = s.store.LogAudit(au.ID, au.Email, "git_commit", fmt.Sprintf("%s @ %s", sha, req.URL))
 	writeJSON(w, map[string]interface{}{
 		"commit": sha,
 		"status": "pushed",

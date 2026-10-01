@@ -228,8 +228,18 @@ const ToastProvider = ({children}) => {
 
 // ── Auth ───────────────────────────────────────────────────────────────
 
-const AuthCtx = createContext({ user: null, session: null, authRequired: false, gateName: '', sessionExpired: false, login: ()=>{}, logout: ()=>{}, clearExpired: ()=>{} });
+const AuthCtx = createContext({ user: null, session: null, authRequired: false, gateName: '', sessionExpired: false, login: ()=>{}, logout: ()=>{}, clearExpired: ()=>{}, setUser: ()=>{} });
 const useAuth = () => useContext(AuthCtx);
+
+// What the signed-in user may do in the panel. With auth off the panel runs
+// as the setup account, a Superuser. The server enforces all of this; these
+// only keep the panel from offering what would answer 403.
+const isAdminRole = (user, authRequired) => !authRequired || user?.role === 'Superuser' || user?.role === 'Admin';
+const isSuperuserRole = (user, authRequired) => !authRequired || user?.role === 'Superuser';
+const useRoles = () => {
+  const { user, authRequired } = useAuth();
+  return { isAdmin: isAdminRole(user, authRequired), isSuperuser: isSuperuserRole(user, authRequired) };
+};
 
 function AuthProvider({ children }) {
   const [ready, setReady] = useState(false);
@@ -292,7 +302,7 @@ function AuthProvider({ children }) {
   if (!ready) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
   return (
-    <AuthCtx.Provider value={{ user, session, authRequired, gateName, sessionExpired, login, logout, clearExpired, authError }}>
+    <AuthCtx.Provider value={{ user, session, authRequired, gateName, sessionExpired, login, logout, clearExpired, authError, setUser }}>
       {children}
     </AuthCtx.Provider>
   );
@@ -390,10 +400,11 @@ function SessionBanner({ onLogin, onDismiss }) {
 // reachable from one icon in the top bar and cross-linked by tabs
 // once you're inside one of them.
 const USER_AREA = [
-  { id: 'users',  label: 'Users' },
+  { id: 'users',  label: 'Users', adminOnly: true },
   { id: 'roles',  label: 'Roles' },
   { id: 'audit',  label: 'Audit log' },
 ];
+const userAreaFor = (isAdmin) => USER_AREA.filter(p => isAdmin || !p.adminOnly);
 
 // Menu is the one piece of shared chrome in the top bar: a button that
 // opens a small dropdown pinned under itself. Outside clicks and Escape
@@ -488,8 +499,11 @@ function TopBar({ user, onNav, onLogout }) {
     localStorage.setItem('frebre_theme', next);
     setDark(next === 'dark');
   };
+  const { isAdmin, isSuperuser } = useRoles();
   const displayName = user?.name || 'Admin';
   const displayRole = user?.role || 'Superuser';
+  // Only a real account has a profile; the auth-off setup account has none.
+  const hasProfile = !!(user && user.id > 0);
   return (
     <header className="topbar">
       <div className="topbar-inner">
@@ -498,19 +512,26 @@ function TopBar({ user, onNav, onLogout }) {
         </button>
         <div className="tb-right">
           <Menu icon="users">
-            {USER_AREA.map(p =>
+            {userAreaFor(isAdmin).map(p =>
               <MenuItem key={p.id} onClick={() => onNav(p.id)}>{p.label}</MenuItem>
             )}
           </Menu>
           <Menu avatar={<Avatar name={displayName} email={user?.email} size={30}/>}>
-            <div className="menu-heading user">
-              <b>{displayName}</b>
-              <span>{displayRole}</span>
-            </div>
+            {hasProfile ? (
+              <button className="menu-heading user menu-heading-link" title="Your profile" onClick={() => onNav('profile')}>
+                <b>{displayName}</b>
+                <span>{displayRole}</span>
+              </button>
+            ) : (
+              <div className="menu-heading user">
+                <b>{displayName}</b>
+                <span>{displayRole}</span>
+              </div>
+            )}
             <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
               {dark ? 'Light mode' : 'Dark mode'}
             </MenuItem>
-            <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>
+            {isSuperuser && <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>}
             {user && user.id && <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>}
             <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
               {window.__HOMESLICE_CONFIG?.version || 'dev'}
@@ -524,9 +545,10 @@ function TopBar({ user, onNav, onLogout }) {
 
 // Tabs linking the three user-area pages together, shown above them.
 function UserAreaTabs({ active, onNav }) {
+  const { isAdmin } = useRoles();
   return (
     <div className="area-tabs">
-      {USER_AREA.map(p =>
+      {userAreaFor(isAdmin).map(p =>
         <button key={p.id} className={'area-tab' + (active === p.id ? ' active' : '')}
                 onClick={() => onNav(p.id)}>{p.label}</button>
       )}
@@ -626,6 +648,9 @@ async function api(session, method, path, body, { rawText = false } = {}) {
   return rawText ? r.text() : r.json();
 }
 
+// sameIDs reports whether two id lists hold the same ids, in any order.
+const sameIDs = (a, b) => a.length === b.length && a.every(id => b.includes(id));
+
 const copyText = async (text, toast) => {
   try { await navigator.clipboard.writeText(text); toast('Copied to clipboard'); }
   catch { toast('Failed to copy', true); }
@@ -724,6 +749,7 @@ const ENTITY_VIEWS = [
 ];
 
 function HomePage({ session, navigate, apps, services, auth, users, adminAuthID, onRefresh }) {
+  const { isAdmin } = useRoles();
   const [view, setView] = useState('recent');
   const [q, setQ] = useState('');
   const [dropFile, setDropFile] = useState(null);
@@ -829,7 +855,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
       <div className="home-section">
         <div className="home-section-head">
           <h2>{activeView.label}</h2>
-          <NewEntityMenu navigate={navigate}/>
+          {isAdmin && <NewEntityMenu navigate={navigate}/>}
         </div>
         <div className="entity-wrap">
           <div className="entity-rail">
@@ -860,10 +886,10 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
               <tbody>
                 {rows.map(row => {
                   const e = row.entity;
-                  const deletable =
+                  const deletable = isAdmin && (
                     (row.kind === 'auth' && !e.builtin) ||
                     (row.kind === 'service' && e.descriptor?.type !== 'ssh') ||
-                    row.kind === 'app';
+                    row.kind === 'app');
                   return (
                     <tr key={row.kind + ':' + row.id} className="entity-row" onClick={() => open(row)}>
                       <td data-col="identity">
@@ -985,15 +1011,13 @@ function UsersView({ session, users, apps, onRefresh }) {
 }
 
 function UserDrawer({ user, session, apps, onClose, onSaved }) {
-  const { user: actor, authRequired } = useAuth();
-  const canManageSSH = (!authRequired) || (actor && (actor.role === 'Superuser' || actor.role === 'Admin'));
   const [form,setForm] = useState({name:'',email:'',role:'Member',status:'Active',apps:[]});
-  const [loading,setLoading] = useState(false);
-  const [sshKey, setSSHKey] = useState(null);
-  const [sshLoading, setSSHLoading] = useState(false);
-  const [showSSHGen, setShowSSHGen] = useState(false);
   const [passphrase, setPassphrase] = useState('');
   const [passConfirm, setPassConfirm] = useState('');
+  const [loading,setLoading] = useState(false);
+  const [busy,setBusy] = useState(false);
+  // The invite or reset link just minted, shown with an email to send.
+  const [link, setLink] = useState(null);
   const toast = useToast();
   const isNew = user==='new';
   const isEdit = user && user.id;
@@ -1008,48 +1032,83 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
         })
         .catch(e=>toast(e.message,true))
         .finally(()=>setLoading(false));
-      // Load SSH key status for admins
-      if (canManageSSH) {
-        setSSHLoading(true);
-        api(session, 'GET','/api/users/'+user.id+'/ssh-key')
-          .then(d => setSSHKey(d.ssh_key))
-          .catch(() => setSSHKey(null))
-          .finally(() => setSSHLoading(false));
-      }
     } else {
       setForm({name:'',email:'',role:'Member',status:'Active',apps:[]});
-      setSSHKey(null);
     }
-    setShowSSHGen(false);
-    setSSHLoading(false);
     setPassphrase('');
     setPassConfirm('');
   },[user]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A passphrase is optional on create, but if one is typed it has to be
+  // usable before anything is saved.
+  const passphraseProblem =
+    !passphrase && !passConfirm ? '' :
+    passphrase.length < 8 ? 'At least 8 characters.' :
+    passphrase !== passConfirm ? "The passphrases don't match." : '';
+
   const save = async () => {
+    setBusy(true);
     try {
-      let uid;
       if(isEdit) {
         await api(session, 'PUT','/api/users/'+user.id,form);
         await api(session, 'PUT','/api/users/'+user.id+'/apps',{apps:form.apps||[]});
         toast('User updated');
       } else {
-        const resp = await api(session, 'POST','/api/users',form);
-        uid = resp.id;
-        await api(session, 'PUT','/api/users/'+uid+'/apps',{apps:form.apps||[]});
-        toast('User created');
+        const created = await api(session, 'POST','/api/users',form);
+        await api(session, 'PUT','/api/users/'+created.id+'/apps',{apps:form.apps||[]});
+        if (passphrase) {
+          try { await api(session, 'POST','/api/users/'+created.id+'/ssh-key',{passphrase}); }
+          catch(e) { toast('User created, but the SSH key failed: '+e.message, true); onClose(); onSaved(); return; }
+        }
+        toast(passphrase ? 'User created with an SSH key' : 'User created');
       }
       onClose(); onSaved();
     } catch(e) { toast(e.message,true); }
+    finally { setBusy(false); }
+  };
+
+  // Invite: create the user as Invited and mint them a link to choose
+  // their own passphrase. The drawer gives way to the email to send.
+  const invite = async () => {
+    setBusy(true);
+    try {
+      const created = await api(session, 'POST','/api/users',{...form,status:'Invited'});
+      await api(session, 'PUT','/api/users/'+created.id+'/apps',{apps:form.apps||[]});
+      const minted = await api(session, 'POST','/api/users/'+created.id+'/passphrase-link');
+      setLink({kind:'invite', user:created, ...minted});
+    } catch(e) { toast(e.message,true); }
+    finally { setBusy(false); }
+  };
+
+  const resetLink = async () => {
+    try {
+      const minted = await api(session, 'POST','/api/users/'+user.id+'/passphrase-link');
+      setLink({kind:'reset', user, ...minted});
+    } catch(e) { toast(e.message,true); }
+  };
+
+  // An invite's refresh waits for the modal: reloading the panel remounts
+  // this drawer, which would take the link with it.
+  const closeLink = () => {
+    const wasInvite = link?.kind === 'invite';
+    setLink(null);
+    if (wasInvite) { onClose(); onSaved(); }
   };
 
   return (
+    <>
     <Drawer
-      open={isNew || isEdit} title={isNew?'New user':'Edit user'}
+      open={(isNew || isEdit) && !(link && link.kind === 'invite')} title={isNew?'New user':'Edit user'}
       onClose={onClose}
       footer={<>
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={save}>{isNew?'Create':'Save'}</button>
+        {isNew && (
+          <button className="btn btn-ghost" onClick={invite} disabled={busy || !form.name || !form.email || !!passphrase}
+                  title={passphrase ? 'Invited users choose their own passphrase — clear the one above to invite' : 'Create the user and get an email to send them'}>
+            <Icon name="mail" size={14}/> Invite
+          </button>
+        )}
+        <button className="btn btn-primary" onClick={save} disabled={busy || !!passphraseProblem}>{isNew?'Create':'Save'}</button>
       </>}
     >
       <p><strong>NOTE:</strong> You don't need to create accounts for people who are just using the apps and logging in with their own creds! This is only for users who need to log in to this admin panel and manage apps and services.</p>
@@ -1081,64 +1140,101 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
           )}
         </div>
       )}
-      {isEdit && canManageSSH && (
-        <>
-          <div style={{marginTop:20,borderTop:'1px solid var(--line-soft)',paddingTop:16}}>
-            <label style={{fontSize:13,fontWeight:600,color:'var(--ink-2)',marginBottom:12,display:'block'}}>SSH Key</label>
-            {sshLoading ? <span className="muted">Loading…</span> : sshKey ? (
-              <>
-                <div style={{marginBottom:8}}>
-                  <Badge tone="green">Active</Badge>
-                  <span className="muted" style={{marginLeft:8,fontSize:13}}>{sshKey.key_type?.toUpperCase()} · {sshKey.fingerprint}</span>
-                </div>
-                <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                  <input className="input mono" value={sshKey.public_key?.trim()} readOnly style={{fontSize:11}} />
-                  <button className="btn btn-ghost" onClick={() => copyText(sshKey.public_key?.trim(), toast)}><Icon name="copy" size={14}/></button>
-                </div>
-                <button className="btn btn-ghost" style={{color:'var(--tone-red)',marginTop:8}} onClick={async () => {
-                  if (!confirm('Delete this user\'s SSH key? They\'ll need a new one to use SSH auth.')) return;
-                  try { await api(session, 'DELETE','/api/users/'+user.id+'/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
-                  catch(e) { toast(e.message, true); }
-                }}>Delete key</button>
-              </>
-            ) : (
-              <button className="btn btn-ghost" onClick={() => setShowSSHGen(true)}><Icon name="lock" size={14}/> Generate SSH Key</button>
-            )}
-          </div>
-          {showSSHGen && (
-            <div className="modal-overlay" onClick={() => { setShowSSHGen(false); setPassphrase(''); setPassConfirm(''); }}>
-              <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
-                <h3 style={{marginBottom:16}}>Generate SSH Key</h3>
-                <p className="muted" style={{fontSize:13,marginBottom:16}}>
-                  Choose a passphrase for {user.name}'s SSH key. They'll need it each time they log in via SSH.
-                </p>
-                <div className="field">
-                  <label>Passphrase</label>
-                  <input className="input" type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
-                </div>
-                <div className="field">
-                  <label>Confirm passphrase</label>
-                  <input className="input" type="password" value={passConfirm} onChange={e => setPassConfirm(e.target.value)} placeholder="Re-enter passphrase" />
-                </div>
-                <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:20}}>
-                  <button className="btn btn-ghost" onClick={() => { setShowSSHGen(false); setPassphrase(''); setPassConfirm(''); }}>Cancel</button>
-                  <button className="btn btn-primary" disabled={passphrase.length < 8 || passphrase !== passConfirm} onClick={async () => {
-                    try {
-                      const d = await api(session, 'POST','/api/users/'+user.id+'/ssh-key', { passphrase });
-                      setSSHKey(d.ssh_key);
-                      setShowSSHGen(false);
-                      setPassphrase('');
-                      setPassConfirm('');
-                      toast('SSH key generated');
-                    } catch(e) { toast(e.message, true); }
-                  }}>Generate</button>
-                </div>
-              </div>
+      {isNew && (
+        <div style={{marginTop:20,borderTop:'1px solid var(--line-soft)',paddingTop:16}}>
+          <label style={{fontSize:13,fontWeight:600,color:'var(--ink-2)',marginBottom:4,display:'block'}}>SSH key passphrase</label>
+          <span className="help" style={{display:'block',marginBottom:12}}>
+            Optional. Set one now and an SSH key is generated with the account — you'll have to pass the passphrase on yourself.
+            Or leave it blank and <b>Invite</b> them to choose their own.
+          </span>
+          <div className="field-row">
+            <div className="field"><label>Passphrase</label>
+              <input className="input" type="password" autoComplete="new-password" value={passphrase} onChange={e=>setPassphrase(e.target.value)} placeholder="Min 8 characters"/>
             </div>
-          )}
-        </>
+            <div className="field"><label>Confirm</label>
+              <input className="input" type="password" autoComplete="new-password" value={passConfirm} onChange={e=>setPassConfirm(e.target.value)} placeholder="Re-enter passphrase"/>
+            </div>
+          </div>
+          {passphraseProblem && <span className="help" style={{color:'var(--danger)'}}>{passphraseProblem}</span>}
+        </div>
+      )}
+      {isEdit && (
+        <div style={{marginTop:20,borderTop:'1px solid var(--line-soft)',paddingTop:16}}>
+          <label style={{fontSize:13,fontWeight:600,color:'var(--ink-2)',marginBottom:12,display:'block'}}>SSH Key</label>
+          <SSHKeySection session={session} keyPath={'/api/users/'+user.id+'/ssh-key'} whose={user.name + "'s"}/>
+          <div style={{marginTop:16}}>
+            <button className="btn btn-ghost" onClick={resetLink}><Icon name="mail" size={14}/> Create reset link</button>
+            <span className="help" style={{display:'block',marginTop:6}}>
+              A link {user.name} opens to choose a new passphrase. Using it replaces their SSH key, so the current public key stops working.
+            </span>
+          </div>
+        </div>
       )}
     </Drawer>
+    {link && <PassphraseLinkModal link={link} onClose={closeLink}/>}
+    </>
+  );
+}
+
+// The email to send with a passphrase link — an invite for a new user, a
+// reset for an existing one. Editable before copying; it's only a draft.
+function passphraseLinkEmail({ kind, user, url, expires_at }) {
+  const cfg = window.__HOMESLICE_CONFIG || {};
+  const base = cfg.apiBase || window.location.origin;
+  const expires = new Date(expires_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  const signIn = cfg.authKind === 'ssh_key'
+    ? `Then sign in at ${base}/control with your email (${user.email}) and that passphrase.`
+    : `The passphrase unlocks your SSH key. You sign in to ${base}/control with your usual account (${user.email}).`;
+  if (kind === 'invite') return `Subject: You're invited to Fresh Breath
+
+Hi ${user.name},
+
+You have a ${user.role} account on Fresh Breath at ${base}.
+
+To get started, choose your passphrase here:
+${url}
+
+The link works once and expires ${expires}. ${signIn}
+`;
+  return `Subject: Reset your Fresh Breath passphrase
+
+Hi ${user.name},
+
+Here's a link to choose a new passphrase for your Fresh Breath account:
+${url}
+
+Setting it replaces your SSH key, so anywhere the old public key was added will need the new one. The link works once and expires ${expires}. ${signIn}
+`;
+}
+
+function PassphraseLinkModal({ link, onClose }) {
+  const [email, setEmail] = useState(() => passphraseLinkEmail(link));
+  const toast = useToast();
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:560}}>
+        <h3 style={{marginBottom:8}}>{link.kind === 'invite' ? `Invite ${link.user.name}` : `Reset link for ${link.user.name}`}</h3>
+        <p className="muted" style={{fontSize:13,marginBottom:16}}>
+          {link.kind === 'invite' ? 'The account is created as Invited and turns Active once they set a passphrase. ' : ''}
+          Copy the email below and send it to <b>{link.user.email}</b>. Any earlier link for them no longer works.
+        </p>
+        <div className="field">
+          <label>Link</label>
+          <div style={{display:'flex',gap:8}}>
+            <input className="input mono" value={link.url} readOnly style={{fontSize:12,flex:1,minWidth:0}}/>
+            <button className="btn btn-ghost" onClick={() => copyText(link.url, toast)} title="Copy link"><Icon name="copy" size={14}/></button>
+          </div>
+        </div>
+        <div className="field">
+          <label>Email</label>
+          <textarea className="input" rows={12} value={email} onChange={e => setEmail(e.target.value)} style={{fontSize:12.5,lineHeight:1.5,resize:'vertical'}}/>
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
+          <button className="btn btn-ghost" onClick={onClose}>Done</button>
+          <button className="btn btn-primary" onClick={() => copyText(email, toast)}><Icon name="copy" size={14}/> Copy email</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2002,6 +2098,7 @@ function AuthForm({ form, setForm, record }) {
 
 // The auth record settings page — what the edit drawer used to be.
 function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, navigate }) {
+  const { isAdmin } = useRoles();
   const record = isNew ? null : auth.find(r => String(r.id) === String(authId));
   const [form, setForm] = useState({name:'',kind:'oidc',descriptor:{}});
   const [saving, setSaving] = useState(false);
@@ -2039,7 +2136,7 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
     catch(e) { toast(e.message, true); }
   };
 
-  if (!isNew && !record) {
+  if ((!isNew && !record) || (isNew && !isAdmin)) {
     return (
       <>
         <PageHead title="Auth record not found" back={()=>navigate('home')} backLabel="Home"/>
@@ -2060,10 +2157,10 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
         sub={record ? 'A credential and login method, standing on its own.' : 'Name a credential and login method.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
-          {record && !isBuiltin && (
+          {isAdmin && record && !isBuiltin && (
             <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>
           )}
-          {!isBuiltin && (
+          {isAdmin && !isBuiltin && (
             <button className="btn btn-primary" onClick={save} disabled={saving || !form.name}>
               {saving ? 'Saving…' : record ? 'Save' : 'Create record'}
             </button>
@@ -2082,7 +2179,10 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
             </span>
           </div>
         ) : (
-          <AuthForm form={form} setForm={setForm} record={record}/>
+          <fieldset className="read-only-fields" disabled={!isAdmin}>
+            {!isAdmin && <span className="help" style={{display:'block',marginBottom:12}}>Read-only — only admins can change auth records.</span>}
+            <AuthForm form={form} setForm={setForm} record={record}/>
+          </fieldset>
         )}
         {record && (
           <div className="field"><label>Used by</label>
@@ -2194,7 +2294,7 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
         records={auth}
         value={form.protected_by}
         onChange={v=>setForm(f=>({...f,protected_by:v}))}
-        onCreate={()=>onCreateGate?.('protected_by')}
+        onCreate={onCreateGate && (()=>onCreateGate('protected_by'))}
       />
 
       {form.descriptor.type === 'mcp' &&
@@ -2214,7 +2314,7 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
           records={auth}
           value={form.acts_as}
           onChange={v=>setForm(f=>({...f,acts_as:v}))}
-          onCreate={()=>onCreateGate?.('acts_as')}
+          onCreate={onCreateGate && (()=>onCreateGate('acts_as'))}
         />
       }
 
@@ -2252,9 +2352,12 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
 }
 
 // The service settings page — what the edit drawer used to be.
-function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, apps, onRefresh, navigate }) {
+function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, apps, users, onRefresh, navigate }) {
+  const { user } = useAuth();
+  const { isAdmin } = useRoles();
   const service = isNew ? null : services.find(s => String(s.id) === String(serviceId));
   const [form, setForm] = useState({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
+  const [members, setMembers] = useState([]);
   const [tools, setTools] = useState([]);
   const [toolsLoading, setToolsLoading] = useState(false);
   const [toolsError, setToolsError] = useState('');
@@ -2270,10 +2373,13 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
       protected_by:service.protected_by ?? null, acts_as:service.acts_as ?? null,
     });
     else setForm({name:'',url:'',descriptor:{type:'mcp',proxied:false},protected_by:null,acts_as:null});
+    setMembers(service?.members || []);
   },[service ? service.id : null, isNew]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const type = isEdit && service.descriptor?.type;
   const hasTools = type === 'tasks' || type === 'virtual';
+  // Only tasks and virtual services have a definition file to share out.
+  const hasFile = hasTools;
 
   useEffect(()=>{
     if (!isEdit || !hasTools) { setTools([]); setToolsError(''); return; }
@@ -2294,6 +2400,9 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
       if (payload.descriptor.type === 'virtual') payload.url = '';
       if (isEdit) {
         await api(session, 'PUT','/api/services/'+service.id,payload);
+        if (hasFile && !sameIDs(members, service.members || [])) {
+          await api(session, 'PUT','/api/services/'+service.id+'/members',{members});
+        }
         toast('Service updated'); onRefresh();
       } else {
         const resp = await api(session, 'POST','/api/services',payload);
@@ -2316,7 +2425,7 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
     catch(e) { toast(e.message,true); }
   };
 
-  if (!isNew && !service) {
+  if ((!isNew && !service) || (isNew && !isAdmin)) {
     return (
       <>
         <PageHead title="Service not found" back={()=>navigate('home')} backLabel="Home"/>
@@ -2327,6 +2436,8 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
 
   const isTasks = form.descriptor.type === 'tasks';
   const isVirtual = form.descriptor.type === 'virtual';
+  // Admins edit everything; a service member edits only the definition file.
+  const canEditFile = isAdmin || (isEdit && !!user && (service.members || []).includes(user.id));
   // The SSH service is the instance's own — seeded at startup, fronting
   // users' keys and each app's known hosts. It has no editable settings.
   const isBuiltin = isEdit && service.descriptor?.type === 'ssh';
@@ -2338,10 +2449,10 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
         sub={service ? 'A registered provider — MCP, API, tasks, virtual or SSH.' : 'Name it and say what it is.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
-          {service && !isBuiltin && (
+          {isAdmin && service && !isBuiltin && (
             <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>
           )}
-          {!isBuiltin && (
+          {isAdmin && !isBuiltin && (
             <button className="btn btn-primary" onClick={save} disabled={!form.name}>{service ? 'Save' : 'Create service'}</button>
           )}
         </>}
@@ -2358,8 +2469,27 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
         )}
         {!isBuiltin && (
           <div className="page-col">
-            <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
-                               service={service} onCreateGate={(slot)=>setCreatingFor(slot)}/>
+            <fieldset className="read-only-fields" disabled={!isAdmin}>
+              {!isAdmin && (
+                <span className="help" style={{display:'block',marginBottom:12}}>
+                  Read-only — only admins can change a service.{canEditFile && hasFile ? ' You can edit its definition file.' : ''}
+                </span>
+              )}
+              <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
+                                 service={service} onCreateGate={isAdmin ? (slot)=>setCreatingFor(slot) : undefined}/>
+            </fieldset>
+            {isAdmin && isEdit && hasFile && (
+              <div className="field">
+                <label>Members</label>
+                <span className="help">Users who may edit this service's definition file — nothing else about it. Admins always can.</span>
+                <MultiSelect
+                  options={users.filter(u => u.role === 'Member' || u.role === 'Read-only').map(u => ({value:u.id,label:u.name}))}
+                  value={members}
+                  onChange={setMembers}
+                  placeholder="No members"
+                />
+              </div>
+            )}
           </div>
         )}
         {!isBuiltin && isEdit && (isTasks || isVirtual) && (
@@ -2367,9 +2497,11 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
             <div className="field">
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
                 <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
-                <button className="btn btn-sm btn-primary" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
-                  <Icon name="edit" size={12}/> Edit
-                </button>
+                {canEditFile && (
+                  <button className="btn btn-sm btn-primary" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
+                    <Icon name="edit" size={12}/> Edit
+                  </button>
+                )}
               </div>
               {toolsLoading && <span className="muted">Loading…</span>}
               {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
@@ -2523,6 +2655,7 @@ function RolesView({ roles }) {
   const checkedFor = (role,group,item) => {
     if(role.name==='Superuser') return true;
     if(role.name==='Admin')     return true;
+    if(group==='Users' && item==='Read') return false; // the users list is admin-only
     if(role.name==='Member')    return item==='Read' || (group==='Apps'&&item==='Edit');
     if(role.name==='Read-only') return item==='Read';
     return false;
@@ -2567,14 +2700,14 @@ function RolesView({ roles }) {
 
 // ── Audit ──────────────────────────────────────────────────────────────
 
-function AuditView({ audit }) {
+function AuditView({ audit, isAdmin }) {
   const [q,setQ] = useState('');
   const filtered = audit.filter(a=>!q || `${a.actor} ${a.action} ${a.target}`.toLowerCase().includes(q.toLowerCase()));
   return (
     <>
       <PageHead
         title="Audit log"
-        sub="Recent changes across the system."
+        sub={isAdmin ? "Recent changes across the system." : "Your own recent activity."}
       />
       <Toolbar search={q} onSearch={setQ} placeholder="Search events…"/>
       <div className="table-wrap" style={{padding:'8px 24px'}}>
@@ -2615,18 +2748,13 @@ function SettingSection({ title, desc, children }) {
   );
 }
 
-function SettingsView({ session, services, apps, auth, user, onRefresh }) {
+function SettingsView({ session, services, apps, auth, onRefresh }) {
   const [selectedAuth, setSelectedAuth] = useState('');
   const [savedAuth, setSavedAuth] = useState('');
   const [creatingGate, setCreatingGate] = useState(false);
   const [defaultApp, setDefaultApp] = useState('');
   const [dbMode, setDbMode] = useState('read-only');
   const [loading, setLoading] = useState(true);
-  const [sshKey, setSSHKey] = useState(null);
-  const [sshLoading, setSSHLoading] = useState(false);
-  const [showGenModal, setShowGenModal] = useState(false);
-  const [passphrase, setPassphrase] = useState('');
-  const [passConfirm, setPassConfirm] = useState('');
   const toast = useToast();
 
   useEffect(() => {
@@ -2641,15 +2769,6 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
       .catch(e => toast(e.message, true))
       .finally(() => setLoading(false));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!user || user.id < 0) return;
-    setSSHLoading(true);
-    api(session, 'GET', '/api/me/ssh-key')
-      .then(d => setSSHKey(d.ssh_key))
-      .catch(() => setSSHKey(null))
-      .finally(() => setSSHLoading(false));
-  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveAuth = async () => {
     try {
@@ -2768,69 +2887,165 @@ function SettingsView({ session, services, apps, auth, user, onRefresh }) {
         )}
         </SettingSection>
 
-        <SettingSection
-          title="SSH key"
-          desc="Generate an SSH key pair for authentication and agent forwarding. Only the public key is shown after creation."
-        >
-        {sshLoading ? <span className="muted">Loading…</span> : sshKey ? (
-          <>
-            <div style={{marginBottom:12}}>
-              <Badge tone="green">Active</Badge>
-              <span className="muted" style={{marginLeft:8,fontSize:13}}>{sshKey.key_type?.toUpperCase()} · {sshKey.fingerprint}</span>
-            </div>
-            <div className="field" style={{maxWidth:560}}>
-              <label>Public key</label>
-              <div style={{display:'flex',gap:8}}>
-                <input className="input mono" value={sshKey.public_key?.trim()} readOnly style={{fontSize:12}} />
-                <button className="btn btn-ghost" onClick={() => copyText(sshKey.public_key?.trim(), toast)}><Icon name="copy" size={14}/></button>
-              </div>
-            </div>
-            <div style={{marginTop:12}}>
-              <button className="btn btn-ghost" style={{color:'var(--tone-red)'}} onClick={async () => {
-                if (!confirm('Delete your SSH key? You\'ll need to generate a new one to use SSH auth.')) return;
-                try { await api(session, 'DELETE', '/api/me/ssh-key'); setSSHKey(null); toast('SSH key deleted'); }
-                catch(e) { toast(e.message, true); }
-              }}>Delete key</button>
-            </div>
-          </>
-        ) : (
-          <button className="btn btn-primary" onClick={() => setShowGenModal(true)}><Icon name="key" size={14}/> Generate SSH Key</button>
-        )}
-        </SettingSection>
       </div>
+    </>
+  );
+}
 
-      {showGenModal && (
-        <div className="modal-overlay" onClick={() => setShowGenModal(false)}>
-          <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
-            <h3 style={{marginBottom:16}}>Generate SSH Key</h3>
-            <p className="muted" style={{fontSize:13,marginBottom:16}}>
-              Choose a strong passphrase. You'll need it each time you log in via SSH. It cannot be recovered if forgotten.
-            </p>
-            <div className="field">
-              <label>Passphrase</label>
-              <input className="input" type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
+// ── Profile ────────────────────────────────────────────────────────────
+
+// The signed-in user's own page: their name and email, and their SSH key.
+// Every role gets it; it's the one place a Member can change anything
+// about their own account.
+function ProfileView({ session }) {
+  const { user, setUser } = useAuth();
+  const [form, setForm] = useState({ name: user?.name || '', email: user?.email || '' });
+  const [saving, setSaving] = useState(false);
+  const toast = useToast();
+
+  if (!user || user.id < 0) {
+    return (
+      <>
+        <PageHead title="Profile" sub="Your own account."/>
+        <div className="empty"><b>No account.</b> The control panel is open — there's no signed-in user to edit.</div>
+      </>
+    );
+  }
+
+  const dirty = form.name !== user.name || form.email !== user.email;
+  const save = async () => {
+    setSaving(true);
+    try {
+      const d = await api(session, 'PUT', '/api/me', form);
+      setUser(d.user);
+      toast('Profile saved');
+    } catch (e) { toast(e.message, true); }
+    finally { setSaving(false); }
+  };
+
+  return (
+    <>
+      <PageHead title="Profile" sub={<>Signed in as <Badge tone={roleTone(user.role)}>{user.role}</Badge></>}/>
+      <div className="settings-layout">
+        <SettingSection
+          title="Your details"
+          desc="How you appear across the control panel and the audit log. Your email is also what single sign-on logins are matched on — change it here if it changes there."
+        >
+          <div style={{maxWidth:380}}>
+            <div className="field"><label>Name</label>
+              <input className="input" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))}/>
             </div>
-            <div className="field">
-              <label>Confirm passphrase</label>
-              <input className="input" type="password" value={passConfirm} onChange={e => setPassConfirm(e.target.value)} placeholder="Re-enter passphrase" />
+            <div className="field"><label>Email</label>
+              <input className="input" type="email" value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value}))}/>
             </div>
-            <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:20}}>
-              <button className="btn btn-ghost" onClick={() => { setShowGenModal(false); setPassphrase(''); setPassConfirm(''); }}>Cancel</button>
-              <button className="btn btn-primary" disabled={passphrase.length < 8 || passphrase !== passConfirm} onClick={async () => {
-                try {
-                  const d = await api(session, 'POST', '/api/me/ssh-key', { passphrase });
-                  setSSHKey(d.ssh_key);
-                  setShowGenModal(false);
-                  setPassphrase('');
-                  setPassConfirm('');
-                  toast('SSH key generated');
-                } catch(e) { toast(e.message, true); }
-              }}>Generate</button>
+            <div style={{display:'flex',gap:8,marginTop:16}}>
+              <button className="btn btn-primary" onClick={save} disabled={saving || !dirty || !form.name.trim() || !form.email.trim()}>
+                {saving ? 'Saving…' : 'Save'}
+              </button>
             </div>
           </div>
-        </div>
+        </SettingSection>
+        <SettingSection
+          title="SSH key"
+          desc="Your SSH key pair, for passphrase sign-in and agent forwarding. Only the public key is ever shown."
+        >
+          <SSHKeySection session={session} keyPath="/api/me/ssh-key" whose="your"/>
+        </SettingSection>
+      </div>
+    </>
+  );
+}
+
+// One user's SSH key: shows the public half and offers delete, or offers to
+// generate one under a chosen passphrase. keyPath is /api/me/ssh-key for
+// your own, /api/users/:id/ssh-key for an admin managing someone else's.
+function SSHKeySection({ session, keyPath, whose }) {
+  const [sshKey, setSSHKey] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    setLoading(true);
+    api(session, 'GET', keyPath)
+      .then(d => setSSHKey(d.ssh_key))
+      .catch(() => setSSHKey(null))
+      .finally(() => setLoading(false));
+  }, [keyPath]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (loading) return <span className="muted">Loading…</span>;
+  if (!sshKey) return (
+    <>
+      <button className="btn btn-ghost" onClick={() => setGenerating(true)}><Icon name="key" size={14}/> Generate SSH key</button>
+      {generating && (
+        <PassphraseModal
+          title="Generate SSH key"
+          blurb={`Choose a passphrase for ${whose} SSH key. It's needed at each passphrase sign-in and can't be recovered if forgotten.`}
+          onClose={() => setGenerating(false)}
+          onSubmit={async (passphrase) => {
+            const d = await api(session, 'POST', keyPath, { passphrase });
+            setSSHKey(d.ssh_key);
+            setGenerating(false);
+            toast('SSH key generated');
+          }}
+        />
       )}
     </>
+  );
+  return (
+    <>
+      <div style={{marginBottom:12}}>
+        <Badge tone="green">Active</Badge>
+        <span className="muted" style={{marginLeft:8,fontSize:13}}>{sshKey.key_type?.toUpperCase()} · {sshKey.fingerprint}</span>
+      </div>
+      <div className="field" style={{maxWidth:560}}>
+        <label>Public key</label>
+        <div style={{display:'flex',gap:8}}>
+          <input className="input mono" value={sshKey.public_key?.trim()} readOnly style={{fontSize:12,flex:1,minWidth:0}} />
+          <button className="btn btn-ghost" onClick={() => copyText(sshKey.public_key?.trim(), toast)}><Icon name="copy" size={14}/></button>
+        </div>
+      </div>
+      <button className="btn btn-ghost" style={{color:'var(--tone-red)'}} onClick={async () => {
+        if (!confirm(`Delete ${whose} SSH key? A new one is needed for passphrase sign-in.`)) return;
+        try { await api(session, 'DELETE', keyPath); setSSHKey(null); toast('SSH key deleted'); }
+        catch(e) { toast(e.message, true); }
+      }}>Delete key</button>
+    </>
+  );
+}
+
+// Asks for a passphrase twice. onSubmit receives it and may throw; the
+// error is toasted and the modal stays open.
+function PassphraseModal({ title, blurb, onClose, onSubmit }) {
+  const [passphrase, setPassphrase] = useState('');
+  const [confirmed, setConfirmed] = useState('');
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const submit = async () => {
+    setBusy(true);
+    try { await onSubmit(passphrase); }
+    catch (e) { toast(e.message, true); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
+        <h3 style={{marginBottom:16}}>{title}</h3>
+        <p className="muted" style={{fontSize:13,marginBottom:16}}>{blurb}</p>
+        <div className="field">
+          <label>Passphrase</label>
+          <input className="input" type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
+        </div>
+        <div className="field">
+          <label>Confirm passphrase</label>
+          <input className="input" type="password" value={confirmed} onChange={e => setConfirmed(e.target.value)} placeholder="Re-enter passphrase" />
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:20}}>
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" disabled={busy || passphrase.length < 8 || passphrase !== confirmed} onClick={submit}>Generate</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -3181,6 +3396,7 @@ const fmtShortTime = (iso) => {
 //     · /control/services/:id/edit-tools      -> service page / tools editor
 //   /control/auth/new · /control/auth/:id     -> auth record page
 //   /control/users|roles|audit|settings       -> the user area and settings
+//   /control/profile                          -> the signed-in user's own page
 const parseRoute = () => {
   const parts = window.location.pathname.replace(/^\/control\/?/, '').split('/').filter(Boolean);
   const [a, b, c] = parts;
@@ -3198,7 +3414,7 @@ const parseRoute = () => {
     if (b === 'new') return { page: 'authrecord', params: { isNew: true } };
     if (b) return { page: 'authrecord', params: { authId: b } };
   }
-  if (!b && ['users', 'roles', 'audit', 'settings'].includes(a)) return { page: a, params: {} };
+  if (!b && ['users', 'roles', 'audit', 'settings', 'profile'].includes(a)) return { page: a, params: {} };
   return { page: 'home', params: {} };
 };
 
@@ -3235,6 +3451,8 @@ function AppShell() {
   const [audit,setAudit] = useState([]);
   const [loading,setLoading] = useState(true);
   const toast = useToast();
+  const isAdmin = isAdminRole(user, authRequired);
+  const isSuperuser = isSuperuserRole(user, authRequired);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -3242,46 +3460,58 @@ function AppShell() {
       // The admin record is loaded alongside the rest because every gate
       // dropdown needs it: an empty slot resolves to it, so the panel cannot
       // label a single inherited gate without knowing which record that is.
+      // The users list is admin-only, so nobody else asks for it.
       const [u,a,s,r,au,ar,st] = await Promise.all([
-        api(session, 'GET','/api/users'),
+        isAdmin ? api(session, 'GET','/api/users') : Promise.resolve({users: []}),
         api(session, 'GET','/api/apps'),
         api(session, 'GET','/api/services'),
         api(session, 'GET','/api/roles'),
         api(session, 'GET','/api/audit'),
         api(session, 'GET','/api/auth'),
-        api(session, 'GET','/api/settings').catch(()=>({})),
+        // Settings are Superuser-only; everyone else reads the admin gate's
+        // id from env.js, which carries it for the control panel.
+        isSuperuser
+          ? api(session, 'GET','/api/settings').catch(()=>({}))
+          : Promise.resolve({admin_auth_service: window.__HOMESLICE_CONFIG?.authRecordID || null}),
       ]);
       setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]);
       setRoles(r.roles||[]); setAudit(au.audit||[]); setAuth(ar.auth||[]);
       setAdminAuthID(st.admin_auth_service ? Number(st.admin_auth_service) : null);
     } catch(e) { if (!authRequired || user) toast('Failed to load: '+e.message, true); }
     setLoading(false);
-  },[authRequired, user, session]); // eslint-disable-line react-hooks/exhaustive-deps
+  },[authRequired, user, session, isAdmin, isSuperuser]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Reload when who is signed in changes — not on every profile edit,
+  // which hands back a fresh user object for the same person.
   useEffect(()=>{
     if (authRequired && !user) return;
     load();
-  },[authRequired, user]); // eslint-disable-line react-hooks/exhaustive-deps
+  },[authRequired, user?.id, user?.role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (authRequired && !user) return <LoginScreen gateName={gateName} onLogin={login} authError={authError}/>;
 
   if(loading) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
+
+  // Pages a role can't use fall back to home rather than a wall of 403s.
+  const page =
+    (route.page === 'users' && !isAdmin) || (route.page === 'settings' && !isSuperuser) ? 'home' : route.page;
 
   return (
     <div className="app-shell">
       <TopBar user={user} onNav={(id)=>navigate(id)} onLogout={user ? logout : null}/>
       <main className="main">
         {sessionExpired && <SessionBanner onLogin={login} onDismiss={clearExpired}/>}
-        {['users','roles','audit'].includes(route.page) && <UserAreaTabs active={route.page} onNav={navigate}/>}
-        {route.page==='home'      && <HomePage session={session} navigate={navigate} apps={apps} services={services} auth={auth} users={users} adminAuthID={adminAuthID} onRefresh={load}/>}
-        {route.page==='app'       && <AppPage session={session} nonce={route.params.nonce} isNew={route.params.isNew} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load} navigate={navigate}/>}
-        {route.page==='service'   && <ServicePage session={session} serviceId={route.params.serviceId} isNew={route.params.isNew} services={services} auth={auth} adminAuthID={adminAuthID} apps={apps} onRefresh={load} navigate={navigate}/>}
-        {route.page==='tools'     && <ServiceToolsEditor session={session} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('service',{serviceId:route.params.serviceId})} onSaved={load}/>}
-        {route.page==='authrecord'&& <AuthPage session={session} authId={route.params.authId} isNew={route.params.isNew} auth={auth} services={services} apps={apps} onRefresh={load} navigate={navigate}/>}
-        {route.page==='users'     && <UsersView session={session} users={users} apps={apps} onRefresh={load}/>}
-        {route.page==='roles'     && <RolesView roles={roles}/>}
-        {route.page==='audit'     && <AuditView audit={audit}/>}
-        {route.page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} user={user} onRefresh={load}/>}
+        {['users','roles','audit'].includes(page) && <UserAreaTabs active={page} onNav={navigate}/>}
+        {page==='home'      && <HomePage session={session} navigate={navigate} apps={apps} services={services} auth={auth} users={users} adminAuthID={adminAuthID} onRefresh={load}/>}
+        {page==='app'       && <AppPage session={session} nonce={route.params.nonce} isNew={route.params.isNew} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load} navigate={navigate}/>}
+        {page==='service'   && <ServicePage session={session} serviceId={route.params.serviceId} isNew={route.params.isNew} services={services} auth={auth} adminAuthID={adminAuthID} apps={apps} users={users} onRefresh={load} navigate={navigate}/>}
+        {page==='tools'     && <ServiceToolsEditor session={session} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('service',{serviceId:route.params.serviceId})} onSaved={load}/>}
+        {page==='authrecord'&& <AuthPage session={session} authId={route.params.authId} isNew={route.params.isNew} auth={auth} services={services} apps={apps} onRefresh={load} navigate={navigate}/>}
+        {page==='users'     && <UsersView session={session} users={users} apps={apps} onRefresh={load}/>}
+        {page==='roles'     && <RolesView roles={roles}/>}
+        {page==='audit'     && <AuditView audit={audit} isAdmin={isAdmin}/>}
+        {page==='profile'   && <ProfileView session={session}/>}
+        {page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} onRefresh={load}/>}
       </main>
     </div>
   );

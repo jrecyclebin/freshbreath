@@ -132,6 +132,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
 	s.mux.HandleFunc("/service/apikey-auth", s.handleAPIKeyAuth)
 	s.mux.HandleFunc("/service/logout", s.handleLogout)
+	s.mux.HandleFunc("/service/passphrase", s.handlePassphraseLink)
 	s.mux.HandleFunc("/service/{id}/", s.handleServiceProxy)
 	s.mux.HandleFunc("/service/call/{name}", s.handleServiceCall)
 
@@ -174,10 +175,12 @@ func (s *Server) SetupRoutes() {
 
 	s.mux.HandleFunc("/api/apps", s.authWrap(pipeline(s.handleApps, anyRole)))
 	s.mux.HandleFunc("/api/apps/", s.authWrap(pipeline(s.handleAppDetail, anyRole)))
-	s.mux.HandleFunc("/api/services", s.authWrap(pipeline(s.handleServices, adminPlus)))
-	s.mux.HandleFunc("/api/services/", s.authWrap(pipeline(s.handleServiceDetail, adminPlus)))
-	s.mux.HandleFunc("/api/auth", s.authWrap(pipeline(s.handleAuthRecords, adminPlus)))
-	s.mux.HandleFunc("/api/auth/", s.authWrap(pipeline(s.handleAuthRecordDetail, adminPlus)))
+	// Services and auth records are readable by every role; core gates each
+	// write (admin+, or a service member for its definition file).
+	s.mux.HandleFunc("/api/services", s.authWrap(pipeline(s.handleServices, anyRole)))
+	s.mux.HandleFunc("/api/services/", s.authWrap(pipeline(s.handleServiceDetail, anyRole)))
+	s.mux.HandleFunc("/api/auth", s.authWrap(pipeline(s.handleAuthRecords, anyRole)))
+	s.mux.HandleFunc("/api/auth/", s.authWrap(pipeline(s.handleAuthRecordDetail, anyRole)))
 
 	// Global databases (design/app-databases.md) — the alias mount. Any
 	// authenticated role rides the mount; gateDBTarget decides who may touch
@@ -1610,6 +1613,9 @@ func (s *Server) handleListServices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	for _, svc := range services {
+		svc.Members, _ = s.store.ListServiceMembers(svc.ID)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"services": services})
@@ -1652,8 +1658,15 @@ func (s *Server) handleServiceDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/services/{id}/members
+	if len(parts) >= 4 && parts[3] == "members" {
+		s.handleServiceMembers(w, r, serviceID)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
+		svc.Members, _ = s.store.ListServiceMembers(serviceID)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(svc)
 	case http.MethodPut:
@@ -1686,6 +1699,36 @@ func (s *Server) handleServiceApps(w http.ResponseWriter, r *http.Request, servi
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"apps": apps})
+}
+
+// handleServiceMembers reads or replaces the users trusted with a service's
+// definition file.
+func (s *Server) handleServiceMembers(w http.ResponseWriter, r *http.Request, serviceID int64) {
+	switch r.Method {
+	case http.MethodGet:
+		members, err := s.store.ListServiceMembers(serviceID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"members": members})
+	case http.MethodPut:
+		var req struct {
+			Members []int64 `json:"members"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if err := s.coreSetServiceMembers(userFromContext(r.Context()), serviceID, req.Members); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ── Auth records API ────────────────────────────────────────────────
@@ -1916,6 +1959,27 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/users/{id}/passphrase-link — mint an invite/reset link
+	if len(parts) >= 4 && parts[3] == "passphrase-link" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		target, err := s.store.GetUser(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		link, expires, err := s.coreCreatePassphraseLink(userFromContext(r.Context()), target)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"url": link, "expires_at": expires})
+		return
+	}
+
 	// Sub-route: /api/users/{id}/ssh-key (admin-only)
 	if len(parts) >= 4 && parts[3] == "ssh-key" {
 		actor, _ := r.Context().Value(userKey).(*db.User)
@@ -2067,7 +2131,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		entries, err := s.store.ListAudit(100)
+		entries, err := s.store.ListAudit(100, auditScope(userFromContext(r.Context())))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -2269,14 +2333,33 @@ func (s *Server) getOIDCProvider(ctx context.Context, issuer string) (*oidc.Prov
 	return p, nil
 }
 
+// handleMe reads the signed-in user (GET) or updates their own name and
+// email (PUT).
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	user, _ := r.Context().Value(userKey).(*db.User)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"user": user})
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"user": user})
+	case http.MethodPut:
+		var req struct {
+			Name  string `json:"name"`
+			Email string `json:"email"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		updated, err := s.coreUpdateProfile(user, req.Name, req.Email)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"user": updated})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleSSHKey(w http.ResponseWriter, r *http.Request) {
@@ -2413,7 +2496,7 @@ func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = s.store.LogAudit(user.Email, "ssh_session_open", fmt.Sprintf("%s@%s:%d", req.Username, req.Host, req.Port))
+	_ = s.store.LogAudit(user.ID, user.Email, "ssh_session_open", fmt.Sprintf("%s@%s:%d", req.Username, req.Host, req.Port))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2458,7 +2541,7 @@ func (s *Server) handleSSHSessionDetail(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if user != nil {
-			_ = s.store.LogAudit(user.Email, "ssh_session_close", id)
+			_ = s.store.LogAudit(user.ID, user.Email, "ssh_session_close", id)
 		}
 		w.WriteHeader(http.StatusNoContent)
 
@@ -2540,7 +2623,7 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 
 	user, _ := r.Context().Value(userKey).(*db.User)
 	if user != nil {
-		_ = s.store.LogAudit(user.Email, "ssh_host_key_delete", fmt.Sprintf("%s:%d", host, port))
+		_ = s.store.LogAudit(user.ID, user.Email, "ssh_host_key_delete", fmt.Sprintf("%s:%d", host, port))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

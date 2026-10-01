@@ -79,6 +79,12 @@ func (s *Store) Migrate() error {
       PRIMARY KEY (app_nonce, user_id)
     );
 
+    CREATE TABLE IF NOT EXISTS service_members (
+      service_id INTEGER NOT NULL,
+      user_id    INTEGER NOT NULL,
+      PRIMARY KEY (service_id, user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS app_service_links (
       app_nonce   TEXT NOT NULL,
       service_id  INTEGER NOT NULL,
@@ -179,6 +185,18 @@ func (s *Store) Migrate() error {
 	s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('users') WHERE name='metadata'").Scan(&hasMetadata)
 	if !hasMetadata {
 		_, err = s.db.Exec("ALTER TABLE users ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+		if err != nil {
+			return err
+		}
+	}
+
+	// Add actor_id to audit_log if missing: the user row behind an entry, so
+	// a member's own activity can be found without trusting the actor label
+	// (a name the member can change). Older rows stay NULL.
+	var hasActorID bool
+	s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('audit_log') WHERE name='actor_id'").Scan(&hasActorID)
+	if !hasActorID {
+		_, err = s.db.Exec("ALTER TABLE audit_log ADD COLUMN actor_id INTEGER")
 		if err != nil {
 			return err
 		}
@@ -657,6 +675,10 @@ func (s *Store) DeleteUser(id int64) error {
 	if err != nil {
 		return err
 	}
+	_, err = s.db.Exec("DELETE FROM service_members WHERE user_id = ?", id)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.Exec("DELETE FROM users WHERE id = ?", id)
 	if err != nil {
 		return err
@@ -698,22 +720,31 @@ func (s *Store) UpdateRole(id int64, description string) error {
 
 // ── Audit ──
 
-func (s *Store) LogAudit(actor, action, target string) error {
+// LogAudit records an audit entry. actorID is the acting user's row id, or 0
+// when the actor is no user row (setup account, unknown).
+func (s *Store) LogAudit(actorID int64, actor, action, target string) error {
 	_, err := s.db.Exec(
-		"INSERT INTO audit_log (actor, action, target) VALUES (?, ?, ?)",
-		actor, action, target,
+		"INSERT INTO audit_log (actor_id, actor, action, target) VALUES (?, ?, ?, ?)",
+		nullableID(positiveID(actorID)), actor, action, target,
 	)
 	return err
 }
 
-func (s *Store) ListAudit(limit int) ([]*AuditEntry, error) {
+// ListAudit returns the most recent audit entries, newest first. A non-zero
+// actorID narrows the list to that user's own entries.
+func (s *Store) ListAudit(limit int, actorID int64) ([]*AuditEntry, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(
-		"SELECT id, created_at, actor, action, target FROM audit_log ORDER BY created_at DESC LIMIT ?",
-		limit,
-	)
+	query := "SELECT id, created_at, actor, action, target FROM audit_log"
+	args := []interface{}{}
+	if actorID != 0 {
+		query += " WHERE actor_id = ?"
+		args = append(args, actorID)
+	}
+	query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -728,6 +759,14 @@ func (s *Store) ListAudit(limit int) ([]*AuditEntry, error) {
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// positiveID returns &id for a real row id, nil otherwise.
+func positiveID(id int64) *int64 {
+	if id <= 0 {
+		return nil
+	}
+	return &id
 }
 
 // ── Services ──
@@ -835,8 +874,59 @@ func (s *Store) TouchService(id int64) error {
 }
 
 func (s *Store) DeleteService(id int64) error {
+	if _, err := s.db.Exec("DELETE FROM service_members WHERE service_id = ?", id); err != nil {
+		return err
+	}
 	_, err := s.db.Exec("DELETE FROM services WHERE id = ?", id)
 	return err
+}
+
+// ── Service members ──
+//
+// A service member is a user (usually a Member) the admins have trusted
+// with a service's definition file. Membership grants nothing else.
+
+func (s *Store) ListServiceMembers(serviceID int64) ([]int64, error) {
+	rows, err := s.db.Query("SELECT user_id FROM service_members WHERE service_id = ? ORDER BY user_id", serviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *Store) SetServiceMembers(serviceID int64, userIDs []int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM service_members WHERE service_id = ?", serviceID); err != nil {
+		return err
+	}
+	for _, uid := range userIDs {
+		if _, err := tx.Exec("INSERT OR IGNORE INTO service_members (service_id, user_id) VALUES (?, ?)", serviceID, uid); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) IsServiceMember(serviceID, userID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM service_members WHERE service_id = ? AND user_id = ?", serviceID, userID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (s *Store) AddAppMember(appNonce string, userID int64) error {
