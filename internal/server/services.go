@@ -629,7 +629,9 @@ func extSubject(provider, providerSub string) string {
 
 // userFromSubject resolves a frbr: subject back to its user row. Returns
 // (nil, nil) for ext: and other non-frbr subjects — not an error, just not
-// one of ours.
+// one of ours. A user who isn't Active is an error: every token, gate pass
+// and refresh resolves through here, so invited or suspended accounts are
+// shut out everywhere, including sessions they already hold.
 func (s *Server) userFromSubject(subject string) (*db.User, error) {
 	idStr, ok := strings.CutPrefix(subject, "frbr:")
 	if !ok {
@@ -639,7 +641,22 @@ func (s *Server) userFromSubject(subject string) (*db.User, error) {
 	if err != nil {
 		return nil, fmt.Errorf("malformed subject %q", subject)
 	}
-	return s.store.GetUser(id)
+	u, err := s.store.GetUser(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := activeUser(u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+// activeUser refuses an account whose status isn't Active.
+func activeUser(u *db.User) error {
+	if u.Status != "Active" {
+		return fmt.Errorf("account is %s", strings.ToLower(u.Status))
+	}
+	return nil
 }
 
 // mintSubject decides the token subject for a completed interactive login:

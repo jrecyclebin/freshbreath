@@ -273,6 +273,11 @@ func (s *Server) mintForLegs(legs []*completedLeg, primaryID int64) (accessToken
 		}
 	}
 	subject, user := s.legIdentity(idLeg)
+	if user != nil {
+		if err := activeUser(user); err != nil {
+			return "", rd, err
+		}
+	}
 	email, role, name := idLeg.email, "", idLeg.name
 	if user != nil {
 		email, role = user.Email, user.Role

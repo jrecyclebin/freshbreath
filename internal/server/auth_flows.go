@@ -963,6 +963,12 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 			return
 		}
+		// Checked after the passphrase so an account's status isn't
+		// readable by anyone who knows its email.
+		if user.Status != "Active" {
+			http.Error(w, "This account is "+strings.ToLower(user.Status)+" — ask an admin to activate it", http.StatusForbidden)
+			return
+		}
 
 		// Add decrypted key to the in-process SSH agent with 1h TTL.
 		// Agent TTL is decoupled from the web JWT — agent timeout doesn't

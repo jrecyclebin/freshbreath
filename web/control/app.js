@@ -648,6 +648,10 @@ async function api(session, method, path, body, { rawText = false } = {}) {
   return rawText ? r.text() : r.json();
 }
 
+// canEditServiceFile reports whether user is one of a service's members,
+// the non-admins trusted with its definition file.
+const canEditServiceFile = (service, user) => !!user && (service.members || []).includes(user.id);
+
 // sameIDs reports whether two id lists hold the same ids, in any order.
 const sameIDs = (a, b) => a.length === b.length && a.every(id => b.includes(id));
 
@@ -714,7 +718,9 @@ const IDSub = ({ value, toast }) => {
 // The drop box on the home page: one place to publish anything — a new
 // app or an app update (.html/.zip) or a tasks/virtual definition (.txt).
 // It only picks the file up; the modal does the asking.
-function DropZone({ onFile }) {
+// updateOnly is for users who can't create apps or services: the drop can
+// only replace something they already have.
+function DropZone({ onFile, updateOnly }) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef(null);
   return (
@@ -731,7 +737,7 @@ function DropZone({ onFile }) {
       onClick={() => inputRef.current?.click()}
     >
       <span className="dz-icon"><Icon name="upload" size={22}/></span>
-      <b>Drop a new app or update</b>
+      <b>{updateOnly ? 'Drop an update' : 'Drop a new app or update'}</b>
       <span>.html or .zip for apps · .txt for tasks & virtual services · or click to browse</span>
       <input ref={inputRef} type="file" accept=".html,.zip,.txt" style={{display:'none'}}
         onChange={e => { const f = e.target.files[0]; if (f) onFile(f); e.target.value = ''; }}/>
@@ -749,6 +755,7 @@ const ENTITY_VIEWS = [
 ];
 
 function HomePage({ session, navigate, apps, services, auth, users, adminAuthID, onRefresh }) {
+  const { user } = useAuth();
   const { isAdmin } = useRoles();
   const [view, setView] = useState('recent');
   const [q, setQ] = useState('');
@@ -846,9 +853,11 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
               ))}
             </div>
           )}
-          <div className="home-dropzone-wrap">
-            <DropZone onFile={setDropFile}/>
-          </div>
+          {(isAdmin || apps.length > 0 || services.some(s => canEditServiceFile(s, user))) && (
+            <div className="home-dropzone-wrap">
+              <DropZone onFile={setDropFile} updateOnly={!isAdmin}/>
+            </div>
+          )}
         </div>
       </div>
 
@@ -947,6 +956,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
 // ── Users ──────────────────────────────────────────────────────────────
 
 function UsersView({ session, users, apps, onRefresh }) {
+  const { isSuperuser } = useRoles();
   const [q,setQ] = useState('');
   const [filter,setFilter] = useState(null);
   const [editing,setEditing] = useState(null);
@@ -994,10 +1004,13 @@ function UsersView({ session, users, apps, onRefresh }) {
                 <td data-col="detail"><UserAppTags apps={u.apps} appList={apps}/></td>
                 <td data-col="detail" className="muted">{fmtAuditTime(u.last_seen)}</td>
                 <td data-col="actions">
-                  <div className="row-actions">
-                    <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(u)} title="Edit"><Icon name="edit" size={14}/></button>
-                    <button className="btn btn-icon btn-ghost" onClick={()=>remove(u.id)} title="Delete"><Icon name="trash" size={14}/></button>
-                  </div>
+                  {/* Only a Superuser may change a Superuser's account. */}
+                  {(isSuperuser || u.role !== 'Superuser') && (
+                    <div className="row-actions">
+                      <button className="btn btn-icon btn-ghost" onClick={()=>setEditing(u)} title="Edit"><Icon name="edit" size={14}/></button>
+                      <button className="btn btn-icon btn-ghost" onClick={()=>remove(u.id)} title="Delete"><Icon name="trash" size={14}/></button>
+                    </div>
+                  )}
                 </td>
               </tr>
             )}
@@ -1011,6 +1024,7 @@ function UsersView({ session, users, apps, onRefresh }) {
 }
 
 function UserDrawer({ user, session, apps, onClose, onSaved }) {
+  const { isSuperuser } = useRoles();
   const [form,setForm] = useState({name:'',email:'',role:'Member',status:'Active',apps:[]});
   const [passphrase, setPassphrase] = useState('');
   const [passConfirm, setPassConfirm] = useState('');
@@ -1117,7 +1131,7 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
       <div className="field-row">
         <div className="field"><label>Role</label>
           <select className="input" value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}>
-            <option>Superuser</option><option>Admin</option><option>Member</option><option>Read-only</option>
+            {isSuperuser && <option>Superuser</option>}<option>Admin</option><option>Member</option><option>Read-only</option>
           </select>
         </div>
         <div className="field"><label>Status</label>
@@ -1516,10 +1530,14 @@ const SLOT_NAMES = { dev:'Development', staging:'Staging', prod:'Production' };
 // virtual service definition — the type is asked here, not guessed,
 // because both formats are just bracketed headers over plain text.
 function UploadModal({ session, file, apps, services, users, auth, adminAuthID, onClose, onSaved, navigate }) {
+  const { user } = useAuth();
+  const { isAdmin } = useRoles();
   const ext = (file.name.split('.').pop() || '').toLowerCase();
   const isAppFile = ext === 'html' || ext === 'zip';
   const seeded = file.name.replace(/\.[^.]+$/, '');
-  const [mode, setMode] = useState('new');
+  // Only admins create; everyone else replaces what they already have —
+  // their own apps (the server lists only those) or services they're members of.
+  const [mode, setMode] = useState(isAdmin ? 'new' : 'replace');
   const [slot, setSlot] = useState('dev');
   const [appNonce, setAppNonce] = useState('');
   const [svcId, setSvcId] = useState('');
@@ -1538,7 +1556,8 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const txtServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
+  const txtServices = services.filter(s =>
+    (s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual') && (isAdmin || canEditServiceFile(s, user)));
 
   const submit = async () => {
     setBusy(true);
@@ -1614,9 +1633,11 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
           </button>
         </div>
         <div className="upload-mode">
-          <button className={mode === 'new' ? 'active' : ''} onClick={()=>setMode('new')}>
-            {isAppFile ? 'New app' : 'New service'}
-          </button>
+          {isAdmin && (
+            <button className={mode === 'new' ? 'active' : ''} onClick={()=>setMode('new')}>
+              {isAppFile ? 'New app' : 'New service'}
+            </button>
+          )}
           <button className={mode === 'replace' ? 'active' : ''} onClick={()=>setMode('replace')}>
             Replace existing
           </button>
@@ -1634,7 +1655,7 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
             <div className="upload-body">
               <ReplacePicker
                 placeholder="Find an app"
-                emptyLabel="No apps match."
+                emptyLabel={isAdmin ? 'No apps match.' : 'No apps match — you can update the apps you belong to.'}
                 items={apps.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(a => ({
                   id: a.nonce, name: a.name, sub: a.url || a.nonce,
                   badge: envShort(a.environment), badgeTone: envTone(a.environment),
@@ -1663,7 +1684,7 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
             <div className="upload-body">
               <ReplacePicker
                 placeholder="Find a service"
-                emptyLabel="No services match."
+                emptyLabel={isAdmin ? 'No services match.' : "No services match — you can update services you're a member of."}
                 items={txtServices.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(s => ({
                   id: String(s.id), name: s.name, sub: s.url || '—',
                   badge: s.descriptor?.type, badgeTone: 'violet',
@@ -2437,7 +2458,7 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
   const isTasks = form.descriptor.type === 'tasks';
   const isVirtual = form.descriptor.type === 'virtual';
   // Admins edit everything; a service member edits only the definition file.
-  const canEditFile = isAdmin || (isEdit && !!user && (service.members || []).includes(user.id));
+  const canEditFile = isAdmin || (isEdit && canEditServiceFile(service, user));
   // The SSH service is the instance's own — seeded at startup, fronting
   // users' keys and each app's known hosts. It has no editable settings.
   const isBuiltin = isEdit && service.descriptor?.type === 'ssh';

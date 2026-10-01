@@ -154,15 +154,44 @@ func (s *Server) gateServiceFile(actor *db.User, serviceID int64) error {
 	return nil
 }
 
+// gateUserAccount allows actor to manage target's account: Admin+ for most
+// users, but only a Superuser may touch a Superuser — otherwise an Admin
+// could edit, delete or reset their way into the higher role.
+func (s *Server) gateUserAccount(actor, target *db.User) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	if target != nil && target.Role == "Superuser" {
+		return s.gate(actor, rolesSuperuser)
+	}
+	return nil
+}
+
+// gateRoleGrant checks that role is a real role and that actor may hand it
+// out: only a Superuser makes Superusers. An empty role passes (the store
+// defaults it to Member).
+func (s *Server) gateRoleGrant(actor *db.User, role string) error {
+	if role == "" {
+		return nil
+	}
+	if !roleIn(role, rolesAll) {
+		return cerr(http.StatusBadRequest, "unknown role %q", role)
+	}
+	if role == "Superuser" {
+		return s.gate(actor, rolesSuperuser)
+	}
+	return nil
+}
+
 // gateSelfOrAdmin allows the action when actor operates on their own account,
-// or when actor is Admin+. Backs the SSH-key ops that serve both the
-// self-service (generate_my_ssh_key) and admin (generate_user_ssh_key)
-// surfaces from a single core function.
+// or when actor may manage target's (gateUserAccount). Backs the SSH-key ops
+// that serve both the self-service (generate_my_ssh_key) and admin
+// (generate_user_ssh_key) surfaces from a single core function.
 func (s *Server) gateSelfOrAdmin(actor, target *db.User) error {
 	if actor != nil && target != nil && actor.ID == target.ID {
 		return nil
 	}
-	return s.gate(actor, rolesAdminPlus)
+	return s.gateUserAccount(actor, target)
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────
@@ -525,6 +554,9 @@ func (s *Server) coreCreateUser(actor *db.User, name, email, role, status string
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, err
 	}
+	if err := s.gateRoleGrant(actor, role); err != nil {
+		return nil, err
+	}
 	if name == "" || email == "" {
 		return nil, cerr(http.StatusBadRequest, "name and email required")
 	}
@@ -540,6 +572,16 @@ func (s *Server) coreUpdateUser(actor *db.User, id int64, name, email, role, sta
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
+	target, err := s.store.GetUser(id)
+	if err != nil {
+		return cerr(http.StatusNotFound, "%v", err)
+	}
+	if err := s.gateUserAccount(actor, target); err != nil {
+		return err
+	}
+	if err := s.gateRoleGrant(actor, role); err != nil {
+		return err
+	}
 	if err := s.store.UpdateUser(id, name, email, role, status, meta); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
@@ -548,7 +590,7 @@ func (s *Server) coreUpdateUser(actor *db.User, id int64, name, email, role, sta
 }
 
 func (s *Server) coreDeleteUser(actor, target *db.User) error {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateUserAccount(actor, target); err != nil {
 		return err
 	}
 	if err := s.store.DeleteUser(target.ID); err != nil {
@@ -560,6 +602,13 @@ func (s *Server) coreDeleteUser(actor, target *db.User) error {
 
 func (s *Server) coreSetUserApps(actor *db.User, id int64, apps []string) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	target, err := s.store.GetUser(id)
+	if err != nil {
+		return cerr(http.StatusNotFound, "%v", err)
+	}
+	if err := s.gateUserAccount(actor, target); err != nil {
 		return err
 	}
 	if err := s.store.SetUserApps(id, apps); err != nil {
@@ -664,7 +713,7 @@ func hashLinkToken(token string) string {
 // coreCreatePassphraseLink mints a passphrase link for target, replacing any
 // earlier one, and returns its URL and expiry.
 func (s *Server) coreCreatePassphraseLink(actor, target *db.User) (string, time.Time, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gateUserAccount(actor, target); err != nil {
 		return "", time.Time{}, err
 	}
 	secret := make([]byte, 32)

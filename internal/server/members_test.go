@@ -233,3 +233,62 @@ func TestPassphraseLink(t *testing.T) {
 		t.Errorf("expired link accepted")
 	}
 }
+
+func TestOnlyActiveUsersSignIn(t *testing.T) {
+	srv := newTestServer(t)
+	active := mustUser(t, srv, "Ann", "Member", "Active")
+	invited := mustUser(t, srv, "Ivo", "Member", "Invited")
+	suspended := mustUser(t, srv, "Sue", "Member", "Suspended")
+
+	// Every token, gate pass and refresh resolves its user here.
+	if u, err := srv.userFromSubject(subjectForUser(active)); err != nil || u == nil {
+		t.Errorf("active user: got %v, %v", u, err)
+	}
+	for _, u := range []*db.User{invited, suspended} {
+		if _, err := srv.userFromSubject(subjectForUser(u)); err == nil {
+			t.Errorf("%s user resolved from a token; want refused", u.Status)
+		}
+		// A fresh login (any kind) can't mint a token for them either.
+		leg := &completedLeg{rec: builtinAuth(t, srv, db.AuthSSHKey), user: u}
+		if _, _, err := srv.mintForLegs([]*completedLeg{leg}, leg.rec.ID); err == nil {
+			t.Errorf("%s user got a token minted", u.Status)
+		}
+	}
+}
+
+func TestAdminsCannotManageSuperusers(t *testing.T) {
+	srv := newTestServer(t)
+	root := mustUser(t, srv, "Root", "Superuser", "Active")
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	member := mustUser(t, srv, "Mel", "Member", "Active")
+	srv.coreGenerateSSHKey(root, root, "rootpassword")
+	root, _ = srv.store.GetUser(root.ID)
+
+	for name, op := range map[string]func() error{
+		"create a Superuser":        func() error { _, e := srv.coreCreateUser(admin, "New", "new@example.com", "Superuser", "Active"); return e },
+		"promote self to Superuser": func() error { return srv.coreUpdateUser(admin, admin.ID, admin.Name, admin.Email, "Superuser", "Active", nil) },
+		"edit a Superuser":          func() error { return srv.coreUpdateUser(admin, root.ID, root.Name, root.Email, "Admin", "Active", root.Metadata) },
+		"delete a Superuser":        func() error { return srv.coreDeleteUser(admin, root) },
+		"set a Superuser's apps":    func() error { return srv.coreSetUserApps(admin, root.ID, nil) },
+		"delete a Superuser's key":  func() error { return srv.coreDeleteSSHKey(admin, root) },
+		"reset a Superuser":         func() error { _, _, e := srv.coreCreatePassphraseLink(admin, root); return e },
+	} {
+		if err := op(); !forbidden(err) {
+			t.Errorf("Admin may %s: got %v, want 403", name, err)
+		}
+	}
+
+	// Admins still manage everyone else; Superusers manage Superusers.
+	if err := srv.coreUpdateUser(admin, member.ID, member.Name, member.Email, "Admin", "Active", nil); err != nil {
+		t.Errorf("Admin promoting a Member to Admin: %v", err)
+	}
+	if _, _, err := srv.coreCreatePassphraseLink(root, root); err != nil {
+		t.Errorf("Superuser resetting a Superuser: %v", err)
+	}
+	if _, err := srv.coreCreateUser(root, "Two", "two@example.com", "Superuser", "Active"); err != nil {
+		t.Errorf("Superuser creating a Superuser: %v", err)
+	}
+	if _, err := srv.coreCreateUser(root, "Odd", "odd@example.com", "Overlord", "Active"); err == nil {
+		t.Errorf("unknown role accepted")
+	}
+}
