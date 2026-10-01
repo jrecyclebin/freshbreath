@@ -292,3 +292,27 @@ func TestAdminsCannotManageSuperusers(t *testing.T) {
 		t.Errorf("unknown role accepted")
 	}
 }
+
+// An upload URL for a service file, minted for someone who isn't one of its
+// members, must not write — the act dispatch re-runs the membership gate.
+func TestServiceFileActURLNeedsMembership(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	member := mustUser(t, srv, "Mel", "Member", "Active")
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := srv.mintActToken(member, http.MethodPut, serviceFileActPath(svc.ID), actTokenTTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := testRequest(t, srv, "PUT", "/api/act/"+ticket, strings.NewReader("[pwned] nope\necho\n"), map[string]string{"Content-Type": "text/plain"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("PUT through a non-member's act URL: got %d, want 403", rr.Code)
+	}
+	if _, _, err := srv.coreReadServiceFile(admin, svc.ID, 0, 0); err == nil {
+		t.Errorf("file was written")
+	}
+}

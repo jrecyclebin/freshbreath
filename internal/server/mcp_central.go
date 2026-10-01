@@ -1075,6 +1075,11 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
+			// Gate at mint time so a non-member gets a clear error instead of a
+			// URL that 403s at dispatch. coreWriteServiceFile gates on the PUT.
+			if err := s.gateServiceFile(user, svc.ID); err != nil {
+				return mcpToolError("%v", err), nil
+			}
 			u, err := s.mintActFileURL(user, http.MethodPut, serviceFileActPath(svc.ID))
 			if err != nil {
 				return mcpToolError("%v", err), nil
