@@ -72,6 +72,39 @@ function uuidv4() {
   return [...b].map((x, i) => (i === 4 || i === 6 || i === 8 || i === 10 ? "-" : "") + x.toString(16).padStart(2, "0")).join("");
 }
 
+// ── API helper ───────────────────────────────────────────────────────
+//
+// Extracted from the control panel. Apps may need access to the central API.
+// Also used internally by ServiceProxy. Pass in the admin session (a
+// ServiceProxy object matching the central auth used in the control panel).
+//
+export async function api(session, path, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  headers.set("X-App-Nonce", APP_NONCE);
+  const renewable = session ? session.addAuth(headers) : false;
+  if (opts.body && !(opts.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json');
+    opts.body = JSON.stringify(opts.body);
+  }
+
+  const url =`${API}${path}`;
+  let r = await fetch(url, { ...opts, headers });
+
+  // Stale token — try refresh once
+  if (r.status === 401 && renewable) {
+    try {
+      await session.refresh();
+      session.addAuth(headers);
+      r = await fetch(url, { ...opts, headers });
+    } catch {
+      throw new Error('Session expired');
+    }
+  }
+
+  if (r.status === 401) { throw new Error('Session expired'); }
+  return r;
+}
+
 // ── The store ───────────────────────────────────────────────────────
 //
 // One entry per cleared auth record at localStorage["frbr:auth:<id>"].
@@ -1067,7 +1100,7 @@ export default ServiceProxy;
 // Expose to window for non-module consumers (e.g. the admin panel)
 if (typeof window !== 'undefined') {
   window.FreshBreath = window.FrBr = {
-    login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
+    api, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
     sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
   };
 }

@@ -356,11 +356,10 @@
   </div>
 
   <script type="module">
-    import { login, ServiceProxy } from "/frbr.js";
+    import { api, login } from "/frbr.js";
 
     const API = window.__HOMESLICE_CONFIG?.apiBase;
     const APP_NONCE = window.__HOMESLICE_CONFIG?.appNonce ?? null;
-    const AUTH_KEY = "ssh-demo-auth";
     const SESSION_KEY = "ssh-demo-session";
 
     // -- Custom constants
@@ -368,7 +367,7 @@
     const SSH_SERVICE_URL = "ssh://";
 
     // ── state ──
-    let authToken = null;   // Bearer token (id_token from SSH auth)
+    let ssh = null;         // logged-in SSH service
     let sessionId = null;   // active SSH session ID
     let currentPath = "/";  // current remote directory
 
@@ -401,14 +400,8 @@
       statusText.textContent = msg;
     }
 
-    async function api(path, opts = {}) {
-      const headers = new Headers(opts.headers || {});
-      headers.set("Authorization", `Bearer ${authToken}`);
-      headers.set("X-App-Nonce", APP_NONCE);
-      if (!headers.has("Content-Type") && opts.body && typeof opts.body === "string") {
-        headers.set("Content-Type", "application/json");
-      }
-      const res = await fetch(`${API}${path}`, { ...opts, headers });
+    async function frbr(path, opts = {}) {
+      const res = await api(ssh.session, path, opts);
       if (!res.ok) {
         const text = await res.text().catch(() => res.statusText);
         throw new Error(`${res.status}: ${text}`);
@@ -443,12 +436,13 @@
       setStatus(null, "Opening SSH login…");
       try {
         const result = await login(SSH_SERVICE_URL);
-        localStorage.setItem(AUTH_KEY, result.toJSON());
-        authToken = result.data?.id_token || result.data?.access_token;
-        const c = result.data?.claims || {};
-        setStatus(true, `Authenticated · ${c.email || c.name || "SSH"}`);
-        connChip.classList.remove("clickable");
-        signoutBtn.classList.remove("hidden");
+        if (result) {
+          const c = result.session || {};
+          setStatus(true, `Authenticated · ${c.email || c.user_name || "SSH"}`);
+          connChip.classList.remove("clickable");
+          signoutBtn.classList.remove("hidden");
+          ssh = result;
+        }
       } catch (e) {
         setStatus(false, e.message);
       }
@@ -461,20 +455,12 @@
     };
 
     // restore saved auth
-    const savedAuth = localStorage.getItem(AUTH_KEY);
-    if (savedAuth) {
-      try {
-        const parsed = ServiceProxy.fromJSON(savedAuth);
-        authToken = parsed.data?.id_token || parsed.data?.access_token;
-        if (authToken) {
-          const c = parsed.data?.claims || {};
-          setStatus(true, `Authenticated · ${c.email || c.name || "SSH"}`);
-          connChip.classList.remove("clickable");
-          signoutBtn.classList.remove("hidden");
-        }
-      } catch {
-        localStorage.removeItem(AUTH_KEY);
-      }
+    const saved = await login(SSH_SERVICE_URL, false);
+    if (saved) {
+      const c = saved.session || {};
+      setStatus(true, `Authenticated · ${c.email || c.user_name || "SSH"}`);
+      connChip.classList.remove("clickable");
+      signoutBtn.classList.remove("hidden");
     }
 
     // restore saved session
@@ -489,7 +475,7 @@
           sessionIdEl.textContent = sessionId.slice(0, 8) + "…";
           sessionExp.textContent = fmtTime(s.expiresAt);
           // verify the session is still alive
-          api(`/ssh/sessions/${sessionId}`).then(data => {
+          frbr(`/ssh/sessions/${sessionId}`).then(data => {
             sessionExp.textContent = fmtTime(data.expiresAt);
             connectBtn.classList.add("hidden");
             disconnectBtn.classList.remove("hidden");
@@ -511,9 +497,7 @@
 
     // ── sign out ──
     signoutBtn.onclick = () => {
-      localStorage.removeItem(AUTH_KEY);
       localStorage.removeItem(SESSION_KEY);
-      authToken = null;
       sessionId = null;
       connChip.classList.add("clickable");
       signoutBtn.classList.add("hidden");
@@ -528,7 +512,7 @@
 
     // ── connect (open SSH session) ──
     connectBtn.onclick = async () => {
-      if (!authToken) { startLogin(); return; }
+      if (!ssh) { startLogin(); return; }
 
       const host = document.getElementById("ssh-host").value.trim();
       const port = parseInt(document.getElementById("ssh-port").value, 10) || 22;
@@ -540,9 +524,9 @@
       connectSt.textContent = "Opening session…";
 
       try {
-        const data = await api("/ssh/sessions", {
+        const data = await frbr("/ssh/sessions", {
           method: "POST",
-          body: JSON.stringify({ host, port, username: username || undefined }),
+          body: { host, port, username: username || undefined },
         });
         sessionId = data.sessionId;
         localStorage.setItem(SESSION_KEY, JSON.stringify({
@@ -579,7 +563,7 @@
       if (!sessionId) return;
       disconnectBtn.disabled = true;
       try {
-        await api(`/ssh/sessions/${sessionId}`, { method: "DELETE" });
+        await frbr(`/ssh/sessions/${sessionId}`, { method: "DELETE" });
       } catch { /* session may already be gone */ }
       sessionId = null;
       localStorage.removeItem(SESSION_KEY);
@@ -607,7 +591,7 @@
       renderBreadcrumb(currentPath);
 
       try {
-        const data = await api(`/sync/files?sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(currentPath)}`);
+        const data = await frbr(`/sync/files?sessionId=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(currentPath)}`);
         const files = data.files || [];
         fileList.innerHTML = "";
         emptyState.classList.toggle("hidden", files.length > 0);
@@ -642,7 +626,7 @@
             dlBtn.onclick = async (e) => {
               e.stopPropagation();
               try {
-                const blob = await api(`/sync/files/${f.path}?sessionId=${encodeURIComponent(sessionId)}`);
+                const blob = await frbr(`/sync/files/${f.path}?sessionId=${encodeURIComponent(sessionId)}`);
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url; a.download = f.name; a.click();
@@ -657,7 +641,7 @@
             e.stopPropagation();
             if (!confirm(`Delete ${f.path}?`)) return;
             try {
-              await api(`/sync/files/${f.path}?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+              await frbr(`/sync/files/${f.path}?sessionId=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
               loadFiles(currentPath);
             } catch (err) { showResult({ error: err.message }); }
           };
@@ -708,7 +692,7 @@
       const hash = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
 
       try {
-        const data = await api(`/sync/files${remotePath}?sessionId=${encodeURIComponent(sessionId)}`, {
+        const data = await frbr(`/sync/files${remotePath}?sessionId=${encodeURIComponent(sessionId)}`, {
           method: "PUT",
           headers: { "X-Hash": hash, "Content-Type": "application/octet-stream" },
           body: file,
@@ -753,7 +737,7 @@
     async function loadHosts() {
       try {
         // The known-hosts endpoint returns rows from ssh_host_keys
-        const res = await api("/ssh/known-hosts");
+        const res = await frbr("/ssh/known-hosts");
         // Parse the raw JSON array
         const hosts = Array.isArray(res) ? res : (res.keys || []);
         hostList.innerHTML = "";
@@ -773,7 +757,7 @@
           li.querySelector(".rm-btn").onclick = async () => {
             if (!confirm(`Remove known host ${h.host}:${h.port}?`)) return;
             try {
-              await api(`/ssh/known-hosts/${h.host}:${h.port}`, { method: "DELETE" });
+              await frbr(`/ssh/known-hosts/${h.host}:${h.port}`, { method: "DELETE" });
               loadHosts();
             } catch (err) { showResult({ error: err.message }); }
           };

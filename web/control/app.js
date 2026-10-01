@@ -275,7 +275,7 @@ function AuthProvider({ children }) {
         const restored = window.FrBr.currentSession();
         if (restored) {
           setSession(restored);
-          const d = await api(restored, 'GET', '/api/me');
+          const d = await frbr(restored, 'GET', '/api/me');
           setUser(d.user);
         }
       } catch (e) {
@@ -292,7 +292,7 @@ function AuthProvider({ children }) {
     const fresh = await window.FrBr.login();
     setSessionExpired(false);
     setSession(fresh);
-    const d = await api(fresh, 'GET', '/api/me');
+    const d = await frbr(fresh, 'GET', '/api/me');
     setUser(d.user);
   };
 
@@ -612,34 +612,16 @@ const authHeaders = (session, init) => {
   return h;
 };
 
-async function api(session, method, path, body, { rawText = false } = {}) {
-  const headers = authHeaders(session);
-  const opts = { method, headers };
-  if (body) {
-    if (body instanceof FormData) {
-      opts.body = body;
-      // Let the browser set the multipart boundary.
-    } else {
-      headers.set('Content-Type', 'application/json');
-      opts.body = JSON.stringify(body);
-    }
+async function frbr(session, method, path, body, { rawText = false } = {}) {
+  const opts = { method, body };
+  let r = null;
+  try {
+    r = await window.FrBr.api(session, path, opts);
+  } catch (e) {
+    _onUnauthorized?.();
+    throw e;
   }
 
-  let r = await fetch(path, opts);
-
-  // Stale token — try refresh once
-  if (r.status === 401 && session?.refresh) {
-    try {
-      await session.refresh();
-      session.addAuth(headers);
-      r = await fetch(path, opts);
-    } catch {
-      _onUnauthorized?.();
-      throw new Error('Session expired');
-    }
-  }
-
-  if (r.status === 401) { _onUnauthorized?.(); throw new Error('Session expired'); }
   if (!r.ok) {
     const t = await r.text().catch(()=>'');
     throw new Error(`${r.status}: ${t||r.statusText}`);
@@ -790,22 +772,22 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
     const e = row.entity;
     if (row.kind === 'app') {
       if (!confirm('Delete this app?')) return;
-      try { await api(session, 'DELETE', '/api/apps/' + row.id); toast('App deleted'); onRefresh(); }
+      try { await frbr(session, 'DELETE', '/api/apps/' + row.id); toast('App deleted'); onRefresh(); }
       catch (err) { toast(err.message, true); }
     } else if (row.kind === 'service') {
       let usedBy = [];
-      try { const r = await api(session, 'GET', '/api/services/' + row.id + '/apps'); usedBy = r.apps || []; }
+      try { const r = await frbr(session, 'GET', '/api/services/' + row.id + '/apps'); usedBy = r.apps || []; }
       catch { /* ignore */ }
       let msg = 'Delete this service?';
       if (usedBy.length > 0) msg += `\n\nIt's used by ${usedBy.length} app${usedBy.length > 1 ? 's' : ''}:\n${usedBy.map(a => a.name).join(', ')}`;
       if (!confirm(msg)) return;
-      try { await api(session, 'DELETE', '/api/services/' + row.id); toast('Service deleted'); onRefresh(); }
+      try { await frbr(session, 'DELETE', '/api/services/' + row.id); toast('Service deleted'); onRefresh(); }
       catch (err) { toast(err.message, true); }
     } else {
       const uses = authUsedBy(e.id, services, apps);
       if (uses.length) { toast(`In use by ${uses.join(', ')} — unassign it first`, true); return; }
       if (!confirm(`Delete "${e.name}"? Anyone holding a credential from it will have to log in again.`)) return;
-      try { await api(session, 'DELETE', '/api/auth/' + e.id); toast('Auth record deleted'); onRefresh(); }
+      try { await frbr(session, 'DELETE', '/api/auth/' + e.id); toast('Auth record deleted'); onRefresh(); }
       catch (err) { toast(err.message, true); }
     }
   };
@@ -970,7 +952,7 @@ function UsersView({ session, users, apps, onRefresh }) {
 
   const remove = async (id) => {
     if (!confirm('Delete this user?')) return;
-    try { await api(session, 'DELETE','/api/users/'+id); toast('User deleted'); onRefresh(); }
+    try { await frbr(session, 'DELETE','/api/users/'+id); toast('User deleted'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -1040,7 +1022,7 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
     if(isEdit) {
       setForm({name:user.name,email:user.email,role:user.role||'Member',status:user.status||'Active',apps:[]});
       setLoading(true);
-      api(session, 'GET','/api/users/'+user.id+'/apps')
+      frbr(session, 'GET','/api/users/'+user.id+'/apps')
         .then(d=>{
           setForm(f=>({...f,apps:d.apps||[]}));
         })
@@ -1064,14 +1046,14 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
     setBusy(true);
     try {
       if(isEdit) {
-        await api(session, 'PUT','/api/users/'+user.id,form);
-        await api(session, 'PUT','/api/users/'+user.id+'/apps',{apps:form.apps||[]});
+        await frbr(session, 'PUT','/api/users/'+user.id,form);
+        await frbr(session, 'PUT','/api/users/'+user.id+'/apps',{apps:form.apps||[]});
         toast('User updated');
       } else {
-        const created = await api(session, 'POST','/api/users',form);
-        await api(session, 'PUT','/api/users/'+created.id+'/apps',{apps:form.apps||[]});
+        const created = await frbr(session, 'POST','/api/users',form);
+        await frbr(session, 'PUT','/api/users/'+created.id+'/apps',{apps:form.apps||[]});
         if (passphrase) {
-          try { await api(session, 'POST','/api/users/'+created.id+'/ssh-key',{passphrase}); }
+          try { await frbr(session, 'POST','/api/users/'+created.id+'/ssh-key',{passphrase}); }
           catch(e) { toast('User created, but the SSH key failed: '+e.message, true); onClose(); onSaved(); return; }
         }
         toast(passphrase ? 'User created with an SSH key' : 'User created');
@@ -1086,9 +1068,9 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
   const invite = async () => {
     setBusy(true);
     try {
-      const created = await api(session, 'POST','/api/users',{...form,status:'Invited'});
-      await api(session, 'PUT','/api/users/'+created.id+'/apps',{apps:form.apps||[]});
-      const minted = await api(session, 'POST','/api/users/'+created.id+'/passphrase-link');
+      const created = await frbr(session, 'POST','/api/users',{...form,status:'Invited'});
+      await frbr(session, 'PUT','/api/users/'+created.id+'/apps',{apps:form.apps||[]});
+      const minted = await frbr(session, 'POST','/api/users/'+created.id+'/passphrase-link');
       setLink({kind:'invite', user:created, ...minted});
     } catch(e) { toast(e.message,true); }
     finally { setBusy(false); }
@@ -1096,7 +1078,7 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
 
   const resetLink = async () => {
     try {
-      const minted = await api(session, 'POST','/api/users/'+user.id+'/passphrase-link');
+      const minted = await frbr(session, 'POST','/api/users/'+user.id+'/passphrase-link');
       setLink({kind:'reset', user, ...minted});
     } catch(e) { toast(e.message,true); }
   };
@@ -1406,8 +1388,8 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
       setForm({name:app.name||'',environment:app.environment||'Development',url:app.url,owner_id:app.owner_id?String(app.owner_id):'',services:[],members:[],protected_by:app.protected_by ?? null});
       setLoading(true);
       Promise.all([
-        api(session, 'GET','/api/apps/'+app.nonce+'/services'),
-        api(session, 'GET','/api/apps/'+app.nonce+'/members'),
+        frbr(session, 'GET','/api/apps/'+app.nonce+'/services'),
+        frbr(session, 'GET','/api/apps/'+app.nonce+'/members'),
       ])
         .then(([svcs,mems])=>{
           const allowed = (svcs.services||[]).filter(l=>l.allowed).map(l=>l.service_id);
@@ -1428,15 +1410,15 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
     try {
       let savedNonce;
       if (app) {
-        await api(session, 'PUT','/api/apps/'+app.nonce,payload);
-        await api(session, 'PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
-        await api(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
+        await frbr(session, 'PUT','/api/apps/'+app.nonce,payload);
+        await frbr(session, 'PUT','/api/apps/'+app.nonce+'/members',{members:form.members||[]});
+        await frbr(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
         toast('App updated');
       } else {
-        const resp = await api(session, 'POST','/api/apps',payload);
+        const resp = await frbr(session, 'POST','/api/apps',payload);
         savedNonce = resp.nonce;
-        await api(session, 'PUT','/api/apps/'+savedNonce+'/members',{members:form.members||[]});
-        await api(session, 'PUT','/api/apps/'+savedNonce+'/services',{services:form.services||[]});
+        await frbr(session, 'PUT','/api/apps/'+savedNonce+'/members',{members:form.members||[]});
+        await frbr(session, 'PUT','/api/apps/'+savedNonce+'/services',{services:form.services||[]});
         toast('App created');
       }
       onRefresh();
@@ -1447,7 +1429,7 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
   const remove = async () => {
     if (!app) return;
     if (!confirm('Delete this app?')) return;
-    try { await api(session, 'DELETE','/api/apps/'+app.nonce); toast('App deleted'); navigate('home'); onRefresh(); }
+    try { await frbr(session, 'DELETE','/api/apps/'+app.nonce); toast('App deleted'); navigate('home'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -1565,14 +1547,14 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
       if (isAppFile) {
         let nonce;
         if (mode === 'new') {
-          const resp = await api(session, 'POST', '/api/apps', {
+          const resp = await frbr(session, 'POST', '/api/apps', {
             name: appForm.name, environment: appForm.environment, url: appForm.url,
             owner_id: appForm.owner_id ? Number(appForm.owner_id) : null,
             protected_by: appForm.protected_by,
           });
           nonce = resp.nonce;
-          await api(session, 'PUT', '/api/apps/' + nonce + '/members', {members: appForm.members || []});
-          await api(session, 'PUT', '/api/apps/' + nonce + '/services', {services: appForm.services || []});
+          await frbr(session, 'PUT', '/api/apps/' + nonce + '/members', {members: appForm.members || []});
+          await frbr(session, 'PUT', '/api/apps/' + nonce + '/services', {services: appForm.services || []});
         } else {
           nonce = appNonce;
         }
@@ -1580,7 +1562,7 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
         fd.append('file', file);
         const res = await fetch('/api/apps/' + nonce + '/web', {method:'POST', headers: authHeaders(session), body: fd});
         if (!res.ok) throw new Error(await res.text());
-        if (slot !== 'dev') await api(session, 'POST', '/api/apps/' + nonce + '/deploy', {target: slot});
+        if (slot !== 'dev') await frbr(session, 'POST', '/api/apps/' + nonce + '/deploy', {target: slot});
         toast(mode === 'new' ? 'App created and uploaded' : 'Uploaded to ' + SLOT_NAMES[slot]);
         onClose(); onSaved?.();
         navigate('app', { nonce });
@@ -1591,14 +1573,14 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
           const payload = {...svcForm};
           if (type === 'virtual') payload.url = '';
           else { delete payload.descriptor.database_target; delete payload.descriptor.database_name; }
-          const resp = await api(session, 'POST', '/api/services', payload);
+          const resp = await frbr(session, 'POST', '/api/services', payload);
           id = resp.id;
         } else {
           id = Number(svcId);
         }
         const fd = new FormData();
         fd.append('file', file, file.name);
-        await api(session, 'POST', '/api/services/' + id + '/files', fd, {rawText: true});
+        await frbr(session, 'POST', '/api/services/' + id + '/files', fd, {rawText: true});
         toast(mode === 'new' ? 'Service created and published' : 'Definition published');
         onClose(); onSaved?.();
         navigate('service', { serviceId: String(id) });
@@ -1851,7 +1833,7 @@ function HostUpload({ session, app, onRefresh }) {
   const deploy = async (target) => {
     setDeploying(target);
     try {
-      const res = await api(session, 'POST', '/api/apps/' + app.nonce + '/deploy', { target });
+      const res = await frbr(session, 'POST', '/api/apps/' + app.nonce + '/deploy', { target });
       setDeployed(d => ({...d, [target]: new Date().toISOString()}));
       toast('Deployed to ' + (res.route || route + '@' + target));
       onRefresh();
@@ -2135,11 +2117,11 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
     try {
       if (record) {
         // PUT answers 204, so an edit reports the record it just sent.
-        await api(session, 'PUT', '/api/auth/' + record.id, form);
+        await frbr(session, 'PUT', '/api/auth/' + record.id, form);
         toast('Auth record updated');
         onRefresh();
       } else {
-        const saved = await api(session, 'POST', '/api/auth', form);
+        const saved = await frbr(session, 'POST', '/api/auth', form);
         toast('Auth record created');
         onRefresh();
         navigate('authrecord', { authId: String(saved.id) });
@@ -2153,7 +2135,7 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
     const uses = authUsedBy(record.id, services, apps);
     if (uses.length) { toast(`In use by ${uses.join(', ')} — unassign it first`, true); return; }
     if (!confirm(`Delete "${record.name}"? Anyone holding a credential from it will have to log in again.`)) return;
-    try { await api(session, 'DELETE', '/api/auth/' + record.id); toast('Auth record deleted'); navigate('home'); onRefresh(); }
+    try { await frbr(session, 'DELETE', '/api/auth/' + record.id); toast('Auth record deleted'); navigate('home'); onRefresh(); }
     catch(e) { toast(e.message, true); }
   };
 
@@ -2229,7 +2211,7 @@ function AuthRecordModal({ session, onClose, onSaved, defaultKind }) {
   const save = async () => {
     setSaving(true);
     try {
-      const saved = await api(session, 'POST', '/api/auth', form);
+      const saved = await frbr(session, 'POST', '/api/auth', form);
       toast('Auth record created');
       onClose(); onSaved?.(saved);
     } catch(e) { toast(e.message, true); }
@@ -2407,7 +2389,7 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
     let cancelled = false;
     setToolsLoading(true);
     setToolsError('');
-    api(session,'GET','/api/services/'+service.id+'/tools')
+    frbr(session,'GET','/api/services/'+service.id+'/tools')
       .then(r => { if(!cancelled){ setTools(r.tools||[]); setToolsError(''); } })
       .catch(e => { if(!cancelled){ setTools([]); setToolsError(e.message); } })
       .finally(() => { if(!cancelled) setToolsLoading(false); });
@@ -2420,13 +2402,13 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
       // Virtual services don't need a URL — the server mints /mcp/{slug}.
       if (payload.descriptor.type === 'virtual') payload.url = '';
       if (isEdit) {
-        await api(session, 'PUT','/api/services/'+service.id,payload);
+        await frbr(session, 'PUT','/api/services/'+service.id,payload);
         if (hasFile && !sameIDs(members, service.members || [])) {
-          await api(session, 'PUT','/api/services/'+service.id+'/members',{members});
+          await frbr(session, 'PUT','/api/services/'+service.id+'/members',{members});
         }
         toast('Service updated'); onRefresh();
       } else {
-        const resp = await api(session, 'POST','/api/services',payload);
+        const resp = await frbr(session, 'POST','/api/services',payload);
         toast('Service created');
         onRefresh();
         navigate('service', { serviceId: String(resp.id) });
@@ -2437,12 +2419,12 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
   const remove = async () => {
     if (!service) return;
     let usedBy = [];
-    try { const r = await api(session, 'GET','/api/services/'+service.id+'/apps'); usedBy = r.apps||[]; }
+    try { const r = await frbr(session, 'GET','/api/services/'+service.id+'/apps'); usedBy = r.apps||[]; }
     catch(e) { /* ignore */ }
     let msg = 'Delete this service?';
     if (usedBy.length > 0) msg += `\n\nIt's used by ${usedBy.length} app${usedBy.length>1?'s':''}:\n${usedBy.map(a=>a.name).join(', ')}`;
     if (!confirm(msg)) return;
-    try { await api(session, 'DELETE','/api/services/'+service.id); toast('Service deleted'); navigate('home'); onRefresh(); }
+    try { await frbr(session, 'DELETE','/api/services/'+service.id); toast('Service deleted'); navigate('home'); onRefresh(); }
     catch(e) { toast(e.message,true); }
   };
 
@@ -2578,7 +2560,7 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
     if (!service) return;
     let cancelled = false;
     setLoading(true);
-    api(session, 'GET', '/api/services/' + serviceId + '/files', null, { rawText: true })
+    frbr(session, 'GET', '/api/services/' + serviceId + '/files', null, { rawText: true })
       .then(text => { if (!cancelled) { setContent(text || ''); setDirty(false); } })
       .catch(e => {
         if (cancelled) return;
@@ -2607,7 +2589,7 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
       const blob = new Blob([content], { type: 'text/plain' });
       const form = new FormData();
       form.append('file', blob, service.name + '.txt');
-      await api(session, 'POST', '/api/services/' + serviceId + '/files', form, { rawText: true });
+      await frbr(session, 'POST', '/api/services/' + serviceId + '/files', form, { rawText: true });
       setDirty(false);
       toast('File saved');
       onSaved?.();
@@ -2779,7 +2761,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
   const toast = useToast();
 
   useEffect(() => {
-    api(session, 'GET', '/api/settings')
+    frbr(session, 'GET', '/api/settings')
       .then(d => {
         const id = d.admin_auth_service || '';
         setSelectedAuth(id);
@@ -2793,7 +2775,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
 
   const saveAuth = async () => {
     try {
-      await api(session, 'PUT', '/api/settings', { admin_auth_service: selectedAuth });
+      await frbr(session, 'PUT', '/api/settings', { admin_auth_service: selectedAuth });
       setSavedAuth(selectedAuth);
       toast('Settings saved');
     } catch(e) { toast(e.message, true); }
@@ -2802,7 +2784,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
   const unlink = async () => {
     if (!confirm('Remove admin auth? The control panel — and every app and service with an empty gate — will be open until auth is reconfigured.')) return;
     try {
-      await api(session, 'PUT', '/api/settings', { admin_auth_service: '' });
+      await frbr(session, 'PUT', '/api/settings', { admin_auth_service: '' });
       setSelectedAuth(''); setSavedAuth('');
       toast('Admin auth removed');
     } catch(e) { toast(e.message, true); }
@@ -2810,14 +2792,14 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
 
   const saveLanding = async () => {
     try {
-      await api(session, 'PUT', '/api/settings', { default_app: defaultApp });
+      await frbr(session, 'PUT', '/api/settings', { default_app: defaultApp });
       toast('Landing page saved');
     } catch(e) { toast(e.message, true); }
   };
 
   const saveDBMode = async () => {
     try {
-      await api(session, 'PUT', '/api/settings', { mcp_database_mode: dbMode });
+      await frbr(session, 'PUT', '/api/settings', { mcp_database_mode: dbMode });
       toast('Database mode saved');
     } catch(e) { toast(e.message, true); }
   };
@@ -2937,7 +2919,7 @@ function ProfileView({ session }) {
   const save = async () => {
     setSaving(true);
     try {
-      const d = await api(session, 'PUT', '/api/me', form);
+      const d = await frbr(session, 'PUT', '/api/me', form);
       setUser(d.user);
       toast('Profile saved');
     } catch (e) { toast(e.message, true); }
@@ -2988,7 +2970,7 @@ function SSHKeySection({ session, keyPath, whose }) {
 
   useEffect(() => {
     setLoading(true);
-    api(session, 'GET', keyPath)
+    frbr(session, 'GET', keyPath)
       .then(d => setSSHKey(d.ssh_key))
       .catch(() => setSSHKey(null))
       .finally(() => setLoading(false));
@@ -3004,7 +2986,7 @@ function SSHKeySection({ session, keyPath, whose }) {
           blurb={`Choose a passphrase for ${whose} SSH key. It's needed at each passphrase sign-in and can't be recovered if forgotten.`}
           onClose={() => setGenerating(false)}
           onSubmit={async (passphrase) => {
-            const d = await api(session, 'POST', keyPath, { passphrase });
+            const d = await frbr(session, 'POST', keyPath, { passphrase });
             setSSHKey(d.ssh_key);
             setGenerating(false);
             toast('SSH key generated');
@@ -3028,7 +3010,7 @@ function SSHKeySection({ session, keyPath, whose }) {
       </div>
       <button className="btn btn-ghost" style={{color:'var(--tone-red)'}} onClick={async () => {
         if (!confirm(`Delete ${whose} SSH key? A new one is needed for passphrase sign-in.`)) return;
-        try { await api(session, 'DELETE', keyPath); setSSHKey(null); toast('SSH key deleted'); }
+        try { await frbr(session, 'DELETE', keyPath); setSSHKey(null); toast('SSH key deleted'); }
         catch(e) { toast(e.message, true); }
       }}>Delete key</button>
     </>
@@ -3133,7 +3115,7 @@ function RemoteUpdates({ session, apps, services }) {
   const [checking, setChecking] = useState(false);
   const toast = useToast();
 
-  const load = () => api(session, 'GET', '/api/updates')
+  const load = () => frbr(session, 'GET', '/api/updates')
     .then(d => setFeeds(d.feeds || []))
     .catch(e => toast(e.message, true));
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -3144,7 +3126,7 @@ function RemoteUpdates({ session, apps, services }) {
       const body = { mode, name };
       if (mode === 'receive') body.url = url;
       if (keyHex.trim()) body.key_hex = keyHex.trim();
-      const d = await api(session, 'POST', '/api/updates', body);
+      const d = await frbr(session, 'POST', '/api/updates', body);
       setNewKey({ id: d.id, key: d.key });
       setUrl(''); setName(''); setKeyHex('');
       load();
@@ -3154,7 +3136,7 @@ function RemoteUpdates({ session, apps, services }) {
 
   const remove = async (f) => {
     if (!confirm(`Delete update feed "${f.name || f.url || f.id}"?`)) return;
-    try { await api(session, 'DELETE', '/api/updates/' + f.id); load(); toast('Feed deleted'); }
+    try { await frbr(session, 'DELETE', '/api/updates/' + f.id); load(); toast('Feed deleted'); }
     catch (e) { toast(e.message, true); }
   };
 
@@ -3164,7 +3146,7 @@ function RemoteUpdates({ session, apps, services }) {
   const checkNow = async () => {
     setChecking(true);
     try {
-      const d = await api(session, 'GET', '/api/updates/check');
+      const d = await frbr(session, 'GET', '/api/updates/check');
       const ups = d.updates || [];
       const map = {};
       ups.forEach(u => { map[u.id] = u.version || '?'; });
@@ -3483,16 +3465,16 @@ function AppShell() {
       // label a single inherited gate without knowing which record that is.
       // The users list is admin-only, so nobody else asks for it.
       const [u,a,s,r,au,ar,st] = await Promise.all([
-        isAdmin ? api(session, 'GET','/api/users') : Promise.resolve({users: []}),
-        api(session, 'GET','/api/apps'),
-        api(session, 'GET','/api/services'),
-        api(session, 'GET','/api/roles'),
-        api(session, 'GET','/api/audit'),
-        api(session, 'GET','/api/auth'),
+        isAdmin ? frbr(session, 'GET','/api/users') : Promise.resolve({users: []}),
+        frbr(session, 'GET','/api/apps'),
+        frbr(session, 'GET','/api/services'),
+        frbr(session, 'GET','/api/roles'),
+        frbr(session, 'GET','/api/audit'),
+        frbr(session, 'GET','/api/auth'),
         // Settings are Superuser-only; everyone else reads the admin gate's
         // id from env.js, which carries it for the control panel.
         isSuperuser
-          ? api(session, 'GET','/api/settings').catch(()=>({}))
+          ? frbr(session, 'GET','/api/settings').catch(()=>({}))
           : Promise.resolve({admin_auth_service: window.__HOMESLICE_CONFIG?.authRecordID || null}),
       ]);
       setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]);
