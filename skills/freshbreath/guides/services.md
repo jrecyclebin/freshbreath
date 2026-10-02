@@ -122,7 +122,7 @@ One verb, every service.
 const svc = await login("https://mcp.example.com/mcp");  // a registered service URL
 ```
 
-It takes a string and nothing else. Before it prompts for anything it asks the
+Before it prompts for anything it asks the
 server what this door actually requires, then looks in the store for a
 credential that satisfies it. So:
 
@@ -132,9 +132,27 @@ credential that satisfies it. So:
 - Only a genuinely missing credential opens a window.
 
 **Call it from a click.** A popup with no user gesture behind it is a popup the
-browser blocks. `login` never opens one on its own for this reason: when a
-session lapses beyond recovery you get a `SessionExpired`, and offering the
-re-login is your call to make at a moment the user is looking.
+browser blocks.
+
+A second argument says how hard to try:
+
+| mode | does |
+|---|---|
+| `"normal"` (default) | Spends a stored credential, refreshing it if needed; opens the login window only when nothing fits. |
+| `"silent"` | Spends a stored credential or returns `null`. Never prompts — the boot-time "am I still signed in?" check. |
+| `"fresh"` | Ignores stored credentials and runs the whole login again, always in a window. For when the server wants proof the user is here *now*. |
+
+**When a login dies mid-session**, `api()` and `ServiceProxy` handle it. A
+`401` with `{"error":"invalid_token"}` gets one refresh; one that's still
+refused, or one with `{"error":"insufficient_user_authentication"}` (the token
+is fine but the login behind it is older than the response's `max_age`
+allows), gets a `"fresh"` login — straight away if the click behind the request still counts, otherwise
+through a small "Session expired · Log in" dialog whose button supplies the
+click. The request retries once it lands; requests that failed together share
+one prompt. The fresh login goes back through whichever door minted the
+credential — the stored entry remembers it — so there's nothing to pass. If the
+user dismisses it you get a `SessionExpired`. Opt a page out with
+`window.__FRBR_RELOGIN = false`.
 
 Called with **no argument**, it clears your app's own gate and returns the
 `AuthSession` rather than a proxy — the "sign in" verb for a gated app:

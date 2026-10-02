@@ -96,7 +96,9 @@ carries the login; the auth record does.
 > Note: the agent TTL (1h) is deliberately decoupled from the web token and from
 > open sessions. If the agent key expires you can still hold a valid token and an
 > already-open SSH session — but you won't be able to open a *new* session until
-> the user logs in again (you'll get `401 no active SSH key`).
+> the user logs in again (you'll get a `401` with
+> `{"error":"insufficient_user_authentication","max_age":3600}`, which `api()`
+> answers with a fresh passphrase login).
 
 A small helper to keep the boilerplate down. Ask the session to set the header
 rather than reading the token out of it — the session knows what its own kind
@@ -291,6 +293,14 @@ await sshFetch(`/ssh/sessions/${sessionId}`, { method: "DELETE" });
   (used as the bearer). The server holds the decrypted key in its agent for 1
   hour. Open SSH sessions last 8 hours. They expire independently — a stale agent
   blocks *new* sessions but not existing ones.
+- **A session id outlives its connection.** Past the 8h TTL the connection
+  closes, but the id stays good for another 24h: the next `/sync` or
+  `/ssh/sessions/{id}` call reopens it to the same host. By then the agent key
+  has always lapsed, so that call answers `401 insufficient_user_authentication`, `api()` runs a
+  fresh passphrase login, and its retry reconnects — nothing for your code to
+  handle. A refreshed token never keeps SSH access alive on its own. Sessions
+  answer only to the user who opened them; anyone else's id, or one past its
+  24h, is a `404` (`session_not_found`).
 - **`X-App-Nonce` is mandatory** on every `/ssh` and `/sync` request. Forgetting
   it returns `401 Missing X-App-Nonce header`, not a 400 — easy to misread.
 - **The `/ssh` and `/sync` endpoints are not service-proxied.** Unlike

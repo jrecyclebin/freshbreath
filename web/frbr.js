@@ -75,33 +75,63 @@ function uuidv4() {
 // ── API helper ───────────────────────────────────────────────────────
 //
 // Extracted from the control panel. Apps may need access to the central API.
-// Also used internally by ServiceProxy. Pass in the admin session (a
-// ServiceProxy object matching the central auth used in the control panel).
+// Pass in the session that clears the app's gate.
 //
 export async function api(session, path, opts = {}) {
-  const headers = new Headers(opts.headers || {});
-  headers.set("X-App-Nonce", APP_NONCE);
-  const renewable = session ? session.addAuth(headers) : false;
-  if (opts.body && !(opts.body instanceof FormData)) {
-    headers.set('Content-Type', 'application/json');
-    opts.body = JSON.stringify(opts.body);
+  const init = { ...opts };
+  // Only stringify JSON-able bodies. Binary bodies (Blob/File, ArrayBuffer,
+  // typed arrays, ReadableStream) and pre-encoded forms must pass through
+  // untouched — JSON.stringify(file) yields "{}", which corrupts raw uploads
+  // (e.g. SSH file sync's hash-verified PUTs).
+  const body = init.body;
+  const isBinaryBody = body instanceof Blob ||
+    body instanceof ArrayBuffer || ArrayBuffer.isView(body) ||
+    body instanceof ReadableStream;
+  if (body && !isBinaryBody && !(body instanceof FormData)) {
+    init.headers = new Headers(init.headers || {});
+    if (!init.headers.has('Content-Type')) init.headers.set('Content-Type', 'application/json');
+    init.body = JSON.stringify(body);
   }
+  return authedFetch(session, `${API}${path}`, init);
+}
 
-  const url =`${API}${path}`;
-  let r = await fetch(url, { ...opts, headers });
+// Every authorized request out of frbr.js. An invalid token buys one
+// refresh and a retry; whatever the server still turns down — or wants a
+// newer login for — buys one fresh login through the door that minted the
+// credential, and another retry. Still refused after that throws
+// SessionExpired, so neither error reaches the caller as a response.
+async function authedFetch(session, url, init) {
+  let renewable = false;
+  const send = (s) => {
+    const headers = new Headers(init.headers);
+    headers.set("X-App-Nonce", APP_NONCE);
+    renewable = s ? s.addAuth(headers) : false;
+    return fetch(url, { ...init, headers });
+  };
 
-  // Stale token — try refresh once
+  let r = await send(session);
   if (r.status === 401 && renewable) {
     try {
       await session.refresh();
-      session.addAuth(headers);
-      r = await fetch(url, { ...opts, headers });
-    } catch {
-      throw new Error('Session expired');
+      r = await send(session);
+    } catch (e) {
+      if (!(e instanceof SessionExpired)) throw e;
     }
   }
 
-  if (r.status === 401) { throw new Error('Session expired'); }
+  // A stream body was spent by the first send, so it can't ride a retry.
+  const replayable = !(init.body instanceof ReadableStream);
+  if (r.status === 401 && session && replayable && window.__FRBR_RELOGIN !== false) {
+    const fresh = await ensureLogin(session.door);
+    if (fresh) {
+      // login() hands back a ServiceProxy for service doors; the
+      // AuthSession it rides is what knows how to authorize.
+      session = fresh.session ?? fresh;
+      r = await send(session);
+    }
+  }
+
+  if (r.status === 401) throw new SessionExpired(session?.authID ?? GATE_ID);
   return r;
 }
 
@@ -157,10 +187,9 @@ function expiryFrom(tokenResponse) {
   return new Date(exp ? exp * 1000 : 0).toISOString();
 }
 
-// Thrown when a refresh is refused: the family is gone and only a fresh
-// login will do. Callers catch this to decide when to offer one — frbr.js
-// never opens a popup on its own, because a popup with no click behind it
-// is a popup the browser blocks.
+// Thrown when a login is gone for good: the refresh was refused, or the
+// server wants a fresh login and the user dismissed the prompt for one
+// (or the page opted out of prompting with window.__FRBR_RELOGIN = false).
 export class SessionExpired extends Error {
   constructor(authID) {
     super("Session expired — log in again");
@@ -203,6 +232,9 @@ export class AuthSession {
   get user_name() { return jwtPayload(this.#entry.access_token)?.user_name; }
   get email()     { return jwtPayload(this.#entry.access_token)?.user_email; }
   get expiresAt() { return this.#entry.expires_at ? new Date(this.#entry.expires_at) : null; }
+  // The service URL whose login minted this credential (null for the app's
+  // own gate) — the door a fresh login goes back through.
+  get door()      { return this.#entry.door ?? null; }
 
   // Whether this session already clears a given record — directly, or as
   // one of the legs sealed into a merged two-leg token.
@@ -280,11 +312,13 @@ export class AuthSession {
     });
   }
 
-  // Drop this session and its stored entry. The server keeps no session to
-  // end — the refresh family dies with the next attempt to use it.
+  // Drop this session's credential and its stored entry. The server keeps
+  // no session to end — the refresh family dies with the next attempt to
+  // use it. The object stays registered, emptied, so the next login for
+  // this record refills it and whoever still holds it recovers too.
   forget() {
     evictEntry(this.authID);
-    sessions.delete(this.authID);
+    this.#entry = { auth_id: this.authID };
   }
 }
 
@@ -346,10 +380,28 @@ async function candidateSession(legIDs) {
   return session;
 }
 
-function popupLogin(url, state) {
+// Thrown when the browser refuses the login window — there was no click
+// behind the call, or the click's activation was already spent.
+class PopupBlocked extends Error {
+  constructor() {
+    super("The login window was blocked");
+    this.name = "PopupBlocked";
+  }
+}
+
+function openLoginWindow(url) {
+  const popup = window.open(url, "frbrAuth", "width=520,height=720");
+  if (!popup) throw new PopupBlocked();
+  return popup;
+}
+
+// Run a login in a window and resolve with the store entry it posts back.
+// A window opened ahead of time (still blank) is navigated rather than
+// opened again.
+function popupLogin(url, state, popup = null) {
   return new Promise((resolve, reject) => {
-    const popup = window.open(url, "frbrAuth", "width=520,height=720");
-    if (!popup) { reject(new Error("The login window was blocked")); return; }
+    if (popup) popup.location.href = url;
+    else popup = openLoginWindow(url);
 
     const finish = (fn, arg) => {
       window.removeEventListener("message", onMessage);
@@ -394,42 +446,153 @@ function toolOutput(result) {
 }
 
 /**
+ * Bring the user back in after a login dies. Runs a fresh login straight
+ * away when the click behind this request still holds user activation;
+ * otherwise (or if that window fails) shows a small dialog whose "Log in"
+ * button supplies the click. Requests that fail together share one prompt
+ * per door, and all retry once it lands.
+ *
+ * @param {string} [serviceURL] — a registered service URL, or omitted for
+ *                                the page's own gate
+ * @returns {Promise<ServiceProxy|AuthSession|null>} the fresh login, or
+ *          null if the user dismissed the dialog
+ */
+const relogins = new Map(); // serviceURL → the prompt in flight for that door
+
+export function ensureLogin(serviceURL = null) {
+  if (!relogins.has(serviceURL)) {
+    relogins.set(serviceURL, promptLogin(serviceURL).finally(() => relogins.delete(serviceURL)));
+  }
+  return relogins.get(serviceURL);
+}
+
+async function promptLogin(serviceURL) {
+  let note = null;
+  if (navigator.userActivation?.isActive) {
+    try {
+      return await login(serviceURL, "fresh");
+    } catch (e) {
+      if (!(e instanceof PopupBlocked)) note = e.message;
+    }
+  }
+  return loginDialog(serviceURL, note);
+}
+
+// The re-login prompt. Styles go on through the CSSOM, which a CSP that
+// blocks inline <style> still allows.
+function loginDialog(serviceURL, note) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.setAttribute("aria-label", "Session expired");
+    dialog.style.cssText = [
+      "background:#1e1e1e", "color:#f5f5f5", "border:1px solid #555",
+      "border-radius:10px", "padding:20px 22px", "max-width:340px",
+      "box-shadow:0 8px 32px rgba(0,0,0,.5)", "text-align:center",
+      "font:14px system-ui, sans-serif",
+    ].join(";");
+
+    const title = document.createElement("div");
+    title.textContent = "Session expired";
+    title.style.cssText = "font-weight:600; font-size:16px; margin-bottom:8px";
+
+    const msg = document.createElement("div");
+    msg.textContent = note ?? "Your session has ended. Log in again to continue.";
+    msg.style.cssText = "color:#bbb; margin-bottom:16px; line-height:1.4";
+
+    const loginBtn = document.createElement("button");
+    loginBtn.textContent = "Log in";
+    loginBtn.style.cssText = [
+      "padding:7px 18px", "cursor:pointer", "border:0", "border-radius:6px",
+      "background:#3b82f6", "color:#fff", "font:600 14px system-ui, sans-serif",
+    ].join(";");
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "Not now";
+    cancelBtn.style.cssText = [
+      "padding:7px 14px", "cursor:pointer", "border:1px solid #666",
+      "border-radius:6px", "background:transparent", "color:#ddd",
+      "font:14px system-ui, sans-serif",
+    ].join(";");
+
+    const buttons = document.createElement("div");
+    buttons.style.cssText = "display:flex; gap:10px; justify-content:center";
+    buttons.append(loginBtn, cancelBtn);
+    dialog.append(title, msg, buttons);
+
+    let result = null;
+    loginBtn.onclick = async () => {
+      loginBtn.disabled = cancelBtn.disabled = true;
+      try {
+        result = await login(serviceURL, "fresh");
+        dialog.close();
+      } catch (e) {
+        // Window closed or the flow failed — keep the dialog up and say why.
+        msg.textContent = e?.message ?? "Login failed — try again.";
+        loginBtn.disabled = cancelBtn.disabled = false;
+      }
+    };
+    cancelBtn.onclick = () => dialog.close();
+    // close covers both buttons and Escape, which <dialog> handles itself.
+    dialog.onclose = () => { dialog.remove(); resolve(result); };
+
+    document.body.appendChild(dialog);
+    dialog.showModal();
+  });
+}
+
+/**
  * Log in to a service and get back a proxy for it.
  *
  * With no argument it clears this page's own gate and returns nothing —
  * the "sign in" verb for a gated app. Either way the app's gate is part of
  * the bill, so logging in to a service signs you in to the app too.
  *
- * A door that asks for nothing resolves instantly. A door already covered
- * by the store resolves with no popup. Only a genuinely missing credential
- * opens a window, so call this from a click.
+ * The mode says how hard to try:
+ *   "normal" — spend a stored credential (refreshing it if it lapsed) and
+ *              open the login window only when nothing fits.
+ *   "silent" — spend a stored credential or come back null; never prompts.
+ *   "fresh"  — ignore stored credentials and run the whole login again,
+ *              always in a window. For when the server needs proof the
+ *              user is here now (the SSH agent's key, say), which no
+ *              refreshed token can give.
  *
- * @param {string} [serviceURL] — a registered service URL, or omitted for
- *                                the app's own gate
- * @param {boolean} [initiate] — initiate login if we're not logged in
+ * A window needs a click behind it, so call "normal" and "fresh" from one.
+ * "fresh" opens its window before anything else, while that click counts.
+ *
+ * @param {string} [serviceURL] — a registered service URL, or omitted (or
+ *                                null) for the app's own gate
+ * @param {"normal"|"silent"|"fresh"} [mode]
  * @returns {Promise<ServiceProxy|AuthSession|null>}
  */
-export async function login(serviceURL, initiate = true) {
-  const door = await resolveDoor(serviceURL);
-  const proxyFor = (service, session) =>
-    serviceURL ? new ServiceProxy({ serviceURL, service, session }) : session;
+export async function login(serviceURL, mode = "normal") {
+  if (!["normal", "silent", "fresh"].includes(mode)) {
+    throw new TypeError(`login mode must be "normal", "silent" or "fresh", not ${JSON.stringify(mode)}`);
+  }
+  const popup = mode === "fresh" ? openLoginWindow("about:blank") : null;
+  try {
+    const door = await resolveDoor(serviceURL);
+    const proxyFor = (service, session) =>
+      serviceURL ? new ServiceProxy({ serviceURL, service, session }) : session;
 
-  if (door.type === "anonymous") return proxyFor(door.service, null);
+    if (door.type === "anonymous") return proxyFor(door.service, null);
 
-  const legIDs = (door.legs || []).map(l => l.auth_id);
-  let session = await candidateSession(legIDs);
-  let service = door.service;
-  if (initiate) {
+    // A fresh login presents nothing, so the server runs every leg.
+    const legIDs = (door.legs || []).map(l => l.auth_id);
+    let session = mode === "fresh" ? null : await candidateSession(legIDs);
+    if (mode === "silent") return session ? proxyFor(door.service, session) : null;
+
     const state = uuidv4();
     const d = await beginLogin(serviceURL, state, session);
-    service = d.service ?? door.service;
-
+    const service = d.service ?? door.service;
     if (d.type === "anonymous") return proxyFor(service, null);
     if (d.type === "ok") return proxyFor(service, session);
 
-    session = AuthSession.for(writeEntry(await popupLogin(d.url, state)));
+    const entry = await popupLogin(d.url, state, popup);
+    session = AuthSession.for(writeEntry({ ...entry, door: serviceURL ?? null }));
+    return proxyFor(service, session);
+  } finally {
+    popup?.close(); // a no-op once the login closed it; otherwise unused
   }
-  return proxyFor(service, session);
 }
 
 /**
@@ -540,20 +703,11 @@ export class ServiceProxy {
     return null;
   }
 
-  // The single choke point: every request out of this proxy is stamped
-  // with the app nonce and carries the session's credential. One 401 buys
-  // one refresh and one retry — after that the caller hears about it.
+  // The single choke point: every request out of this proxy goes through
+  // authedFetch, so a dead login is retried and re-prompted the same way
+  // api() does it.
   async #fetch(url, init = {}) {
-    const headers = new Headers(init.headers);
-    headers.set("X-App-Nonce", APP_NONCE);
-    const renewable = this.#session ? this.#session.addAuth(headers) : false;
-    let res = await fetch(url, { ...init, headers });
-    if (res.status === 401 && renewable) {
-      await this.#session.refresh();
-      this.#session.addAuth(headers);
-      res = await fetch(url, { ...init, headers });
-    }
-    return res;
+    return authedFetch(this.#session, url, init);
   }
 
   // A proxied MCP service is reached through the server, which swaps the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -12,6 +13,14 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
+
+// ErrSessionNotFound covers an unknown id, one owned by another user, and
+// one forgotten after its reopen window — all a 404 to the caller.
+var ErrSessionNotFound = errors.New("session not found")
+
+// How long an expired session's id stays good for a reopen. Past this the
+// record is dropped and the id reads as not found.
+const reopenWindow = 24 * time.Hour
 
 // HostKeyStore abstracts TOFU host key persistence. The caller provides
 // an implementation backed by whatever database they use.
@@ -31,6 +40,8 @@ type Session struct {
 	SFTPClient  *sftp.Client
 	ConnectedAt time.Time
 	ExpiresAt   time.Time
+
+	closed bool // connections shut at expiry; guarded by SessionManager.mu
 }
 
 // SessionManager manages SSH sessions. Each session is an authenticated
@@ -58,9 +69,109 @@ func NewSessionManager(agent *AgentManager, hostKeys HostKeyStore, ttl time.Dura
 // Open dials an SSH connection to the given host using the user's key from
 // the agent manager, then opens the SFTP subsystem. Returns the new session.
 func (m *SessionManager) Open(userID int64, host string, port int, username string) (*Session, error) {
+	sshClient, sftpClient, err := m.dial(userID, host, port, username)
+	if err != nil {
+		return nil, err
+	}
+	session := m.newSession(genNonce(), userID, host, port, username, sshClient, sftpClient)
+
+	m.mu.Lock()
+	m.sessions[session.ID] = session
+	m.mu.Unlock()
+
+	return session, nil
+}
+
+// Get returns the user's session by ID. A session past its TTL is redialed
+// under the same ID with the owner's agent key, so the id is a durable
+// handle and the TTL only decides when the user must prove themselves
+// again: the agent key lapses an hour after the passphrase login that
+// loaded it — always before the TTL — and then the reopen fails with
+// ErrNoKey until they log in again.
+func (m *SessionManager) Get(id string, userID int64) (*Session, error) {
+	m.mu.Lock()
+	s, ok := m.sessions[id]
+	if !ok || s.UserID != userID {
+		m.mu.Unlock()
+		return nil, ErrSessionNotFound
+	}
+	if time.Now().Before(s.ExpiresAt) {
+		m.mu.Unlock()
+		return s, nil
+	}
+	shut(s)
+	m.mu.Unlock()
+
+	// Dial outside the lock — it can take seconds.
+	sshClient, sftpClient, err := m.dial(s.UserID, s.Host, s.Port, s.Username)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.sessions[id]
+	if !ok || cur != s {
+		// Closed meanwhile, or a concurrent request already reopened it.
+		sftpClient.Close()
+		sshClient.Close()
+		if !ok {
+			return nil, ErrSessionNotFound
+		}
+		return cur, nil
+	}
+	fresh := m.newSession(id, s.UserID, s.Host, s.Port, s.Username, sshClient, sftpClient)
+	m.sessions[id] = fresh
+	return fresh, nil
+}
+
+// Close shuts down the user's session and forgets it.
+func (m *SessionManager) Close(id string, userID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	s, ok := m.sessions[id]
+	if !ok || s.UserID != userID {
+		return ErrSessionNotFound
+	}
+	shut(s)
+	delete(m.sessions, id)
+	return nil
+}
+
+// ExpireSessions shuts the connections of sessions past their TTL, and
+// forgets them once their reopen window has passed too.
+func (m *SessionManager) ExpireSessions() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now()
+	for id, s := range m.sessions {
+		if now.After(s.ExpiresAt) {
+			shut(s)
+		}
+		if now.After(s.ExpiresAt.Add(reopenWindow)) {
+			delete(m.sessions, id)
+		}
+	}
+}
+
+// Stop closes all sessions. Call on server shutdown.
+func (m *SessionManager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id, s := range m.sessions {
+		shut(s)
+		delete(m.sessions, id)
+	}
+}
+
+// dial connects to host with the user's agent key and opens SFTP on top.
+func (m *SessionManager) dial(userID int64, host string, port int, username string) (*ssh.Client, *sftp.Client, error) {
 	signer, err := m.agent.GetSigner(userID)
 	if err != nil {
-		return nil, fmt.Errorf("no SSH key available: %w", err)
+		return nil, nil, fmt.Errorf("no SSH key available: %w", err)
 	}
 
 	config := &ssh.ClientConfig{
@@ -73,18 +184,21 @@ func (m *SessionManager) Open(userID int64, host string, port int, username stri
 	addr := fmt.Sprintf("%s:%d", host, port)
 	sshClient, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
-		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
+		return nil, nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
 
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		sshClient.Close()
-		return nil, fmt.Errorf("sftp subsystem: %w", err)
+		return nil, nil, fmt.Errorf("sftp subsystem: %w", err)
 	}
+	return sshClient, sftpClient, nil
+}
 
+func (m *SessionManager) newSession(id string, userID int64, host string, port int, username string, sshClient *ssh.Client, sftpClient *sftp.Client) *Session {
 	now := time.Now()
-	session := &Session{
-		ID:          genNonce(),
+	return &Session{
+		ID:          id,
 		UserID:      userID,
 		Host:        host,
 		Port:        port,
@@ -94,72 +208,19 @@ func (m *SessionManager) Open(userID int64, host string, port int, username stri
 		ConnectedAt: now,
 		ExpiresAt:   now.Add(m.ttl),
 	}
-
-	m.mu.Lock()
-	m.sessions[session.ID] = session
-	m.mu.Unlock()
-
-	return session, nil
 }
 
-// Get returns a session by ID. Returns an error if not found or expired.
-func (m *SessionManager) Get(id string) (*Session, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	s, ok := m.sessions[id]
-	if !ok {
-		return nil, fmt.Errorf("session not found")
+// shut closes a session's connections once. The caller holds m.mu.
+func shut(s *Session) {
+	if s.closed {
+		return
 	}
-	if time.Now().After(s.ExpiresAt) {
-		// Lazy expiry — close and remove.
+	s.closed = true
+	if s.SFTPClient != nil {
 		s.SFTPClient.Close()
+	}
+	if s.SSHClient != nil {
 		s.SSHClient.Close()
-		delete(m.sessions, id)
-		return nil, fmt.Errorf("session expired")
-	}
-	return s, nil
-}
-
-// Close shuts down a session's SSH + SFTP connections and removes it.
-func (m *SessionManager) Close(id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	s, ok := m.sessions[id]
-	if !ok {
-		return fmt.Errorf("session not found")
-	}
-	s.SFTPClient.Close()
-	s.SSHClient.Close()
-	delete(m.sessions, id)
-	return nil
-}
-
-// ExpireSessions closes and removes sessions past their TTL.
-func (m *SessionManager) ExpireSessions() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	now := time.Now()
-	for id, s := range m.sessions {
-		if now.After(s.ExpiresAt) {
-			s.SFTPClient.Close()
-			s.SSHClient.Close()
-			delete(m.sessions, id)
-		}
-	}
-}
-
-// Stop closes all sessions. Call on server shutdown.
-func (m *SessionManager) Stop() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for id, s := range m.sessions {
-		s.SFTPClient.Close()
-		s.SSHClient.Close()
-		delete(m.sessions, id)
 	}
 }
 

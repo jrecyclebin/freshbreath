@@ -618,7 +618,8 @@ async function frbr(session, method, path, body, { rawText = false } = {}) {
   try {
     r = await window.FrBr.api(session, path, opts);
   } catch (e) {
-    _onUnauthorized?.();
+    // frbr.js already offered a fresh login; this is the user saying "not now".
+    if (e instanceof window.FrBr.SessionExpired) _onUnauthorized?.();
     throw e;
   }
 

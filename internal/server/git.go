@@ -159,14 +159,14 @@ func (s *Server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 func resolveGitUser(w http.ResponseWriter, r *http.Request) (*db.User, bool) {
 	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		httpInvalidToken(w, "Unauthorized")
 		return nil, false
 	}
 	return user, true
 }
 
 // writeGitErr maps a gateway error to the right HTTP status:
-//   - ErrNoKey                → 401 (client re-prompts for the SSH passphrase)
+//   - ErrNoKey                → 401 insufficient_user_authentication (client re-prompts for the SSH passphrase)
 //   - ErrInvalidInput         → 400 (bad JSON, missing url/message, bad sha/path)
 //   - os.ErrNotExist          → 404 (unknown branch, missing pull path)
 //   - ErrStaleBase, ErrNothingToCommit → 409 (client pulls and retries)
@@ -174,7 +174,7 @@ func resolveGitUser(w http.ResponseWriter, r *http.Request) (*db.User, bool) {
 func writeGitErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, sshkit.ErrNoKey):
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		httpStepUp(w, err.Error(), sshAgentTTL)
 	case errors.Is(err, sshkit.ErrInvalidInput):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, os.ErrNotExist):

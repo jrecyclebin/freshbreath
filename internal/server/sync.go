@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/pkg/sftp"
 
+	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
 )
 
@@ -30,7 +32,7 @@ func (s *Server) handleSyncList(w http.ResponseWriter, r *http.Request) {
 
 	session, err := s.resolveSession(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeSessionError(w, err)
 		return
 	}
 
@@ -92,9 +94,9 @@ func (s *Server) handleSyncDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := s.sessionMgr.Get(req.SessionID)
+	session, err := s.sessionMgr.Get(req.SessionID, sessionUserID(r))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeSessionError(w, err)
 		return
 	}
 
@@ -155,7 +157,7 @@ func (s *Server) handleSyncDiff(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	session, err := s.resolveSession(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeSessionError(w, err)
 		return
 	}
 
@@ -213,7 +215,7 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	session, err := s.resolveSession(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeSessionError(w, err)
 		return
 	}
 
@@ -250,7 +252,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 	session, err := s.resolveSession(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeSessionError(w, err)
 		return
 	}
 
@@ -287,13 +289,51 @@ func (s *Server) handleSyncFileOps(w http.ResponseWriter, r *http.Request) {
 
 // ── Helpers ──
 
-// resolveSession extracts the sessionId query param and looks up the session.
+// writeSessionError maps session lookup failures to machine-readable
+// responses, so clients react to codes instead of error text:
+//
+//	401 Unauthorized  {"error":"insufficient_user_authentication"} → the expired session needs a reopen and the agent key has lapsed
+//	404 Not Found     {"error":"session_not_found"} → unknown, someone else's, or past its reopen window
+//	400 Bad Request   {"error":"bad_request"}       → missing sessionId
+//	502 Bad Gateway   {"error":"reopen_failed"}     → the reopen's dial failed
+func writeSessionError(w http.ResponseWriter, err error) {
+	var code string
+	var status int
+	switch {
+	case errors.Is(err, sshkit.ErrNoKey):
+		httpStepUp(w, err.Error(), sshAgentTTL)
+		return
+	case errors.Is(err, sshkit.ErrSessionNotFound):
+		status, code = http.StatusNotFound, "session_not_found"
+	case errors.Is(err, errMissingSessionID):
+		status, code = http.StatusBadRequest, "bad_request"
+	default:
+		status, code = http.StatusBadGateway, "reopen_failed"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": code, "error_description": err.Error()})
+}
+
+var errMissingSessionID = errors.New("missing sessionId parameter")
+
+// sessionUserID is the requesting user's id — sessions answer only to the
+// user who opened them. Zero (no user) matches no session.
+func sessionUserID(r *http.Request) int64 {
+	if u, _ := r.Context().Value(userKey).(*db.User); u != nil {
+		return u.ID
+	}
+	return 0
+}
+
+// resolveSession extracts the sessionId query param and looks up the
+// requesting user's session, reopening it if it expired.
 func (s *Server) resolveSession(r *http.Request) (*sshkit.Session, error) {
 	sid := r.URL.Query().Get("sessionId")
 	if sid == "" {
-		return nil, fmt.Errorf("missing sessionId parameter")
+		return nil, errMissingSessionID
 	}
-	return s.sessionMgr.Get(sid)
+	return s.sessionMgr.Get(sid, sessionUserID(r))
 }
 
 // sanitizePath prevents path traversal attacks.

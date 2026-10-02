@@ -369,6 +369,7 @@
     // ── state ──
     let ssh = null;         // logged-in SSH service
     let sessionId = null;   // active SSH session ID
+    let expiresAt = null;   // the session's expiry, as the server sent it
     let currentPath = "/";  // current remote directory
 
     // ── DOM refs ──
@@ -425,6 +426,12 @@
       try { return new Date(iso).toLocaleString(); } catch { return iso; }
     }
 
+    function saveSession() {
+      localStorage.setItem(SESSION_KEY, JSON.stringify({
+        sessionId, currentPath, expiresAt,
+      }));
+    }
+
     function showResult(data) {
       document.getElementById("result-panel").classList.remove("hidden");
       document.getElementById("result").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
@@ -455,8 +462,9 @@
     };
 
     // restore saved auth
-    const saved = await login(SSH_SERVICE_URL, false);
+    const saved = await login(SSH_SERVICE_URL, "silent");
     if (saved) {
+      ssh = saved;
       const c = saved.session || {};
       setStatus(true, `Authenticated · ${c.email || c.user_name || "SSH"}`);
       connChip.classList.remove("clickable");
@@ -469,6 +477,7 @@
       try {
         const s = JSON.parse(savedSession);
         sessionId = s.sessionId;
+        expiresAt = s.expiresAt ?? null;
         currentPath = s.currentPath || "/";
         if (sessionId) {
           sessionInfo.classList.remove("hidden");
@@ -529,11 +538,9 @@
           body: { host, port, username: username || undefined },
         });
         sessionId = data.sessionId;
-        localStorage.setItem(SESSION_KEY, JSON.stringify({
-          sessionId,
-          expiresAt: data.expiresAt,
-          currentPath: "/",
-        }));
+        expiresAt = data.expiresAt;
+        currentPath = "/";
+        saveSession();
         sessionInfo.classList.remove("hidden");
         sessionIdEl.textContent = sessionId.slice(0, 8) + "…";
         sessionExp.textContent = fmtTime(data.expiresAt);
@@ -543,16 +550,12 @@
         disconnectBtn.classList.remove("hidden");
         browserPanel.classList.remove("hidden");
         hostsPanel.classList.remove("hidden");
-        currentPath = "/";
         loadFiles("/");
         loadHosts();
       } catch (e) {
-        if (e.message && e.message.startsWith("401:")) {
-          connectSt.textContent = "SSH key expired — re-authenticating…";
-          startLogin().then(() => connectBtn.click());
-        } else {
-          connectSt.textContent = e.message;
-        }
+        // A lapsed SSH key was already re-prompted inside api(); a
+        // SessionExpired here means the user said "not now".
+        connectSt.textContent = e.message;
       } finally {
         connectBtn.disabled = false;
       }
@@ -582,11 +585,7 @@
     async function loadFiles(dirPath) {
       currentPath = dirPath || "/";
       pathLabel.textContent = currentPath;
-      localStorage.setItem(SESSION_KEY, JSON.stringify({
-        sessionId,
-        expiresAt: sessionExp.textContent,
-        currentPath,
-      }));
+      saveSession();
 
       renderBreadcrumb(currentPath);
 

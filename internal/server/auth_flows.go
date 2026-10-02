@@ -908,6 +908,11 @@ func (h *htmlOnFirstWrite) Write(p []byte) (int, error) {
 	return h.w.Write(p)
 }
 
+// sshAgentTTL is how long a passphrase login keeps the user's SSH key in
+// the agent. Anything that needs the key past it asks for a fresh login,
+// with this as the challenge's max_age.
+const sshAgentTTL = time.Hour
+
 // handleSSHAuth is the passphrase login form: the browser face of an
 // ssh_key auth record. GET renders; POST verifies the passphrase against
 // the user's stored SSH key and advances the flow.
@@ -970,11 +975,11 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Add decrypted key to the in-process SSH agent with 1h TTL.
+		// Add decrypted key to the in-process SSH agent for sshAgentTTL.
 		// Agent TTL is decoupled from the web JWT — agent timeout doesn't
 		// invalidate the web session, and vice versa.
 		if s.agentMgr != nil {
-			if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, 1*time.Hour); err != nil {
+			if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, sshAgentTTL); err != nil {
 				log.Printf("agent add key for user %d: %v", user.ID, err)
 			}
 		}

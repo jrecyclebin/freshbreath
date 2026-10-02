@@ -727,7 +727,7 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	claims, _, err := s.verifyGateRequest(gate, r)
 	if err != nil {
-		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+		httpInvalidToken(w, "Unauthorized: "+err.Error())
 		return
 	}
 
@@ -738,7 +738,7 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	if claims == nil && svc.Descriptor.Type == "mcp" {
 		if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); isFreshbreathToken(raw) {
 			if claims, err = s.verifyAndUnwrapToken(raw, mcpAuthID(svc.ID)); err != nil {
-				http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+				httpInvalidToken(w, "Unauthorized: "+err.Error())
 				return
 			}
 		}
@@ -885,7 +885,7 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	}
 	claims, authUser, err := s.verifyGateRequest(gate, r)
 	if err != nil {
-		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+		httpInvalidToken(w, "Unauthorized: "+err.Error())
 		return
 	}
 
@@ -2149,6 +2149,54 @@ type contextKey string
 
 const userKey contextKey = "user"
 
+// The two 401s a client can recover from, as RFC 6750 / RFC 9470 bearer
+// challenges with the same fields mirrored in a JSON body (browsers only
+// expose WWW-Authenticate cross-origin when told to; bodies always read):
+//
+//	invalid_token                    — the token is expired or rejected. A
+//	                                   refresh may fix it; if not, log in.
+//	insufficient_user_authentication — the token is fine but the user's
+//	                                   last login is older than max_age
+//	                                   allows. Only a fresh login fixes it.
+
+func httpInvalidToken(w http.ResponseWriter, description string) {
+	writeBearerChallenge(w, map[string]any{
+		"error":             "invalid_token",
+		"error_description": description,
+	})
+}
+
+func httpStepUp(w http.ResponseWriter, description string, maxAge time.Duration) {
+	writeBearerChallenge(w, map[string]any{
+		"error":             "insufficient_user_authentication",
+		"error_description": description,
+		"max_age":           int(maxAge.Seconds()),
+	})
+}
+
+func writeBearerChallenge(w http.ResponseWriter, fields map[string]any) {
+	challenge := fmt.Sprintf(`Bearer error=%q, error_description="%s"`,
+		fields["error"], challengeText(fields["error_description"].(string)))
+	if maxAge, ok := fields["max_age"]; ok {
+		challenge += fmt.Sprintf(`, max_age="%d"`, maxAge)
+	}
+	w.Header().Set("WWW-Authenticate", challenge)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(fields)
+}
+
+// challengeText keeps a description inside the character set RFC 6750
+// allows in a quoted challenge value: printable ASCII minus '"' and '\'.
+func challengeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Pre-authenticated path: if userKey is already set, trust the caller and
@@ -2161,7 +2209,7 @@ func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
 		}
 		rec, err := s.adminAuthRecord()
 		if err != nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			httpInvalidToken(w, "Unauthorized")
 			return
 		}
 		if rec == nil {
@@ -2174,7 +2222,7 @@ func (s *Server) authWrap(h http.HandlerFunc) http.HandlerFunc {
 		if err != nil || user == nil {
 			// The admin gate demands a real user row — a valid ext: token
 			// from the right provider is still nobody we know.
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			httpInvalidToken(w, "Unauthorized")
 			return
 		}
 		if user.ID > 0 {
@@ -2202,7 +2250,7 @@ func requireAnyRole(roles ...string) func(http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			u, ok := r.Context().Value(userKey).(*db.User)
 			if !ok || u == nil {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				httpInvalidToken(w, "Unauthorized")
 				return
 			}
 			if !allowed[u.Role] {
@@ -2250,7 +2298,7 @@ func (s *Server) requireAppServiceAccess(serviceType string) func(http.HandlerFu
 
 			user, _ := r.Context().Value(userKey).(*db.User)
 			if user == nil {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				httpInvalidToken(w, "Unauthorized")
 				return
 			}
 
@@ -2365,7 +2413,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSSHKey(w http.ResponseWriter, r *http.Request) {
 	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		httpInvalidToken(w, "Unauthorized")
 		return
 	}
 
@@ -2377,7 +2425,7 @@ func (s *Server) handleSSHKey(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		httpInvalidToken(w, "Unauthorized")
 		return
 	}
 
@@ -2419,7 +2467,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		httpInvalidToken(w, "Unauthorized")
 		return
 	}
 
@@ -2462,7 +2510,7 @@ func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
 
 	user, _ := r.Context().Value(userKey).(*db.User)
 	if user == nil || user.ID < 0 {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		httpInvalidToken(w, "Unauthorized")
 		return
 	}
 
@@ -2488,8 +2536,10 @@ func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
 
 	session, err := s.sessionMgr.Open(user.ID, req.Host, req.Port, req.Username)
 	if err != nil {
+		// The agent's key lapses an hour after the passphrase login that
+		// loaded it, and only another passphrase login reloads it.
 		if errors.Is(err, sshkit.ErrNoKey) {
-			http.Error(w, err.Error(), http.StatusUnauthorized)
+			httpStepUp(w, err.Error(), sshAgentTTL)
 			return
 		}
 		http.Error(w, fmt.Sprintf("Failed to open SSH session: %v", err), http.StatusBadGateway)
@@ -2519,9 +2569,9 @@ func (s *Server) handleSSHSessionDetail(w http.ResponseWriter, r *http.Request) 
 
 	switch r.Method {
 	case http.MethodGet:
-		session, err := s.sessionMgr.Get(id)
+		session, err := s.sessionMgr.Get(id, sessionUserID(r))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			writeSessionError(w, err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -2536,8 +2586,8 @@ func (s *Server) handleSSHSessionDetail(w http.ResponseWriter, r *http.Request) 
 
 	case http.MethodDelete:
 		user, _ := r.Context().Value(userKey).(*db.User)
-		if err := s.sessionMgr.Close(id); err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		if err := s.sessionMgr.Close(id, sessionUserID(r)); err != nil {
+			writeSessionError(w, err)
 			return
 		}
 		if user != nil {
