@@ -306,5 +306,5 @@ func (s *Server) handleElicitationComplete(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, `<!doctype html><title>Complete</title><body style="font-family:system-ui;max-width:32rem;margin:15vh auto;text-align:center"><h1>✓ Complete</h1><p>You can close this window and return to your assistant.</p></body>`)
+	io.WriteString(w, authPage("Complete", `<div><h1>Complete</h1><p class="lead">You can close this window and return to your assistant.</p></div>`))
 }

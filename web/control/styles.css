@@ -110,8 +110,13 @@ button { font-family: inherit; }
   display: block;
   object-fit: contain;
 }
+/* The logo is drawn on off-white: contrast clips that to white, multiply
+   drops it in light mode, and once inverted for dark, screen drops the
+   black. */
+.tb-brand .brand-logo { filter: contrast(1.25); mix-blend-mode: multiply; }
 [data-theme="dark"] .tb-brand .brand-logo {
-  filter: invert(1) brightness(0.8);
+  filter: invert(1) contrast(1.25) brightness(0.8);
+  mix-blend-mode: screen;
 }
 
 .tb-right {
@@ -1730,3 +1735,92 @@ select.input {
 /* Wraps a form so one `disabled` makes it read-only for roles that can't
    save it; the fieldset itself draws nothing. */
 .read-only-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+
+/* ── Password reveal ─────────────────────────────────────────────────── */
+
+/* An eye button inside a password input, here and on the sign-in windows.
+   .shown on the wrapper swaps the eye for the struck-out one. */
+.reveal { position: relative; display: flex; }
+.reveal .input { flex: 1; min-width: 0; padding-right: 40px; }
+.reveal-btn {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.reveal-btn:hover { background: var(--hover); color: var(--ink); }
+.reveal-btn .eye-off, .reveal.shown .reveal-btn .eye { display: none; }
+.reveal.shown .reveal-btn .eye-off { display: block; }
+
+/* ── Sign-in windows ─────────────────────────────────────────────────── */
+
+/* The server's own pages — login popups, passphrase links and their
+   errors — built by authPage in auth_flows.go: the panel's logo over one
+   card, in the panel's tokens and light/dark choice. */
+.auth-page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 32px 16px;
+}
+.auth-logo { width: 170px; height: auto; display: block; filter: contrast(1.25); mix-blend-mode: multiply; }
+[data-theme="dark"] .auth-logo { filter: invert(1) contrast(1.25) brightness(0.8); mix-blend-mode: screen; }
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 28px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+}
+.auth-card h1 { margin: 0; font-size: 20px; font-weight: 500; letter-spacing: -0.015em; }
+.auth-card p.lead { margin: 4px 0 0; color: var(--ink-2); font-size: 14px; }
+.auth-card form { display: flex; flex-direction: column; gap: 14px; }
+.auth-card .btn-primary { justify-content: center; padding: 10px 14px; margin-top: 4px; }
+.auth-card .btn:disabled { opacity: .5; cursor: not-allowed; }
+.auth-card a { color: var(--accent); }
+
+.auth-error, .auth-hint, .auth-ok {
+  padding: 12px 14px;
+  border: 1px solid;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+.auth-error { background: oklch(from var(--tone-red) var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-red) var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-red) var(--tone-border-l) calc(c * .33) h); }
+.auth-hint { background: oklch(from var(--tone-amber) var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-amber) var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-amber) var(--tone-border-l) calc(c * .33) h); }
+.auth-hint strong { display: block; margin-bottom: 2px; }
+.auth-ok { background: oklch(from var(--tone-green) var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-green) var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-green) var(--tone-border-l) calc(c * .33) h); }
+.auth-ok a { color: inherit; font-weight: 600; }
+.auth-card [hidden] { display: none; }
+
+.auth-detail {
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-word;
+}

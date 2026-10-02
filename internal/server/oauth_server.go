@@ -435,14 +435,11 @@ func (os *oauthServer) handleAuthorizeContinue(w http.ResponseWriter, r *http.Re
 // read the frbr:auth:* store that apps on this host share. It offers any
 // live tokens for the records this flow needs and follows the server's
 // verdict.
-const authorizeInterstitialHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Authorizing — Fresh Breath</title>
-<style>
-  body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f11;color:#e4e4e7;display:grid;place-items:center;min-height:100vh}
-  .card{text-align:center;color:#a1a1aa;font-size:14px}
-</style></head><body>
-<div class="card"><p>Checking your session…</p></div>
+var authorizeInterstitialHTML = authPage("Authorizing", `
+<div>
+  <h1>Authorizing</h1>
+  <p class="lead" id="lead">Checking your session…</p>
+</div>
 <script>
 (function(){
   var state = "{{STATE}}";
@@ -466,12 +463,12 @@ const authorizeInterstitialHTML = `<!doctype html>
     body: JSON.stringify({state: state, tokens: tokens})
   }).then(function(r){ return r.json(); }).then(function(d){
     if (d.redirect) { window.location.href = d.redirect; }
-    else { document.querySelector(".card").innerHTML = "<p>" + (d.error_description || "Authorization failed") + "</p>"; }
+    else { document.getElementById("lead").textContent = d.error_description || "Authorization failed"; }
   }).catch(function(){
-    document.querySelector(".card").innerHTML = "<p>Network error</p>";
+    document.getElementById("lead").textContent = "Network error";
   });
 })();
-</script></body></html>`
+</script>`)
 
 func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

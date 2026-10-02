@@ -258,41 +258,39 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 // kin, not app code.)
 func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}) {
 	entryJSON, _ := json.Marshal(entry)
-	lead := "Logged in. You can close this window."
+	lead := "You can close this window."
 	redirect := ""
 	if p.returnTo != "" {
-		lead = "Logged in. Returning to the app…"
+		lead = "Returning to the app…"
 		redirect = fmt.Sprintf("window.location.replace(%q);", p.returnTo)
 	}
-	fmt.Fprintf(w, `<!doctype html>
-<html>
-<body>
-  <p>%s</p>
-  <script>
-    (function () {
-      var entry = %s;
-      if (window.opener && !window.opener.closed) {
-        window.opener.postMessage({
-          type: "auth-complete",
-          state: %q,
-          entry: entry,
-        }, "*");
-        return;
-      }
-      entry.written_at = new Date().toISOString();
-      try {
-        localStorage.setItem("frbr:auth:" + entry.auth_id, JSON.stringify(entry));
-      } catch (e) {
-        document.querySelector("p").textContent =
-          "Logged in, but the browser would not store the session.";
-        return;
-      }
-      %s
-    })();
-  </script>
-</body>
-</html>
-`, lead, string(entryJSON), p.appState, redirect)
+	io.WriteString(w, authPage("Signed in", fmt.Sprintf(`
+<div>
+  <h1>You're signed in</h1>
+  <p class="lead" id="lead">%s</p>
+</div>
+<script>
+  (function () {
+    var entry = %s;
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({
+        type: "auth-complete",
+        state: %q,
+        entry: entry,
+      }, "*");
+      return;
+    }
+    entry.written_at = new Date().toISOString();
+    try {
+      localStorage.setItem("frbr:auth:" + entry.auth_id, JSON.stringify(entry));
+    } catch (e) {
+      document.getElementById("lead").textContent =
+        "But the browser would not store the session.";
+      return;
+    }
+    %s
+  })();
+</script>`, lead, string(entryJSON), p.appState, redirect)))
 }
 
 // returnAllowed judges a login's return target the way the CORS check
@@ -515,12 +513,7 @@ func gatePageError(w http.ResponseWriter, status int, title, detail string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	title, detail = html.EscapeString(title), html.EscapeString(detail)
-	io.WriteString(w, `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fresh Breath — `+title+`</title>
-<style>`+authFormStyle+`</style></head><body>
-<div class="card"><h1>`+title+`</h1><p class="lead">`+detail+`</p></div>
-</body></html>`)
+	io.WriteString(w, authPage(title, `<div><h1>`+title+`</h1><p class="lead">`+detail+`</p></div>`))
 }
 
 // handleLogout signs this browser out of one record: every family that
@@ -847,7 +840,7 @@ func (s *Server) callbackError(w http.ResponseWriter, r *http.Request, rec *db.A
 
 	// Collapse the hint block when there is nothing actionable to show.
 	if hint == "" {
-		page = strings.Replace(page, "<div class=\"hint\">", "<div class=\"hint\" style=\"display:none\">", 1)
+		page = strings.Replace(page, "<div class=\"auth-hint\">", "<div class=\"auth-hint\" hidden>", 1)
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -855,24 +848,16 @@ func (s *Server) callbackError(w http.ResponseWriter, r *http.Request, rec *db.A
 	w.Write([]byte(page))
 }
 
-const callbackErrorHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Fresh Breath — Sign-in error</title>
-<style>` + authFormStyle + `
-  .detail{color:#a1a1aa;font-size:13px;line-height:1.6;word-break:break-word;background:#0f0f11;border:1px solid #27272a;border-radius:8px;padding:12px;margin-top:12px}
-  .hint{color:#fbbf24;font-size:13px;line-height:1.6;margin-top:16px;background:rgba(99,102,241,.08);border:1px solid #27272a;border-radius:8px;padding:12px}
-  .hint strong{display:block;color:#fbbf24;margin-bottom:4px}
-</style></head><body>
-<div class="card">
+var callbackErrorHTML = authPage("Sign-in error", `
+<div>
   <h1>{{TITLE}}</h1>
   <p class="lead">The sign-in flow for this service could not continue. Details below for the server log.</p>
-  <div class="detail">{{DETAIL}}</div>
-  <div class="hint">
-    <strong>Likely cause</strong>
-    {{HINT}}
-  </div>
 </div>
-</body></html>`
+<div class="auth-detail">{{DETAIL}}</div>
+<div class="auth-hint">
+  <strong>Likely cause</strong>
+  {{HINT}}
+</div>`)
 
 // respondLeg completes a form-cleared leg and writes the right response:
 // JSON {"redirect"} to move the browser on, or the final page as HTML.
@@ -1043,21 +1028,51 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-const authFormStyle = `
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:system-ui,-apple-system,sans-serif;background:#0f0f11;color:#e4e4e7;display:grid;place-items:center;min-height:100vh}
-  .card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:32px;width:100%;max-width:380px}
-  h1{font-size:18px;font-weight:600;margin-bottom:4px}
-  p.lead{color:#71717a;font-size:14px;margin-bottom:24px}
-  label{display:block;font-size:13px;color:#a1a1aa;margin-bottom:6px;font-weight:500}
-  input{width:100%;padding:10px 12px;border:1px solid #27272a;border-radius:8px;background:#0f0f11;color:#e4e4e7;font-size:14px;margin-bottom:16px;outline:none}
-  input:focus{border-color:#6366f1}
-  button{width:100%;padding:10px;border:none;border-radius:8px;background:#6366f1;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
-  button:hover{background:#4f46e5}
-  button:disabled{opacity:.5;cursor:not-allowed}
-  .err{color:#f87171;font-size:13px;margin-bottom:12px;display:none}
-  .err.show{display:block}
+// authPage frames one of the server's own browser pages — the login
+// forms, the passphrase link, the error and done pages — to match the
+// control panel: its stylesheet and fonts (served ungated under
+// /control/), its logo, and the theme the viewer picked there, else
+// their system's. title is HTML; escape anything untrusted in it.
+func authPage(title, body string) string {
+	return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>` + title + ` — Fresh Breath</title>
+<link rel="stylesheet" href="/control/fonts.css">
+<link rel="stylesheet" href="/control/styles.css">
+<script>` + authPageScript + `</script>
+</head><body class="auth-page">
+<img class="auth-logo" src="/control/images/frbr-sm.png" alt="Fresh Breath">
+<main class="auth-card">
+` + body + `
+</main>
+</body></html>`
+}
+
+// authPageScript sets the theme before first paint (the panel keeps the
+// viewer's toggle in frebre_theme) and works every reveal button.
+const authPageScript = `
+  (function(){
+    var t; try { t = localStorage.getItem('frebre_theme'); } catch (e) {}
+    var dark = t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+  document.addEventListener('click', function(ev){
+    var btn = ev.target.closest && ev.target.closest('.reveal-btn');
+    if (!btn) return;
+    var wrap = btn.parentNode, input = wrap.querySelector('input');
+    var show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    wrap.classList.toggle('shown', show);
+    btn.setAttribute('aria-pressed', show);
+  });
 `
+
+// revealButton goes right after a password input, both inside a
+// <div class="reveal">: the eye that shows what was typed.
+const revealButton = `<button type="button" class="reveal-btn" aria-label="Show" aria-pressed="false">` +
+	`<svg class="eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>` +
+	`<svg class="eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.9 3.9"/><path d="M6.6 6.6C3.8 8.4 2 12 2 12s3.5 7 10 7a10.6 10.6 0 0 0 5.4-1.4"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></svg>` +
+	`</button>`
 
 // authFormScript is shared by both forms: POST the credentials, then either
 // follow a JSON redirect (next leg / MCP client) or render the returned
@@ -1068,7 +1083,7 @@ const authFormScript = `
     fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
       .then(function(r){
         if (!r.ok) {
-          r.text().then(function(t){errEl.textContent=t||'Login failed';errEl.className='err show'});
+          r.text().then(function(t){errEl.textContent=t||'Login failed';errEl.hidden=false});
           btn.disabled=false; btn.textContent=idleLabel;
           return;
         }
@@ -1079,39 +1094,40 @@ const authFormScript = `
           r.text().then(function(html){document.open();document.write(html);document.close()});
         }
       })
-      .catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent=idleLabel});
+      .catch(function(){errEl.textContent='Network error';errEl.hidden=false;btn.disabled=false;btn.textContent=idleLabel});
   }
 `
 
-const sshAuthFormHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in — Fresh Breath</title>
-<style>` + authFormStyle + `</style></head><body>
-<div class="card">
-  <h1>Fresh Breath Login</h1>
-  <p class="lead">Sign in with your passphrase.</p>
-  <div class="err" id="err"></div>
-  <form id="f">
-    <label for="e">Email</label>
-    <input id="e" type="email" required autocomplete="email" autofocus/>
-    <label for="p">Passphrase</label>
-    <input id="p" type="password" required autocomplete="current-password"/>
-    <button type="submit" id="btn">Sign in</button>
-  </form>
+var sshAuthFormHTML = authPage("Sign in", `
+<div>
+  <h1>Sign in</h1>
+  <p class="lead">Use your email and SSH key passphrase.</p>
 </div>
-<script>` + authFormScript + `
+<div class="auth-error" id="err" hidden></div>
+<form id="f">
+  <div class="field">
+    <label for="e">Email</label>
+    <input id="e" class="input" type="email" required autocomplete="email" autofocus/>
+  </div>
+  <div class="field">
+    <label for="p">Passphrase</label>
+    <div class="reveal"><input id="p" class="input" type="password" required autocomplete="current-password"/>`+revealButton+`</div>
+  </div>
+  <button type="submit" id="btn" class="btn btn-primary">Sign in</button>
+</form>
+<script>`+authFormScript+`
 (function(){
   var state="{{STATE}}";
   document.getElementById('f').onsubmit=function(ev){
     ev.preventDefault();
     var btn=document.getElementById('btn'), errEl=document.getElementById('err');
-    errEl.className='err'; errEl.textContent=''; btn.textContent='Signing in…';
+    errEl.hidden=true; errEl.textContent=''; btn.textContent='Signing in…';
     submitAuth('/service/ssh-auth',
       {state:state,email:document.getElementById('e').value,passphrase:document.getElementById('p').value},
       btn, errEl, 'Sign in');
   };
 })();
-</script></body></html>`
+</script>`)
 
 // handlePassphraseLink is the page behind an invite or reset link: the
 // link's token is the whole credential, so it is mounted bare. GET shows
@@ -1155,26 +1171,24 @@ func (s *Server) handlePassphraseLink(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-const passphraseLinkFormHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Set passphrase — Fresh Breath</title>
-<style>` + authFormStyle + `
-  .ok{color:#4ade80;font-size:14px;line-height:1.5}
-  .ok a{color:#a5b4fc}
-</style></head><body>
-<div class="card">
+var passphraseLinkFormHTML = authPage("Set passphrase", `
+<div>
   <h1>Set your passphrase</h1>
   <p class="lead">For <b>{{EMAIL}}</b>. You'll use it to sign in to Fresh Breath. Setting it creates a new SSH key for your account.</p>
-  <div class="err" id="err"></div>
-  <form id="f">
-    <label for="p">New passphrase</label>
-    <input id="p" type="password" required minlength="8" autocomplete="new-password" autofocus/>
-    <label for="c">Confirm passphrase</label>
-    <input id="c" type="password" required minlength="8" autocomplete="new-password"/>
-    <button type="submit" id="btn">Set passphrase</button>
-  </form>
-  <p class="ok" id="ok" style="display:none">Your passphrase is set. <a href="/control">Sign in to the control panel</a>.</p>
 </div>
+<div class="auth-error" id="err" hidden></div>
+<form id="f">
+  <div class="field">
+    <label for="p">New passphrase</label>
+    <div class="reveal"><input id="p" class="input" type="password" required minlength="8" autocomplete="new-password" autofocus/>`+revealButton+`</div>
+  </div>
+  <div class="field">
+    <label for="c">Confirm passphrase</label>
+    <div class="reveal"><input id="c" class="input" type="password" required minlength="8" autocomplete="new-password"/>`+revealButton+`</div>
+  </div>
+  <button type="submit" id="btn" class="btn btn-primary">Set passphrase</button>
+</form>
+<p class="auth-ok" id="ok" hidden>Your passphrase is set. <a href="/control">Sign in to the control panel</a>.</p>
 <script>
 (function(){
   var token={{TOKEN}};
@@ -1182,59 +1196,54 @@ const passphraseLinkFormHTML = `<!doctype html>
     ev.preventDefault();
     var btn=document.getElementById('btn'), errEl=document.getElementById('err');
     var p=document.getElementById('p').value, c=document.getElementById('c').value;
-    errEl.className='err';
-    if (p.length<8) { errEl.textContent='Use at least 8 characters.'; errEl.className='err show'; return; }
-    if (p!==c) { errEl.textContent='The passphrases don\'t match.'; errEl.className='err show'; return; }
+    errEl.hidden=true;
+    if (p.length<8) { errEl.textContent='Use at least 8 characters.'; errEl.hidden=false; return; }
+    if (p!==c) { errEl.textContent='The passphrases don\'t match.'; errEl.hidden=false; return; }
     btn.disabled=true; btn.textContent='Saving…';
     fetch('/service/passphrase', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({token:token, passphrase:p})})
       .then(function(r){
         if (r.ok) {
-          document.getElementById('f').style.display='none';
-          document.getElementById('ok').style.display='block';
+          document.getElementById('f').hidden=true;
+          document.getElementById('ok').hidden=false;
           return;
         }
-        r.text().then(function(t){errEl.textContent=t||'Could not set passphrase';errEl.className='err show'});
+        r.text().then(function(t){errEl.textContent=t||'Could not set passphrase';errEl.hidden=false});
         btn.disabled=false; btn.textContent='Set passphrase';
       })
-      .catch(function(){errEl.textContent='Network error';errEl.className='err show';btn.disabled=false;btn.textContent='Set passphrase'});
+      .catch(function(){errEl.textContent='Network error';errEl.hidden=false;btn.disabled=false;btn.textContent='Set passphrase'});
   };
 })();
-</script></body></html>`
+</script>`)
 
-const passphraseLinkErrorHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Link expired — Fresh Breath</title>
-<style>` + authFormStyle + `</style></head><body>
-<div class="card">
+var passphraseLinkErrorHTML = authPage("Link not valid", `
+<div>
   <h1>Link not valid</h1>
   <p class="lead">{{MESSAGE}}</p>
-</div>
-</body></html>`
+</div>`)
 
-const apiKeyAuthFormHTML = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>API Key — Fresh Breath</title>
-<style>` + authFormStyle + `</style></head><body>
-<div class="card">
-  <h1>API Key</h1>
+var apiKeyAuthFormHTML = authPage("API key", `
+<div>
+  <h1>API key</h1>
   <p class="lead">Enter the API key for this service.</p>
-  <div class="err" id="err"></div>
-  <form id="f">
-    <label for="k">API Key</label>
-    <input id="k" type="password" required autofocus/>
-    <button type="submit" id="btn">Submit</button>
-  </form>
 </div>
-<script>` + authFormScript + `
+<div class="auth-error" id="err" hidden></div>
+<form id="f">
+  <div class="field">
+    <label for="k">API key</label>
+    <div class="reveal"><input id="k" class="input mono" type="password" required autocomplete="off" autofocus/>`+revealButton+`</div>
+  </div>
+  <button type="submit" id="btn" class="btn btn-primary">Continue</button>
+</form>
+<script>`+authFormScript+`
 (function(){
   var state="{{STATE}}";
   document.getElementById('f').onsubmit=function(ev){
     ev.preventDefault();
     var btn=document.getElementById('btn'), errEl=document.getElementById('err');
-    errEl.className='err'; errEl.textContent=''; btn.textContent='Submitting…';
+    errEl.hidden=true; errEl.textContent=''; btn.textContent='Checking…';
     submitAuth('/service/apikey-auth',
       {state:state,api_key:document.getElementById('k').value},
-      btn, errEl, 'Submit');
+      btn, errEl, 'Continue');
   };
 })();
-</script></body></html>`
+</script>`)

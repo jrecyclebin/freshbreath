@@ -62,14 +62,14 @@ func TestCallbackErrorEscapesDetail(t *testing.T) {
 	s.callbackError(w, r, &db.AuthRecord{Name: "x"}, "Code exchange failed", err)
 
 	body := w.Body.String()
-	if strings.Contains(body, "<script>") {
+	if strings.Contains(body, `<script>alert(`) {
 		t.Error("unescaped <script> reached the response body")
 	}
 	if !strings.Contains(body, html.EscapeString("<script>")) {
 		t.Error("detail should be HTML-escaped")
 	}
 	// No mapped hint for this code: the hint box must be hidden.
-	if !strings.Contains(body, `style="display:none"`) {
+	if !strings.Contains(body, `<div class="auth-hint" hidden>`) {
 		t.Error("hint box should be hidden when no hint")
 	}
 }

@@ -42,11 +42,27 @@ const Icon = ({ name, size = 16 }) => {
     back:    <><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></>,
     tag:     <><path d="M20.6 13.4L13.4 20.6a2 2 0 0 1-2.8 0l-7.2-7.2A2 2 0 0 1 2.8 12V5a2 2 0 0 1 2-2h7a2 2 0 0 1 1.4.6l7.4 7.4a2 2 0 0 1 0 2.4z"/><circle cx="7.5" cy="7.5" r="1.2"/></>,
     chevron: <><path d="M6 9l6 6 6-6"/></>,
+    eye:     <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></>,
+    eyeOff:  <><path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.9 3.9"/><path d="M6.6 6.6C3.8 8.4 2 12 2 12s3.5 7 10 7a10.6 10.6 0 0 0 5.4-1.4"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></>,
   };
   return <svg {...c}>{p[name] || p.more}</svg>;
 };
 
 // ── UI primitives ──────────────────────────────────────────────────────
+
+// A password input with an eye button that shows what was typed. Takes
+// whatever an <input className="input"> would; the type is its own.
+const PasswordInput = ({ className = 'input', ...props }) => {
+  const [shown, setShown] = useState(false);
+  return (
+    <div className={shown ? 'reveal shown' : 'reveal'}>
+      <input {...props} className={className} type={shown ? 'text' : 'password'}/>
+      <button type="button" className="reveal-btn" aria-label="Show" aria-pressed={shown} onClick={() => setShown(v => !v)}>
+        <Icon name={shown ? 'eyeOff' : 'eye'} size={16}/>
+      </button>
+    </div>
+  );
+};
 
 // A hand-drawn "window with a view", deterministic from the user's email
 // (falling back to their name). The drawing lives in window-avatar.js, a
@@ -1146,10 +1162,10 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
           </span>
           <div className="field-row">
             <div className="field"><label>Passphrase</label>
-              <input className="input" type="password" autoComplete="new-password" value={passphrase} onChange={e=>setPassphrase(e.target.value)} placeholder="Min 8 characters"/>
+              <PasswordInput autoComplete="new-password" value={passphrase} onChange={e=>setPassphrase(e.target.value)} placeholder="Min 8 characters"/>
             </div>
             <div className="field"><label>Confirm</label>
-              <input className="input" type="password" autoComplete="new-password" value={passConfirm} onChange={e=>setPassConfirm(e.target.value)} placeholder="Re-enter passphrase"/>
+              <PasswordInput autoComplete="new-password" value={passConfirm} onChange={e=>setPassConfirm(e.target.value)} placeholder="Re-enter passphrase"/>
             </div>
           </div>
           {passphraseProblem && <span className="help" style={{color:'var(--danger)'}}>{passphraseProblem}</span>}
@@ -2053,7 +2069,7 @@ function AuthForm({ form, setForm, record }) {
             </div>
           </div>
           <div className="field"><label>Client Secret</label>
-            <input className="input mono" type="password" value={d.client_secret||''}
+            <PasswordInput className="input mono" value={d.client_secret||''}
                    onChange={e=>upd('client_secret',e.target.value)} placeholder={secretPlaceholder}/>
             <span className="help">Never leaves the server — token exchange and refresh run here.</span>
           </div>
@@ -2070,7 +2086,7 @@ function AuthForm({ form, setForm, record }) {
       {kind === 'api_key' && (
         <>
           <div className="field"><label>Key</label>
-            <input className="input mono" type="password" value={d.key||''}
+            <PasswordInput className="input mono" value={d.key||''}
                    onChange={e=>upd('key',e.target.value)} placeholder={secretPlaceholder}/>
           </div>
           <div className="field"><label>Header</label>
@@ -3038,11 +3054,11 @@ function PassphraseModal({ title, blurb, onClose, onSubmit }) {
         <p className="muted" style={{fontSize:13,marginBottom:16}}>{blurb}</p>
         <div className="field">
           <label>Passphrase</label>
-          <input className="input" type="password" value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
+          <PasswordInput value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
         </div>
         <div className="field">
           <label>Confirm passphrase</label>
-          <input className="input" type="password" value={confirmed} onChange={e => setConfirmed(e.target.value)} placeholder="Re-enter passphrase" />
+          <PasswordInput value={confirmed} onChange={e => setConfirmed(e.target.value)} placeholder="Re-enter passphrase" />
         </div>
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:20}}>
           <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
