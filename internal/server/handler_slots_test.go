@@ -359,3 +359,48 @@ func TestHostedAppRoutabilityByDisk(t *testing.T) {
 		t.Errorf("bareapp status = %d body = %q, want 200 bare (disk is truth)", rr.Code, rr.Body.String())
 	}
 }
+
+// TestHostedAppRevalidates pins that hosted app files — assets and the SPA
+// fallback alike — are revalidated on every use, and that a rewrite inside
+// the same second still changes the ETag so the browser can't get a stale 304.
+func TestHostedAppRevalidates(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "cacheapp")
+	cleanupSlotApp(t, srv, nonce)
+	createSlotFile(t, srv, nonce, "web", "index.html", []byte("v1"))
+	createSlotFile(t, srv, nonce, "web", "app.js", []byte("js1"))
+	srv.rebuildHostedRoutes()
+
+	for _, path := range []string{"/cacheapp/", "/cacheapp/app.js", "/cacheapp/some/route"} {
+		rr := testRequest(t, srv, http.MethodGet, path, nil, nil)
+		if cc := rr.Header().Get("Cache-Control"); cc != "private, no-cache" {
+			t.Errorf("%s: Cache-Control = %q, want private, no-cache", path, cc)
+		}
+		if rr.Header().Get("ETag") == "" {
+			t.Errorf("%s: missing ETag", path)
+		}
+	}
+
+	rr := testRequest(t, srv, http.MethodGet, "/cacheapp/app.js", nil, nil)
+	etag := rr.Header().Get("ETag")
+	rr = testRequest(t, srv, http.MethodGet, "/cacheapp/app.js", nil, map[string]string{"If-None-Match": etag})
+	if rr.Code != http.StatusNotModified {
+		t.Fatalf("unchanged file: status = %d, want 304", rr.Code)
+	}
+
+	// Same size, same second: Last-Modified can't tell these apart; the ETag must.
+	path := filepath.Join(srv.config.DataDir, "apps", nonce, "web", "app.js")
+	fi, _ := os.Stat(path)
+	createSlotFile(t, srv, nonce, "web", "app.js", []byte("js2"))
+	sameSecond := fi.ModTime().Truncate(time.Second).Add(500 * time.Millisecond)
+	if sameSecond.Equal(fi.ModTime()) {
+		sameSecond = sameSecond.Add(time.Millisecond)
+	}
+	if err := os.Chtimes(path, sameSecond, sameSecond); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	rr = testRequest(t, srv, http.MethodGet, "/cacheapp/app.js", nil, map[string]string{"If-None-Match": etag})
+	if rr.Code != http.StatusOK || rr.Body.String() != "js2" {
+		t.Fatalf("rewritten file: status = %d body = %q, want 200 js2", rr.Code, rr.Body.String())
+	}
+}

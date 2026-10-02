@@ -119,6 +119,13 @@ func (s *Server) SetupRoutes() {
 		rel := strings.TrimPrefix(r.URL.Path, "/control/")
 		if rel != "" {
 			if fi, err := os.Stat(filepath.Join(controlDir, rel)); err == nil && !fi.IsDir() {
+				// Vendored files carry their version in the filename, so a
+				// given URL never changes content. Everything else revalidates.
+				if strings.HasPrefix(rel, "vendor/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				} else {
+					w.Header().Set("Cache-Control", "no-cache")
+				}
 				controlFiles.ServeHTTP(w, r)
 				return
 			}
@@ -386,6 +393,7 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(clean, "..") {
 			filePath := filepath.Join(webDir, clean)
 			if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
+				setRevalidateHeaders(w, fi)
 				http.ServeFile(w, r, filePath)
 				return
 			}
@@ -400,7 +408,21 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	fi, _ := f.Stat()
+	setRevalidateHeaders(w, fi)
 	http.ServeContent(w, r, "index.html", fi.ModTime(), f)
+}
+
+// setRevalidateHeaders makes the browser check back on every use of a hosted
+// app file. Hosted apps are SPAs that change often and do no cache-busting of
+// their own, so without this the browser's heuristic freshness (a tenth of the
+// file's age) serves stale code for hours or days after a deploy. Revalidation
+// is a cheap 304. private: the app gate covers these responses, so no shared
+// cache should keep them. The ETag carries the mtime at full resolution —
+// Last-Modified alone is whole seconds, and two writes inside one second (an
+// agent iterating on the dev slot) would otherwise earn a wrong 304.
+func setRevalidateHeaders(w http.ResponseWriter, fi os.FileInfo) {
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", fmt.Sprintf(`"%x-%x"`, fi.ModTime().UnixNano(), fi.Size()))
 }
 
 // slotDirName maps a requested slot to its on-disk dir under the app folder.
@@ -443,6 +465,7 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(data)
 }
 
@@ -660,6 +683,8 @@ func mustJSON(v any) string {
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
+	// Rendered per request (the caller's app and origin), never cacheable.
+	w.Header().Set("Cache-Control", "no-cache")
 	// A ?loc= query marks a programmatic fetch from frbr.js re-deriving its
 	// nonce after a Referer-suppressed load (script tags never set ?loc=).
 	// Hand it JSON instead of the JS assignment so the client can .json() it;
@@ -682,6 +707,7 @@ func (s *Server) handleFrbr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache") // env is prepended per request
 	w.Write(s.renderEnvJS(r))
 	w.Write(data)
 }

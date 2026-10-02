@@ -1522,3 +1522,26 @@ func TestLoginAnonymousCarriesServiceInfo(t *testing.T) {
 		t.Errorf("service = %+v, want id %s and proxied", resp.Service, id)
 	}
 }
+
+// TestControlCaching pins the control panel's cache split: vendored files
+// (version in the filename) are immutable, everything else revalidates, and
+// the per-request scripts are never cached.
+func TestControlCaching(t *testing.T) {
+	srv := newTestServer(t)
+	cases := []struct{ path, want string }{
+		{"/control/vendor/react-18.3.1.production.min.js", "public, max-age=31536000, immutable"},
+		{"/control/styles.css", "no-cache"},
+		{"/control/images/frbr-sm.png", "no-cache"},
+		{"/frbr.js", "no-cache"},
+		{"/env.js", "no-cache"},
+	}
+	for _, tc := range cases {
+		rr := testRequest(t, srv, "GET", tc.path, nil, nil)
+		if rr.Code != 200 {
+			t.Errorf("%s: status = %d, want 200", tc.path, rr.Code)
+		}
+		if cc := rr.Header().Get("Cache-Control"); cc != tc.want {
+			t.Errorf("%s: Cache-Control = %q, want %q", tc.path, cc, tc.want)
+		}
+	}
+}
