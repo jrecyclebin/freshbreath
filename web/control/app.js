@@ -803,9 +803,12 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
       : <span className="muted">—</span>;
   };
 
+  const mcpUrl = `${window.__HOMESLICE_CONFIG.apiBase}/mcp`;
   return (
     <>
-      <p>Connect to the MCP at <strong>{window.__HOMESLICE_CONFIG.apiBase}/mcp</strong>. <a href="https://freshbreath.dev/" target="_blank">Read more.</a></p>
+      <p>Connect to the MCP at <strong>{mcpUrl}</strong>.
+      <button className="id-sub" onClick={() => copyText(mcpUrl, toast)} title="Copy URL"><Icon name="copy" size={14}/></button>
+      &nbsp;<a href="https://freshbreath.dev/" target="_blank">Read more.</a></p>
       <div className="home-section">
         <div className="home-hosted">
           {hosted.length === 0 ? (
