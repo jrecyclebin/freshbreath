@@ -264,10 +264,9 @@
   </div>
 
   <script type="module">
-    import { login, ServiceProxy } from "/frbr.js";
+    import { login } from "/frbr.js";
 
     const API_BASE = window.__HOMESLICE_CONFIG?.apiBase;
-    const AUTH_KEY = "test-auth";
     const SERVICE_URL = "https://mcp.notion.com/mcp"; // "https://api.dropboxapi.com/2/";
 
     const connChip   = document.getElementById("conn-chip");
@@ -277,11 +276,6 @@
     const callStatus = document.getElementById("call-status");
 
     let service = null;
-
-    ServiceProxy.on('refresh', svc => {
-      console.log("Access token refreshed.");
-      localStorage.setItem(AUTH_KEY, svc.toJSON());
-    });
 
     function setStatus(ok, msg) {
       statusDot.className = "status-dot" + (ok === true ? " ok" : ok === false ? " err" : "");
@@ -331,20 +325,16 @@
       setStatus(null, "Opening authorization…");
       try {
         const result = await login(SERVICE_URL);
-        localStorage.setItem(AUTH_KEY, result.toJSON());
-
-        // OIDC identity service — just display the auth status
-        if (result.data?.claims) {
-          const c = result.data.claims;
-          setStatus(true, `Authenticated · ${c.email || c.name || c.sub}`);
-          connChip.classList.remove("clickable");
-          signoutBtn.classList.remove("hidden");
-          return;
-        }
 
         // MCP / API service — load tools or proceed
-        service = result;
-        await loadTools();
+        if (result.session) {
+          const c = result.session;
+          setStatus(true, `Authenticated · ${c.email || c.user_name || c.subject}`);
+          connChip.classList.remove("clickable");
+          signoutBtn.classList.remove("hidden");
+          service = result;
+          await loadTools();
+        }
       } catch (e) {
         setStatus(false, e.message);
       }
@@ -358,30 +348,17 @@
     };
 
     // ── restore saved session on page load ──
-    const saved = localStorage.getItem(AUTH_KEY);
-    if (saved) {
-      try {
-        const parsed = ServiceProxy.fromJSON(saved);
-        if (parsed.data?.claims) {
-          // OIDC identity session — restore display only
-          const c = parsed.data.claims;
-          setStatus(true, `Authenticated · ${c.email || c.name || c.sub}`);
-          connChip.classList.remove("clickable");
-          signoutBtn.classList.remove("hidden");
-        } else {
-          // MCP / API service session
-          service = parsed;
-          loadTools().catch(() => {
-            localStorage.removeItem(AUTH_KEY);
-            service = null;
-            connChip.classList.add("clickable");
-            signoutBtn.classList.add("hidden");
-            setStatus(false, "Session expired — click to log in again");
-          });
-        }
-      } catch {
-        localStorage.removeItem(AUTH_KEY);
-      }
+    const result = await login(SERVICE_URL, false);
+    if (result.session) {
+      const c = result.session;
+      setStatus(true, `Authenticated · ${c.email || c.user_name || c.subject}`);
+      service = result;
+      loadTools().catch(() => {
+        service = null;
+        connChip.classList.add("clickable");
+        signoutBtn.classList.add("hidden");
+        setStatus(false, "Session expired — click to log in again");
+      });
     }
 
     // ── theme ──
@@ -398,7 +375,6 @@
 
     // ── sign out ──
     signoutBtn.onclick = () => {
-      localStorage.removeItem(AUTH_KEY);
       service = null;
       connChip.classList.add("clickable");
       signoutBtn.classList.add("hidden");

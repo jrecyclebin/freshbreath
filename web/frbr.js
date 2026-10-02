@@ -565,6 +565,9 @@ function loginDialog(serviceURL, note) {
  * @returns {Promise<ServiceProxy|AuthSession|null>}
  */
 export async function login(serviceURL, mode = "normal") {
+  // Simple boolean mode - two most common cases.
+  if (mode === true)  { mode = "normal"; }
+  if (mode === false) { mode = "silent"; }
   if (!["normal", "silent", "fresh"].includes(mode)) {
     throw new TypeError(`login mode must be "normal", "silent" or "fresh", not ${JSON.stringify(mode)}`);
   }
