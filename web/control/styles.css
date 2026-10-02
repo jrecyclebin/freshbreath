@@ -901,141 +901,6 @@ select.input {
   color: white;
 }
 
-/* ── Login screen ──────────────────────────────────────────────────────── */
-
-.login-screen {
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: 1.1fr 1fr;
-  background: var(--bg);
-}
-
-.login-aside {
-  position: relative;
-  padding: 48px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  background:
-    radial-gradient(1200px 600px at 10% 0%, oklch(from var(--accent) 0.96 0.04 h / 0.55), transparent 60%),
-    radial-gradient(900px 500px at 90% 100%, oklch(from var(--warn) 0.95 0.05 h / 0.45), transparent 60%),
-    var(--bg);
-  overflow: hidden;
-}
-
-.login-aside .quiet-grid {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(to right, oklch(from var(--line) 0.9 c h / 0.5) 1px, transparent 1px),
-    linear-gradient(to bottom, oklch(from var(--line) 0.9 c h / 0.5) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(800px 600px at 30% 50%, black 10%, transparent 80%);
-  pointer-events: none;
-}
-
-.login-aside-inner { position: relative; z-index: 1; }
-
-.login-brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-weight: 600;
-  font-size: 16px;
-  letter-spacing: -0.01em;
-}
-
-.login-headline {
-  margin-top: 96px;
-  font-size: 52px;
-  line-height: 1.06;
-  letter-spacing: -0.025em;
-  font-weight: 500;
-  color: var(--ink);
-  max-width: 520px;
-  text-wrap: balance;
-}
-.login-headline em { font-style: normal; color: var(--ink-3); }
-
-.login-sub {
-  margin-top: 24px;
-  color: var(--ink-2);
-  max-width: 440px;
-  font-size: 15px;
-}
-
-.login-foot {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  gap: 24px;
-  font-size: 12px;
-  color: var(--ink-3);
-  font-family: var(--font-mono);
-  letter-spacing: 0.02em;
-}
-
-.login-main {
-  display: grid;
-  place-items: center;
-  padding: 48px;
-}
-
-.login-card {
-  width: 100%;
-  max-width: 380px;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}
-
-.login-card h2 {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 500;
-  letter-spacing: -0.015em;
-}
-.login-card p.lead { margin: 0; color: var(--ink-2); font-size: 14px; }
-
-.oidc-btn {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 14px 18px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  font-size: 14px;
-  font-family: var(--font-ui);
-  font-weight: 500;
-  color: var(--ink);
-  cursor: pointer;
-  transition: background .15s, border-color .15s, transform .05s;
-  text-align: left;
-}
-.oidc-btn:hover { background: var(--hover); border-color: var(--line); }
-.oidc-btn:active { transform: translateY(1px); }
-.oidc-btn .glyph { width: 22px; height: 22px; display: grid; place-items: center; flex-shrink: 0; }
-.oidc-btn .meta { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--ink-3); letter-spacing: 0.02em; }
-
-.oidc-primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-.oidc-primary:hover { background: var(--ink-deep); border-color: var(--ink-deep); }
-.oidc-primary .meta { color: oklch(from var(--bg) 0.68 calc(c + 0.002) h); }
-
-.login-error {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: oklch(from var(--tone-red) 0.96 calc(c * .25) h);
-  border: 1px solid oklch(from var(--tone-red) 0.90 calc(c * .33) h);
-  color: oklch(from var(--tone-red) 0.44 calc(c * .67) h);
-  font-size: 13px;
-}
-.login-error svg { flex-shrink: 0; margin-top: 1px; }
-
 /* ── Session banner ──────────────────────────────────────────────────── */
 
 .session-banner {
@@ -1597,10 +1462,6 @@ select.input {
   .drawer-foot { padding: 12px 20px; }
   .field-row { grid-template-columns: 1fr; }
 
-  .login-screen { grid-template-columns: 1fr; }
-  .login-aside { display: none; }
-  .login-main { padding: 32px 24px; }
-
   /* ── Table → card layout ─────────────────────────────── */
 
   .tbl[data-mobile] { display: block; }
@@ -1770,7 +1631,8 @@ select.input {
 
 /* The server's own pages — login popups, passphrase links and their
    errors — built by authPage in auth_flows.go: the panel's logo over one
-   card, in the panel's tokens and light/dark choice. */
+   card, in the panel's tokens and light/dark choice. The panel's own
+   sign-in screen (LoginScreen) wears the same frame. */
 .auth-page {
   min-height: 100vh;
   display: flex;

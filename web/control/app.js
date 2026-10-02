@@ -326,14 +326,16 @@ function AuthProvider({ children }) {
 
 // How each kind of gate introduces itself on the sign-in screen. The kind
 // comes from env.js, so the button says what will actually happen when it
-// is clicked rather than assuming everyone signs in the same way.
+// is clicked rather than assuming everyone signs in the same way. (The
+// panel's gate is never an API key — settings refuse one.)
 const GATE_PROMPTS = {
-  ssh_key:   { lead: 'Sign in with your SSH key passphrase.', cta: () => 'Sign in with your passphrase', tag: 'SSH' },
-  api_key:   { lead: 'This panel is behind an API key.',      cta: () => 'Enter the API key',            tag: 'KEY' },
-  oidc:      { lead: 'Use your work account to access the control panel.', cta: (n) => `Continue with ${n || 'your identity provider'}`, tag: 'OIDC' },
-  oauth2:    { lead: 'Use your work account to access the control panel.', cta: (n) => `Continue with ${n || 'your provider'}`,          tag: 'OAUTH2' },
+  ssh_key:   { lead: 'Use your email and SSH key passphrase.',           cta: () => 'Sign in with your passphrase' },
+  oidc:      { lead: 'Use your work account to access the control panel.', cta: (n) => `Continue with ${n || 'your identity provider'}` },
+  oauth2:    { lead: 'Use your work account to access the control panel.', cta: (n) => `Continue with ${n || 'your provider'}` },
 };
 
+// The sign-in screen wears the same frame as the server's own sign-in
+// windows — the logo over one card — and its button opens that window.
 function LoginScreen({ gateName, onLogin, authError }) {
   const cfg = window.__HOMESLICE_CONFIG || {};
   const gate = GATE_PROMPTS[cfg.authKind] || GATE_PROMPTS.oidc;
@@ -353,45 +355,20 @@ function LoginScreen({ gateName, onLogin, authError }) {
     finally { setBusy(false); }
   };
   return (
-    <div className="login-screen">
-      <aside className="login-aside">
-        <div className="quiet-grid"/>
-        <div className="login-aside-inner">
-          <div className="login-brand">
-            <span className="brand-mark"/>
-            Fresh Breath
-          </div>
-          <h1 className="login-headline">
-            A quieter place<br/>
-            to run <em>your services.</em>
-          </h1>
-          <p className="login-sub">
-            Manage users, applications, and auth across every service you operate — without leaving the calm.
-          </p>
+    <div className="auth-page">
+      <img className="auth-logo" src="/control/images/frbr-sm.png" alt="Fresh Breath"/>
+      <main className="auth-card">
+        <div>
+          <h1>Sign in</h1>
+          <p className="lead">{gate.lead}</p>
         </div>
-        <div className="login-foot">
-          <span>admin panel</span>
-          <span>{window.__HOMESLICE_CONFIG?.version || 'dev'}</span>
-        </div>
-      </aside>
-      <main className="login-main">
-        <div className="login-card">
-          <div>
-            <h2>Sign in to Fresh Breath</h2>
-            <p className="lead">{gate.lead}</p>
-          </div>
-          {(authError || failure) && (
-            <div className="login-error">
-              <Icon name="bell" size={14}/>
-              <span>{failure || errorMessages[authError] || 'Authentication error.'}</span>
-            </div>
-          )}
-          <button className="oidc-btn oidc-primary" onClick={attempt} disabled={busy}>
-            <span className="glyph"><Icon name="lock" size={16}/></span>
-            {busy ? 'Signing in…' : gate.cta(gateName)}
-            <span className="meta">{gate.tag}</span>
-          </button>
-        </div>
+        {(authError || failure) && (
+          <div className="auth-error">{failure || errorMessages[authError] || 'Authentication error.'}</div>
+        )}
+        <button className="btn btn-primary" onClick={attempt} disabled={busy}>
+          <Icon name="lock" size={14}/>
+          {busy ? 'Signing in…' : gate.cta(gateName)}
+        </button>
       </main>
     </div>
   );
