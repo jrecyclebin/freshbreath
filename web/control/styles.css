@@ -1733,8 +1733,12 @@ select.input {
 .unproxied-mark { margin-left: 6px; color: var(--warn); font-weight: 700; cursor: help; }
 
 /* Wraps a form so one `disabled` makes it read-only for roles that can't
-   save it; the fieldset itself draws nothing. */
-.read-only-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+   save it; the fieldset itself draws nothing. It sits between .page-form
+   (or .page-col) and the fields, so it has to carry their spacing too. */
+.read-only-fields {
+  border: 0; padding: 0; margin: 0; min-width: 0;
+  display: flex; flex-direction: column; gap: 20px;
+}
 
 /* ── Password reveal ─────────────────────────────────────────────────── */
 

@@ -2200,7 +2200,7 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
           </div>
         ) : (
           <fieldset className="read-only-fields" disabled={!isAdmin}>
-            {!isAdmin && <span className="help" style={{display:'block',marginBottom:12}}>Read-only — only admins can change auth records.</span>}
+            {!isAdmin && <span className="help">Read-only — only admins can change auth records.</span>}
             <AuthForm form={form} setForm={setForm} record={record}/>
           </fieldset>
         )}
@@ -2491,7 +2491,7 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
           <div className="page-col">
             <fieldset className="read-only-fields" disabled={!isAdmin}>
               {!isAdmin && (
-                <span className="help" style={{display:'block',marginBottom:12}}>
+                <span className="help">
                   Read-only — only admins can change a service.{canEditFile && hasFile ? ' You can edit its definition file.' : ''}
                 </span>
               )}
