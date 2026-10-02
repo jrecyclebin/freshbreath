@@ -256,7 +256,9 @@ func newBrowser(t *testing.T) context.Context {
 	}
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), opts...)
 	ctx, cancel := chromedp.NewContext(allocCtx)
-	t.Cleanup(func() { cancel(); cancelAlloc() })
+	// Close Chromium gracefully rather than killing it: a killed browser
+	// leaves helpers still writing the profile while TempDir removes it.
+	t.Cleanup(func() { chromedp.Cancel(ctx); cancel(); cancelAlloc() })
 	if err := chromedp.Run(ctx); err != nil {
 		t.Fatalf("start browser: %v", err)
 	}
