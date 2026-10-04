@@ -83,8 +83,8 @@ creds are kept in their browser - no sessions are kept in Fresh Breath's databas
     called from your apps or as its own MCP.
 
   - Even SQLite queries! Every Fresh Breath app can be given a database, which
-    you then write tools for. (i.e. a `list-items` tool that executes a `SELECT
-    * FROM items` query.)
+    you then write tools for. (i.e. a `list-items` tool that executes a
+    `SELECT * FROM items` query.)
 
   - Wrap Powershell or bash script into a "task" service. Same thing: can be
     called from anywhere.
