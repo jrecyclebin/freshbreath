@@ -1,0 +1,160 @@
+name: PR Gate
+
+# The three things a PR has to clear before it can merge: unit tests, the
+# end-to-end suite, and a native build. They run as independent jobs so one
+# failing doesn't stop the others — every PR gets a full bill of health.
+# `report` then folds the three into a success rate and fails (blocking the
+# PR, once the check is required in branch protection) unless all pass.
+#
+# NB: a failing check only blocks a merge once "report" (or the three
+# individual checks) is a *required* status check under the repo's branch
+# protection / ruleset. That is a one-time repo setting, not something a
+# workflow file can impose — see the note at the bottom of this file.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# A new push to a PR supersedes the run in flight for it; let the old one
+# die rather than finish half the checks.
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+
+      - name: Cache Go modules & build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
+      - name: mise test
+        run: mise run test
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+
+      - name: Cache Go modules & build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
+      # The e2e harness drives headless Chromium and honours FRBR_E2E_CHROME
+      # (falling back to a PATH search when blank). ubuntu-latest ships
+      # Google Chrome; pin the path so a missing browser fails loudly here,
+      # not somewhere deep inside the test.
+      - name: Locate Chrome
+        id: chrome
+        run: |
+          p="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          echo "path=$p" >> "$GITHUB_OUTPUT"
+          if [ -n "$p" ]; then
+            "$p" --version
+          else
+            echo "::warning::no Chrome found on PATH; e2e will rely on chromedp's own search"
+          fi
+
+      - name: mise e2e
+        run: mise run e2e
+        env:
+          FRBR_E2E_CHROME: ${{ steps.chrome.outputs.path }}
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+
+      - name: Cache Go modules & build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
+      - name: mise build
+        run: mise run build
+
+  report:
+    needs: [test, e2e, build]
+    # always() so the rate is published even when a check failed — the
+    # whole point is to see 2/3, not to swallow the result.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Success rate
+        shell: bash
+        env:
+          R_TEST: ${{ needs.test.result }}
+          R_E2E: ${{ needs.e2e.result }}
+          R_BUILD: ${{ needs.build.result }}
+        run: |
+          set -uo pipefail
+          total=3
+          pass=0
+          sum="$GITHUB_STEP_SUMMARY"
+          {
+            echo "### PR Gate"
+            echo ""
+          } >> "$sum"
+
+          emit() {
+            local name="$1" res="$2" icon line
+            if [ "$res" = "success" ]; then
+              icon="✅"
+              pass=$((pass + 1))
+            else
+              icon="❌"
+            fi
+            line="- $name: $icon"
+            [ "$res" = "success" ] || line="$line ($res)"
+            echo "$line"
+            echo "$line" >> "$sum"
+          }
+
+          emit "mise test"  "$R_TEST"
+          emit "mise e2e"   "$R_E2E"
+          emit "mise build" "$R_BUILD"
+
+          rate=$((pass * 100 / total))
+          {
+            echo ""
+            echo "**Success rate: ${pass}/${total} (${rate}%)**"
+          } >> "$sum"
+
+          echo ""
+          echo "Success rate: ${pass}/${total} (${rate}%)"
+
+          if [ "$pass" -ne "$total" ]; then
+            echo "::error::${pass}/${total} checks passed — this PR is blocked"
+            exit 1
+          fi
+          echo "✓ all ${total} checks passed"
+
+# ── Enabling the block ──────────────────────────────────────────────
+# A red check alone does not stop a merge. To actually block, make the
+# check required: repo Settings → Branches → branch protection rule for
+# `main` → "Require status checks to pass before merging" → add `report`
+# (or `test`, `e2e`, `build` individually for finer-grained status). The
+# `report` job is the single gate that fails when any of the three fails.

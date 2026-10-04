@@ -6,7 +6,7 @@
 * For writing quick MCP wrappers around SQLite queries, HTTP APIs, or scripts.
 * For setting up connections (like Github or Google Drive) and giving apps
   access to their calls or their auth.
-* Fresh Breath itself talks MCP. Hook an agent up and build directly on it.
+* Fresh Breath itself is an MCP. Hook an agent up and build directly on it.
 
 **QUICK NOTE ON THAT:** *Personal* not *public*. Don't just host this on the
 Internet!!
@@ -27,10 +27,14 @@ And now that friends and family are cooking up their own little single-use
 apps - almost all of them standalone static HTML files - I realized that lots
 of people need this kind of thing!
 
-> ⌐■_■ **STATIC SO SIMPLE**
+> ⌐■_■ **A UNIVERSAL ADAPTER**
 >
-> Part of the goal here is to keep EVERYTHING client-side - keep it all in
-> pure, static HTML, where possible. Like even a `file;///` URL if you want.
+> One way to think of Fresh Breath is as a universal adapter. I have an app that
+> tracks personal finance - it was written by setting up the app and publishing
+> it through MCP. The app is hosted on Fresh Breath so I can use through a
+> browser - or I have a Telegram bot that accesses it through an MCP - so I can
+> ask questions or get notified while I'm out. I can also send updates to YNAB,
+> which is set up as a service, since I still like to use it for the time being.
 
 If you find yourself writing lots of little apps that threaten to go beyond static
 HTML - they need basic auth, some integrations, some LLM calls, some file I/O -
@@ -48,7 +52,7 @@ build apps that use the connections and credentials of the people using them -
 not some shared account that you set up for them.
 
 In this way, you could host an app for the members of your workplace to use.
-It could be a dashboard showing Github and Linear activity. Your coworkers
+It could be a dashboard showing Github and Linear activity. Your coworkers'
 creds are kept in their browser - no sessions are kept in Fresh Breath's database.
 
 ## Rundown of Features
@@ -61,7 +65,7 @@ creds are kept in their browser - no sessions are kept in Fresh Breath's databas
     token with any upstream credentials sealed inside it. The server unseals
     them on the way out; a static HTML file never holds a provider's token.
 
-- Mark services as "proxied" if you need to ensure that connections get through.
+- Services are proxied, if you allow it, to ensure that connections get through.
 
 - Upload static HTML apps that you've built with Cowork or other agent harnesses
   to host them. (Will automatically proxy these apps. Oh and you don't strictly
@@ -77,6 +81,10 @@ creds are kept in their browser - no sessions are kept in Fresh Breath's databas
 
   - Wrap any APIs into a "virtual" service. This is a set of tools that can be
     called from your apps or as its own MCP.
+
+  - Even SQLite queries! Every Fresh Breath app can be given a database, which
+    you then write tools for. (i.e. a `list-items` tool that executes a `SELECT
+    * FROM items` query.)
 
   - Wrap Powershell or bash script into a "task" service. Same thing: can be
     called from anywhere.
