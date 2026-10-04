@@ -112,13 +112,13 @@ Every app hosted on Fresh Breath gets a random ID - used to identify itself.
 And every integration (auth connection, API, MCP) is identified by a primary
 URL.
 
-Your app needs to include `frbr.js` from the server, call `login()` with your
-app ID and service URL - this gives your app access to functions like `listTools()`,
-`callTool()`, or `fetch()`.
+Your app needs to include `frbr.js` from the server, call `login()` with the
+service URL you want to use - this gives your app access to functions like
+`listTools()`, `callTool()`, or `fetch()`.
 
 ```html
 <script type="module">
-  import { login, ServiceProxy } from "http://localhost:9009/frbr.js?your-app-id";
+  import { login } from "/frbr.js";
 
   const service = await login("https://mcp.example.com/mcp");
   const tools = await service.listTools();
