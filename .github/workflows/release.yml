@@ -63,12 +63,12 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     env:
-      # A mac installer can only be signed + notarized when the Developer ID
-      # p12 is present. Without it (a fork, or before the secret is set) the
-      # mac installer step is skipped rather than failing the release — the
-      # portable macOS tarball still ships either way. Windows installers need
-      # no secrets, so they always run.
-      HAS_MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
+      # A mac installer can only be signed + notarized when both the Developer
+      # ID p12 and the notary API key are present. Without them (a fork, or
+      # before the secrets are set) the mac installer step is skipped rather
+      # than failing the release — the portable macOS tarball still ships
+      # either way. Windows installers need no secrets, so they always run.
+      HAS_MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATES_P12 != '' && secrets.APPLE_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -162,15 +162,13 @@ jobs:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           # macOS signing + notarization (read only by the mac installer task;
-          # empty and ignored on Windows rows, which don't sign).
+          # empty and ignored on Windows rows, which don't sign). The key ID
+          # and issuer are identifiers, not credentials, so they're repo vars.
           MACOS_CERTIFICATES_P12: ${{ secrets.MACOS_CERTIFICATES_P12 }}
           MACOS_CERTIFICATES_PASSWORD: ${{ secrets.MACOS_CERTIFICATES_PASSWORD }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
 
       - name: Upload installer artifact
         if: matrix.mise_installer_task != '' && (matrix.goos != 'darwin' || env.HAS_MACOS_SIGNING == 'true')
@@ -209,15 +207,10 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          assets=(dist/*.tar.gz dist/*.zip dist/*-setup.exe)
-          # The macOS .pkg is only built when signing secrets are present (see
-          # the build job); a fork without them ships no pkg, and the glob
-          # should expand to nothing rather than break the upload.
-          shopt -s nullglob
-          pkgs=(dist/*-setup.pkg)
-          shopt -u nullglob
-          [ ${#pkgs[@]} -gt 0 ] && assets+=("${pkgs[@]}")
-          gh release upload "$TAG" --repo "$REPO" --clobber "${assets[@]}"
+          # -setup.* is the Windows .exe always, plus the macOS .pkg when the
+          # signing secrets were present to build it.
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            dist/*.tar.gz dist/*.zip dist/*-setup.*
 
   # Say it out loud in Slack. Only after `release`, so the ping means the
   # binaries are actually attached — a notification that fires on a release

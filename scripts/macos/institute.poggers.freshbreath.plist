@@ -31,9 +31,9 @@
         <key>FRBR_DIR</key>
         <string>/usr/local/freshbreath</string>
         <key>FRBR_DATA_DIR</key>
-        <string>/usr/local/var/freshbreath</string>
+        <string>/Library/Application Support/freshbreath</string>
         <key>XDG_CONFIG_HOME</key>
-        <string>/usr/local/var/freshbreath/config</string>
+        <string>/Library/Application Support/freshbreath/config</string>
     </dict>
 
     <!-- Run as a dedicated low-privilege service user (created by postinstall),
@@ -50,8 +50,8 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/usr/local/var/freshbreath/freshbreath.log</string>
+    <string>/Library/Application Support/freshbreath/freshbreath.log</string>
     <key>StandardErrorPath</key>
-    <string>/usr/local/var/freshbreath/freshbreath.log</string>
+    <string>/Library/Application Support/freshbreath/freshbreath.log</string>
 </dict>
 </plist>
