@@ -26,6 +26,7 @@ type Config struct {
 	ListenAddr    string
 	TLSCertFile   string
 	TLSKeyFile    string
+	EnvFile       string // the env file config loads from (or would); local TLS writes here
 }
 
 // Server is the freshbreath application server hub. All HTTP handlers, MCP

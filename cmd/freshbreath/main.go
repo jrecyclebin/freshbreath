@@ -42,6 +42,22 @@ func resolveConfigDir() string {
 	return ""
 }
 
+// resolveEnvFile picks the env file config loads from: ./.env when it
+// exists, else config.env in the config dir, else where that would go in
+// the user's config home. The last may not exist yet; local TLS setup
+// creates it.
+func resolveEnvFile() string {
+	if abs, err := filepath.Abs(".env"); err == nil {
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+	if dir := resolveConfigDir(); dir != "" {
+		return filepath.Join(dir, "config.env")
+	}
+	return filepath.Join(xdg.ConfigHome, "freshbreath", "config.env")
+}
+
 // resolveConfigPath resolves a (possibly relative) path against configDir.
 // Empty paths pass through unchanged; absolute paths are returned as-is; a
 // relative path is joined to configDir, but only when configDir is set —
@@ -223,16 +239,9 @@ func resolveDataDir(binDir string) (string, string) {
 }
 
 func main() {
-	// Config loading: .env in CWD wins; otherwise try XDG config.
-	cwdEnv := ".env"
-	if _, err := os.Stat(cwdEnv); err == nil {
-		_ = godotenv.Load(cwdEnv)
-	} else {
-		xdgCfgDir := resolveConfigDir()
-		if xdgCfgDir != "" {
-			_ = godotenv.Load(filepath.Join(xdgCfgDir, "config.env"))
-		}
-	}
+	// Config loading: .env in CWD wins; otherwise XDG config.env.
+	envFile := resolveEnvFile()
+	_ = godotenv.Load(envFile)
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -259,6 +268,7 @@ func main() {
 		ListenAddr:    getEnv("FRBR_LISTEN_ADDR", ":9009"),
 		TLSCertFile:   getEnv("FRBR_TLS_CERT", ""),
 		TLSKeyFile:    getEnv("FRBR_TLS_KEY", ""),
+		EnvFile:       envFile,
 	}
 
 	// TLS cert/key paths resolve relative to ConfigDir; absolute paths are
