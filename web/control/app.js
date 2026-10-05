@@ -374,6 +374,91 @@ function LoginScreen({ gateName, onLogin, authError }) {
   );
 }
 
+// A fresh install's first screen: make the first Superuser and put the
+// panel behind their SSH passphrase. Skipping it is for installs with
+// other plans (OIDC, or staying open); it only stops the prompt.
+const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
+
+function OnboardingScreen({ onSkip }) {
+  const [form, setForm] = useState({ name: '', email: '', passphrase: '', confirm: '' });
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState('');
+  const [done, setDone] = useState(false);
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const plainHTTP = location.protocol === 'http:' && !LOOPBACK.includes(location.hostname);
+  const ready = form.name && form.email && form.passphrase.length >= 8 && form.passphrase === form.confirm;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setFailure('');
+    try {
+      await frbr(null, 'POST', '/api/onboarding', { name: form.name, email: form.email, passphrase: form.passphrase });
+      setDone(true);
+    } catch (err) { setFailure(err.message); }
+    finally { setBusy(false); }
+  };
+  const skip = async () => {
+    try { await frbr(null, 'POST', '/api/onboarding/skip'); onSkip(); }
+    catch (err) { setFailure(err.message); }
+  };
+
+  if (done) return (
+    <div className="auth-page">
+      <img className="auth-logo" src="/control/images/frbr-sm.png" alt="Fresh Breath"/>
+      <main className="auth-card">
+        <div>
+          <h1>You're all set</h1>
+          <p className="lead">The control panel is locked now. Sign in with {form.email} and the passphrase you just chose.</p>
+        </div>
+        <button className="btn btn-primary" onClick={() => location.reload()}>
+          <Icon name="lock" size={14}/> Continue to sign in
+        </button>
+      </main>
+    </div>
+  );
+
+  return (
+    <div className="auth-page">
+      <img className="auth-logo" src="/control/images/frbr-sm.png" alt="Fresh Breath"/>
+      <main className="auth-card">
+        <div>
+          <h1>Welcome to Fresh Breath</h1>
+          <p className="lead">Nobody's signed up yet, so this panel is open to anyone who can reach it. Make yourself the Superuser and lock it with an SSH passphrase.</p>
+        </div>
+        {plainHTTP && (
+          <div className="auth-hint">
+            <strong>This connection isn't encrypted.</strong>
+            Your passphrase will cross the network in plain text, here and at every sign-in.
+          </div>
+        )}
+        {failure && <div className="auth-error">{failure}</div>}
+        <form onSubmit={submit}>
+          <div className="field">
+            <label>Name</label>
+            <input className="input" autoComplete="name" value={form.name} onChange={set('name')} autoFocus/>
+          </div>
+          <div className="field">
+            <label>Email</label>
+            <input className="input" type="email" autoComplete="email" value={form.email} onChange={set('email')}/>
+          </div>
+          <div className="field">
+            <label>Passphrase</label>
+            <PasswordInput autoComplete="new-password" value={form.passphrase} onChange={set('passphrase')} placeholder="Min 8 characters"/>
+          </div>
+          <div className="field">
+            <label>Confirm passphrase</label>
+            <PasswordInput autoComplete="new-password" value={form.confirm} onChange={set('confirm')} placeholder="Re-enter passphrase"/>
+          </div>
+          <button className="btn btn-primary" type="submit" disabled={busy || !ready}>
+            <Icon name="lock" size={14}/> {busy ? 'Setting up…' : 'Create account and lock the panel'}
+          </button>
+        </form>
+        <button className="btn btn-ghost" onClick={skip}>Skip — I'll set up auth myself</button>
+      </main>
+    </div>
+  );
+}
+
 function SessionBanner({ onLogin, onDismiss }) {
   return (
     <div className="session-banner">
@@ -3453,6 +3538,12 @@ function AppShell() {
   const toast = useToast();
   const isAdmin = isAdminRole(user, authRequired);
   const isSuperuser = isSuperuserRole(user, authRequired);
+  // Only an open (setup-mode) panel asks; null while it's asking.
+  const [onboarding, setOnboarding] = useState(authRequired ? false : null);
+  useEffect(() => {
+    if (authRequired) return;
+    frbr(null, 'GET', '/api/onboarding').then(d => setOnboarding(!!d.needed)).catch(() => setOnboarding(false));
+  }, [authRequired]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -3489,8 +3580,9 @@ function AppShell() {
   },[authRequired, user?.id, user?.role]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (authRequired && !user) return <LoginScreen gateName={gateName} onLogin={login} authError={authError}/>;
+  if (onboarding) return <OnboardingScreen onSkip={() => setOnboarding(false)}/>;
 
-  if(loading) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
+  if(loading || onboarding === null) return <div style={{display:'grid',placeItems:'center',height:'100vh',color:'var(--ink-3)'}}>Loading…</div>;
 
   // Pages a role can't use fall back to home rather than a wall of 403s.
   const page =
