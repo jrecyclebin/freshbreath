@@ -43,6 +43,7 @@ jobs:
             ext: .tar.gz
             label: macos-arm64
             mise_task: build:mac
+            mise_installer_task: build:mac-installer
           - os: windows-latest
             goos: windows
             goarch: amd64
@@ -61,6 +62,13 @@ jobs:
             mise_installer_task: build:windows-arm64-installer
 
     runs-on: ${{ matrix.os }}
+    env:
+      # A mac installer can only be signed + notarized when the Developer ID
+      # p12 is present. Without it (a fork, or before the secret is set) the
+      # mac installer step is skipped rather than failing the release — the
+      # portable macOS tarball still ships either way. Windows installers need
+      # no secrets, so they always run.
+      HAS_MACOS_SIGNING: ${{ secrets.MACOS_CERTIFICATES_P12 != '' }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -146,20 +154,32 @@ jobs:
           path: dist/freshbreath-${{ github.ref_name }}-${{ matrix.label }}${{ matrix.ext }}
 
       - name: Build & package installer
-        if: matrix.goos == 'windows'
+        if: matrix.mise_installer_task != '' && (matrix.goos != 'darwin' || env.HAS_MACOS_SIGNING == 'true')
         shell: bash
         run: mise run ${{ matrix.mise_installer_task }}
         env:
           CC: ${{ matrix.cc }}
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
+          # macOS signing + notarization (read only by the mac installer task;
+          # empty and ignored on Windows rows, which don't sign).
+          MACOS_CERTIFICATES_P12: ${{ secrets.MACOS_CERTIFICATES_P12 }}
+          MACOS_CERTIFICATES_PASSWORD: ${{ secrets.MACOS_CERTIFICATES_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Upload installer artifact
-        if: matrix.goos == 'windows'
+        if: matrix.mise_installer_task != '' && (matrix.goos != 'darwin' || env.HAS_MACOS_SIGNING == 'true')
         uses: actions/upload-artifact@v6
         with:
           name: freshbreath-${{ github.ref_name }}-${{ matrix.label }}-setup
-          path: dist/freshbreath-${{ github.ref_name }}-${{ matrix.label }}-setup.exe
+          # Glob covers both the Windows .exe and the macOS .pkg, which share
+          # the `-setup` suffix by convention.
+          path: dist/freshbreath-${{ github.ref_name }}-${{ matrix.label }}-setup.*
 
   release:
     needs: build
@@ -189,8 +209,15 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" --repo "$REPO" --clobber \
-            dist/*.tar.gz dist/*.zip dist/*-setup.exe
+          assets=(dist/*.tar.gz dist/*.zip dist/*-setup.exe)
+          # The macOS .pkg is only built when signing secrets are present (see
+          # the build job); a fork without them ships no pkg, and the glob
+          # should expand to nothing rather than break the upload.
+          shopt -s nullglob
+          pkgs=(dist/*-setup.pkg)
+          shopt -u nullglob
+          [ ${#pkgs[@]} -gt 0 ] && assets+=("${pkgs[@]}")
+          gh release upload "$TAG" --repo "$REPO" --clobber "${assets[@]}"
 
   # Say it out loud in Slack. Only after `release`, so the ping means the
   # binaries are actually attached — a notification that fires on a release

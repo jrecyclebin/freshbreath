@@ -56,6 +56,18 @@ description = "Build for macOS x64 (native on macOS runners; needs osxcross on L
 env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "amd64", CC = "${CC:-cc}" }
 run = "bash scripts/build.sh"
 
+# The macOS .pkg installer — the peer of build:windows-installer. Like the
+# Windows one it depends on the matching build task (build:mac) and reuses
+# that task's portable tarball as its payload, then wraps it into a signed,
+# notarized, upgradable package that installs the server as a launchd daemon.
+# Needs Developer ID certificates and Apple notarization credentials; see the
+# header of scripts/build-mac-installer.sh for the secrets.
+[tasks."build:mac-installer"]
+description = "Build the macOS .pkg installer (signed + notarized; depends on build:mac, needs Developer ID certs + Apple notarization creds)"
+depends = ["build:mac"]
+env = { GOOS = "darwin", GOARCH = "arm64" }
+run = "bash scripts/build-mac-installer.sh"
+
 [tasks."build:windows"]
 description = "Build for Windows x64 (requires x86_64-w64-mingw32-gcc on Linux)"
 env = { CGO_ENABLED = "1", GOOS = "windows", GOARCH = "amd64", CC = "${CC:-x86_64-w64-mingw32-gcc}" }
