@@ -101,6 +101,8 @@ export async function api(session, path, opts = {}) {
 // credential, and another retry. Still refused after that throws
 // SessionExpired, so neither error reaches the caller as a response.
 async function authedFetch(session, url, init) {
+  session = session?.current ?? null;
+  const original = session;
   let renewable = false;
   const send = (s) => {
     const headers = new Headers(init.headers);
@@ -128,6 +130,7 @@ async function authedFetch(session, url, init) {
       // AuthSession it rides is what knows how to authorize.
       session = fresh.session ?? fresh;
       r = await send(session);
+      if (r.status !== 401) original.supersede(session);
     }
   }
 
@@ -210,6 +213,7 @@ const sessions = new Map();
 export class AuthSession {
   #entry;
   #refreshing = null;
+  #successor = null;
 
   constructor(entry) { this.#entry = entry; }
 
@@ -222,6 +226,17 @@ export class AuthSession {
   }
 
   static get(authID) { return sessions.get(authID) ?? null; }
+
+  // The session to spend in this one's place. A login for another record
+  // can take over — the app moved behind a new gate, say — and whoever
+  // still holds this session follows it there instead of prompting again.
+  get current() { return this.#successor?.current ?? this; }
+
+  supersede(next) {
+    if (next === this) return;
+    next.#successor = null; // keeps the chain from looping back here
+    this.#successor = next;
+  }
 
   get authID()    { return this.#entry.auth_id; }
   get kind()      { return this.#entry.kind; }
@@ -298,6 +313,11 @@ export class AuthSession {
         // Refused: the refresh family is gone. Keeping the entry would only
         // let a dead token ride along on the next request.
         this.forget();
+        throw new SessionExpired(e.auth_id);
+      }
+      if (r.status === 403) {
+        // This app may no longer spend this record (its gate moved). The
+        // login may still serve other apps, so the entry stays put.
         throw new SessionExpired(e.auth_id);
       }
       throw new Error(`Token refresh failed (${r.status})`);
@@ -696,7 +716,7 @@ export class ServiceProxy {
 
   get serviceURL() { return this.#serviceURL; }
   get serviceID()  { return this.#serviceID; }
-  get session()    { return this.#session; }
+  get session()    { return this.#session?.current ?? null; }
 
   // The slug for task and virtual services, which answer at /service/call
   // rather than over MCP transport; null for everything else.
@@ -710,7 +730,7 @@ export class ServiceProxy {
   // authedFetch, so a dead login is retried and re-prompted the same way
   // api() does it.
   async #fetch(url, init = {}) {
-    return authedFetch(this.#session, url, init);
+    return authedFetch(this.session, url, init);
   }
 
   // A proxied MCP service is reached through the server, which swaps the
@@ -722,9 +742,9 @@ export class ServiceProxy {
       url = new URL(`${API}/service/${this.#serviceID}/`, window.location.href);
       headers.set("X-App-Nonce", APP_NONCE);
     }
-    if (this.#session) {
-      await this.#session.check();
-      this.#session.addAuth(headers);
+    if (this.session) {
+      await this.session.check();
+      this.session.addAuth(headers);
     }
     const transport = new StreamableHTTPClientTransport(url, {
       requestInit: { headers },
@@ -739,7 +759,7 @@ export class ServiceProxy {
       return await fn();
     } catch (e) {
       if (!String(e).includes("401")) throw e;
-      await this.#session?.refresh();
+      await this.session?.refresh();
       await this.#connect();
       return await fn();
     }

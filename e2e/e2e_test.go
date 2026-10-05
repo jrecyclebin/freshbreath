@@ -3,11 +3,15 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"poggers.institute/freshbreath/internal/db"
@@ -16,7 +20,11 @@ import (
 // githubAuth registers fake GitHub as an oauth2 auth record, the way the
 // real GitHub OAuth App is set up.
 func githubAuth(fb *freshbreath, gh *fakeGitHub) int64 {
-	return fb.createAuth("GitHub", db.AuthOAuth2, db.AuthDescriptor{
+	return fb.createAuth("GitHub", db.AuthOAuth2, githubDescriptor(gh))
+}
+
+func githubDescriptor(gh *fakeGitHub) db.AuthDescriptor {
+	return db.AuthDescriptor{
 		AuthorizeURL:  gh.URL + "/login/oauth/authorize",
 		TokenURL:      gh.URL + "/login/oauth/access_token",
 		UserInfoURL:   gh.URL + "/user",
@@ -25,7 +33,7 @@ func githubAuth(fb *freshbreath, gh *fakeGitHub) int64 {
 		ClientSecret:  githubClientSecret,
 		Scopes:        "repo read:user",
 		Provider:      "github",
-	})
+	}
 }
 
 // githubVirtual registers a virtual service over fake GitHub, behind the
@@ -190,6 +198,73 @@ func TestTaskServiceFromApp(t *testing.T) {
 }
 
 var taskTools = []string{"echo", "fail", "token-kind"}
+
+// An admin moves an app behind a different gate while its page is open.
+// The page's old login can't be refreshed for this app any more, so the
+// next call prompts for the new gate, retries, and later calls ride the
+// new login without prompting again.
+func TestRegatedAppPromptsForNewGate(t *testing.T) {
+	gh := newFakeGitHub(t)
+	fb := startFreshbreath(t)
+	oldGate := githubAuth(fb, gh)
+	newGate := fb.createAuth("GitHub (new gate)", db.AuthOAuth2, githubDescriptor(gh))
+	open := fb.builtinAuth(db.AuthAnonymous)
+	svc := fb.createService("e2e-tasks", "", db.ServiceDescriptor{Type: "tasks"}, &open)
+	fb.uploadServiceFile(svc, "tasks.txt", testdata(t, "tasks.txt", nil))
+	a := fb.createApp("e2e-regate", oldGate, testdata(t, "app.html", nil), svc)
+
+	browser := newBrowser(t)
+	ctx, cancel := context.WithTimeout(browser, 45*time.Second)
+	defer cancel()
+	q := url.Values{"scenario": {"regate"}, "service": {svc.URL}}
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(fb.URL+a.Route+"?"+q.Encode()),
+		chromedp.WaitReady("#run", chromedp.ByID),
+		chromedp.Click("#run", chromedp.ByID),
+		chromedp.WaitVisible(`#out[data-ready]`, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	fb.api("PUT", "/api/apps/"+a.Nonce, map[string]any{"name": "e2e-regate", "protected_by": newGate}, nil)
+
+	var out string
+	err = chromedp.Run(ctx,
+		chromedp.Click("#again", chromedp.ByID),
+		chromedp.WaitVisible(`#out[data-done]`, chromedp.ByQuery),
+		chromedp.Text("#out", &out, chromedp.ByID),
+	)
+	if err != nil {
+		var html string
+		chromedp.Run(browser, chromedp.OuterHTML("body", &html, chromedp.ByQuery))
+		t.Fatalf("calls after the gate moved: %v\n%s", err, html)
+	}
+	var res struct {
+		scenarioResult
+		Result struct {
+			Before, After, Later map[string]string
+			AuthID               int64
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("bad output %q", out)
+	}
+	if !res.OK {
+		t.Fatalf("scenario failed in the app: %s", res.Error)
+	}
+	for name, echo := range map[string]map[string]string{"before": res.Result.Before, "after": res.Result.After, "later": res.Result.Later} {
+		if echo["echo"] != name {
+			t.Errorf("%s call = %v", name, echo)
+		}
+	}
+	if res.Result.AuthID != newGate {
+		t.Errorf("proxy session = record %d, want the new gate %d", res.Result.AuthID, newGate)
+	}
+	if gh.Logins() != 2 {
+		t.Errorf("GitHub logins = %d, want 2 (one per gate)", gh.Logins())
+	}
+}
 
 // An MCP client connects to a task service behind the GitHub login. Each
 // task's arguments show up as strings in its schema, the script gets the

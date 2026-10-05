@@ -994,7 +994,7 @@ func TestLoginAdminNonceAllowed(t *testing.T) {
 	})
 	srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10))
 
-	// The control panel's ephemeral nonce logs in to its own gate (no url).
+	// The control panel's nonce logs in to its own gate (no url).
 	rr := testRequest(t, srv, "GET", "/service/login?state=x", nil,
 		map[string]string{"X-App-Nonce": srv.adminNonce})
 	if rr.Code != 200 {

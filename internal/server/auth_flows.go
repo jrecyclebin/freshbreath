@@ -612,7 +612,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the gate for this door: the admin record for the control
-	// panel's ephemeral nonce, the app's protected_by otherwise.
+	// panel's nonce, the app's protected_by otherwise.
 	var gate *db.AuthRecord
 	var app *db.App
 	var err error

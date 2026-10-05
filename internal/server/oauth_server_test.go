@@ -991,7 +991,7 @@ func TestOAuthRefreshRotatesEveryLeg(t *testing.T) {
 //
 // This models the control panel's own identity session: the cookie path
 // requires an app identity, and the console is the sole consumer of the
-// ephemeral adminNonce, restricted to the configured admin auth record.
+// adminNonce, restricted to the configured admin auth record.
 func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	srv := newTestServer(t)
 	rec := oidcRecord(t, srv, "IdP")
@@ -999,7 +999,7 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	srv.adminNonce = utils.GenNonce() // production sets this in NewServer; tests build the literal directly
+	srv.adminNonce = utils.GenNonce() // production sets this in New; tests build the literal directly
 	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
@@ -1024,6 +1024,34 @@ func TestRefreshGrantCookieOmitsBodyToken(t *testing.T) {
 	}
 	if got, want := refreshCookiePath(rr), "/oauth/token/"+strconv.FormatInt(rec.ID, 10); got != want {
 		t.Errorf("rotated cookie Path = %q, want %q", got, want)
+	}
+}
+
+// The control panel learns the admin nonce once, at page load, and keeps
+// presenting it. A server restart must not orphan that nonce, or an open
+// panel's first refresh after the restart is refused as a stranger.
+func TestRefreshGrantAdminNonceSurvivesRestart(t *testing.T) {
+	srv := newTestServer(t)
+	rec := oidcRecord(t, srv, "IdP")
+	web, err := srv.store.CreateUser("Web User", "web@example.com", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
+	srv.adminNonce = adminNonceFrom(srv.store)
+	pageNonce := srv.adminNonce // what the open panel holds
+
+	srv.adminNonce = adminNonceFrom(srv.store) // the restart
+	if srv.adminNonce != pageNonce {
+		t.Fatalf("admin nonce changed across restart: %q → %q", pageNonce, srv.adminNonce)
+	}
+
+	rt := mintIdentityRefresh(t, srv, web, rec.ID)
+	rr := cookieRefresh(srv, rec.ID, rt, pageNonce)
+	if rr.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 }
 
@@ -1170,7 +1198,7 @@ func TestRefreshGrantCookieAppGatePermitted(t *testing.T) {
 	}
 }
 
-// The admin console's ephemeral nonce may only refresh the configured admin
+// The admin console's nonce may only refresh the configured admin
 // auth record — not any other record's cookie. A leaked adminNonce must not
 // become a universal refresh credential.
 func TestRefreshGrantAdminNonceWrongRecord(t *testing.T) {

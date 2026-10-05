@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -47,7 +48,7 @@ import (
 // ── Fresh Breath ────────────────────────────────────────────────────
 
 // freshbreath is one running server, fresh for each test: its own data
-// directory, database and signing key, serving on a loopback port.
+// directory, database and signing key, serving HTTPS on a loopback port.
 type freshbreath struct {
 	URL string
 	t   *testing.T
@@ -59,7 +60,7 @@ func startFreshbreath(t *testing.T) *freshbreath {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	baseURL := "http://" + ln.Addr().String()
+	baseURL := "https://" + ln.Addr().String()
 	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -92,10 +93,26 @@ func startFreshbreath(t *testing.T) *freshbreath {
 		PublicBaseURL: baseURL,
 	}, store, localKey, agentMgr, sessionMgr, "e2e", "e2e")
 
-	httpSrv := &http.Server{Handler: srv}
-	go httpSrv.Serve(ln)
-	t.Cleanup(func() { httpSrv.Close() })
+	// Served over TLS, like a real deployment: the browser only keeps the
+	// SameSite=None refresh cookie when it is Secure. Go clients, the
+	// server's own included, trust httptest's localhost certificate.
+	ts := &httptest.Server{Listener: ln, Config: &http.Server{Handler: srv, ErrorLog: log.New(quietHandshakes{}, "", log.LstdFlags)}}
+	ts.StartTLS()
+	t.Cleanup(ts.Close)
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = ts.Client().Transport.(*http.Transport).TLSClientConfig
 	return &freshbreath{URL: baseURL, t: t}
+}
+
+// quietHandshakes drops the handshake errors Chromium's speculative
+// connections leave behind when a test closes the browser, and passes
+// every other server error through.
+type quietHandshakes struct{}
+
+func (quietHandshakes) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("TLS handshake error")) {
+		return len(p), nil
+	}
+	return os.Stderr.Write(p)
 }
 
 // api calls the admin API. A fresh server has no admin gate yet (setup
@@ -250,6 +267,7 @@ func newBrowser(t *testing.T) context.Context {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.NoSandbox,
 		chromedp.UserDataDir(t.TempDir()),
+		chromedp.IgnoreCertErrors,
 	)
 	if path := os.Getenv("FRBR_E2E_CHROME"); path != "" {
 		opts = append(opts, chromedp.ExecPath(path))
@@ -327,6 +345,9 @@ func connectMCP(t *testing.T, browser context.Context, endpoint string) *mcp.Cli
 	redirectURL := callback.URL + "/callback"
 
 	handler, err := auth.NewAuthorizationCodeHandler(&auth.AuthorizationCodeHandlerConfig{
+		// Discovery dials with its own transport unless handed one; this
+		// one trusts the test server's certificate.
+		Client:      &http.Client{Transport: http.DefaultTransport},
 		RedirectURL: redirectURL,
 		DynamicClientRegistrationConfig: &auth.DynamicClientRegistrationConfig{
 			Metadata: &oauthex.ClientRegistrationMetadata{
