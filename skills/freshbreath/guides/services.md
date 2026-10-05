@@ -154,6 +154,11 @@ credential — the stored entry remembers it — so there's nothing to pass. If 
 user dismisses it you get a `SessionExpired`. Opt a page out with
 `window.__FRBR_RELOGIN = false`.
 
+A refresh can also be refused because *this app* may no longer use the record
+— an admin moved the app behind another gate while the page was open. That
+gets the same prompt, for the new gate. The session you were holding hands
+over to the new one, so later calls through it skip the prompt.
+
 Called with **no argument**, it clears your app's own gate and returns the
 `AuthSession` rather than a proxy — the "sign in" verb for a gated app:
 
@@ -200,7 +205,8 @@ your own backend.
 
 **Persistence is not your problem.** The library stores one entry per cleared
 record under `localStorage["frbr:auth:<id>"]`, writes on login, rewrites on every
-refresh, and evicts when the server refuses one. There is nothing to serialize,
+refresh, and evicts when the server refuses one (but not when it only refuses
+*this app* — the login may still serve another). There is nothing to serialize,
 no event to subscribe to, and no key for your app to choose. Don't write to
 `frbr:auth:*` yourself.
 

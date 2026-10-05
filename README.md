@@ -295,7 +295,11 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 
 When both `FRBR_TLS_CERT` and `FRBR_TLS_KEY` are provided, the server uses TLS (`https:`). Otherwise it serves plain HTTP.
 
+Plain HTTP works for the control panel and hosted apps, but apps loaded from `file://` or another origin can't stay signed in: browsers only send a cross-site cookie over HTTPS, so their logins lapse when the access token does.
+
 ### TLS certificates
+
+**Built in** — on a fresh install served over plain HTTP, the control panel's onboarding offers to do what mkcert does: it makes a certificate authority for this install, issues a certificate for the address you reached it by (plus the machine name and loopback), and writes `FRBR_TLS_CERT`/`FRBR_TLS_KEY` into the env file the server loads (`./.env`, else `config.env` in the config dir). Download the CA from the panel, trust it on each device, and restart. Node-based clients such as Claude Code also need `NODE_EXTRA_CA_CERTS` pointed at it.
 
 **For local development** — use [mkcert](https://github.com/FiloSottile/mkcert). It creates a local CA, installs it into your system and browser trust stores, and issues certs that Chromium treats as fully valid (no scary red screen).
 

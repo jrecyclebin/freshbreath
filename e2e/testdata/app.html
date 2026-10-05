@@ -13,6 +13,7 @@
     as JSON, with data-done set once it's there.
   -->
   <button id="run">Run</button>
+  <button id="again">Again</button>
   <pre id="out"></pre>
   <script type="module">
     import { login } from "/frbr.js";
@@ -50,6 +51,21 @@
           failure = e.message;
         }
         return { tools, echo, failure };
+      },
+
+      // A task service the page keeps using while an admin moves the app
+      // behind another gate. Sets data-ready after the first call and waits
+      // for Again; the old login can't be refreshed for this app any more.
+      async regate() {
+        const tasks = await login(params.get("service"));
+        const before = await tasks.callTool("echo", { message: "before" });
+        const again = document.getElementById("again");
+        const clicked = new Promise(res => again.addEventListener("click", res, { once: true }));
+        document.getElementById("out").dataset.ready = "1";
+        await clicked;
+        const after = await tasks.callTool("echo", { message: "after" });
+        const later = await tasks.callTool("echo", { message: "later" });
+        return { before, after, later, authID: tasks.session?.authID };
       },
     };
 

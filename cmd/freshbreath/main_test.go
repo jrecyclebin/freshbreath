@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/adrg/xdg"
 	_ "github.com/mattn/go-sqlite3"
 
 	"poggers.institute/freshbreath/internal/db"
@@ -195,5 +196,31 @@ func TestLoadSigningKeyFreshInstallNoTable(t *testing.T) {
 	}
 	if len(key) != 32 {
 		t.Fatalf("minted key is %d bytes, want 32", len(key))
+	}
+}
+
+// The env file is the one config loads: ./.env when there is one, else
+// config.env in the first freshbreath config dir, else where that dir
+// would be made in the user's own config home.
+func TestResolveEnvFile(t *testing.T) {
+	home, system := t.TempDir(), t.TempDir()
+	xdgHome, xdgDirs := xdg.ConfigHome, xdg.ConfigDirs
+	t.Cleanup(func() { xdg.ConfigHome, xdg.ConfigDirs = xdgHome, xdgDirs })
+	xdg.ConfigHome, xdg.ConfigDirs = home, []string{system}
+	t.Chdir(t.TempDir())
+
+	if got, want := resolveEnvFile(), filepath.Join(home, "freshbreath", "config.env"); got != want {
+		t.Errorf("nothing anywhere: %q, want %q", got, want)
+	}
+
+	os.MkdirAll(filepath.Join(system, "freshbreath"), 0o755)
+	if got, want := resolveEnvFile(), filepath.Join(system, "freshbreath", "config.env"); got != want {
+		t.Errorf("system config dir: %q, want %q", got, want)
+	}
+
+	os.WriteFile(".env", nil, 0o600)
+	cwd, _ := os.Getwd()
+	if got, want := resolveEnvFile(), filepath.Join(cwd, ".env"); got != want {
+		t.Errorf("./.env: %q, want %q", got, want)
 	}
 }

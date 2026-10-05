@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ type Config struct {
 	ListenAddr    string
 	TLSCertFile   string
 	TLSKeyFile    string
+	EnvFile       string // the env file config loads from (or would); local TLS writes here
 }
 
 // Server is the freshbreath application server hub. All HTTP handlers, MCP
@@ -43,7 +45,7 @@ type Server struct {
 	localKey          []byte
 	version           string                 // build version, threaded from cmd via -X main.version
 	commit            string                 // build commit, threaded from cmd via -X main.commit
-	adminNonce        string                 // ephemeral nonce for the admin panel (same-origin)
+	adminNonce        string                 // the admin panel's nonce, stable across restarts
 	agentMgr          *sshkit.AgentManager   // per-user SSH key signers
 	sessionMgr        *sshkit.SessionManager // SSH + SFTP sessions
 	gitGw             *sshkit.GitGateway     // stateless git-over-SSH gateway
@@ -197,7 +199,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		localKey:       localKey,
 		version:        version,
 		commit:         commit,
-		adminNonce:     utils.GenNonce(),
+		adminNonce:     adminNonceFrom(store),
 		agentMgr:       agentMgr,
 		sessionMgr:     sessionMgr,
 		gitGw:          sshkit.NewGitGateway(agentMgr, store),
@@ -233,4 +235,23 @@ func (s *Server) ListenAndServe() error {
 		return http.ListenAndServeTLS(s.config.ListenAddr, s.config.TLSCertFile, s.config.TLSKeyFile, s)
 	}
 	return http.ListenAndServe(s.config.ListenAddr, s)
+}
+
+// adminNonceFrom returns the control panel's nonce, minting it on first boot.
+// It outlives restarts because an open panel keeps the nonce it loaded with;
+// a fresh one each boot would refuse that panel's next token refresh. Should
+// the store fail, the panel still works until the next restart.
+func adminNonceFrom(store *db.Store) string {
+	nonce, err := store.GetSetting("admin_nonce")
+	if err == nil && nonce != "" {
+		return nonce
+	}
+	nonce = utils.GenNonce()
+	if err == nil {
+		err = store.SetSetting("admin_nonce", nonce)
+	}
+	if err != nil {
+		log.Printf("admin nonce not stored, open panels will need a reload after restart: %v", err)
+	}
+	return nonce
 }
