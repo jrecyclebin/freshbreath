@@ -1436,10 +1436,14 @@ func TestRefreshCookieSecureFlag(t *testing.T) {
 			if c == nil {
 				t.Fatal("no refresh_token cookie set")
 			}
-			// SameSite=None must hold in every shape — that is the invariant the
-			// Secure flag exists to rescue, so assert it stays put too.
-			if c.SameSite != http.SameSiteNoneMode {
-				t.Errorf("SameSite = %v, want SameSiteNoneMode", c.SameSite)
+			// SameSite=None needs Secure or the browser drops the cookie, so
+			// plain HTTP falls back to Lax: same-origin refresh still works.
+			wantSameSite := http.SameSiteLaxMode
+			if tc.wantSecure {
+				wantSameSite = http.SameSiteNoneMode
+			}
+			if c.SameSite != wantSameSite {
+				t.Errorf("SameSite = %v, want %v", c.SameSite, wantSameSite)
 			}
 			if c.Secure != tc.wantSecure {
 				t.Errorf("Secure = %v, want %v", c.Secure, tc.wantSecure)

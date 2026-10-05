@@ -295,6 +295,8 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 
 When both `FRBR_TLS_CERT` and `FRBR_TLS_KEY` are provided, the server uses TLS (`https:`). Otherwise it serves plain HTTP.
 
+Plain HTTP works for the control panel and hosted apps, but apps loaded from `file://` or another origin can't stay signed in: browsers only send a cross-site cookie over HTTPS, so their logins lapse when the access token does.
+
 ### TLS certificates
 
 **For local development** — use [mkcert](https://github.com/FiloSottile/mkcert). It creates a local CA, installs it into your system and browser trust stores, and issues certs that Chromium treats as fully valid (no scary red screen).
