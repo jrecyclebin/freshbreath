@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -55,6 +56,11 @@ func TestIssueLocalTLSChainsToCA(t *testing.T) {
 	}
 	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: "elsewhere.example", Roots: roots}); err == nil {
 		t.Error("cert verifies for a name it wasn't issued for")
+	}
+
+	// macOS refuses a TLS cert valid for more than 825 days.
+	if days := leaf.NotAfter.Sub(leaf.NotBefore).Hours() / 24; days > 825 {
+		t.Errorf("cert is valid for %.1f days; macOS allows 825", days)
 	}
 
 	for _, secret := range []string{files.Key, filepath.Join(dir, "ca-key.pem")} {
@@ -187,4 +193,30 @@ func TestTLSSetupRefusedWhenTLSIsOn(t *testing.T) {
 	if _, err := os.Stat(srv.config.EnvFile); err == nil {
 		t.Error("config.env written anyway")
 	}
+}
+
+// The pair loads the way ListenAndServeTLS loads it, and a client that
+// trusts only the local CA completes a handshake against it.
+func TestIssueLocalTLSServes(t *testing.T) {
+	files, err := issueLocalTLS(t.TempDir(), []string{"localhost", "127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := tls.LoadX509KeyPair(files.Cert, files.Key)
+	if err != nil {
+		t.Fatalf("load pair: %v", err)
+	}
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("hi")) }))
+	ts.TLS = &tls.Config{Certificates: []tls.Certificate{pair}}
+	ts.StartTLS()
+	defer ts.Close()
+
+	roots := x509.NewCertPool()
+	roots.AddCert(readCert(t, files.CA))
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}}}
+	resp, err := client.Get(ts.URL)
+	if err != nil {
+		t.Fatalf("GET over the local cert: %v", err)
+	}
+	resp.Body.Close()
 }

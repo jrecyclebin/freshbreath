@@ -376,10 +376,100 @@ function LoginScreen({ gateName, onLogin, authError }) {
 
 // A fresh install's first screen: make the first Superuser and put the
 // panel behind their SSH passphrase. Skipping it is for installs with
-// other plans (OIDC, or staying open); it only stops the prompt.
+// other plans (OIDC, or staying open); it only stops the prompt. On plain
+// HTTP it opens with an optional step to switch to HTTPS first, so the
+// passphrase never has to cross in the clear.
 const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 
 function OnboardingScreen({ onSkip }) {
+  const [step, setStep] = useState(location.protocol === 'http:' ? 'tls' : 'account');
+  if (step === 'tls') return <SecureConnectionStep onSkip={() => setStep('account')}/>;
+  return <CreateAccountStep onSkip={onSkip}/>;
+}
+
+// How to trust the downloaded CA, for the device doing the downloading.
+const TRUST_STEPS = {
+  mac:     { label: 'macOS',   steps: ['Open the downloaded file; Keychain Access adds it.', 'Double-click "Fresh Breath local CA", open Trust, and choose Always Trust.'] },
+  windows: { label: 'Windows', steps: ['Double-click the file → Install Certificate → Current User → Place in "Trusted Root Certification Authorities".'] },
+  linux:   { label: 'Linux',   steps: ['Debian/Ubuntu: sudo cp freshbreath-ca.pem /usr/local/share/ca-certificates/freshbreath.crt && sudo update-ca-certificates', 'Arch/Fedora: sudo trust anchor --store freshbreath-ca.pem', 'Chrome reads its own store here: certutil -d sql:$HOME/.pki/nssdb -A -t C,, -n "Fresh Breath" -i freshbreath-ca.pem'] },
+};
+const TRUST_EVERYWHERE = [
+  'Firefox keeps its own list: Settings → Certificates → View Certificates → Authorities → Import.',
+  'Node-based tools (Claude Code, most MCP clients) skip the system list; set NODE_EXTRA_CA_CERTS to the file\'s path.',
+];
+const RESTART = {
+  linux:   'sudo systemctl restart freshbreath, or stop and start it however you run it (docker compose restart, say).',
+  darwin:  'sudo launchctl kickstart -k system/institute.poggers.freshbreath, or stop and start it however you run it.',
+  windows: 'Restart "Fresh Breath Service" in Services, or run: nssm restart "Fresh Breath Service"',
+};
+const clientOS = () => {
+  const p = (navigator.userAgentData?.platform || navigator.platform || '').toLowerCase();
+  return p.includes('mac') ? 'mac' : p.includes('win') ? 'windows' : 'linux';
+};
+
+function SecureConnectionStep({ onSkip }) {
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState('');
+  const [issued, setIssued] = useState(null);
+  const here = clientOS();
+
+  const generate = async () => {
+    setBusy(true); setFailure('');
+    try { setIssued(await frbr(null, 'POST', '/api/tls')); }
+    catch (err) { setFailure(err.message); }
+    finally { setBusy(false); }
+  };
+
+  if (issued) return (
+    <div className="auth-page">
+      <img className="auth-logo" src="/control/images/frbr-sm.png" alt="Fresh Breath"/>
+      <main className="auth-card auth-card-wide">
+        <div>
+          <h1>Certificate ready</h1>
+          <p className="lead">Issued for {issued.hosts.join(', ')}, and recorded in <code>{issued.env_file}</code>.</p>
+        </div>
+        <ol className="auth-steps">
+          <li>
+            <strong>Download the certificate authority.</strong>
+            <a className="btn" href="/api/tls/ca.pem" download="freshbreath-ca.pem"><Icon name="download" size={14}/> freshbreath-ca.pem</a>
+          </li>
+          <li>
+            <strong>Trust it on each device you'll use.</strong>
+            <ul>{TRUST_STEPS[here].steps.map(t => <li key={t}>{t}</li>)}</ul>
+            {Object.entries(TRUST_STEPS).filter(([k]) => k !== here).map(([k, v]) => (
+              <details key={k}><summary>{v.label}</summary><ul>{v.steps.map(t => <li key={t}>{t}</li>)}</ul></details>
+            ))}
+            <ul className="muted">{TRUST_EVERYWHERE.map(t => <li key={t}>{t}</li>)}</ul>
+          </li>
+          <li>
+            <strong>Restart Fresh Breath.</strong>
+            <div className="auth-detail">{RESTART[issued.os] || 'Stop and start it however you run it.'}</div>
+          </li>
+        </ol>
+        <a className="btn btn-primary" href={issued.https_url}><Icon name="lock" size={14}/> Continue at {issued.https_url}</a>
+      </main>
+    </div>
+  );
+
+  return (
+    <div className="auth-page">
+      <img className="auth-logo" src="/control/images/frbr-sm.png" alt="Fresh Breath"/>
+      <main className="auth-card">
+        <div>
+          <h1>Secure the connection</h1>
+          <p className="lead">This panel is on plain HTTP. Fresh Breath can make its own certificate authority and a certificate for this server, so browsers and MCP clients can connect over HTTPS once you trust it.</p>
+        </div>
+        {failure && <div className="auth-error">{failure}</div>}
+        <button className="btn btn-primary" onClick={generate} disabled={busy}>
+          <Icon name="lock" size={14}/> {busy ? 'Generating…' : 'Generate a certificate'}
+        </button>
+        <button className="btn btn-ghost" onClick={onSkip}>Skip — stay on HTTP</button>
+      </main>
+    </div>
+  );
+}
+
+function CreateAccountStep({ onSkip }) {
   const [form, setForm] = useState({ name: '', email: '', passphrase: '', confirm: '' });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState('');

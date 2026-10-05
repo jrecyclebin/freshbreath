@@ -36,10 +36,7 @@ type localTLSFiles struct {
 	CA, Cert, Key string
 }
 
-const (
-	localCAValidity   = 10 * 365 * 24 * time.Hour
-	localCertValidity = 825 * 24 * time.Hour // what mkcert issues
-)
+const localCAValidity = 10 * 365 * 24 * time.Hour
 
 // issueLocalTLS writes a server cert for hosts into dir, signed by the CA
 // already there, or by a new one when there isn't. Keeping the CA means
@@ -71,9 +68,11 @@ func issueLocalTLS(dir string, hosts []string) (*localTLSFiles, error) {
 		SerialNumber: randomSerial(),
 		Subject:      pkix.Name{Organization: []string{"Fresh Breath"}, CommonName: hosts[0]},
 		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(localCertValidity),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		// mkcert's span: inside the 825 days macOS allows a TLS cert,
+		// counting from NotBefore.
+		NotAfter:    time.Now().AddDate(2, 3, 0),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}
 	for _, h := range hosts {
 		if ip := net.ParseIP(h); ip != nil {
