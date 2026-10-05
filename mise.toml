@@ -60,10 +60,11 @@ run = "bash scripts/build.sh"
 # Windows one it depends on the matching build task (build:mac) and reuses
 # that task's portable tarball as its payload, then wraps it into a signed,
 # notarized, upgradable package that installs the server as a launchd daemon.
-# Needs Developer ID certificates and Apple notarization credentials; see the
-# header of scripts/build-mac-installer.sh for the secrets.
+# Needs Developer ID certificates and Apple notarization credentials — from
+# CI secrets, or locally from the login keychain plus APPLE_NOTARY_PROFILE;
+# see the header of scripts/build-mac-installer.sh.
 [tasks."build:mac-installer"]
-description = "Build the macOS .pkg installer (signed + notarized; depends on build:mac, needs Developer ID certs + Apple notarization creds)"
+description = "Build the macOS .pkg installer (signed + notarized; depends on build:mac; locally needs APPLE_NOTARY_PROFILE)"
 depends = ["build:mac"]
 env = { GOOS = "darwin", GOARCH = "arm64" }
 run = "bash scripts/build-mac-installer.sh"

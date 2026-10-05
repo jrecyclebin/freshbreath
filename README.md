@@ -338,6 +338,30 @@ mise run          # run the dev server, reloads from code changes (requires `ent
 mise e2e          # end-to-end suite (needs Chromium)
 ```
 
+### Building the Mac installer locally
+
+The signed, notarized `.pkg` builds on a Mac with full Xcode. Signing uses
+the Developer ID Application and Developer ID Installer certificates in your
+login keychain (Xcode puts them there when you create them), and notarization
+uses a `notarytool` keychain profile — so no key files sit on disk.
+
+Once per Mac, save the App Store Connect API key as a profile, then name it in
+a `mise.local.toml` (gitignored):
+
+```bash
+xcrun notarytool store-credentials <profile> --key AuthKey_XXXX.p8 --key-id XXXX --issuer <uuid>
+```
+
+```toml
+[env]
+APPLE_NOTARY_PROFILE = "<profile>"
+```
+
+Then `mise run build:mac-installer` builds `dist/freshbreath-<version>-macos-arm64-setup.pkg`.
+CI does the same from the `MACOS_CERTIFICATES_P12`, `MACOS_CERTIFICATES_PASSWORD`
+and `APPLE_API_KEY` secrets plus the `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`
+repo variables.
+
 ### End-to-end tests
 
 `e2e/` runs a real server against in-process fakes of GitHub (an OAuth App

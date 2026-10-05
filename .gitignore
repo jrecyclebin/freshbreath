@@ -3,6 +3,7 @@
 
 # Local testing
 .env
+mise.local.toml
 /data
 /freshbreath
 *.db

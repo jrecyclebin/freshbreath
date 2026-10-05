@@ -21,18 +21,25 @@ set -euo pipefail
 # Required: GOOS, GOARCH
 # Optional: VERSION (defaults to git describe via GIT_VERSION)
 #
-# ── Secrets (all required) ─────────────────────────────────────────
+# ── Signing: CI or local ───────────────────────────────────────────
+# CI sets these, and the identities go into a throwaway keychain:
 #   MACOS_CERTIFICATES_P12       base64 of a .p12 that contains BOTH the
 #                                Developer ID Application AND Developer ID
 #                                Installer certificates (export both from
 #                                Keychain Access into one .p12)
 #   MACOS_CERTIFICATES_PASSWORD  that .p12's password
-#   APPLE_API_KEY                base64 of an App Store Connect API key (.p8),
-#                                used by notarytool — no 2FA, no rotation
+# Unset (a dev Mac), the identities are taken from the login keychain, where
+# Xcode put them when the certificates were made.
 #
-# ── Identifiers (required; repo variables in CI, not secrets) ───────
-#   APPLE_API_KEY_ID             the API key's ID (e.g. ABC123DEF4)
+# ── Notarization: CI or local ──────────────────────────────────────
+# CI sets an App Store Connect API key (the ID and issuer are repo vars):
+#   APPLE_API_KEY                base64 of the API key (.p8)
+#   APPLE_API_KEY_ID             the key's ID (e.g. ABC123DEF4)
 #   APPLE_API_ISSUER             the issuer ID (UUID)
+# Locally, name a notarytool keychain profile instead — one made once with
+# `xcrun notarytool store-credentials <name> --key … --key-id … --issuer …`:
+#   APPLE_NOTARY_PROFILE         that profile's name (mise.local.toml is a
+#                                good home for it)
 #
 # Required tools: Xcode (xcrun notarytool / stapler), security, pkgbuild,
 # productbuild, codesign, spctl — all present on a macOS runner with Xcode.
@@ -58,36 +65,56 @@ if [ ! -f "$archive" ]; then
   exit 1
 fi
 
-for var in MACOS_CERTIFICATES_P12 MACOS_CERTIFICATES_PASSWORD \
-           APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER; do
-  if [ -z "${!var:-}" ]; then
-    echo "build-mac-installer.sh: $var is not set." >&2
-    echo "  Set it in the mise task env or CI secrets/vars (see this script's header)." >&2
+# Pick each mode from what's set, and say which — a half-set CI config should
+# fail here, not drift silently into local mode.
+if [ -n "${MACOS_CERTIFICATES_P12:-}" ]; then
+  if [ -z "${MACOS_CERTIFICATES_PASSWORD:-}" ]; then
+    echo "build-mac-installer.sh: MACOS_CERTIFICATES_P12 is set but MACOS_CERTIFICATES_PASSWORD isn't." >&2
     exit 1
   fi
-done
+  sign_mode=p12
+else
+  sign_mode=login
+fi
 
-# Sensitive temp files and the build keychain are cleaned on any exit, and the
-# user's keychain search list is put back as it was — this script reorders it,
-# which matters on a dev Mac even if a CI runner is thrown away afterwards.
+if [ -n "${APPLE_API_KEY:-}" ]; then
+  if [ -z "${APPLE_API_KEY_ID:-}" ] || [ -z "${APPLE_API_ISSUER:-}" ]; then
+    echo "build-mac-installer.sh: APPLE_API_KEY is set but APPLE_API_KEY_ID / APPLE_API_ISSUER aren't." >&2
+    exit 1
+  fi
+  notary_mode=key
+elif [ -n "${APPLE_NOTARY_PROFILE:-}" ]; then
+  notary_mode=profile
+else
+  echo "build-mac-installer.sh: notarization needs either" >&2
+  echo "  (CI)    APPLE_API_KEY + APPLE_API_KEY_ID + APPLE_API_ISSUER, or" >&2
+  echo "  (local) APPLE_NOTARY_PROFILE, naming a 'xcrun notarytool store-credentials' profile" >&2
+  exit 1
+fi
+echo "→ signing from: $sign_mode keychain · notarizing with: $notary_mode"
+
+# Sensitive temp files and the build keychain are cleaned on any exit. In p12
+# mode the user's keychain search list is reordered, so it's put back as it
+# was — that matters on a dev Mac even if a CI runner is thrown away after.
 KEYCHAIN="freshbreath-build.keychain-db"
 orig_keychains=()
-while IFS= read -r kc; do
-  kc="${kc#"${kc%%[![:space:]]*}"}"; kc="${kc//\"/}"
-  [ -n "$kc" ] && orig_keychains+=("$kc")
-done < <(security list-keychains -d user)
 tmp_files=()
 cleanup() {
   if [ ${#tmp_files[@]} -gt 0 ]; then rm -rf "${tmp_files[@]}"; fi
-  security list-keychains -d user -s "${orig_keychains[@]}" 2>/dev/null || true
-  security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+  if [ ${#orig_keychains[@]} -gt 0 ]; then
+    security list-keychains -d user -s "${orig_keychains[@]}" 2>/dev/null || true
+    security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
-cert="$(mktemp -t frbr)"; tmp_files+=("$cert")
-printf '%s' "$MACOS_CERTIFICATES_P12" | base64 -D > "$cert"
-key_file="$(mktemp -t frbr)"; tmp_files+=("$key_file")
-printf '%s' "$APPLE_API_KEY" | base64 -D > "$key_file"
+if [ "$notary_mode" = key ]; then
+  key_file="$(mktemp "${TMPDIR:-/tmp}/frbr.XXXXXX")"; tmp_files+=("$key_file")
+  printf '%s' "$APPLE_API_KEY" | base64 -D > "$key_file"
+  notary_args=(--key "$key_file" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER")
+else
+  notary_args=(--keychain-profile "$APPLE_NOTARY_PROFILE")
+fi
 
 # ── Stage payload from the portable archive ────────────────────────
 staging="dist/pkg-staging"
@@ -115,38 +142,51 @@ chmod 0644 "$root/Library/LaunchDaemons/institute.poggers.freshbreath.plist"
 cp scripts/macos/uninstall.sh "$root/usr/local/freshbreath/uninstall.sh"
 chmod 0755 "$root/usr/local/freshbreath/uninstall.sh"
 
-# ── Import signing identities into a throwaway keychain ─────────────
-# CI runners have no login keychain carrying our certs, so make one, import
-# the .p12, and let the signing tools use it headless. set-key-partition-list
-# is the part that stops codesign / productbuild prompting for permission on
-# a GUI-less runner — if it fails, the build would hang on that prompt, so
-# neither step is allowed to fail quietly.
-security delete-keychain "$KEYCHAIN" 2>/dev/null || true
-KEYCHAIN_PW="$(uuidgen)"
-security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
-security set-keychain-settings -lut 21600 "$KEYCHAIN"
-security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
-# Prepend ours to the search list so codesign / productbuild resolve our
-# identities (and their intermediate certs). cleanup restores the original.
-security list-keychains -d user -s "$KEYCHAIN" "${orig_keychains[@]}"
-security import "$cert" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATES_PASSWORD" \
-  -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/pkgbuild
-security set-key-partition-list \
-  -S apple-tool:,apple:,codesign:,productbuild:,pkgbuild: \
-  -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+# ── Signing identities ──────────────────────────────────────────────
+# p12 mode: CI runners have no login keychain carrying our certs, so make a
+# throwaway one, import the .p12, and let the signing tools use it headless.
+# set-key-partition-list is the part that stops codesign / productbuild
+# prompting for permission on a GUI-less runner — if it fails, the build
+# would hang on that prompt, so neither step is allowed to fail quietly.
+# login mode: the identities are already on the search list; at most macOS
+# asks once to let codesign use the key ("Always Allow" quiets it for good).
+search=()
+if [ "$sign_mode" = p12 ]; then
+  while IFS= read -r kc; do
+    kc="${kc#"${kc%%[![:space:]]*}"}"; kc="${kc//\"/}"
+    [ -n "$kc" ] && orig_keychains+=("$kc")
+  done < <(security list-keychains -d user)
 
-# Resolve the two identities by name. A .p12 carrying both certs yields one
-# "Developer ID Application: …" (for the binary) and one "Developer ID
-# Installer: …" (for the package).
-app_identity=$(security find-identity -p codesigning -v "$KEYCHAIN" \
+  cert="$(mktemp "${TMPDIR:-/tmp}/frbr.XXXXXX")"; tmp_files+=("$cert")
+  printf '%s' "$MACOS_CERTIFICATES_P12" | base64 -D > "$cert"
+
+  security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+  KEYCHAIN_PW="$(uuidgen)"
+  security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+  security set-keychain-settings -lut 21600 "$KEYCHAIN"
+  security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+  # Prepend ours to the search list so codesign / productbuild resolve our
+  # identities (and their intermediate certs). cleanup restores the original.
+  security list-keychains -d user -s "$KEYCHAIN" "${orig_keychains[@]}"
+  security import "$cert" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATES_PASSWORD" \
+    -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/pkgbuild
+  security set-key-partition-list \
+    -S apple-tool:,apple:,codesign:,productbuild:,pkgbuild: \
+    -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+  search=("$KEYCHAIN")
+fi
+
+# Resolve the two identities by name: one "Developer ID Application: …" (for
+# the binary) and one "Developer ID Installer: …" (for the package).
+app_identity=$(security find-identity -p codesigning -v ${search[@]+"${search[@]}"} \
   | grep -m1 'Developer ID Application' | sed 's/.*"\(.*\)".*/\1/' || true)
-installer_identity=$(security find-identity -v "$KEYCHAIN" \
+installer_identity=$(security find-identity -v ${search[@]+"${search[@]}"} \
   | grep -m1 'Developer ID Installer' | sed 's/.*"\(.*\)".*/\1/' || true)
 if [ -z "$app_identity" ] || [ -z "$installer_identity" ]; then
-  echo "build-mac-installer.sh: could not find both signing identities." >&2
-  echo "  The .p12 (MACOS_CERTIFICATES_P12) must contain a Developer ID Application" >&2
-  echo "  AND a Developer ID Installer certificate. Identities found:" >&2
-  security find-identity -v "$KEYCHAIN" >&2
+  echo "build-mac-installer.sh: could not find both signing identities ($sign_mode keychain)." >&2
+  echo "  Need a valid Developer ID Application AND Developer ID Installer certificate" >&2
+  echo "  with its private key. Identities found:" >&2
+  security find-identity -v ${search[@]+"${search[@]}"} >&2
   exit 1
 fi
 
@@ -172,7 +212,7 @@ if ! printf '%s' "$PKG_VERSION" | grep -qE '^[0-9]+(\.[0-9]+)*$'; then
 fi
 
 # Flat packages run postinstall on both fresh installs and upgrades.
-scripts_dir="$(mktemp -d -t frbr)"; tmp_files+=("$scripts_dir")
+scripts_dir="$(mktemp -d "${TMPDIR:-/tmp}/frbr.XXXXXX")"; tmp_files+=("$scripts_dir")
 cp scripts/macos/postinstall "$scripts_dir/postinstall"
 chmod 0755 "$scripts_dir/postinstall"
 
@@ -190,7 +230,7 @@ pkgbuild \
 # hostArchitectures makes Installer refuse a Mac of the wrong arch up front,
 # instead of laying down a binary that launchd would crash-loop forever.
 # productbuild signs with a trusted timestamp, which notarization requires.
-dist_xml="$(mktemp -t frbr)"; tmp_files+=("$dist_xml")
+dist_xml="$(mktemp "${TMPDIR:-/tmp}/frbr.XXXXXX")"; tmp_files+=("$dist_xml")
 cat > "$dist_xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
@@ -212,9 +252,7 @@ productbuild --distribution "$dist_xml" --package-path dist \
 
 # ── Notarize + staple ───────────────────────────────────────────────
 echo "→ notarytool submit (can take a few minutes)…"
-xcrun notarytool submit "$out" \
-  --key "$key_file" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" \
-  --wait
+xcrun notarytool submit "$out" "${notary_args[@]}" --wait
 
 echo "→ stapler staple"
 xcrun stapler staple "$out"
