@@ -199,28 +199,38 @@ func TestLoadSigningKeyFreshInstallNoTable(t *testing.T) {
 	}
 }
 
-// The env file is the one config loads: ./.env when there is one, else
-// config.env in the first freshbreath config dir, else where that dir
-// would be made in the user's own config home.
-func TestResolveEnvFile(t *testing.T) {
+// ./.env puts config in the current dir (portable mode); otherwise the
+// first existing freshbreath config dir wins, and the user's config home
+// is preferred over system dirs and created when nothing exists.
+func TestSetupConfigDir(t *testing.T) {
 	home, system := t.TempDir(), t.TempDir()
 	xdgHome, xdgDirs := xdg.ConfigHome, xdg.ConfigDirs
 	t.Cleanup(func() { xdg.ConfigHome, xdg.ConfigDirs = xdgHome, xdgDirs })
 	xdg.ConfigHome, xdg.ConfigDirs = home, []string{system}
 	t.Chdir(t.TempDir())
 
-	if got, want := resolveEnvFile(), filepath.Join(home, "freshbreath", "config.env"); got != want {
-		t.Errorf("nothing anywhere: %q, want %q", got, want)
+	check := func(label, wantDir, wantEnv string) {
+		t.Helper()
+		dir, env, err := setupConfigDir()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if dir != wantDir || env != wantEnv {
+			t.Errorf("%s: (%q, %q), want (%q, %q)", label, dir, env, wantDir, wantEnv)
+		}
 	}
 
 	os.MkdirAll(filepath.Join(system, "freshbreath"), 0o755)
-	if got, want := resolveEnvFile(), filepath.Join(system, "freshbreath", "config.env"); got != want {
-		t.Errorf("system config dir: %q, want %q", got, want)
+	check("system config dir", filepath.Join(system, "freshbreath"), filepath.Join(system, "freshbreath", "config.env"))
+
+	os.RemoveAll(filepath.Join(system, "freshbreath"))
+	userDir := filepath.Join(home, "freshbreath")
+	check("nothing anywhere", userDir, filepath.Join(userDir, "config.env"))
+	if _, err := os.Stat(userDir); err != nil {
+		t.Errorf("config home dir not created: %v", err)
 	}
 
 	os.WriteFile(".env", nil, 0o600)
 	cwd, _ := os.Getwd()
-	if got, want := resolveEnvFile(), filepath.Join(cwd, ".env"); got != want {
-		t.Errorf("./.env: %q, want %q", got, want)
-	}
+	check("./.env", cwd, filepath.Join(cwd, ".env"))
 }

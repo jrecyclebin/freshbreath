@@ -3,6 +3,7 @@
 
 # Local testing
 .env
+signing.key
 mise.local.toml
 /data
 /freshbreath

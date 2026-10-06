@@ -20,7 +20,7 @@ import (
 type Config struct {
 	Dir           string // install directory (web/ control panel)
 	DataDir       string // mutable state directory (apps/, virtual/, tasks/)
-	ConfigDir     string // XDG config directory, empty if none found
+	ConfigDir     string // ./ in portable mode (./.env present), else XDG config dir
 	DBPath        string
 	PublicBaseURL string
 	ListenAddr    string
