@@ -1303,6 +1303,10 @@ func (s *Store) RegisterOAuthClient(clientID, clientSecret string, redirectURIs 
 	return err
 }
 
+// ErrUnreadableOAuthClient marks a client row that exists but can't be
+// decoded — usually a secret sealed under a since-changed signing key.
+var ErrUnreadableOAuthClient = errors.New("unreadable oauth client")
+
 // GetOAuthClient looks up a registered OAuth client by ID.
 func (s *Store) GetOAuthClient(clientID string) (clientSecret string, redirectURIs []string, ok bool, err error) {
 	var secretStr, urisStr string
@@ -1317,11 +1321,11 @@ func (s *Store) GetOAuthClient(clientID string) (clientSecret string, redirectUR
 	}
 	var uris []string
 	if err := json.Unmarshal([]byte(urisStr), &uris); err != nil {
-		return "", nil, false, err
+		return "", nil, false, fmt.Errorf("%w %q: redirect_uris: %w", ErrUnreadableOAuthClient, clientID, err)
 	}
 	secret, err := s.openField(secretStr)
 	if err != nil {
-		return "", nil, false, fmt.Errorf("oauth client %q: %w", clientID, err)
+		return "", nil, false, fmt.Errorf("%w %q: %w", ErrUnreadableOAuthClient, clientID, err)
 	}
 	return secret, uris, true, nil
 }

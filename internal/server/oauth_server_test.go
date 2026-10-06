@@ -496,6 +496,47 @@ func TestOAuthAuthCodeGrantInvalidClient(t *testing.T) {
 	}
 }
 
+// A client sealed under a different signing key (the key rotated, say) reads
+// as unknown on both endpoints, so the MCP client re-registers instead of
+// hitting a 500 forever.
+func TestOAuthUnreadableClientIsUnknown(t *testing.T) {
+	srv := newTestServer(t)
+	srv.oauthSrv.clients.store.SetSealKey(bytes.Repeat([]byte{1}, 32))
+	clientID, secret := registerOAuthClient(t, srv)
+	srv.oauthSrv.clients.store.SetSealKey(bytes.Repeat([]byte{2}, 32))
+
+	_, challenge := pkcePair()
+	q := url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://client.example/callback"},
+		"state":                 {"st"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}
+	authz := testRequest(t, srv, "GET", "/oauth/authorize?"+q.Encode(), nil, nil)
+	token := postForm(t, srv, "/oauth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"code":          {"some-code"},
+		"code_verifier": {"some-verifier"},
+		"client_id":     {clientID},
+		"client_secret": {secret},
+	})
+	for _, c := range []struct {
+		name string
+		code int
+		body []byte
+	}{{"authorize", 400, authz.Body.Bytes()}, {"token", 401, token.Body.Bytes()}} {
+		var resp map[string]string
+		json.Unmarshal(c.body, &resp)
+		if resp["error"] != "invalid_client" {
+			t.Errorf("%s: error = %q, want invalid_client", c.name, resp["error"])
+		}
+	}
+	if authz.Code != 400 || token.Code != 401 {
+		t.Errorf("status = %d/%d, want 400/401", authz.Code, token.Code)
+	}
+}
+
 func TestOAuthAuthCodeGrantUnknownCode(t *testing.T) {
 	srv := newTestServer(t)
 	clientID, secret := registerOAuthClient(t, srv)
