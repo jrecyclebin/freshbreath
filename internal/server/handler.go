@@ -203,6 +203,10 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/me/sessions", s.authWrap(pipeline(s.handleSessions, anyRole)))
 	s.mux.HandleFunc("/api/me/sessions/", s.authWrap(pipeline(s.handleSessionDetail, anyRole)))
 	s.mux.HandleFunc("/api/settings", s.authWrap(pipeline(s.handleSettings, superuser)))
+	s.mux.HandleFunc("/api/onboarding", s.authWrap(pipeline(s.handleOnboarding, superuser)))
+	s.mux.HandleFunc("/api/onboarding/skip", s.authWrap(pipeline(s.handleOnboardingSkip, superuser)))
+	s.mux.HandleFunc("/api/tls", s.authWrap(pipeline(s.handleLocalTLS, superuser)))
+	s.mux.HandleFunc("/api/tls/ca.pem", s.authWrap(pipeline(s.handleLocalCA, superuser)))
 
 	// Remote update feeds (design/remote-updates.md). Management is
 	// admin-only; check/apply are mounted BARE — anonymous by design, the

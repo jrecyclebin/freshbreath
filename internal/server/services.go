@@ -929,7 +929,16 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, r *http.Request, data 
 	// when NOT behind a proxy, but spoofing it to "https" over plain HTTP just
 	// makes the browser refuse the Secure cookie — self-defeating, no DoS
 	// or gain — so no extra validation is warranted here.
+	//
+	// Plain HTTP can't carry SameSite=None at all, so there the cookie is Lax:
+	// same-origin pages (the control panel, hosted apps) still refresh, and
+	// only the file:// and foreign-origin consumers, which need TLS anyway,
+	// go without.
 	secure := schemeOf(r) == "https" || s.config.TLSCertFile != ""
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    rt,
@@ -937,7 +946,7 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, r *http.Request, data 
 		MaxAge:   int(refreshTokenTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: http.SameSiteNoneMode,
+		SameSite: sameSite,
 	})
 	return rt, nil
 }

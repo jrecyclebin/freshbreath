@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/adrg/xdg"
 	_ "github.com/mattn/go-sqlite3"
 
 	"poggers.institute/freshbreath/internal/db"
@@ -196,4 +197,40 @@ func TestLoadSigningKeyFreshInstallNoTable(t *testing.T) {
 	if len(key) != 32 {
 		t.Fatalf("minted key is %d bytes, want 32", len(key))
 	}
+}
+
+// ./.env puts config in the current dir (portable mode); otherwise the
+// first existing freshbreath config dir wins, and the user's config home
+// is preferred over system dirs and created when nothing exists.
+func TestSetupConfigDir(t *testing.T) {
+	home, system := t.TempDir(), t.TempDir()
+	xdgHome, xdgDirs := xdg.ConfigHome, xdg.ConfigDirs
+	t.Cleanup(func() { xdg.ConfigHome, xdg.ConfigDirs = xdgHome, xdgDirs })
+	xdg.ConfigHome, xdg.ConfigDirs = home, []string{system}
+	t.Chdir(t.TempDir())
+
+	check := func(label, wantDir, wantEnv string) {
+		t.Helper()
+		dir, env, err := setupConfigDir()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if dir != wantDir || env != wantEnv {
+			t.Errorf("%s: (%q, %q), want (%q, %q)", label, dir, env, wantDir, wantEnv)
+		}
+	}
+
+	os.MkdirAll(filepath.Join(system, "freshbreath"), 0o755)
+	check("system config dir", filepath.Join(system, "freshbreath"), filepath.Join(system, "freshbreath", "config.env"))
+
+	os.RemoveAll(filepath.Join(system, "freshbreath"))
+	userDir := filepath.Join(home, "freshbreath")
+	check("nothing anywhere", userDir, filepath.Join(userDir, "config.env"))
+	if _, err := os.Stat(userDir); err != nil {
+		t.Errorf("config home dir not created: %v", err)
+	}
+
+	os.WriteFile(".env", nil, 0o600)
+	cwd, _ := os.Getwd()
+	check("./.env", cwd, filepath.Join(cwd, ".env"))
 }

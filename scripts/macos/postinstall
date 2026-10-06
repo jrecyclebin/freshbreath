@@ -1,0 +1,73 @@
+#!/bin/bash
+# Runs as root during install (both fresh install and upgrade). Idempotent —
+# safe to run once on a fresh box and again on every upgrade.
+#
+# Fresh install: creates the service user, makes the data dir, loads the daemon.
+# Upgrade: the user and data dir already exist (the checks no-op); the daemon is
+# reloaded from the just-replaced plist and binary.
+set -euo pipefail
+
+LABEL=institute.poggers.freshbreath
+PLIST=/Library/LaunchDaemons/${LABEL}.plist
+DATA_DIR="/Library/Application Support/freshbreath"
+
+# Create the dedicated service user + its primary group if missing. The group
+# is required too: `chown _freshbreath:_freshbreath` below resolves the name via
+# getgrnam, which fails (and chown with it) if the group doesn't exist. The ID
+# is the lowest one from 200 up that's free as both a UID and a GID — the
+# local-service range (above the reserved <200, below per-user 500+), and the
+# same number for both is the macOS convention for a primary group. IsHidden
+# and a '*' password keep it off the login window and un-loginable; NFSHomeDir
+# is the data dir so $HOME-derived paths land somewhere it owns.
+if ! id _freshbreath >/dev/null 2>&1; then
+  used=$( { dscl . -list /Users UniqueID; dscl . -list /Groups PrimaryGroupID; } | awk '{print $2}')
+  id=200
+  while printf '%s\n' "$used" | grep -qx "$id"; do id=$((id + 1)); done
+  if [ "$id" -ge 500 ]; then
+    echo "postinstall: no free service ID in 200-499" >&2
+    exit 1
+  fi
+  # A group left behind by a half-finished earlier install keeps its GID.
+  if ! dscl . -read /Groups/_freshbreath >/dev/null 2>&1; then
+    dscl . -create /Groups/_freshbreath
+    dscl . -create /Groups/_freshbreath PrimaryGroupID "$id"
+    dscl . -create /Groups/_freshbreath RealName "Fresh Breath"
+  fi
+  gid=$(dscl . -read /Groups/_freshbreath PrimaryGroupID | awk '{print $2}')
+  dscl . -create /Users/_freshbreath
+  dscl . -create /Users/_freshbreath UniqueID "$id"
+  dscl . -create /Users/_freshbreath PrimaryGroupID "$gid"
+  dscl . -create /Users/_freshbreath UserShell /usr/bin/false
+  dscl . -create /Users/_freshbreath NFSHomeDir "$DATA_DIR"
+  dscl . -create /Users/_freshbreath RealName "Fresh Breath"
+  dscl . -create /Users/_freshbreath Password '*'
+  dscl . -create /Users/_freshbreath IsHidden 1
+fi
+
+# Data dir (DB, apps, logs). Never shipped in the pkg, so it survives upgrades
+# untouched — the same principle as the Windows installer leaving
+# %PROGRAMDATA%\freshbreath alone. Only the top is chowned: everything beneath
+# it was created by the daemon, already as the service user.
+mkdir -p "$DATA_DIR"
+chown _freshbreath:_freshbreath "$DATA_DIR"
+chmod 0750 "$DATA_DIR"
+
+# (Re)load the daemon. Always bootout + bootstrap rather than kickstart: a
+# kickstart reuses the plist launchd already has in memory, so an upgrade
+# that changed the plist would keep running the old config. bootout returns
+# before the job is fully gone, and bootstrapping too soon fails with an I/O
+# error, so wait (up to ~10s) for it to clear.
+launchctl bootout system/"$LABEL" 2>/dev/null || true
+for _ in $(seq 50); do
+  launchctl print system/"$LABEL" >/dev/null 2>&1 || break
+  sleep 0.2
+done
+launchctl bootstrap system "$PLIST"
+
+cat <<EOF
+Fresh Breath installed.
+  Server:    http://localhost:9009
+  Data:      $DATA_DIR
+  Logs:      $DATA_DIR/freshbreath.log
+  Uninstall: sudo /usr/local/freshbreath/uninstall.sh
+EOF

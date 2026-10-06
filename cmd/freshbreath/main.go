@@ -30,16 +30,33 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// resolveConfigDir returns the XDG config directory for freshbreath
-// (or "" if none exists). It does not load any config file.
-func resolveConfigDir() string {
+// setupConfigDir picks the config directory and the env file within it.
+// A ./.env makes the current directory the config dir (portable mode:
+// unzip, run, everything stays put). Otherwise it's the first existing
+// XDG freshbreath dir, created in the user's config home if none exists.
+//
+// Returns (config dir, env file path, error)
+func setupConfigDir() (string, string, error) {
+	if abs, err := filepath.Abs(".env"); err == nil {
+		if _, err := os.Stat(abs); err == nil {
+			return filepath.Dir(abs), abs, nil
+		}
+	}
+
+	// If one of these common config dirs is found, use it.
 	for _, dir := range append([]string{xdg.ConfigHome}, xdg.ConfigDirs...) {
 		p := filepath.Join(dir, "freshbreath")
 		if _, err := os.Stat(p); err == nil {
-			return p
+			return p, filepath.Join(p, "config.env"), nil
 		}
 	}
-	return ""
+
+	// No config dir exists yet; give future config a home.
+	dir := filepath.Join(xdg.ConfigHome, "freshbreath")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", fmt.Errorf("create config dir: %w", err)
+	}
+	return dir, filepath.Join(dir, "config.env"), nil
 }
 
 // resolveConfigPath resolves a (possibly relative) path against configDir.
@@ -106,15 +123,7 @@ func loadSigningKey(configDir string, store *db.Store) ([]byte, error) {
 		return key, nil
 	}
 
-	if configDir == "" {
-		// No config dir exists yet; give the key (and future config) a home.
-		configDir = filepath.Join(xdg.ConfigHome, "freshbreath")
-		if err := os.MkdirAll(configDir, 0o700); err != nil {
-			return nil, fmt.Errorf("create config dir: %w", err)
-		}
-	}
 	keyPath := filepath.Join(configDir, "signing.key")
-
 	if raw, err := os.ReadFile(keyPath); err == nil {
 		key, err := decodeKeyMaterial(string(raw))
 		if err != nil {
@@ -223,16 +232,12 @@ func resolveDataDir(binDir string) (string, string) {
 }
 
 func main() {
-	// Config loading: .env in CWD wins; otherwise try XDG config.
-	cwdEnv := ".env"
-	if _, err := os.Stat(cwdEnv); err == nil {
-		_ = godotenv.Load(cwdEnv)
-	} else {
-		xdgCfgDir := resolveConfigDir()
-		if xdgCfgDir != "" {
-			_ = godotenv.Load(filepath.Join(xdgCfgDir, "config.env"))
-		}
+	// Config loading: .env in CWD wins; otherwise XDG config.env.
+	configDir, envFile, err := setupConfigDir()
+	if err != nil {
+		log.Fatalf("freshbreath: can't setup configuration: %v", err)
 	}
+	_ = godotenv.Load(envFile)
 
 	exePath, err := os.Executable()
 	if err != nil {
@@ -253,17 +258,17 @@ func main() {
 	cfg := server.Config{
 		Dir:           dir,
 		DataDir:       dataDir,
-		ConfigDir:     resolveConfigDir(),
+		ConfigDir:     configDir,
 		DBPath:        dbPath,
 		PublicBaseURL: getEnv("FRBR_BASE_URL", ""),
 		ListenAddr:    getEnv("FRBR_LISTEN_ADDR", ":9009"),
 		TLSCertFile:   getEnv("FRBR_TLS_CERT", ""),
 		TLSKeyFile:    getEnv("FRBR_TLS_KEY", ""),
+		EnvFile:       envFile,
 	}
 
 	// TLS cert/key paths resolve relative to ConfigDir; absolute paths are
-	// used as-is. (If no ConfigDir was found, relative paths stay relative
-	// to the current working directory.)
+	// used as-is.
 	cfg.TLSCertFile = resolveConfigPath(cfg.ConfigDir, cfg.TLSCertFile)
 	cfg.TLSKeyFile = resolveConfigPath(cfg.ConfigDir, cfg.TLSKeyFile)
 

@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -78,8 +80,19 @@ func (cs *oauthClientStore) register(redirectURIs []string) (string, string, err
 	return id, secret, nil
 }
 
+// get reports an unreadable client as unknown, so the MCP client gets
+// invalid_client and re-registers instead of being stuck on a 500. It
+// logs loudly: a run of these usually means the signing key changed.
 func (cs *oauthClientStore) get(id string) (string, []string, bool, error) {
-	return cs.store.GetOAuthClient(id)
+	secret, uris, ok, err := cs.store.GetOAuthClient(id)
+	if errors.Is(err, db.ErrUnreadableOAuthClient) {
+		log.Printf("WARNING: treating client as unknown: %v (signing key changed?)", err)
+		return "", nil, false, nil
+	}
+	if err != nil {
+		log.Printf("oauth client lookup %q: %v", id, err)
+	}
+	return secret, uris, ok, err
 }
 
 // ── MCP Auth Pending State ──────────────────────────────────────────

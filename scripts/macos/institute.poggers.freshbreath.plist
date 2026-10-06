@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fresh Breath launchd daemon. Installed by the .pkg to
+  /Library/LaunchDaemons/ and loaded by postinstall. Runs the server as a
+  dedicated _freshbreath user at boot, restarting it if it exits — the macOS
+  peer of the Windows NSSM service (auto-start under a low-priv account).
+
+  The Label is also the package receipt identifier, so it must never change
+  between versions: that receipt is what lets a newer .pkg upgrade an older
+  one in place.
+
+  Environment variables pin the three directories so a daemon whose CWD is /
+  doesn't have to go hunting:
+    FRBR_DIR        install dir (web/ control panel + skills/), next to the binary
+    FRBR_DATA_DIR   mutable state (apps/, virtual/, tasks/, the SQLite db, logs)
+    XDG_CONFIG_HOME where the signing key persists (signing.key), under the data dir
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>institute.poggers.freshbreath</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/freshbreath/freshbreath</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>FRBR_DIR</key>
+        <string>/usr/local/freshbreath</string>
+        <key>FRBR_DATA_DIR</key>
+        <string>/Library/Application Support/freshbreath</string>
+        <key>XDG_CONFIG_HOME</key>
+        <string>/Library/Application Support/freshbreath/config</string>
+    </dict>
+
+    <!-- Run as a dedicated low-privilege service user (created by postinstall),
+         not root — the macOS analogue of the Windows LocalService account. -->
+    <key>UserName</key>
+    <string>_freshbreath</string>
+    <key>GroupName</key>
+    <string>_freshbreath</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Restart on any exit, mirroring NSSM's auto-restart. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Application Support/freshbreath/freshbreath.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Library/Application Support/freshbreath/freshbreath.log</string>
+</dict>
+</plist>
