@@ -75,7 +75,7 @@ manually include your app nonce in the URL. (Or on pages that set
 Either way puts everything on `window.FreshBreath` (aliased `window.FrBr`):
 
 ```js
-const { login, currentSession, signOut } = window.FreshBreath;
+const { api, login, currentSession, signOut } = window.FreshBreath;
 ```
 
 For `file://` apps use the full server URL with the nonce; the server can't
@@ -87,9 +87,10 @@ origin, `/frbr.js` is enough.
 If your app is hosted on the server and has a gate, the server enforces it
 before serving anything — HTML and assets alike. A browser that hasn't
 cleared the gate is sent through the login and back to the page it asked for.
-What lets it through afterwards is the gate pass: an HttpOnly cookie listing
-the records this browser has cleared. It is not a credential — API calls
-still carry the token from the store — and your app never touches it.
+
+This is the gate pass: an HttpOnly cookie listing active logins, active
+tokens. It is not a credential — API calls still carry the token from the
+store — and your app never touches it.
 
 ### Auto-login at load
 
@@ -109,7 +110,7 @@ To keep the decision in app code, set the flag before the script loads:
 
 ```html
 <script>window.__FRBR_AUTO_LOGIN = false</script>
-<script type="module" src="/frbr.js?your-app-nonce"></script>
+<script type="module" src="/frbr.js"></script>
 ```
 
 ---
@@ -136,34 +137,19 @@ browser blocks.
 
 A second argument says how hard to try:
 
-| mode | does |
-|---|---|
-| `"normal"` (default) | Spends a stored credential, refreshing it if needed; opens the login window only when nothing fits. |
-| `"silent"` | Spends a stored credential or returns `null`. Never prompts — the boot-time "am I still signed in?" check. |
-| `"fresh"` | Ignores stored credentials and runs the whole login again, always in a window. For when the server wants proof the user is here *now*. |
+- `"normal"` (default, can also use `true`): Used a stored cred or pop a log-in.
+- `"silent"` (or `false` here works): Spends a stored credential or returns `null`. Never prompts — quick boot-time check.
+- `"fresh"`: Force a log-in.
 
-**When a login dies mid-session**, `api()` and `ServiceProxy` handle it. A
-`401` with `{"error":"invalid_token"}` gets one refresh; one that's still
-refused, or one with `{"error":"insufficient_user_authentication"}` (the token
-is fine but the login behind it is older than the response's `max_age`
-allows), gets a `"fresh"` login — straight away if the click behind the request still counts, otherwise
-through a small "Session expired · Log in" dialog whose button supplies the
-click. The request retries once it lands; requests that failed together share
-one prompt. The fresh login goes back through whichever door minted the
-credential — the stored entry remembers it — so there's nothing to pass. If the
-user dismisses it you get a `SessionExpired`. Opt a page out with
-`window.__FRBR_RELOGIN = false`.
-
-A refresh can also be refused because *this app* may no longer use the record
-— an admin moved the app behind another gate while the page was open. That
-gets the same prompt, for the new gate. The session you were holding hands
-over to the new one, so later calls through it skip the prompt.
+**When a login dies mid-session**, the underlying `api()` and `ServiceProxy`
+infrastructure handle it. No problem if the gate has changed, that code will
+check for that as well.
 
 Called with **no argument**, it clears your app's own gate and returns the
 `AuthSession` rather than a proxy — the "sign in" verb for a gated app:
 
 ```js
-await login();   // the app's gate, nothing else
+const session = await login();   // the app's gate, nothing else
 ```
 
 You rarely need it. Logging in to any service clears the app's gate on the way
@@ -200,17 +186,16 @@ svc.session.provider    // "github" — the upstream slug, when there is one
 svc.session.expiresAt   // Date
 ```
 
-`subject` is the honest answer to "who is this?" — display it, or send it to
-your own backend.
+The session object also has `user_name` and `email` properties for displaying
+the name and email of the logged-in user - obviously very important.
 
-**Persistence is not your problem.** The library stores one entry per cleared
-record under `localStorage["frbr:auth:<id>"]`, writes on login, rewrites on every
-refresh, and evicts when the server refuses one (but not when it only refuses
-*this app* — the login may still serve another). There is nothing to serialize,
-no event to subscribe to, and no key for your app to choose. Don't write to
-`frbr:auth:*` yourself.
+`subject` is useful as a unique ID that also expresses whether the user's
+account is native to Fresh Breath or an unmanaged log-in.
 
-To ask whether you're already signed in — at boot, before any network call:
+**Persistence is not your problem.** Access tokens and refresh tokens are
+saved and refreshed as needed.
+
+To ask whether you're already signed in - at boot, before any network call:
 
 ```js
 const session = currentSession();   // null when the store holds nothing live
@@ -284,8 +269,7 @@ relative to the service's registered URL; the leading slash is optional.
   <pre id="out"></pre>
 
   <script type="module">
-    import { login, currentSession, SessionExpired }
-      from "https://localhost:9009/frbr.js?your-app-nonce-here";
+    import { login, currentSession, SessionExpired } from "/frbr.js";
 
     const SERVICE_URL = "https://mcp.example.com/mcp";
     let svc = null;
@@ -296,8 +280,8 @@ relative to the service's registered URL; the leading slash is optional.
         tools.map(t => `${t.name}: ${t.description}`).join("\n");
     }
 
-    async function connect() {
-      svc = await login(SERVICE_URL);
+    async function connect(prompt = true) {
+      svc = await login(SERVICE_URL, prompt);
       await showTools();
     }
 
@@ -305,14 +289,8 @@ relative to the service's registered URL; the leading slash is optional.
       connect().catch(e => { document.getElementById("out").textContent = e.message; });
 
     // Already signed in from an earlier visit — or from a sibling app behind
-    // the same gate? Then this needs no popup and no click.
-    if (currentSession()) {
-      connect().catch(e => {
-        // A lapsed session is not an error to shout about: the button is
-        // still there, and clicking it is the fix.
-        if (!(e instanceof SessionExpired)) console.error(e);
-      });
-    }
+    // the same gate? Let's check silently.
+    connect(false);
   </script>
 </body>
 </html>
@@ -324,11 +302,8 @@ relative to the service's registered URL; the leading slash is optional.
 
 - **App nonce** comes from `/api/apps` — a 10-character random string.
 - **Service URL** must match a service registered *and linked to your app*.
-  Exact match; trailing slashes matter.
-- **`file://` apps**: the server must be running, and CORS must allow the `null`
-  origin (Fresh Breath echoes the `Origin` header back, so it does). If a
-  service gives you CORS errors, switch it to proxied in the control panel and
-  every call routes through the server instead.
+- **`file://` apps**: the server must be running, and assigned services must
+  be proxied.
 - **Sharing the store**: apps served from the Fresh Breath origin share one
   store, which is what lets a second app skip the prompt. Apps served from their
   own origins don't, and will prompt separately.
