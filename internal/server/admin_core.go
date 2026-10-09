@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -1077,10 +1078,21 @@ func (s *Server) coreDownloadAppWeb(actor *db.User, nonce string) ([]byte, strin
 	return buf.Bytes(), appSlug(app), nil
 }
 
-// coreUploadAppWeb writes web files for an app from raw content. The
-// filename determines handling: .html is saved as index.html; .zip is
-// extracted via extractZip.
-func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, filename string) (string, error) {
+// uploadFile is one file from an upload request. Name is the client's
+// filename, which may carry a relative path ("css/site.css").
+type uploadFile struct {
+	Name string
+	Data []byte
+}
+
+// coreUploadAppWeb replaces an app's web directory (the Development slot)
+// with an uploaded bundle: one or more files, where any .zip is expanded in
+// place. The whole set is treated like one zip — a single top-level folder
+// shared by every file is unwrapped, and if there's no index.html the first
+// .html alphabetically becomes it — so a lone page, a zip, a pile of files
+// and a dropped folder all publish the same way. Everything is validated
+// before the old files are cleared.
+func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFile) (string, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return "", err
 	}
@@ -1088,25 +1100,110 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, fil
 	if err != nil {
 		return "", cerr(http.StatusNotFound, "app not found: %v", err)
 	}
+	if len(files) == 0 {
+		return "", cerr(http.StatusBadRequest, "no files uploaded")
+	}
+
+	// Gather every entry as a slash path plus an opener, so zip entries stream
+	// straight to disk instead of being decompressed into memory.
+	type entry struct {
+		path string
+		open func() (io.ReadCloser, error)
+	}
+	var entries []entry
+	for _, f := range files {
+		rel, err := cleanAppFilePath(f.Name)
+		if err != nil {
+			return "", cerr(http.StatusBadRequest, "%s: %v", f.Name, err)
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.HasSuffix(strings.ToLower(rel), ".zip") {
+			data := f.Data
+			entries = append(entries, entry{rel, func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(data)), nil
+			}})
+			continue
+		}
+		zr, err := zip.NewReader(bytes.NewReader(f.Data), int64(len(f.Data)))
+		if err != nil {
+			return "", cerr(http.StatusBadRequest, "zip error: %s: %v", f.Name, err)
+		}
+		zipDir := path.Dir(rel) // a zip expands where it was uploaded
+		for _, zf := range zr.File {
+			if zf.FileInfo().IsDir() {
+				continue
+			}
+			clean := path.Clean(path.Join(zipDir, filepath.ToSlash(zf.Name)))
+			if clean == "." || path.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+				continue // unsafe entry
+			}
+			entries = append(entries, entry{clean, zf.Open})
+		}
+	}
+
+	// Unwrap a single top-level folder shared by every entry.
+	topDirs := map[string]bool{}
+	hasRootFiles := false
+	for _, e := range entries {
+		if top, _, found := strings.Cut(e.path, "/"); found {
+			topDirs[top] = true
+		} else {
+			hasRootFiles = true
+		}
+	}
+	if !hasRootFiles && len(topDirs) == 1 {
+		for i := range entries {
+			_, entries[i].path, _ = strings.Cut(entries[i].path, "/")
+		}
+	}
+
+	// Find the entry point: index.html, else the first .html alphabetically.
+	var htmlFiles []string
+	hasIndex := false
+	for _, e := range entries {
+		if e.path == "index.html" {
+			hasIndex = true
+		}
+		if strings.HasSuffix(strings.ToLower(e.path), ".html") {
+			htmlFiles = append(htmlFiles, e.path)
+		}
+	}
+	if !hasIndex {
+		if len(htmlFiles) == 0 {
+			return "", cerr(http.StatusBadRequest, "no HTML file found in upload")
+		}
+		sort.Strings(htmlFiles)
+		for i := range entries {
+			if entries[i].path == htmlFiles[0] {
+				entries[i].path = "index.html"
+			}
+		}
+	}
+
 	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
 	if err := os.RemoveAll(webDir); err != nil {
 		return "", cerr(http.StatusInternalServerError, "failed to clear web dir")
 	}
-	if err := os.MkdirAll(webDir, 0755); err != nil {
-		return "", cerr(http.StatusInternalServerError, "failed to create web dir")
-	}
-
-	name := strings.ToLower(filename)
-	if strings.HasSuffix(name, ".html") {
-		if err := os.WriteFile(filepath.Join(webDir, "index.html"), data, 0644); err != nil {
-			return "", cerr(http.StatusInternalServerError, "write failed")
+	for _, e := range entries {
+		dest := filepath.Join(webDir, filepath.FromSlash(e.path))
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return "", cerr(http.StatusInternalServerError, "mkdir: %v", err)
 		}
-	} else if strings.HasSuffix(name, ".zip") {
-		if err := extractZip(bytes.NewReader(data), int64(len(data)), webDir); err != nil {
-			return "", cerr(http.StatusBadRequest, "zip error: %v", err)
+		rc, err := e.open()
+		if err != nil {
+			return "", cerr(http.StatusBadRequest, "open %s: %v", e.path, err)
 		}
-	} else {
-		return "", cerr(http.StatusBadRequest, "unsupported file type (.html or .zip only)")
+		out, err := os.Create(dest)
+		if err != nil {
+			rc.Close()
+			return "", cerr(http.StatusInternalServerError, "create: %v", err)
+		}
+		_, copyErr := io.Copy(out, rc)
+		out.Close()
+		rc.Close()
+		if copyErr != nil {
+			return "", cerr(http.StatusBadRequest, "write %s: %v", e.path, copyErr)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -1121,6 +1218,30 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, fil
 	s.rebuildHostedRoutes()
 	s.audit(actor, "uploaded web files", app.Name)
 	return "/" + appSlug(app), nil
+}
+
+// coreUploadAppData adds uploaded files to an app's data area at their
+// relative paths, replacing same-named files and leaving the rest alone.
+// Files are stored as-is (zips are not expanded). All paths are checked
+// before anything is written. Returns the written paths.
+func (s *Server) coreUploadAppData(actor *db.User, nonce string, files []uploadFile) ([]string, error) {
+	if len(files) == 0 {
+		return nil, cerr(http.StatusBadRequest, "no files uploaded")
+	}
+	paths := make([]string, len(files))
+	for i, f := range files {
+		rel, err := cleanAppFilePath(f.Name)
+		if err != nil {
+			return nil, cerr(http.StatusBadRequest, "%s: %v", f.Name, err)
+		}
+		paths[i] = filepath.ToSlash(rel)
+	}
+	for i, f := range files {
+		if err := s.coreWriteAppFile(actor, nonce, "data", paths[i], f.Data, ""); err != nil {
+			return nil, err
+		}
+	}
+	return paths, nil
 }
 
 // coreDeleteAppWeb removes an app's web directory (the Development slot).
@@ -1706,108 +1827,6 @@ func (s *Server) coreListServiceFiles(actor *db.User, id int64, search string) (
 		}
 	}
 	return []appFile{{Path: filepath.Base(path), Size: fi.Size()}}, nil
-}
-
-// extractZip extracts a zip archive to destDir, auto-detecting the content
-// root (unwrapping a single top-level folder if present) and ensuring an
-// index.html exists (renaming the first .html alphabetically if absent).
-// Accepts a size parameter so it can be called from both multipart (whole
-// stream) and core (known-length buffer) paths.
-func extractZip(r io.ReaderAt, size int64, destDir string) error {
-	zr, err := zip.NewReader(r, size)
-	if err != nil {
-		return fmt.Errorf("open zip: %w", err)
-	}
-
-	// Determine effective root: if all file entries share a single top-level
-	// directory and there are no files directly at the root, strip that prefix.
-	topDirs := map[string]bool{}
-	hasRootFiles := false
-	for _, f := range zr.File {
-		name := filepath.ToSlash(f.Name)
-		if name == "" || strings.HasSuffix(name, "/") {
-			continue
-		}
-		if idx := strings.Index(name, "/"); idx >= 0 {
-			topDirs[name[:idx]] = true
-		} else {
-			hasRootFiles = true
-		}
-	}
-	root := ""
-	if !hasRootFiles && len(topDirs) == 1 {
-		for dir := range topDirs {
-			root = dir + "/"
-		}
-	}
-
-	// Find the entry point HTML: prefer index.html, else first .html alphabetically.
-	var htmlFiles []string
-	hasIndex := false
-	for _, f := range zr.File {
-		name := filepath.ToSlash(f.Name)
-		if !strings.HasPrefix(name, root) || strings.HasSuffix(name, "/") {
-			continue
-		}
-		rel := strings.TrimPrefix(name, root)
-		if rel == "index.html" {
-			hasIndex = true
-			break
-		}
-		if strings.HasSuffix(rel, ".html") {
-			htmlFiles = append(htmlFiles, rel)
-		}
-	}
-	var entryPoint string
-	if !hasIndex {
-		if len(htmlFiles) == 0 {
-			return fmt.Errorf("no HTML file found in zip")
-		}
-		sort.Strings(htmlFiles)
-		entryPoint = htmlFiles[0]
-	}
-
-	// Extract files.
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		name := filepath.ToSlash(f.Name)
-		if !strings.HasPrefix(name, root) {
-			continue
-		}
-		rel := strings.TrimPrefix(name, root)
-		if rel == "" {
-			continue
-		}
-		if entryPoint != "" && rel == entryPoint {
-			rel = "index.html"
-		}
-		clean := filepath.Clean(rel)
-		if strings.HasPrefix(clean, "..") {
-			continue
-		}
-		destPath := filepath.Join(destDir, clean)
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return fmt.Errorf("mkdir: %w", err)
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return fmt.Errorf("open entry: %w", err)
-		}
-		out, err := os.Create(destPath)
-		if err != nil {
-			rc.Close()
-			return fmt.Errorf("create: %w", err)
-		}
-		_, copyErr := io.Copy(out, rc)
-		out.Close()
-		rc.Close()
-		if copyErr != nil {
-			return fmt.Errorf("extract: %w", copyErr)
-		}
-	}
-	return nil
 }
 
 // isHostedNonce reports whether nonce maps to a currently hosted app route.

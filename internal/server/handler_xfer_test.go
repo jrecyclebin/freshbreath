@@ -1,8 +1,11 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -397,7 +400,7 @@ func TestAppDataSurvivesWebReplace(t *testing.T) {
 	if err := srv.coreWriteAppFile(su, nonce, "data", "keep.txt", []byte("kept"), ""); err != nil {
 		t.Fatalf("write data: %v", err)
 	}
-	if _, err := srv.coreUploadAppWeb(su, nonce, []byte("<h1>v2</h1>"), "index.html"); err != nil {
+	if _, err := srv.coreUploadAppWeb(su, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>v2</h1>")}}); err != nil {
 		t.Fatalf("upload web: %v", err)
 	}
 	if err := srv.coreDeleteAppWeb(su, nonce); err != nil {
@@ -406,5 +409,149 @@ func TestAppDataSurvivesWebReplace(t *testing.T) {
 	data, err := srv.coreReadAppFile(su, nonce, "data", "keep.txt", 0, 0)
 	if err != nil || string(data) != "kept" {
 		t.Fatalf("data after web replace/delete = %q, %v; want kept", data, err)
+	}
+}
+
+// ── Bulk uploads ──
+//
+// Upload POSTs take any number of "file" parts; each part's filename is its
+// relative path.
+
+func postFiles(t *testing.T, srv *Server, url string, files map[string][]byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for name, data := range files {
+		fw, err := mw.CreateFormFile("file", name)
+		if err != nil {
+			t.Fatalf("create form file: %v", err)
+		}
+		fw.Write(data)
+	}
+	mw.Close()
+	return testRequest(t, srv, http.MethodPost, url, &body, map[string]string{"Content-Type": mw.FormDataContentType()})
+}
+
+func zipBytes(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		w, _ := zw.Create(name)
+		w.Write([]byte(content))
+	}
+	zw.Close()
+	return buf.Bytes()
+}
+
+func webFileSet(t *testing.T, srv *Server, nonce string) map[string]bool {
+	t.Helper()
+	files, err := srv.coreListAppFiles(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	set := map[string]bool{}
+	for _, f := range files {
+		set[f.Path] = true
+	}
+	return set
+}
+
+func TestAppWebUploadBundles(t *testing.T) {
+	cases := []struct {
+		name  string
+		files map[string][]byte
+		want  []string
+	}{
+		{"lone page becomes index", map[string][]byte{"game.html": []byte("<h1>g</h1>")},
+			[]string{"index.html"}},
+		{"zip with a top folder", map[string][]byte{"site.zip": zipBytes(t, map[string]string{"site/main.html": "m", "site/js/app.js": "a"})},
+			[]string{"index.html", "js/app.js"}},
+		{"dropped folder is unwrapped", map[string][]byte{"dist/index.html": []byte("i"), "dist/css/site.css": []byte("c"), "dist/about.html": []byte("a")},
+			[]string{"index.html", "css/site.css", "about.html"}},
+		{"loose files keep their paths", map[string][]byte{"index.html": []byte("i"), "style.css": []byte("s"), "img/logo.png": []byte("p")},
+			[]string{"index.html", "style.css", "img/logo.png"}},
+		{"zip expands beside loose files", map[string][]byte{"index.html": []byte("i"), "vendor/lib.zip": zipBytes(t, map[string]string{"lib.js": "l"})},
+			[]string{"index.html", "vendor/lib.js"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			nonce := createApp(t, srv, "bundle")
+			createAppFile(t, srv, nonce, "stale.txt", []byte("old"))
+
+			rr := postFiles(t, srv, "/api/apps/"+nonce+"/web", tc.files)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+			}
+			got := webFileSet(t, srv, nonce)
+			if len(got) != len(tc.want) {
+				t.Errorf("files = %v, want %v (stale files cleared)", got, tc.want)
+			}
+			for _, w := range tc.want {
+				if !got[w] {
+					t.Errorf("missing %s in %v", w, got)
+				}
+			}
+		})
+	}
+}
+
+func TestAppWebUploadRejectsKeepOldFiles(t *testing.T) {
+	cases := map[string]map[string][]byte{
+		"no html":       {"style.css": []byte("s")},
+		"escaping path": {"../evil.html": []byte("e")},
+		"broken zip":    {"site.zip": []byte("not a zip")},
+	}
+	for name, files := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := newTestServer(t)
+			nonce := createApp(t, srv, "keep")
+			createAppFile(t, srv, nonce, "index.html", []byte("live"))
+
+			rr := postFiles(t, srv, "/api/apps/"+nonce+"/web", files)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+			}
+			data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "index.html", 0, 0)
+			if err != nil || string(data) != "live" {
+				t.Fatalf("index.html = %q, %v; want the old file untouched", data, err)
+			}
+		})
+	}
+}
+
+func TestAppDataBulkUpload(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	nonce := createApp(t, srv, "uploads")
+	if err := srv.coreWriteAppFile(su, nonce, "data", "existing.txt", []byte("kept"), ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	archive := zipBytes(t, map[string]string{"inner.txt": "x"})
+	rr := postFiles(t, srv, "/api/apps/"+nonce+"/data", map[string][]byte{
+		"photos/a.jpg": []byte("jpeg"),
+		"backup.zip":   archive,
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	files, _ := srv.coreListAppFiles(su, nonce, "data", "")
+	got := map[string]int64{}
+	for _, f := range files {
+		got[f.Path] = f.Size
+	}
+	if len(got) != 3 || got["existing.txt"] != 4 || got["photos/a.jpg"] != 4 || got["backup.zip"] != int64(len(archive)) {
+		t.Errorf("data files = %v, want existing.txt kept, photos/a.jpg added, backup.zip stored unexpanded", got)
+	}
+
+	rr = postFiles(t, srv, "/api/apps/"+nonce+"/data", map[string][]byte{"ok.txt": []byte("o"), "../escape.txt": []byte("e")})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("escaping path: status = %d, want 400", rr.Code)
+	}
+	if _, err := srv.coreReadAppFile(su, nonce, "data", "ok.txt", 0, 0); err == nil {
+		t.Errorf("ok.txt written despite a rejected sibling; uploads should be all-or-nothing on path checks")
 	}
 }

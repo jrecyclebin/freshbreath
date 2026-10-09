@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -1521,23 +1522,12 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 		w.Write(data)
 
 	case http.MethodPost:
-		if err := r.ParseMultipartForm(50 << 20); err != nil {
-			http.Error(w, "file too large (50MB max)", http.StatusBadRequest)
-			return
-		}
-		file, header, err := r.FormFile("file")
+		files, err := readUploadFiles(w, r)
 		if err != nil {
-			http.Error(w, "missing 'file' field", http.StatusBadRequest)
+			writeErr(w, err)
 			return
 		}
-		defer file.Close()
-
-		data, readErr := io.ReadAll(file)
-		if readErr != nil {
-			http.Error(w, "read failed", http.StatusInternalServerError)
-			return
-		}
-		route, err := s.coreUploadAppWeb(actor, nonce, data, header.Filename)
+		route, err := s.coreUploadAppWeb(actor, nonce, files)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -1559,10 +1549,25 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 
 // handleAppData serves an app's private data area: ?file=<relpath> selects
 // single-file GET/PUT/DELETE (as on /web); a bare GET lists the files as
-// {files:[{path,size}]}.
+// {files:[{path,size}]}, and a multipart POST adds one or more files.
 func (s *Server) handleAppData(w http.ResponseWriter, r *http.Request, nonce string) {
 	if file := r.URL.Query().Get("file"); file != "" {
 		s.handleAppFile(w, r, nonce, "data", file)
+		return
+	}
+	if r.Method == http.MethodPost {
+		files, err := readUploadFiles(w, r)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		paths, err := s.coreUploadAppData(userFromContext(r.Context()), nonce, files)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"files": paths})
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -1576,6 +1581,50 @@ func (s *Server) handleAppData(w http.ResponseWriter, r *http.Request, nonce str
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
+}
+
+// uploadMaxBytes caps one upload request — every file in it together.
+const uploadMaxBytes = 100 << 20
+
+// readUploadFiles reads every "file" part of a multipart upload. Each part's
+// filename is kept whole, relative path included ("css/site.css"), unlike
+// mime/multipart's FileName, which strips directories.
+func readUploadFiles(w http.ResponseWriter, r *http.Request) ([]uploadFile, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, uploadMaxBytes)
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return nil, cerr(http.StatusBadRequest, "expected a multipart/form-data upload")
+	}
+	readErr := func(err error) error {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return cerr(http.StatusRequestEntityTooLarge, "upload too large (%dMB max)", uploadMaxBytes>>20)
+		}
+		return cerr(http.StatusBadRequest, "error reading upload: %v", err)
+	}
+	var files []uploadFile
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, readErr(err)
+		}
+		if part.FormName() != "file" {
+			continue
+		}
+		_, params, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return nil, readErr(err)
+		}
+		files = append(files, uploadFile{Name: params["filename"], Data: data})
+	}
+	if len(files) == 0 {
+		return nil, cerr(http.StatusBadRequest, "missing 'file' field")
+	}
+	return files, nil
 }
 
 // handleAppFile is single-file GET/PUT/DELETE in an app's web or data area.

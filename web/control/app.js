@@ -866,12 +866,50 @@ const IDSub = ({ value, toast }) => {
   );
 };
 
+// Every file in a drop as { file, path }, with dropped folders walked so
+// path keeps their structure ("dist/css/site.css"). Must be called straight
+// from the drop handler: the browser empties dataTransfer once it returns.
+async function droppedFiles(dataTransfer) {
+  const entries = [...dataTransfer.items].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return pickedFiles(dataTransfer.files);
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      if (entry.name === '.DS_Store') return;
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      out.push({ file, path: prefix + file.name });
+      return;
+    }
+    const reader = entry.createReader();
+    // readEntries hands back a batch at a time; keep reading until it's empty.
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (!batch.length) break;
+      for (const e of batch) await walk(e, prefix + entry.name + '/');
+    }
+  };
+  for (const e of entries) await walk(e, '');
+  return out;
+}
+
+// Files from an <input type="file"> in the same { file, path } shape.
+const pickedFiles = (fileList) => [...fileList].map(f => ({ file: f, path: f.name }));
+
+// A multipart body with one "file" part per upload; each part's filename is
+// its relative path, which the server keeps.
+const uploadForm = (files) => {
+  const fd = new FormData();
+  for (const f of files) fd.append('file', f.file, f.path);
+  return fd;
+};
+
 // The drop box on the home page: one place to publish anything — a new
-// app or an app update (.html/.zip) or a tasks/virtual definition (.txt).
-// It only picks the file up; the modal does the asking.
+// app or an app update (.html/.zip, several files or a folder) or a
+// tasks/virtual definition (.txt). It only picks the files up; the modal
+// does the asking.
 // updateOnly is for users who can't create apps or services: the drop can
 // only replace something they already have.
-function DropZone({ onFile, updateOnly }) {
+function DropZone({ onFiles, updateOnly }) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef(null);
   return (
@@ -879,19 +917,19 @@ function DropZone({ onFile, updateOnly }) {
       className={'drop-zone home-dropzone' + (dragging ? ' drop-zone-active' : '')}
       onDragOver={e => { e.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)}
-      onDrop={e => {
+      onDrop={async e => {
         e.preventDefault();
         setDragging(false);
-        const f = e.dataTransfer.files[0];
-        if (f) onFile(f);
+        const files = await droppedFiles(e.dataTransfer);
+        if (files.length) onFiles(files);
       }}
       onClick={() => inputRef.current?.click()}
     >
       <span className="dz-icon"><Icon name="upload" size={22}/></span>
       <b>{updateOnly ? 'Drop an update' : 'Drop a new app or update'}</b>
-      <span>.html or .zip for apps · .txt for tasks & virtual services · or click to browse</span>
-      <input ref={inputRef} type="file" accept=".html,.zip,.txt" style={{display:'none'}}
-        onChange={e => { const f = e.target.files[0]; if (f) onFile(f); e.target.value = ''; }}/>
+      <span>.html, .zip, several files or a folder for apps · .txt for tasks & virtual services · or click to browse</span>
+      <input ref={inputRef} type="file" multiple style={{display:'none'}}
+        onChange={e => { const files = pickedFiles(e.target.files); if (files.length) onFiles(files); e.target.value = ''; }}/>
     </div>
   );
 }
@@ -910,7 +948,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
   const { isAdmin } = useRoles();
   const [view, setView] = useState('recent');
   const [q, setQ] = useState('');
-  const [dropFile, setDropFile] = useState(null);
+  const [dropFiles, setDropFiles] = useState(null);
   const toast = useToast();
 
   const hosted = apps.filter(isHosted);
@@ -989,7 +1027,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
           {hosted.length === 0 ? (
             <div className="empty hosted-empty">
               <b>No hosted apps yet.</b><br/>
-              Drop an .html or .zip file to publish your first one.
+              Drop an .html or .zip file, or a folder of files, to publish your first one.
             </div>
           ) : (
             <div className="hosted-grid">
@@ -1009,7 +1047,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
           )}
           {(isAdmin || apps.length > 0 || services.some(s => canEditServiceFile(s, user))) && (
             <div className="home-dropzone-wrap">
-              <DropZone onFile={setDropFile} updateOnly={!isAdmin}/>
+              <DropZone onFiles={setDropFiles} updateOnly={!isAdmin}/>
             </div>
           )}
         </div>
@@ -1098,9 +1136,9 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
         </div>
       </div>
 
-      {dropFile && (
-        <UploadModal session={session} file={dropFile} apps={apps} services={services} auth={auth}
-                     users={users} adminAuthID={adminAuthID} onClose={() => setDropFile(null)}
+      {dropFiles && (
+        <UploadModal session={session} files={dropFiles} apps={apps} services={services} auth={auth}
+                     users={users} adminAuthID={adminAuthID} onClose={() => setDropFiles(null)}
                      onSaved={onRefresh} navigate={navigate}/>
       )}
     </>
@@ -1677,18 +1715,24 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
 
 const SLOT_NAMES = { dev:'Development', staging:'Staging', prod:'Production' };
 
-// UploadModal asks what a dropped file should become. An .html/.zip lands
-// in an app slot — a brand-new app with the full settings form, or a
+// UploadModal asks what dropped files should become. An .html/.zip — or
+// several files, or a folder — lands in an app slot — a brand-new app with the full settings form, or a
 // replacement upload for an existing one (defaults to Development; another
 // slot deploys there right after the upload). A .txt publishes a tasks or
 // virtual service definition — the type is asked here, not guessed,
 // because both formats are just bracketed headers over plain text.
-function UploadModal({ session, file, apps, services, users, auth, adminAuthID, onClose, onSaved, navigate }) {
+// files is a list of { file, path } (see droppedFiles).
+function UploadModal({ session, files, apps, services, users, auth, adminAuthID, onClose, onSaved, navigate }) {
   const { user } = useAuth();
   const { isAdmin } = useRoles();
-  const ext = (file.name.split('.').pop() || '').toLowerCase();
-  const isAppFile = ext === 'html' || ext === 'zip';
-  const seeded = file.name.replace(/\.[^.]+$/, '');
+  const single = files.length === 1 ? files[0] : null;
+  const ext = single ? (single.path.split('.').pop() || '').toLowerCase() : '';
+  const isAppFile = !single || ext === 'html' || ext === 'zip';
+  // A dropped folder names the upload after itself; a lone file after its name.
+  const tops = new Set(files.map(f => f.path.includes('/') ? f.path.split('/')[0] : null));
+  const folder = !single && tops.size === 1 && !tops.has(null) ? [...tops][0] : null;
+  const seeded = single ? single.file.name.replace(/\.[^.]+$/, '') : (folder || '');
+  const totalSize = files.reduce((n, f) => n + f.file.size, 0);
   // Only admins create; everyone else replaces what they already have —
   // their own apps (the server lists only those) or services they're members of.
   const [mode, setMode] = useState(isAdmin ? 'new' : 'replace');
@@ -1730,9 +1774,7 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
         } else {
           nonce = appNonce;
         }
-        const fd = new FormData();
-        fd.append('file', file);
-        const res = await fetch('/api/apps/' + nonce + '/web', {method:'POST', headers: authHeaders(session), body: fd});
+        const res = await fetch('/api/apps/' + nonce + '/web', {method:'POST', headers: authHeaders(session), body: uploadForm(files)});
         if (!res.ok) throw new Error(await res.text());
         if (slot !== 'dev') await frbr(session, 'POST', '/api/apps/' + nonce + '/deploy', {target: slot});
         toast(mode === 'new' ? 'App created and uploaded' : 'Uploaded to ' + SLOT_NAMES[slot]);
@@ -1751,7 +1793,7 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
           id = Number(svcId);
         }
         const fd = new FormData();
-        fd.append('file', file, file.name);
+        fd.append('file', single.file, single.file.name);
         await frbr(session, 'POST', '/api/services/' + id + '/files', fd, {rawText: true});
         toast(mode === 'new' ? 'Service created and published' : 'Definition published');
         onClose(); onSaved?.();
@@ -1779,8 +1821,11 @@ function UploadModal({ session, file, apps, services, users, auth, adminAuthID, 
         <div className="upload-head">
           <div className="upload-file-icon"><Icon name={isAppFile ? 'apps' : 'log'} size={19}/></div>
           <div className="upload-file-id">
-            <div className="upload-file-name mono">{file.name}</div>
-            <div className="upload-file-meta">{isAppFile ? 'App bundle' : 'Service definition'} · {(file.size/1024).toFixed(1)} KB</div>
+            <div className="upload-file-name mono">{single ? single.file.name : folder ? folder + '/' : files.length + ' files'}</div>
+            <div className="upload-file-meta">
+              {isAppFile ? 'App bundle' : 'Service definition'}
+              {!single && ' · ' + files.length + ' files'} · {(totalSize/1024).toFixed(1)} KB
+            </div>
           </div>
           <button className="upload-close" onClick={busy ? undefined : onClose} title="Close" disabled={busy}>
             <Icon name="close" size={16}/>
@@ -1950,21 +1995,16 @@ function HostUpload({ session, app, onRefresh }) {
 
   const route = hostRoute(app);
 
-  const upload = async (file) => {
-    if (!file) return;
-    const ext = file.name.split('.').pop().toLowerCase();
-    if (ext !== 'html' && ext !== 'zip') {
-      toast('Please upload an .html or .zip file', true);
-      return;
-    }
+  // files is a list of { file, path }; the server sorts out the bundle and
+  // says so if there's no page in it.
+  const upload = async (files) => {
+    if (!files.length) return;
     setUploading(true);
-    const fd = new FormData();
-    fd.append('file', file);
     try {
       const res = await fetch('/api/apps/' + app.nonce + '/web', {
         method: 'POST',
         headers: authHeaders(session),
-        body: fd,
+        body: uploadForm(files),
       });
       if (!res.ok) throw new Error(await res.text());
       const now = new Date().toISOString();
@@ -1995,10 +2035,10 @@ function HostUpload({ session, app, onRefresh }) {
     }
   };
 
-  const onDrop = (e) => {
+  const onDrop = async (e) => {
     e.preventDefault();
     setDragging(false);
-    upload(e.dataTransfer.files[0]);
+    upload(await droppedFiles(e.dataTransfer));
   };
 
   // Deploys copy the current Development (web) folder into the target slot.
@@ -2033,9 +2073,9 @@ function HostUpload({ session, app, onRefresh }) {
       >
         <span className="dz-icon"><Icon name="upload" size={22}/></span>
         <b>{uploading ? 'Uploading…' : (hosted ? 'Drop to replace' : 'Drop an app bundle')}</b>
-        <span>.html or .zip · or click to browse</span>
-        <input ref={inputRef} type="file" accept=".html,.zip" style={{display:'none'}}
-          onChange={e=>upload(e.target.files[0])}/>
+        <span>.html, .zip, several files or a folder · or click to browse</span>
+        <input ref={inputRef} type="file" multiple style={{display:'none'}}
+          onChange={e=>{ upload(pickedFiles(e.target.files)); e.target.value = ''; }}/>
       </div>
 
       <div className="field">
