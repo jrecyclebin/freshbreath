@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1436,16 +1434,6 @@ func hasContentType(headers map[string]string) bool {
 		}
 	}
 	return false
-}
-
-// LoadVirtualTools reads and parses the virtual description file for a service.
-func LoadVirtualTools(dir string, svcName string) ([]VirtualTool, error) {
-	path := filepath.Join(dir, "virtual", svcName+".txt")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("virtual file not found: %s: %w", path, err)
-	}
-	return ParseVirtualFile(data)
 }
 
 // findVirtualTool looks up a tool by name (case-insensitive).

@@ -13,7 +13,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	"poggers.institute/freshbreath/internal/db"
+	"poggers.institute/freshbreath/internal/formats"
 	"poggers.institute/freshbreath/internal/sshkit"
 )
 
@@ -311,6 +314,7 @@ func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *i
 		return "", cerr(http.StatusInternalServerError, "%v", err)
 	}
 	s.rebuildHostedRoutes()
+	s.syncAppServiceMount(nonce)
 	s.audit(actor, "created app", name)
 	return nonce, nil
 }
@@ -326,6 +330,7 @@ func (s *Server) coreUpdateApp(actor *db.User, nonce, name, env, url string, own
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
 	s.rebuildHostedRoutes()
+	s.syncAppServiceMount(nonce)
 	s.audit(actor, "updated app", name)
 	return nil
 }
@@ -343,6 +348,7 @@ func (s *Server) coreDeleteApp(actor *db.User, nonce string) error {
 	}
 	os.RemoveAll(filepath.Join(s.config.DataDir, "apps", nonce))
 	s.rebuildHostedRoutes()
+	s.syncAppServiceMount(nonce)
 	s.audit(actor, "deleted app", app.Name)
 	return nil
 }
@@ -379,6 +385,9 @@ func (s *Server) coreCreateService(actor *db.User, name, url string, d db.Servic
 	}
 	if name == "" {
 		return nil, cerr(http.StatusBadRequest, "name required")
+	}
+	if strings.HasPrefix(name, appServicePrefix) {
+		return nil, cerr(http.StatusBadRequest, "service names starting with %q are reserved for app services", appServicePrefix)
 	}
 	if !db.ValidServiceType(d.Type) {
 		return nil, cerr(http.StatusBadRequest, "unknown service type %q", d.Type)
@@ -422,6 +431,9 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	}
 	if name == "" {
 		return cerr(http.StatusBadRequest, "name required")
+	}
+	if strings.HasPrefix(name, appServicePrefix) && name != existing.Name {
+		return cerr(http.StatusBadRequest, "service names starting with %q are reserved for app services", appServicePrefix)
 	}
 	if !db.ValidServiceType(d.Type) {
 		return cerr(http.StatusBadRequest, "unknown service type %q", d.Type)
@@ -842,29 +854,45 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 
 // ── App Web operations ─────────────────────────────────────────────
 
-// appFile is one entry in an app's hosted web directory.
+// appFileDir resolves an app file area to its directory. "web" (the default)
+// is the Development slot the web server hosts; "data" sits beside it and is
+// never served — private storage such as user uploads.
+func (s *Server) appFileDir(nonce, area string) (string, error) {
+	switch area {
+	case "", "web":
+		return filepath.Join(s.config.DataDir, "apps", nonce, "web"), nil
+	case "data":
+		return filepath.Join(s.config.DataDir, "apps", nonce, "data"), nil
+	}
+	return "", cerr(http.StatusBadRequest, `area must be "web" or "data"`)
+}
+
+// appFile is one entry in an app's web or data directory.
 type appFile struct {
 	Path string `json:"path"` // slash-separated path relative to the web dir
 	Size int64  `json:"size"` // bytes
 }
 
-// coreListAppWeb lists the files in an app's web directory, sorted by path.
+// coreListAppFiles lists the files in an app's web or data area, sorted by path.
 // An app with no uploaded files lists empty (not an error). If search is
 // non-empty, only files whose path or content contains the term (case-
 // insensitive) are returned.
-func (s *Server) coreListAppWeb(actor *db.User, nonce, search string) ([]appFile, error) {
+func (s *Server) coreListAppFiles(actor *db.User, nonce, area, search string) ([]appFile, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
 	if _, err := s.store.GetApp(nonce); err != nil {
 		return nil, cerr(http.StatusNotFound, "app not found: %v", err)
 	}
-	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
+	webDir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(webDir); os.IsNotExist(err) {
 		return []appFile{}, nil
 	}
 	files := []appFile{}
-	err := filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+	err = filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
 		if err != nil || fi.IsDir() {
 			return err
 		}
@@ -881,6 +909,141 @@ func (s *Server) coreListAppWeb(actor *db.User, nonce, search string) ([]appFile
 	}
 	slices.SortFunc(files, func(a, b appFile) int { return strings.Compare(a.Path, b.Path) })
 	return files, nil
+}
+
+// appFileMatch is one matching line from searchAppFiles.
+type appFileMatch struct {
+	Nonce string `json:"nonce"`
+	App   string `json:"app"`
+	Path  string `json:"path"` // slash-separated path relative to the web dir
+	Line  int    `json:"line"` // 1-based
+	Text  string `json:"text"`
+}
+
+// Search output caps: a whole-server search or a minified bundle could
+// otherwise produce an unbounded result.
+const (
+	searchMaxMatches  = 500
+	searchMaxLineText = 300
+)
+
+// coreSearchAppFiles greps an app file area (web or data) for a regular expression (RE2
+// syntax), returning matching lines with 1-based line numbers, like rg. With
+// a nonce it searches that app; without one it searches every app the actor
+// can list (all apps for admin+, their own apps otherwise). Binary files are
+// skipped, long lines are clipped, and results stop at searchMaxMatches with
+// truncated=true.
+func (s *Server) coreSearchAppFiles(actor *db.User, nonce, area, pattern string, ignoreCase bool) ([]appFileMatch, bool, error) {
+	if _, err := s.appFileDir(nonce, area); err != nil {
+		return nil, false, err
+	}
+	if pattern == "" {
+		return nil, false, cerr(http.StatusBadRequest, "pattern is required")
+	}
+	if ignoreCase {
+		pattern = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, false, cerr(http.StatusBadRequest, "invalid pattern: %v", err)
+	}
+
+	type appRef struct{ nonce, name string }
+	var apps []appRef
+	if nonce != "" {
+		if err := s.gateApp(actor, nonce); err != nil {
+			return nil, false, err
+		}
+		app, err := s.store.GetApp(nonce)
+		if err != nil {
+			return nil, false, cerr(http.StatusNotFound, "app not found: %v", err)
+		}
+		apps = append(apps, appRef{app.Nonce, app.Name})
+	} else {
+		if actor == nil {
+			return nil, false, cerr(http.StatusForbidden, "forbidden")
+		}
+		var rows []map[string]interface{}
+		if roleIn(actor.Role, rolesAdminPlus) {
+			rows, err = s.store.ListApps()
+		} else {
+			rows, err = s.store.ListAppsForUser(actor.ID)
+		}
+		if err != nil {
+			return nil, false, cerr(http.StatusInternalServerError, "list apps failed: %v", err)
+		}
+		for _, row := range rows {
+			n, _ := row["nonce"].(string)
+			name, _ := row["name"].(string)
+			apps = append(apps, appRef{n, name})
+		}
+	}
+
+	matches := []appFileMatch{}
+	for _, app := range apps {
+		webDir, _ := s.appFileDir(app.nonce, area)
+		if _, err := os.Stat(webDir); os.IsNotExist(err) {
+			continue
+		}
+		var paths []string
+		err := filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+			if err != nil || fi.IsDir() {
+				return err
+			}
+			paths = append(paths, path)
+			return nil
+		})
+		if err != nil {
+			return nil, false, cerr(http.StatusInternalServerError, "search failed: %v", err)
+		}
+		slices.Sort(paths)
+		for _, path := range paths {
+			data, err := os.ReadFile(path)
+			if err != nil || bytes.IndexByte(data, 0) >= 0 {
+				continue // unreadable or binary
+			}
+			rel, _ := filepath.Rel(webDir, path)
+			for i, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSuffix(line, "\r")
+				if !re.MatchString(line) {
+					continue
+				}
+				if len(matches) == searchMaxMatches {
+					return matches, true, nil
+				}
+				if len(line) > searchMaxLineText {
+					line = clipAroundMatch(line, re)
+				}
+				matches = append(matches, appFileMatch{
+					Nonce: app.nonce,
+					App:   app.name,
+					Path:  filepath.ToSlash(rel),
+					Line:  i + 1,
+					Text:  line,
+				})
+			}
+		}
+	}
+	return matches, false, nil
+}
+
+// clipAroundMatch cuts a long line down to searchMaxLineText bytes centered
+// near the first match, marking cut ends with "…". Keeps minified files
+// readable in search results.
+func clipAroundMatch(line string, re *regexp.Regexp) string {
+	start := 0
+	if loc := re.FindStringIndex(line); loc != nil {
+		start = max(0, loc[0]-searchMaxLineText/3)
+	}
+	end := min(len(line), start+searchMaxLineText)
+	text := strings.ToValidUTF8(line[start:end], "")
+	if start > 0 {
+		text = "…" + text
+	}
+	if end < len(line) {
+		text += "…"
+	}
+	return text
 }
 
 // coreDownloadAppWeb returns the app's web directory as a zip archive.
@@ -925,10 +1088,21 @@ func (s *Server) coreDownloadAppWeb(actor *db.User, nonce string) ([]byte, strin
 	return buf.Bytes(), appSlug(app), nil
 }
 
-// coreUploadAppWeb writes web files for an app from raw content. The
-// filename determines handling: .html is saved as index.html; .zip is
-// extracted via extractZip.
-func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, filename string) (string, error) {
+// uploadFile is one file from an upload request. Name is the client's
+// filename, which may carry a relative path ("css/site.css").
+type uploadFile struct {
+	Name string
+	Data []byte
+}
+
+// coreUploadAppWeb replaces an app's web directory (the Development slot)
+// with an uploaded bundle: one or more files, where any .zip is expanded in
+// place. The whole set is treated like one zip — a single top-level folder
+// shared by every file is unwrapped, and if there's no index.html the first
+// .html alphabetically becomes it — so a lone page, a zip, a pile of files
+// and a dropped folder all publish the same way. Everything is validated
+// before the old files are cleared.
+func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFile) (string, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return "", err
 	}
@@ -936,25 +1110,110 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, fil
 	if err != nil {
 		return "", cerr(http.StatusNotFound, "app not found: %v", err)
 	}
+	if len(files) == 0 {
+		return "", cerr(http.StatusBadRequest, "no files uploaded")
+	}
+
+	// Gather every entry as a slash path plus an opener, so zip entries stream
+	// straight to disk instead of being decompressed into memory.
+	type entry struct {
+		path string
+		open func() (io.ReadCloser, error)
+	}
+	var entries []entry
+	for _, f := range files {
+		rel, err := cleanAppFilePath(f.Name)
+		if err != nil {
+			return "", cerr(http.StatusBadRequest, "%s: %v", f.Name, err)
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.HasSuffix(strings.ToLower(rel), ".zip") {
+			data := f.Data
+			entries = append(entries, entry{rel, func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(data)), nil
+			}})
+			continue
+		}
+		zr, err := zip.NewReader(bytes.NewReader(f.Data), int64(len(f.Data)))
+		if err != nil {
+			return "", cerr(http.StatusBadRequest, "zip error: %s: %v", f.Name, err)
+		}
+		zipDir := path.Dir(rel) // a zip expands where it was uploaded
+		for _, zf := range zr.File {
+			if zf.FileInfo().IsDir() {
+				continue
+			}
+			clean := path.Clean(path.Join(zipDir, filepath.ToSlash(zf.Name)))
+			if clean == "." || path.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+				continue // unsafe entry
+			}
+			entries = append(entries, entry{clean, zf.Open})
+		}
+	}
+
+	// Unwrap a single top-level folder shared by every entry.
+	topDirs := map[string]bool{}
+	hasRootFiles := false
+	for _, e := range entries {
+		if top, _, found := strings.Cut(e.path, "/"); found {
+			topDirs[top] = true
+		} else {
+			hasRootFiles = true
+		}
+	}
+	if !hasRootFiles && len(topDirs) == 1 {
+		for i := range entries {
+			_, entries[i].path, _ = strings.Cut(entries[i].path, "/")
+		}
+	}
+
+	// Find the entry point: index.html, else the first .html alphabetically.
+	var htmlFiles []string
+	hasIndex := false
+	for _, e := range entries {
+		if e.path == "index.html" {
+			hasIndex = true
+		}
+		if strings.HasSuffix(strings.ToLower(e.path), ".html") {
+			htmlFiles = append(htmlFiles, e.path)
+		}
+	}
+	if !hasIndex {
+		if len(htmlFiles) == 0 {
+			return "", cerr(http.StatusBadRequest, "no HTML file found in upload")
+		}
+		sort.Strings(htmlFiles)
+		for i := range entries {
+			if entries[i].path == htmlFiles[0] {
+				entries[i].path = "index.html"
+			}
+		}
+	}
+
 	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
 	if err := os.RemoveAll(webDir); err != nil {
 		return "", cerr(http.StatusInternalServerError, "failed to clear web dir")
 	}
-	if err := os.MkdirAll(webDir, 0755); err != nil {
-		return "", cerr(http.StatusInternalServerError, "failed to create web dir")
-	}
-
-	name := strings.ToLower(filename)
-	if strings.HasSuffix(name, ".html") {
-		if err := os.WriteFile(filepath.Join(webDir, "index.html"), data, 0644); err != nil {
-			return "", cerr(http.StatusInternalServerError, "write failed")
+	for _, e := range entries {
+		dest := filepath.Join(webDir, filepath.FromSlash(e.path))
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return "", cerr(http.StatusInternalServerError, "mkdir: %v", err)
 		}
-	} else if strings.HasSuffix(name, ".zip") {
-		if err := extractZip(bytes.NewReader(data), int64(len(data)), webDir); err != nil {
-			return "", cerr(http.StatusBadRequest, "zip error: %v", err)
+		rc, err := e.open()
+		if err != nil {
+			return "", cerr(http.StatusBadRequest, "open %s: %v", e.path, err)
 		}
-	} else {
-		return "", cerr(http.StatusBadRequest, "unsupported file type (.html or .zip only)")
+		out, err := os.Create(dest)
+		if err != nil {
+			rc.Close()
+			return "", cerr(http.StatusInternalServerError, "create: %v", err)
+		}
+		_, copyErr := io.Copy(out, rc)
+		out.Close()
+		rc.Close()
+		if copyErr != nil {
+			return "", cerr(http.StatusBadRequest, "write %s: %v", e.path, copyErr)
+		}
 	}
 
 	now := time.Now().UTC()
@@ -969,6 +1228,30 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, data []byte, fil
 	s.rebuildHostedRoutes()
 	s.audit(actor, "uploaded web files", app.Name)
 	return "/" + appSlug(app), nil
+}
+
+// coreUploadAppData adds uploaded files to an app's data area at their
+// relative paths, replacing same-named files and leaving the rest alone.
+// Files are stored as-is (zips are not expanded). All paths are checked
+// before anything is written. Returns the written paths.
+func (s *Server) coreUploadAppData(actor *db.User, nonce string, files []uploadFile) ([]string, error) {
+	if len(files) == 0 {
+		return nil, cerr(http.StatusBadRequest, "no files uploaded")
+	}
+	paths := make([]string, len(files))
+	for i, f := range files {
+		rel, err := cleanAppFilePath(f.Name)
+		if err != nil {
+			return nil, cerr(http.StatusBadRequest, "%s: %v", f.Name, err)
+		}
+		paths[i] = filepath.ToSlash(rel)
+	}
+	for i, f := range files {
+		if err := s.coreWriteAppFile(actor, nonce, "data", paths[i], f.Data, ""); err != nil {
+			return nil, err
+		}
+	}
+	return paths, nil
 }
 
 // coreDeleteAppWeb removes an app's web directory (the Development slot).
@@ -1134,10 +1417,10 @@ func fileMatchesSearch(webDir, relPath, term string) bool {
 	return strings.Contains(strings.ToLower(string(data)), lower)
 }
 
-// coreReadAppFile reads all or part of a file from an app's web directory.
+// coreReadAppFile reads all or part of a file from an app's web or data area.
 // offset is a zero-based byte position; limit is the maximum bytes to return.
 // A zero limit reads to the end of the file.
-func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset, limit int64) ([]byte, error) {
+func (s *Server) coreReadAppFile(actor *db.User, nonce, area, filePath string, offset, limit int64) ([]byte, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
@@ -1148,8 +1431,11 @@ func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset,
 	if err != nil {
 		return nil, cerr(http.StatusBadRequest, "%v", err)
 	}
-	fullPath := filepath.Join(s.config.DataDir, "apps", nonce, "web", rel)
-	data, err := os.ReadFile(fullPath)
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, rel))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, cerr(http.StatusNotFound, "file not found")
@@ -1160,10 +1446,10 @@ func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset,
 }
 
 // coreStatAppFile returns the size and sniffed content type of a file in an
-// app's web directory without reading the whole file. Used by the MCP
+// app's web or data area without reading the whole file. Used by the MCP
 // read_app_file transport:"http" and threshold-escape paths to populate
 // {size, content_type} without loading a potentially large file into memory.
-func (s *Server) coreStatAppFile(actor *db.User, nonce, filePath string) (int64, string, error) {
+func (s *Server) coreStatAppFile(actor *db.User, nonce, area, filePath string) (int64, string, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return 0, "", err
 	}
@@ -1174,7 +1460,11 @@ func (s *Server) coreStatAppFile(actor *db.User, nonce, filePath string) (int64,
 	if err != nil {
 		return 0, "", cerr(http.StatusBadRequest, "%v", err)
 	}
-	size, ct, err := sniffFile(filepath.Join(s.config.DataDir, "apps", nonce, "web", rel))
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return 0, "", err
+	}
+	size, ct, err := sniffFile(filepath.Join(dir, rel))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, "", cerr(http.StatusNotFound, "file not found")
@@ -1215,10 +1505,11 @@ func replaceUniqueText(src, old, repl []byte) ([]byte, error) {
 	return bytes.Replace(src, old, repl, 1), nil
 }
 
-// coreWriteAppFile writes or patches a file in an app's web directory. If
+// coreWriteAppFile writes or patches a file in an app's web or data area. If
 // oldText is empty the entire file is replaced. Otherwise the single occurrence
-// of oldText in the existing file is replaced with data.
-func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data []byte, oldText string) error {
+// of oldText in the existing file is replaced with data. Only web writes count
+// as a publish (LastUploaded, hosted routes).
+func (s *Server) coreWriteAppFile(actor *db.User, nonce, area, filePath string, data []byte, oldText string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
@@ -1231,8 +1522,11 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data [
 		return cerr(http.StatusBadRequest, "%v", err)
 	}
 
-	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
-	fullPath := filepath.Join(webDir, rel)
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return err
+	}
+	fullPath := filepath.Join(dir, rel)
 
 	var newData []byte
 	if oldText == "" {
@@ -1258,23 +1552,25 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data [
 		return cerr(http.StatusInternalServerError, "write failed")
 	}
 
-	now := time.Now().UTC()
-	details := app.Details
-	if details == nil {
-		details = &db.AppDetails{}
+	if area != "data" {
+		now := time.Now().UTC()
+		details := app.Details
+		if details == nil {
+			details = &db.AppDetails{}
+		}
+		details.LastUploaded = &now
+		if err := s.store.UpdateAppDetails(nonce, details); err != nil {
+			return cerr(http.StatusInternalServerError, "failed to save details")
+		}
+		s.rebuildHostedRoutes()
 	}
-	details.LastUploaded = &now
-	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
-		return cerr(http.StatusInternalServerError, "failed to save details")
-	}
-	s.rebuildHostedRoutes()
 	_ = s.store.TouchApp(nonce)
-	s.audit(actor, "wrote app file", app.Name+"/"+rel)
+	s.audit(actor, "wrote app file", app.Name+"/"+appFileAuditPath(area, rel))
 	return nil
 }
 
-// coreDeleteAppFile removes a single file from an app's web directory.
-func (s *Server) coreDeleteAppFile(actor *db.User, nonce, filePath string) error {
+// coreDeleteAppFile removes a single file from an app's web or data area.
+func (s *Server) coreDeleteAppFile(actor *db.User, nonce, area, filePath string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
@@ -1286,17 +1582,103 @@ func (s *Server) coreDeleteAppFile(actor *db.User, nonce, filePath string) error
 	if err != nil {
 		return cerr(http.StatusBadRequest, "%v", err)
 	}
-	fullPath := filepath.Join(s.config.DataDir, "apps", nonce, "web", rel)
-	if err := os.Remove(fullPath); err != nil {
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, rel)); err != nil {
 		if os.IsNotExist(err) {
 			return cerr(http.StatusNotFound, "file not found")
 		}
 		return cerr(http.StatusInternalServerError, "delete failed")
 	}
-	s.rebuildHostedRoutes()
+	if area != "data" {
+		s.rebuildHostedRoutes()
+	}
 	_ = s.store.TouchApp(nonce)
-	s.audit(actor, "deleted app file", app.Name+"/"+rel)
+	s.audit(actor, "deleted app file", app.Name+"/"+appFileAuditPath(area, rel))
 	return nil
+}
+
+// appFileAuditPath labels data-area files in the audit log so they aren't
+// mistaken for published web files.
+func appFileAuditPath(area, rel string) string {
+	rel = filepath.ToSlash(rel)
+	if area == "data" {
+		return "data:" + rel
+	}
+	return rel
+}
+
+// ── App services ────────────────────────────────────────────────────
+//
+// Every app has its own virtual service, implicit rather than a row in the
+// services table. It starts blank and gains tools when its definition is
+// written, then works like any virtual service: MCP at /mcp/app:<slug>,
+// HTTP at /service/call/app:<slug>, and the usual service-file tools under
+// the name app:<slug>. It answers to the app: the app's gate protects it,
+// app members may edit it, only the app itself may call it over HTTP, and
+// its SQL steps use the app's own database. Its ID is the app's negated,
+// which can't collide with a real service. The definition lives at
+// apps/<nonce>/service.txt — outside every served slot — and goes with the
+// app.
+
+// appServicePrefix starts every app service's name and slug.
+const appServicePrefix = "app:"
+
+// appService builds an app's implicit virtual service.
+func appService(app *db.App) *db.Service {
+	slug := appServicePrefix + appSlug(app)
+	return &db.Service{
+		ID:          -app.ID,
+		Name:        slug,
+		URL:         "/mcp/" + slug,
+		Descriptor:  db.ServiceDescriptor{Type: "virtual", DatabaseTarget: "app:" + app.Nonce},
+		ProtectedBy: app.ProtectedBy,
+		AppNonce:    app.Nonce,
+	}
+}
+
+// appServiceBySlug finds the app service for an app slug (the part after
+// "app:").
+func (s *Server) appServiceBySlug(slug string) (*db.Service, error) {
+	apps, err := s.store.ListHostedApps()
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range apps {
+		if appSlug(a) == slug {
+			app, err := s.store.GetApp(a.Nonce)
+			if err != nil {
+				return nil, err
+			}
+			return appService(app), nil
+		}
+	}
+	return nil, fmt.Errorf("no app with slug %q", slug)
+}
+
+// syncAppServiceMount remounts an app's service after the app or its
+// definition changes — or unmounts it once the app is gone.
+func (s *Server) syncAppServiceMount(nonce string) {
+	s.mcpMounts.removeApp(nonce)
+	if app, err := s.store.GetApp(nonce); err == nil {
+		s.mcpMounts.add(s, appService(app))
+	}
+}
+
+// loadVirtualTools parses a virtual service's definition. An app service
+// with nothing written yet is blank, not missing.
+func (s *Server) loadVirtualTools(svc *db.Service) ([]formats.VirtualTool, error) {
+	path := serviceDefinitionPath(s.config.DataDir, svc)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) && svc.AppNonce != "" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("virtual file not found: %s: %w", path, err)
+	}
+	return formats.ParseVirtualFile(data)
 }
 
 // ── Service File operations ─────────────────────────────────────────
@@ -1304,6 +1686,9 @@ func (s *Server) coreDeleteAppFile(actor *db.User, nonce, filePath string) error
 // serviceDefinitionPath returns the on-disk definition path for tasks and
 // virtual services, or "" for other service types.
 func serviceDefinitionPath(dataDir string, svc *db.Service) string {
+	if svc.AppNonce != "" {
+		return filepath.Join(dataDir, "apps", svc.AppNonce, "service.txt")
+	}
 	switch svc.Descriptor.Type {
 	case "tasks":
 		return filepath.Join(dataDir, "tasks", svc.Name+".txt")
@@ -1313,19 +1698,51 @@ func serviceDefinitionPath(dataDir string, svc *db.Service) string {
 	return ""
 }
 
+// definitionService gates and loads the service whose definition file an
+// operation touches: a registered tasks/virtual service (Admin+ or a service
+// member), or — for a negative ID — an app's own service (Admin+ or an app
+// member).
+func (s *Server) definitionService(actor *db.User, id int64) (*db.Service, error) {
+	if id < 0 {
+		app, err := s.store.GetAppByID(-id)
+		if err != nil {
+			return nil, cerr(http.StatusNotFound, "service not found: %v", err)
+		}
+		if err := s.gateApp(actor, app.Nonce); err != nil {
+			return nil, err
+		}
+		return appService(app), nil
+	}
+	if err := s.gateServiceFile(actor, id); err != nil {
+		return nil, err
+	}
+	svc, err := s.store.GetService(id)
+	if err != nil {
+		return nil, cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
+		return nil, cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+	return svc, nil
+}
+
+// touchService bumps a registered service's updated_at; an app service
+// touches its app.
+func (s *Server) touchService(svc *db.Service) {
+	if svc.AppNonce != "" {
+		_ = s.store.TouchApp(svc.AppNonce)
+		return
+	}
+	_ = s.store.TouchService(svc.ID)
+}
+
 // coreDownloadServiceFiles returns a service's published definition file.
 // Only tasks and virtual services support file publishing; the returned file
 // is the raw plain-text definition.
 func (s *Server) coreDownloadServiceFiles(actor *db.User, id int64) ([]byte, string, error) {
-	if err := s.gateServiceFile(actor, id); err != nil {
-		return nil, "", err
-	}
-	svc, err := s.store.GetService(id)
+	svc, err := s.definitionService(actor, id)
 	if err != nil {
-		return nil, "", cerr(http.StatusNotFound, "service not found: %v", err)
-	}
-	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-		return nil, "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		return nil, "", err
 	}
 
 	path := serviceDefinitionPath(s.config.DataDir, svc)
@@ -1343,15 +1760,9 @@ func (s *Server) coreDownloadServiceFiles(actor *db.User, id int64) ([]byte, str
 // Only tasks and virtual services support file publishing; they each accept a
 // single plain-text file stored in their existing definition directory.
 func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, filename string) (string, error) {
-	if err := s.gateServiceFile(actor, id); err != nil {
-		return "", err
-	}
-	svc, err := s.store.GetService(id)
+	svc, err := s.definitionService(actor, id)
 	if err != nil {
-		return "", cerr(http.StatusNotFound, "service not found: %v", err)
-	}
-	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-		return "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		return "", err
 	}
 	if strings.HasSuffix(strings.ToLower(filename), ".zip") {
 		return "", cerr(http.StatusBadRequest, "zip uploads are not supported for %s services", svc.Descriptor.Type)
@@ -1366,7 +1777,7 @@ func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, f
 	}
 	s.mcpMounts.add(s, svc)
 
-	_ = s.store.TouchService(id)
+	s.touchService(svc)
 	s.audit(actor, "uploaded service files", svc.Name)
 	return svc.URL, nil
 }
@@ -1374,24 +1785,22 @@ func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, f
 // coreDeleteServiceFiles removes a service's published definition file.
 // Only tasks and virtual services support file publishing.
 func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
-	if err := s.gateServiceFile(actor, id); err != nil {
-		return err
-	}
-	svc, err := s.store.GetService(id)
+	svc, err := s.definitionService(actor, id)
 	if err != nil {
-		return cerr(http.StatusNotFound, "service not found: %v", err)
-	}
-	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-		return cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		return err
 	}
 
 	path := serviceDefinitionPath(s.config.DataDir, svc)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return cerr(http.StatusInternalServerError, "failed to remove service file")
 	}
-	s.mcpMounts.remove(mcpSlug(svc.URL))
+	if svc.AppNonce != "" {
+		s.mcpMounts.add(s, svc) // back to blank, still mounted
+	} else {
+		s.mcpMounts.remove(mcpSlug(svc.URL))
+	}
 
-	_ = s.store.TouchService(id)
+	s.touchService(svc)
 	s.audit(actor, "removed service files", svc.Name)
 	return nil
 }
@@ -1400,15 +1809,9 @@ func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
 // file. offset is a zero-based byte position; limit is the maximum bytes to
 // return. A zero limit reads to the end of the file.
 func (s *Server) coreReadServiceFile(actor *db.User, id int64, offset, limit int64) ([]byte, string, error) {
-	if err := s.gateServiceFile(actor, id); err != nil {
-		return nil, "", err
-	}
-	svc, err := s.store.GetService(id)
+	svc, err := s.definitionService(actor, id)
 	if err != nil {
-		return nil, "", cerr(http.StatusNotFound, "service not found: %v", err)
-	}
-	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-		return nil, "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		return nil, "", err
 	}
 
 	path := serviceDefinitionPath(s.config.DataDir, svc)
@@ -1426,15 +1829,9 @@ func (s *Server) coreReadServiceFile(actor *db.User, id int64, offset, limit int
 // tasks/virtual service definition file without reading the whole file.
 // Symmetric to coreStatAppFile for the MCP service-file read paths.
 func (s *Server) coreStatServiceFile(actor *db.User, id int64) (int64, string, error) {
-	if err := s.gateServiceFile(actor, id); err != nil {
-		return 0, "", err
-	}
-	svc, err := s.store.GetService(id)
+	svc, err := s.definitionService(actor, id)
 	if err != nil {
-		return 0, "", cerr(http.StatusNotFound, "service not found: %v", err)
-	}
-	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-		return 0, "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		return 0, "", err
 	}
 	size, ct, err := sniffFile(serviceDefinitionPath(s.config.DataDir, svc))
 	if err != nil {
@@ -1450,15 +1847,9 @@ func (s *Server) coreStatServiceFile(actor *db.User, id int64) (int64, string, e
 // file. If oldText is empty the entire file is replaced. Otherwise the single
 // occurrence of oldText in the existing file is replaced with data.
 func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, oldText string) error {
-	if err := s.gateServiceFile(actor, id); err != nil {
-		return err
-	}
-	svc, err := s.store.GetService(id)
+	svc, err := s.definitionService(actor, id)
 	if err != nil {
-		return cerr(http.StatusNotFound, "service not found: %v", err)
-	}
-	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-		return cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		return err
 	}
 
 	path := serviceDefinitionPath(s.config.DataDir, svc)
@@ -1488,7 +1879,7 @@ func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, old
 	}
 	s.mcpMounts.add(s, svc)
 
-	_ = s.store.TouchService(id)
+	s.touchService(svc)
 	s.audit(actor, "wrote service file", svc.Name)
 	return nil
 }
@@ -1497,15 +1888,9 @@ func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, old
 // single-item listing. If search is non-empty, the file is only returned when
 // its content contains the term (case-insensitive).
 func (s *Server) coreListServiceFiles(actor *db.User, id int64, search string) ([]appFile, error) {
-	if err := s.gateServiceFile(actor, id); err != nil {
-		return nil, err
-	}
-	svc, err := s.store.GetService(id)
+	svc, err := s.definitionService(actor, id)
 	if err != nil {
-		return nil, cerr(http.StatusNotFound, "service not found: %v", err)
-	}
-	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-		return nil, cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		return nil, err
 	}
 
 	path := serviceDefinitionPath(s.config.DataDir, svc)
@@ -1526,108 +1911,6 @@ func (s *Server) coreListServiceFiles(actor *db.User, id int64, search string) (
 		}
 	}
 	return []appFile{{Path: filepath.Base(path), Size: fi.Size()}}, nil
-}
-
-// extractZip extracts a zip archive to destDir, auto-detecting the content
-// root (unwrapping a single top-level folder if present) and ensuring an
-// index.html exists (renaming the first .html alphabetically if absent).
-// Accepts a size parameter so it can be called from both multipart (whole
-// stream) and core (known-length buffer) paths.
-func extractZip(r io.ReaderAt, size int64, destDir string) error {
-	zr, err := zip.NewReader(r, size)
-	if err != nil {
-		return fmt.Errorf("open zip: %w", err)
-	}
-
-	// Determine effective root: if all file entries share a single top-level
-	// directory and there are no files directly at the root, strip that prefix.
-	topDirs := map[string]bool{}
-	hasRootFiles := false
-	for _, f := range zr.File {
-		name := filepath.ToSlash(f.Name)
-		if name == "" || strings.HasSuffix(name, "/") {
-			continue
-		}
-		if idx := strings.Index(name, "/"); idx >= 0 {
-			topDirs[name[:idx]] = true
-		} else {
-			hasRootFiles = true
-		}
-	}
-	root := ""
-	if !hasRootFiles && len(topDirs) == 1 {
-		for dir := range topDirs {
-			root = dir + "/"
-		}
-	}
-
-	// Find the entry point HTML: prefer index.html, else first .html alphabetically.
-	var htmlFiles []string
-	hasIndex := false
-	for _, f := range zr.File {
-		name := filepath.ToSlash(f.Name)
-		if !strings.HasPrefix(name, root) || strings.HasSuffix(name, "/") {
-			continue
-		}
-		rel := strings.TrimPrefix(name, root)
-		if rel == "index.html" {
-			hasIndex = true
-			break
-		}
-		if strings.HasSuffix(rel, ".html") {
-			htmlFiles = append(htmlFiles, rel)
-		}
-	}
-	var entryPoint string
-	if !hasIndex {
-		if len(htmlFiles) == 0 {
-			return fmt.Errorf("no HTML file found in zip")
-		}
-		sort.Strings(htmlFiles)
-		entryPoint = htmlFiles[0]
-	}
-
-	// Extract files.
-	for _, f := range zr.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		name := filepath.ToSlash(f.Name)
-		if !strings.HasPrefix(name, root) {
-			continue
-		}
-		rel := strings.TrimPrefix(name, root)
-		if rel == "" {
-			continue
-		}
-		if entryPoint != "" && rel == entryPoint {
-			rel = "index.html"
-		}
-		clean := filepath.Clean(rel)
-		if strings.HasPrefix(clean, "..") {
-			continue
-		}
-		destPath := filepath.Join(destDir, clean)
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return fmt.Errorf("mkdir: %w", err)
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return fmt.Errorf("open entry: %w", err)
-		}
-		out, err := os.Create(destPath)
-		if err != nil {
-			rc.Close()
-			return fmt.Errorf("create: %w", err)
-		}
-		_, copyErr := io.Copy(out, rc)
-		out.Close()
-		rc.Close()
-		if copyErr != nil {
-			return fmt.Errorf("extract: %w", copyErr)
-		}
-	}
-	return nil
 }
 
 // isHostedNonce reports whether nonce maps to a currently hosted app route.

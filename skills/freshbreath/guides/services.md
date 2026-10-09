@@ -24,7 +24,9 @@ don't have to be a member to *use* the app, just to maintain it.)
   with `listTools` / `callTool` like any MCP service. (See the 'tasks' guide for
   writing the scripts.)
 - **virtual** — custom MCP endpoints you define, wrapping API calls or SQL
-  queries. Also `listTools` / `callTool`. (See the 'virtuals' guide.)
+  queries. Also `listTools` / `callTool`. (See the 'virtuals' guide.) Every
+  app also has its own blank virtual service, `/mcp/app:<slug>` — no setup,
+  just write its tools (see "App services" in the 'virtuals' guide).
 - **ssh** — every server has exactly one SSH service (URL `ssh://`) for
   connecting to remote machines.
 

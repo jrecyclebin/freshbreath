@@ -98,6 +98,18 @@ func (r *mcpMountRegistry) remove(slug string) {
 	r.mu.Unlock()
 }
 
+// removeApp deletes an app service's entry, whatever slug the app had when
+// it was mounted.
+func (r *mcpMountRegistry) removeApp(nonce string) {
+	r.mu.Lock()
+	for slug, e := range r.entries {
+		if e.svc.AppNonce == nonce {
+			delete(r.entries, slug)
+		}
+	}
+	r.mu.Unlock()
+}
+
 // requireMCPGate enforces a mount's inbound gate. Every mount resolves its
 // protected_by per request — empty inherits the admin record — and demands
 // a bearer; the one exception is an explicit Anonymous record, which mounts
@@ -129,7 +141,7 @@ func (s *Server) requireMCPGate(svc *db.Service, next http.Handler) http.Handler
 // tools via the MCP protocol. Optional opts tweak the ServerOptions before the
 // server is built (tests use them to force an old protocol version).
 func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOptions)) (*mcp.Server, error) {
-	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+	tools, err := s.loadVirtualTools(svc)
 	if err != nil {
 		return nil, fmt.Errorf("load virtual tools: %w", err)
 	}

@@ -292,19 +292,30 @@ func (s *Server) mintActFileURL(user *db.User, method, pathQuery string) (string
 	return s.config.PublicBaseURL + "/api/act/" + tok, nil
 }
 
-// appFileActPath builds the act-token target path for an app web file:
-// /api/apps/{nonce}/web?file=<relpath>, with the file path query-encoded.
-func appFileActPath(nonce, filePath string) string {
+// appFileAreaDescription documents the area argument shared by the app file tools.
+const appFileAreaDescription = "Optional file area: \"web\" (default) is the Development slot the web server hosts; \"data\" is private storage (e.g. user uploads) that is never served over the web."
+
+// appFileActPath builds the act-token target path for an app file:
+// /api/apps/{nonce}/{web|data}?file=<relpath>, with the file path
+// query-encoded. An empty area means web.
+func appFileActPath(nonce, area, filePath string) string {
+	if area == "" {
+		area = "web"
+	}
 	q := url.Values{}
 	q.Set("file", filePath)
-	return "/api/apps/" + nonce + "/web?" + q.Encode()
+	return "/api/apps/" + nonce + "/" + area + "?" + q.Encode()
 }
 
 // serviceFileActPath builds the act-token target path for a service
-// definition file: /api/services/{id}/files. Services take no client path —
-// the definition path is server-derived.
-func serviceFileActPath(id int64) string {
-	return "/api/services/" + strconv.FormatInt(id, 10) + "/files"
+// definition file: /api/services/{id}/files, or /api/apps/{nonce}/service/files
+// for an app's own service. Services take no client path — the definition
+// path is server-derived.
+func serviceFileActPath(svc *db.Service) string {
+	if svc.AppNonce != "" {
+		return "/api/apps/" + svc.AppNonce + "/service/files"
+	}
+	return "/api/services/" + strconv.FormatInt(svc.ID, 10) + "/files"
 }
 
 // mcpToolError returns a tool result with an error message.
@@ -370,6 +381,20 @@ func (s *Server) serviceByName(name string) (*db.Service, error) {
 		return nil, fmt.Errorf("service not found: %v", err)
 	}
 	return svc, nil
+}
+
+// definitionServiceByName is serviceByName for the service-file tools, which
+// also reach an app's own service by its app:<slug> name. The core calls
+// they hand it to do the gating.
+func (s *Server) definitionServiceByName(name string) (*db.Service, error) {
+	if appSlug, ok := strings.CutPrefix(name, appServicePrefix); ok {
+		svc, err := s.appServiceBySlug(appSlug)
+		if err != nil {
+			return nil, fmt.Errorf("service not found: %v", err)
+		}
+		return svc, nil
+	}
+	return s.serviceByName(name)
 }
 
 // ── App Tools ───────────────────────────────────────────────────────
@@ -701,11 +726,12 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// list_app_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_app_files",
-		Description: "List an app's hosted web files (path + size). Empty if nothing is published. Optionally search file paths and contents.",
+		Description: "List an app's files (path + size) in its web or data area. Empty if nothing is there. Optionally search file paths and contents.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"nonce":  map[string]interface{}{"type": "string", "description": "App nonce"},
+				"area":   map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
 				"search": map[string]interface{}{"type": "string", "description": "Optional term to filter by path or content (case-insensitive)"},
 			},
 			"required": []string{"nonce"},
@@ -718,23 +744,57 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
+		area, _ := args["area"].(string)
 		search, _ := args["search"].(string)
-		files, err := s.coreListAppWeb(user, nonce, search)
+		files, err := s.coreListAppFiles(user, nonce, area, search)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]interface{}{"files": files})
 	})
 
+	// search_app_files
+	mcps.AddTool(&mcp.Tool{
+		Name:        "search_app_files",
+		Description: "Search app files (web area by default, or data) like grep/rg: returns each matching line with its path and 1-based line number. Omit nonce to search every app you can access. Binary files are skipped, long lines are clipped around the match, and results stop at 500 matches (truncated:true).",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pattern":     map[string]interface{}{"type": "string", "description": "Regular expression (RE2 syntax) matched against each line"},
+				"nonce":       map[string]interface{}{"type": "string", "description": "Optional app nonce; omit to search all your apps"},
+				"area":        map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
+				"ignore_case": map[string]interface{}{"type": "boolean", "description": "Optional case-insensitive match"},
+			},
+			"required": []string{"pattern"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		pattern, _ := args["pattern"].(string)
+		nonce, _ := args["nonce"].(string)
+		area, _ := args["area"].(string)
+		ignoreCase, _ := args["ignore_case"].(bool)
+		matches, truncated, err := s.coreSearchAppFiles(user, nonce, area, pattern, ignoreCase)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]interface{}{"matches": matches, "truncated": truncated})
+	})
+
 	// read_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "read_app_file",
-Description: "Read all or part of a file from an app's web directory. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
+Description: "Read all or part of a file from an app's web or data area. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"nonce":     map[string]interface{}{"type": "string", "description": "App nonce"},
-				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
+				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the area's root"},
+				"area":      map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
 				"offset":    map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
 				"limit":     map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
 				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to fetch over HTTP sidechannel — for saving as files)"},
@@ -750,6 +810,7 @@ Description: "Read all or part of a file from an app's web directory. Valid UTF-
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
 		path, _ := args["path"].(string)
+		area, _ := args["area"].(string)
 		offset := int64Arg(args, "offset")
 		limit := int64Arg(args, "limit")
 		transport, _ := args["transport"].(string)
@@ -758,7 +819,7 @@ Description: "Read all or part of a file from an app's web directory. Valid UTF-
 		switch transport {
 		case actTokenTransportInline:
 			if chunked {
-				data, err := s.coreReadAppFile(user, nonce, path, offset, limit)
+				data, err := s.coreReadAppFile(user, nonce, area, path, offset, limit)
 				if err != nil {
 					return mcpToolError("%v", err), nil
 				}
@@ -766,16 +827,16 @@ Description: "Read all or part of a file from an app's web directory. Valid UTF-
 			}
 			// Whole-file: bound the read so a huge file isn't loaded just to
 			// decide it's too big; escape to an act-token URL if it is.
-			data, err := s.coreReadAppFile(user, nonce, path, 0, int64(mcpInlineMaxBytes)+1)
+			data, err := s.coreReadAppFile(user, nonce, area, path, 0, int64(mcpInlineMaxBytes)+1)
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
 			if int64(len(data)) > mcpInlineMaxBytes {
-				size, ct, serr := s.coreStatAppFile(user, nonce, path)
+				size, ct, serr := s.coreStatAppFile(user, nonce, area, path)
 				if serr != nil {
 					return mcpToolError("%v", serr), nil
 				}
-				u, merr := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, path))
+				u, merr := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, area, path))
 				if merr != nil {
 					return mcpToolError("%v", merr), nil
 				}
@@ -794,11 +855,11 @@ Description: "Read all or part of a file from an app's web directory. Valid UTF-
 			if chunked {
 				return mcpToolError("transport:\"http\" is incompatible with offset/limit (the URL targets the whole file)"), nil
 			}
-			size, ct, err := s.coreStatAppFile(user, nonce, path)
+			size, ct, err := s.coreStatAppFile(user, nonce, area, path)
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
-			u, err := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, path))
+			u, err := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, area, path))
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -817,12 +878,13 @@ Description: "Read all or part of a file from an app's web directory. Valid UTF-
 	// write_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_app_file",
-Description: "Write or patch a file in an app's web directory. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band.",
+Description: "Write or patch a file in an app's web or data area. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"nonce":     map[string]interface{}{"type": "string", "description": "App nonce"},
-				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
+				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the area's root"},
+				"area":      map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
 				"new_text":  map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
 				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
 				"transport": map[string]interface{}{"type": "string", "enum": []string{"http", "inline"}, "description": "How to transfer bytes: \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files) or \"inline\" (directly from context)."},
@@ -840,6 +902,7 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 		path, _ := args["path"].(string)
 		content, _ := args["new_text"].(string)
 		oldText, _ := args["old_text"].(string)
+		area, _ := args["area"].(string)
 		transport, _ := args["transport"].(string)
 
 		switch transport {
@@ -847,7 +910,7 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 			if content == "" && oldText == "" {
 				return mcpToolError("transport:\"inline\" requires new_text or old_text"), nil
 			}
-			if err := s.coreWriteAppFile(user, nonce, path, []byte(content), oldText); err != nil {
+			if err := s.coreWriteAppFile(user, nonce, area, path, []byte(content), oldText); err != nil {
 				return mcpToolError("%v", err), nil
 			}
 			return mcpToolResult(map[string]string{"status": "written"})
@@ -861,7 +924,10 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 			if err := s.gateApp(user, nonce); err != nil {
 				return mcpToolError("%v", err), nil
 			}
-			u, err := s.mintActFileURL(user, http.MethodPut, appFileActPath(nonce, path))
+			if _, err := s.appFileDir(nonce, area); err != nil {
+				return mcpToolError("%v", err), nil
+			}
+			u, err := s.mintActFileURL(user, http.MethodPut, appFileActPath(nonce, area, path))
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -875,12 +941,13 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 	// delete_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "delete_app_file",
-		Description: "Delete a file from an app's web directory.",
+		Description: "Delete a file from an app's web or data area.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
-				"path":  map[string]interface{}{"type": "string", "description": "File path relative to the app's web directory"},
+				"path":  map[string]interface{}{"type": "string", "description": "File path relative to the area's root"},
+				"area":  map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
 			},
 			"required": []string{"nonce", "path"},
 		},
@@ -893,7 +960,8 @@ Description: "Write or patch a file in an app's web directory. Without old_text 
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
 		path, _ := args["path"].(string)
-		if err := s.coreDeleteAppFile(user, nonce, path); err != nil {
+		area, _ := args["area"].(string)
+		if err := s.coreDeleteAppFile(user, nonce, area, path); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "deleted"})
@@ -926,7 +994,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server, role string) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		name, _ := args["name"].(string)
 		search, _ := args["search"].(string)
-		svc, err := s.serviceByName(name)
+		svc, err := s.definitionServiceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -964,11 +1032,11 @@ Description: "Read all or part of a virtual or task service's definition file. A
 		transport, _ := args["transport"].(string)
 		chunked := offset != 0 || limit != 0
 
-		svc, err := s.serviceByName(name)
+		svc, err := s.definitionServiceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		pathQuery := serviceFileActPath(svc.ID)
+		pathQuery := serviceFileActPath(svc)
 
 		switch transport {
 		case actTokenTransportInline:
@@ -1058,7 +1126,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			if content == "" && oldText == "" {
 				return mcpToolError("transport:\"inline\" requires new_text or old_text"), nil
 			}
-			svc, err := s.serviceByName(name)
+			svc, err := s.definitionServiceByName(name)
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -1071,16 +1139,16 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			if oldText != "" {
 				return mcpToolError("transport:\"http\" is incompatible with old_text (patches stay inline)"), nil
 			}
-			svc, err := s.serviceByName(name)
+			svc, err := s.definitionServiceByName(name)
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
 			// Gate at mint time so a non-member gets a clear error instead of a
 			// URL that 403s at dispatch. coreWriteServiceFile gates on the PUT.
-			if err := s.gateServiceFile(user, svc.ID); err != nil {
+			if _, err := s.definitionService(user, svc.ID); err != nil {
 				return mcpToolError("%v", err), nil
 			}
-			u, err := s.mintActFileURL(user, http.MethodPut, serviceFileActPath(svc.ID))
+			u, err := s.mintActFileURL(user, http.MethodPut, serviceFileActPath(svc))
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -1110,7 +1178,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		name, _ := args["name"].(string)
-		svc, err := s.serviceByName(name)
+		svc, err := s.definitionServiceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}

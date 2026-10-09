@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -182,6 +183,7 @@ func (s *Server) SetupRoutes() {
 
 	s.mux.HandleFunc("/api/apps", s.authWrap(pipeline(s.handleApps, anyRole)))
 	s.mux.HandleFunc("/api/apps/", s.authWrap(pipeline(s.handleAppDetail, anyRole)))
+	s.mux.HandleFunc("/api/apps/search", s.authWrap(pipeline(s.handleSearchAppFiles, anyRole)))
 	// Services and auth records are readable by every role; core gates each
 	// write (admin+, or a service member for its definition file).
 	s.mux.HandleFunc("/api/services", s.authWrap(pipeline(s.handleServices, anyRole)))
@@ -243,7 +245,8 @@ func (s *Server) SetupRoutes() {
 	s.mountAllMCP()
 }
 
-// mountAllMCP mounts every virtual and task service at /mcp/<slug>.
+// mountAllMCP mounts every virtual and task service at /mcp/<slug>, and
+// every app's own service at /mcp/app:<slug>.
 func (s *Server) mountAllMCP() {
 	services, err := s.store.ListServices()
 	if err != nil {
@@ -251,6 +254,13 @@ func (s *Server) mountAllMCP() {
 	}
 	for _, svc := range services {
 		s.mcpMounts.add(s, svc)
+	}
+	apps, err := s.store.ListHostedApps()
+	if err != nil {
+		return
+	}
+	for _, a := range apps {
+		s.syncAppServiceMount(a.Nonce)
 	}
 }
 
@@ -819,7 +829,29 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 // serviceBySlug finds the task or virtual service answering at
 // /service/call/<slug> and /mcp/<slug>: tasks://<slug> first, then
 // /mcp/<slug>.
+// serviceByURL finds a registered service by its URL, or an app service by
+// its /mcp/app:<slug>.
+func (s *Server) serviceByURL(url string) (*db.Service, error) {
+	if slug, ok := strings.CutPrefix(url, "/mcp/"+appServicePrefix); ok {
+		return s.appServiceBySlug(slug)
+	}
+	return s.store.GetServiceByURL(url)
+}
+
+// appMayUseService reports whether an app may reach a service from its
+// pages: its own app service, or a registered service it's linked to.
+func (s *Server) appMayUseService(nonce string, svc *db.Service) bool {
+	if svc.AppNonce != "" {
+		return svc.AppNonce == nonce
+	}
+	ok, err := s.store.IsServiceAllowedForApp(nonce, svc.ID)
+	return err == nil && ok
+}
+
 func (s *Server) serviceBySlug(slug string) (*db.Service, error) {
+	if appSlug, ok := strings.CutPrefix(slug, appServicePrefix); ok {
+		return s.appServiceBySlug(appSlug)
+	}
 	svc, err := s.store.GetServiceByURL("tasks://" + slug)
 	if err != nil {
 		svc, err = s.store.GetServiceByURL("/mcp/" + slug)
@@ -863,7 +895,7 @@ func (s *Server) loadServiceToolSummaries(svc *db.Service) ([]serviceToolSummary
 		}
 		return out, nil
 	case "virtual":
-		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+		tools, err := s.loadVirtualTools(svc)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return []serviceToolSummary{}, nil
@@ -901,8 +933,7 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unknown app", http.StatusUnauthorized)
 		return
 	}
-	allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, svc.ID)
-	if err != nil || !allowed {
+	if !s.appMayUseService(app.Nonce, svc) {
 		http.Error(w, "Service not approved for this app", http.StatusForbidden)
 		return
 	}
@@ -1000,7 +1031,7 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, auth formats.VirtualAuth) {
 	switch r.Method {
 	case http.MethodGet:
-		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+		tools, err := s.loadVirtualTools(svc)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -1017,7 +1048,7 @@ func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *db.Service, auth formats.VirtualAuth) {
-	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+	tools, err := s.loadVirtualTools(svc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -1364,6 +1395,19 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/apps/{nonce}/service/{files|tools} — the app's own
+	// virtual service, as /api/services/{id}/… serves a registered one.
+	if len(parts) >= 5 && parts[3] == "service" {
+		s.handleAppService(w, r, nonce, parts[4])
+		return
+	}
+
+	// Sub-route: /api/apps/{nonce}/data — private files the web server never hosts
+	if len(parts) >= 4 && parts[3] == "data" {
+		s.handleAppData(w, r, nonce)
+		return
+	}
+
 	// Sub-route: /api/apps/{nonce}/db — query/watch/list/drop app databases
 	// (design/app-databases.md). Dispatched before the app lookup: the gate
 	// is gateDBTarget inside the core, and a database route shouldn't 404 on
@@ -1498,35 +1542,7 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 	// valid with ?file= — it's a full-file raw-body replace; patches stay
 	// MCP-only (no PATCH verb over HTTP).
 	if file := r.URL.Query().Get("file"); file != "" {
-		switch r.Method {
-		case http.MethodGet:
-			data, err := s.coreReadAppFile(actor, nonce, file, 0, 0)
-			if err != nil {
-				writeErr(w, err)
-				return
-			}
-			w.Header().Set("Content-Type", http.DetectContentType(data))
-			w.Write(data)
-		case http.MethodPut:
-			data, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, "read failed", http.StatusInternalServerError)
-				return
-			}
-			if err := s.coreWriteAppFile(actor, nonce, file, data, ""); err != nil {
-				writeErr(w, err)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		case http.MethodDelete:
-			if err := s.coreDeleteAppFile(actor, nonce, file); err != nil {
-				writeErr(w, err)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
+		s.handleAppFile(w, r, nonce, "web", file)
 		return
 	}
 
@@ -1542,23 +1558,12 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 		w.Write(data)
 
 	case http.MethodPost:
-		if err := r.ParseMultipartForm(50 << 20); err != nil {
-			http.Error(w, "file too large (50MB max)", http.StatusBadRequest)
-			return
-		}
-		file, header, err := r.FormFile("file")
+		files, err := readUploadFiles(w, r)
 		if err != nil {
-			http.Error(w, "missing 'file' field", http.StatusBadRequest)
+			writeErr(w, err)
 			return
 		}
-		defer file.Close()
-
-		data, readErr := io.ReadAll(file)
-		if readErr != nil {
-			http.Error(w, "read failed", http.StatusInternalServerError)
-			return
-		}
-		route, err := s.coreUploadAppWeb(actor, nonce, data, header.Filename)
+		route, err := s.coreUploadAppWeb(actor, nonce, files)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -1576,6 +1581,168 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleAppService serves an app's own virtual service: "files" is its
+// definition (as /api/services/{id}/files), "tools" its tool summaries.
+func (s *Server) handleAppService(w http.ResponseWriter, r *http.Request, nonce, sub string) {
+	if !s.canAccessApp(r.Context(), nonce) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	switch sub {
+	case "files":
+		s.handleServiceFiles(w, r, -app.ID)
+	case "tools":
+		s.handleServiceTools(w, r, appService(app))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// handleAppData serves an app's private data area: ?file=<relpath> selects
+// single-file GET/PUT/DELETE (as on /web); a bare GET lists the files as
+// {files:[{path,size}]}, and a multipart POST adds one or more files.
+func (s *Server) handleAppData(w http.ResponseWriter, r *http.Request, nonce string) {
+	if file := r.URL.Query().Get("file"); file != "" {
+		s.handleAppFile(w, r, nonce, "data", file)
+		return
+	}
+	if r.Method == http.MethodPost {
+		files, err := readUploadFiles(w, r)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		paths, err := s.coreUploadAppData(userFromContext(r.Context()), nonce, files)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"files": paths})
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	files, err := s.coreListAppFiles(userFromContext(r.Context()), nonce, "data", "")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
+}
+
+// uploadMaxBytes caps one upload request — every file in it together.
+const uploadMaxBytes = 100 << 20
+
+// readUploadFiles reads every "file" part of a multipart upload. Each part's
+// filename is kept whole, relative path included ("css/site.css"), unlike
+// mime/multipart's FileName, which strips directories.
+func readUploadFiles(w http.ResponseWriter, r *http.Request) ([]uploadFile, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, uploadMaxBytes)
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return nil, cerr(http.StatusBadRequest, "expected a multipart/form-data upload")
+	}
+	readErr := func(err error) error {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return cerr(http.StatusRequestEntityTooLarge, "upload too large (%dMB max)", uploadMaxBytes>>20)
+		}
+		return cerr(http.StatusBadRequest, "error reading upload: %v", err)
+	}
+	var files []uploadFile
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, readErr(err)
+		}
+		if part.FormName() != "file" {
+			continue
+		}
+		_, params, _ := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return nil, readErr(err)
+		}
+		files = append(files, uploadFile{Name: params["filename"], Data: data})
+	}
+	if len(files) == 0 {
+		return nil, cerr(http.StatusBadRequest, "missing 'file' field")
+	}
+	return files, nil
+}
+
+// handleAppFile is single-file GET/PUT/DELETE in an app's web or data area.
+// PUT is a full-file raw-body replace; patches stay MCP-only.
+func (s *Server) handleAppFile(w http.ResponseWriter, r *http.Request, nonce, area, file string) {
+	actor := userFromContext(r.Context())
+	switch r.Method {
+	case http.MethodGet:
+		data, err := s.coreReadAppFile(actor, nonce, area, file, 0, 0)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", http.DetectContentType(data))
+		if area == "data" {
+			// Data files are untrusted uploads: never let one run script on
+			// this origin, whatever its sniffed type.
+			w.Header().Set("Content-Security-Policy", "sandbox")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
+		w.Write(data)
+	case http.MethodPut:
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read failed", http.StatusInternalServerError)
+			return
+		}
+		if err := s.coreWriteAppFile(actor, nonce, area, file, data, ""); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodDelete:
+		if err := s.coreDeleteAppFile(actor, nonce, area, file); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSearchAppFiles greps app web files — the HTTP twin of the
+// search_app_files MCP tool.
+// GET /api/apps/search?pattern=<regex>[&nonce=<nonce>][&area=web|data][&ignore_case=true]
+func (s *Server) handleSearchAppFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	ignoreCase, _ := strconv.ParseBool(q.Get("ignore_case"))
+	matches, truncated, err := s.coreSearchAppFiles(userFromContext(r.Context()), q.Get("nonce"), q.Get("area"), q.Get("pattern"), ignoreCase)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"matches": matches, "truncated": truncated})
 }
 
 // handleAppDeploy copies one deployment slot over another.

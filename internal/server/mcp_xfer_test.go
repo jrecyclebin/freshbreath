@@ -117,6 +117,165 @@ func TestMCPListAppFiles(t *testing.T) {
 	}
 }
 
+func TestMCPSearchAppFiles(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	one, _ := srv.coreCreateApp(su, "one", "", "", nil, nil)
+	two, _ := srv.coreCreateApp(su, "two", "", "", nil, nil)
+	createAppFile(t, srv, one, "index.html", []byte("<h1>Hello</h1>\r\n<p>hello again</p>\n"))
+	createAppFile(t, srv, one, "logo.png", []byte("hello\x00binary"))
+	createAppFile(t, srv, two, "js/app.js", []byte("// nothing\nconsole.log('hello')\n"))
+
+	type result struct {
+		Matches   []appFileMatch `json:"matches"`
+		Truncated bool           `json:"truncated"`
+	}
+	search := func(args map[string]interface{}) result {
+		t.Helper()
+		res := callCentralTool(t, srv, "search_app_files", args)
+		if res.IsError {
+			t.Fatalf("search_app_files failed: %s", toolResultText(t, res))
+		}
+		var r result
+		if err := json.Unmarshal([]byte(toolResultText(t, res)), &r); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return r
+	}
+
+	// One app, case-sensitive: only line 2 matches; the binary file is skipped.
+	r := search(map[string]interface{}{"nonce": one, "pattern": "hel+o"})
+	if len(r.Matches) != 1 || r.Matches[0].Line != 2 || r.Matches[0].Text != "<p>hello again</p>" || r.Matches[0].Path != "index.html" {
+		t.Errorf("matches = %+v, want index.html:2", r.Matches)
+	}
+
+	// Case-insensitive picks up line 1 too, without the trailing \r.
+	r = search(map[string]interface{}{"nonce": one, "pattern": "hello", "ignore_case": true})
+	if len(r.Matches) != 2 || r.Matches[0].Text != "<h1>Hello</h1>" {
+		t.Errorf("matches = %+v, want 2 with clean line 1", r.Matches)
+	}
+
+	// No nonce searches across every app.
+	r = search(map[string]interface{}{"pattern": "hello"})
+	if len(r.Matches) != 2 {
+		t.Fatalf("matches = %+v, want 2 across apps", r.Matches)
+	}
+	got := map[string]bool{}
+	for _, m := range r.Matches {
+		got[m.Nonce+":"+m.Path] = true
+	}
+	if !got[one+":index.html"] || !got[two+":js/app.js"] {
+		t.Errorf("matches = %+v, want hits in both apps", r.Matches)
+	}
+
+	// Bad regex is a tool error.
+	res := callCentralTool(t, srv, "search_app_files", map[string]interface{}{"pattern": "("})
+	if !res.IsError {
+		t.Errorf("expected error for invalid pattern")
+	}
+}
+
+func TestMCPAppDataArea(t *testing.T) {
+	srv := newTestServer(t)
+	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "data-mcp", "", "", nil, nil)
+
+	call := func(name string, args map[string]interface{}) string {
+		t.Helper()
+		args["nonce"] = nonce
+		res := callCentralTool(t, srv, name, args)
+		if res.IsError {
+			t.Fatalf("%s failed: %s", name, toolResultText(t, res))
+		}
+		return toolResultText(t, res)
+	}
+
+	call("write_app_file", map[string]interface{}{"area": "data", "path": "notes/a.txt", "new_text": "private note", "transport": "inline"})
+	if out := call("read_app_file", map[string]interface{}{"area": "data", "path": "notes/a.txt", "transport": "inline"}); !strings.Contains(out, "private note") {
+		t.Errorf("read data = %s", out)
+	}
+	if out := call("list_app_files", map[string]interface{}{"area": "data"}); !strings.Contains(out, "notes/a.txt") {
+		t.Errorf("list data = %s", out)
+	}
+	if out := call("list_app_files", map[string]interface{}{}); strings.Contains(out, "notes/a.txt") {
+		t.Errorf("web list leaked data file: %s", out)
+	}
+	if out := call("search_app_files", map[string]interface{}{"area": "data", "pattern": "private"}); !strings.Contains(out, `"line":1`) {
+		t.Errorf("search data = %s", out)
+	}
+	if out := call("search_app_files", map[string]interface{}{"pattern": "private"}); !strings.Contains(out, `"matches":[]`) {
+		t.Errorf("web search leaked data file: %s", out)
+	}
+
+	// The http transport URL targets the data route and lands the bytes there.
+	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{"nonce": nonce, "area": "data", "path": "up.txt", "transport": "http"})
+	url, _ := toolResultJSON(t, res)["url"].(string)
+	p := actTokenPayloadFromURL(t, srv, url)
+	if !strings.HasPrefix(p.Path, "/api/apps/"+nonce+"/data?file=") {
+		t.Fatalf("act path = %q, want the data route", p.Path)
+	}
+	if rr := dispatchActPathAsAdmin(t, srv, "PUT", p.Path, bytes.NewReader([]byte("uploaded")), "text/plain"); rr.Code != http.StatusNoContent {
+		t.Fatalf("act PUT = %d %q", rr.Code, rr.Body.String())
+	}
+	if data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "data", "up.txt", 0, 0); err != nil || string(data) != "uploaded" {
+		t.Fatalf("data/up.txt = %q, %v", data, err)
+	}
+
+	call("delete_app_file", map[string]interface{}{"area": "data", "path": "notes/a.txt"})
+	if out := call("list_app_files", map[string]interface{}{"area": "data"}); strings.Contains(out, "notes/a.txt") {
+		t.Errorf("file still listed after delete: %s", out)
+	}
+
+	res = callCentralTool(t, srv, "list_app_files", map[string]interface{}{"nonce": nonce, "area": "secret"})
+	if !res.IsError {
+		t.Errorf("expected error for unknown area")
+	}
+}
+
+func TestSearchAppFilesScopesMembers(t *testing.T) {
+	srv := newTestServer(t)
+	admin := &db.User{ID: 1, Role: "Admin"}
+	mine, _ := srv.coreCreateApp(admin, "mine", "", "", nil, nil)
+	theirs, _ := srv.coreCreateApp(admin, "theirs", "", "", nil, nil)
+	member, err := srv.coreCreateUser(admin, "member", "member@x", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	if err := srv.coreSetAppMembers(admin, mine, []int64{member.ID}); err != nil {
+		t.Fatalf("set members: %v", err)
+	}
+	createAppFile(t, srv, mine, "a.txt", []byte("secret"))
+	createAppFile(t, srv, theirs, "b.txt", []byte("secret"))
+
+	matches, _, err := srv.coreSearchAppFiles(member, "", "", "secret", false)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Nonce != mine {
+		t.Errorf("matches = %+v, want only the member's app", matches)
+	}
+	if _, _, err := srv.coreSearchAppFiles(member, theirs, "", "secret", false); err == nil {
+		t.Errorf("expected forbidden searching a non-member app")
+	}
+}
+
+func TestSearchAppFilesLimits(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	nonce, _ := srv.coreCreateApp(su, "big", "", "", nil, nil)
+	createAppFile(t, srv, nonce, "many.txt", []byte(strings.Repeat("x\n", searchMaxMatches+10)))
+	createAppFile(t, srv, nonce, "min.js", []byte(strings.Repeat("a", 1000)+"NEEDLE"+strings.Repeat("b", 1000)))
+
+	matches, truncated, err := srv.coreSearchAppFiles(su, nonce, "", "^x$", false)
+	if err != nil || !truncated || len(matches) != searchMaxMatches {
+		t.Errorf("got %d matches, truncated=%v, err=%v; want %d, true", len(matches), truncated, err, searchMaxMatches)
+	}
+
+	matches, _, _ = srv.coreSearchAppFiles(su, nonce, "", "NEEDLE", false)
+	if len(matches) != 1 || !strings.Contains(matches[0].Text, "NEEDLE") || len(matches[0].Text) > searchMaxLineText+2*len("…") {
+		t.Errorf("clipped line = %+v, want a short window around NEEDLE", matches)
+	}
+}
+
 func TestMCPReadAppFile(t *testing.T) {
 	srv := newTestServer(t)
 	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-app", "", "", nil, nil)
@@ -221,7 +380,7 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 		t.Fatalf("write_app_file patch failed: %s", toolResultText(t, res))
 	}
 
-	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
+	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "", "index.html", 0, 0)
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -292,7 +451,7 @@ func TestMCPDeleteAppFile(t *testing.T) {
 		t.Fatalf("delete_app_file failed: %s", toolResultText(t, res))
 	}
 
-	_, err = srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "index.html", 0, 0)
+	_, err = srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "", "index.html", 0, 0)
 	if err == nil {
 		t.Fatal("expected file to be deleted")
 	}
@@ -685,7 +844,7 @@ func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("dispatch = %d %q, want 204", rr.Code, rr.Body.String())
 	}
-	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "via-http.txt", 0, 0)
+	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "", "via-http.txt", 0, 0)
 	if err != nil || string(data) != "written over http\n" {
 		t.Fatalf("readback = %q err=%v", string(data), err)
 	}
@@ -716,7 +875,7 @@ func TestMCPWriteAppFileLargeNoThreshold(t *testing.T) {
 	if m["status"] != "written" {
 		t.Fatalf("status = %v, want written (no threshold on writes)", m["status"])
 	}
-	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "big.txt", 0, 0)
+	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "", "big.txt", 0, 0)
 	if err != nil || !bytes.Equal(data, big) {
 		t.Fatalf("readback len = %d err=%v, want %d", len(data), err, len(big))
 	}
@@ -733,7 +892,7 @@ func TestMCPWriteAppFilePatchStaysInline(t *testing.T) {
 	if m["status"] != "written" {
 		t.Fatalf("status = %v, want written", m["status"])
 	}
-	data, _ := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "p.txt", 0, 0)
+	data, _ := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "", "p.txt", 0, 0)
 	if string(data) != "hello new world" {
 		t.Fatalf("patched = %q, want hello new world", string(data))
 	}

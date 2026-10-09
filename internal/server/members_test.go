@@ -304,7 +304,7 @@ func TestServiceFileActURLNeedsMembership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ticket, err := srv.mintActToken(member, http.MethodPut, serviceFileActPath(svc.ID), actTokenTTL)
+	ticket, err := srv.mintActToken(member, http.MethodPut, serviceFileActPath(svc), actTokenTTL)
 	if err != nil {
 		t.Fatal(err)
 	}
