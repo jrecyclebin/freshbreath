@@ -317,3 +317,23 @@ func parseServiceID(t *testing.T, id string) int64 {
 	}
 	return n
 }
+
+func TestSearchAppFilesHTTP(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "searchable")
+	createAppFile(t, srv, nonce, "index.html", []byte("one\nTwo\nthree"))
+
+	rr := testRequest(t, srv, http.MethodGet, "/api/apps/search?pattern=two&ignore_case=true&nonce="+nonce, nil, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rr.Code, rr.Body.String())
+	}
+	want := `{"matches":[{"nonce":"` + nonce + `","app":"searchable","path":"index.html","line":2,"text":"Two"}],"truncated":false}`
+	if got := strings.TrimSpace(rr.Body.String()); got != want {
+		t.Fatalf("body = %s, want %s", got, want)
+	}
+
+	rr = testRequest(t, srv, http.MethodGet, "/api/apps/search", nil, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing pattern: status = %d, want 400", rr.Code)
+	}
+}

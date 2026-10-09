@@ -33,6 +33,13 @@ The MCP tools work like the file tools LLMs are used to:
 - **`list_app_files`** — `{ nonce, search? }` → `{ files }`, each
   `{ path, size }`, sorted by path. Empty when nothing's published. If `search`
   is provided, only files whose path or content contains the term are returned.
+- **`search_app_files`** — `{ pattern, nonce?, ignore_case? }` →
+  `{ matches, truncated }`, each match `{ nonce, app, path, line, text }`.
+  Works like `grep`/`rg`: `pattern` is a regular expression (RE2 syntax)
+  matched per line, and `line` is 1-based. Omit `nonce` to search every app you
+  can access. Binary files are skipped, long lines are clipped around the
+  match, and results stop at 500 matches with `truncated: true`. Over HTTP:
+  `GET /api/apps/search?pattern=…&nonce=…&ignore_case=true`.
 - **`read_app_file`** — `{ nonce, path, offset?, limit?, transport? }` →
   `{ content }` (with `{ encoding: "base64" }` for binary files). `offset` and
   `limit` are zero-based byte bounds for reading chunks. `transport` (see §3)

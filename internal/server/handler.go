@@ -182,6 +182,7 @@ func (s *Server) SetupRoutes() {
 
 	s.mux.HandleFunc("/api/apps", s.authWrap(pipeline(s.handleApps, anyRole)))
 	s.mux.HandleFunc("/api/apps/", s.authWrap(pipeline(s.handleAppDetail, anyRole)))
+	s.mux.HandleFunc("/api/apps/search", s.authWrap(pipeline(s.handleSearchAppFiles, anyRole)))
 	// Services and auth records are readable by every role; core gates each
 	// write (admin+, or a service member for its definition file).
 	s.mux.HandleFunc("/api/services", s.authWrap(pipeline(s.handleServices, anyRole)))
@@ -1576,6 +1577,25 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleSearchAppFiles greps app web files — the HTTP twin of the
+// search_app_files MCP tool.
+// GET /api/apps/search?pattern=<regex>[&nonce=<nonce>][&ignore_case=true]
+func (s *Server) handleSearchAppFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	ignoreCase, _ := strconv.ParseBool(q.Get("ignore_case"))
+	matches, truncated, err := s.coreSearchAppFiles(userFromContext(r.Context()), q.Get("nonce"), q.Get("pattern"), ignoreCase)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"matches": matches, "truncated": truncated})
 }
 
 // handleAppDeploy copies one deployment slot over another.

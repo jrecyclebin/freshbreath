@@ -117,6 +117,109 @@ func TestMCPListAppFiles(t *testing.T) {
 	}
 }
 
+func TestMCPSearchAppFiles(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	one, _ := srv.coreCreateApp(su, "one", "", "", nil, nil)
+	two, _ := srv.coreCreateApp(su, "two", "", "", nil, nil)
+	createAppFile(t, srv, one, "index.html", []byte("<h1>Hello</h1>\r\n<p>hello again</p>\n"))
+	createAppFile(t, srv, one, "logo.png", []byte("hello\x00binary"))
+	createAppFile(t, srv, two, "js/app.js", []byte("// nothing\nconsole.log('hello')\n"))
+
+	type result struct {
+		Matches   []appFileMatch `json:"matches"`
+		Truncated bool           `json:"truncated"`
+	}
+	search := func(args map[string]interface{}) result {
+		t.Helper()
+		res := callCentralTool(t, srv, "search_app_files", args)
+		if res.IsError {
+			t.Fatalf("search_app_files failed: %s", toolResultText(t, res))
+		}
+		var r result
+		if err := json.Unmarshal([]byte(toolResultText(t, res)), &r); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return r
+	}
+
+	// One app, case-sensitive: only line 2 matches; the binary file is skipped.
+	r := search(map[string]interface{}{"nonce": one, "pattern": "hel+o"})
+	if len(r.Matches) != 1 || r.Matches[0].Line != 2 || r.Matches[0].Text != "<p>hello again</p>" || r.Matches[0].Path != "index.html" {
+		t.Errorf("matches = %+v, want index.html:2", r.Matches)
+	}
+
+	// Case-insensitive picks up line 1 too, without the trailing \r.
+	r = search(map[string]interface{}{"nonce": one, "pattern": "hello", "ignore_case": true})
+	if len(r.Matches) != 2 || r.Matches[0].Text != "<h1>Hello</h1>" {
+		t.Errorf("matches = %+v, want 2 with clean line 1", r.Matches)
+	}
+
+	// No nonce searches across every app.
+	r = search(map[string]interface{}{"pattern": "hello"})
+	if len(r.Matches) != 2 {
+		t.Fatalf("matches = %+v, want 2 across apps", r.Matches)
+	}
+	got := map[string]bool{}
+	for _, m := range r.Matches {
+		got[m.Nonce+":"+m.Path] = true
+	}
+	if !got[one+":index.html"] || !got[two+":js/app.js"] {
+		t.Errorf("matches = %+v, want hits in both apps", r.Matches)
+	}
+
+	// Bad regex is a tool error.
+	res := callCentralTool(t, srv, "search_app_files", map[string]interface{}{"pattern": "("})
+	if !res.IsError {
+		t.Errorf("expected error for invalid pattern")
+	}
+}
+
+func TestSearchAppFilesScopesMembers(t *testing.T) {
+	srv := newTestServer(t)
+	admin := &db.User{ID: 1, Role: "Admin"}
+	mine, _ := srv.coreCreateApp(admin, "mine", "", "", nil, nil)
+	theirs, _ := srv.coreCreateApp(admin, "theirs", "", "", nil, nil)
+	member, err := srv.coreCreateUser(admin, "member", "member@x", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create member: %v", err)
+	}
+	if err := srv.coreSetAppMembers(admin, mine, []int64{member.ID}); err != nil {
+		t.Fatalf("set members: %v", err)
+	}
+	createAppFile(t, srv, mine, "a.txt", []byte("secret"))
+	createAppFile(t, srv, theirs, "b.txt", []byte("secret"))
+
+	matches, _, err := srv.coreSearchAppFiles(member, "", "secret", false)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(matches) != 1 || matches[0].Nonce != mine {
+		t.Errorf("matches = %+v, want only the member's app", matches)
+	}
+	if _, _, err := srv.coreSearchAppFiles(member, theirs, "secret", false); err == nil {
+		t.Errorf("expected forbidden searching a non-member app")
+	}
+}
+
+func TestSearchAppFilesLimits(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	nonce, _ := srv.coreCreateApp(su, "big", "", "", nil, nil)
+	createAppFile(t, srv, nonce, "many.txt", []byte(strings.Repeat("x\n", searchMaxMatches+10)))
+	createAppFile(t, srv, nonce, "min.js", []byte(strings.Repeat("a", 1000)+"NEEDLE"+strings.Repeat("b", 1000)))
+
+	matches, truncated, err := srv.coreSearchAppFiles(su, nonce, "^x$", false)
+	if err != nil || !truncated || len(matches) != searchMaxMatches {
+		t.Errorf("got %d matches, truncated=%v, err=%v; want %d, true", len(matches), truncated, err, searchMaxMatches)
+	}
+
+	matches, _, _ = srv.coreSearchAppFiles(su, nonce, "NEEDLE", false)
+	if len(matches) != 1 || !strings.Contains(matches[0].Text, "NEEDLE") || len(matches[0].Text) > searchMaxLineText+2*len("…") {
+		t.Errorf("clipped line = %+v, want a short window around NEEDLE", matches)
+	}
+}
+
 func TestMCPReadAppFile(t *testing.T) {
 	srv := newTestServer(t)
 	nonce, err := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "read-app", "", "", nil, nil)

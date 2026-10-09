@@ -726,6 +726,36 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		return mcpToolResult(map[string]interface{}{"files": files})
 	})
 
+	// search_app_files
+	mcps.AddTool(&mcp.Tool{
+		Name:        "search_app_files",
+		Description: "Search app web files like grep/rg: returns each matching line with its path and 1-based line number. Omit nonce to search every app you can access. Binary files are skipped, long lines are clipped around the match, and results stop at 500 matches (truncated:true).",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"pattern":     map[string]interface{}{"type": "string", "description": "Regular expression (RE2 syntax) matched against each line"},
+				"nonce":       map[string]interface{}{"type": "string", "description": "Optional app nonce; omit to search all your apps"},
+				"ignore_case": map[string]interface{}{"type": "boolean", "description": "Optional case-insensitive match"},
+			},
+			"required": []string{"pattern"},
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		user, err := s.mcpUser(req)
+		if err != nil {
+			return mcpToolError("auth: %v", err), nil
+		}
+		args := make(map[string]interface{})
+		json.Unmarshal(req.Params.Arguments, &args)
+		pattern, _ := args["pattern"].(string)
+		nonce, _ := args["nonce"].(string)
+		ignoreCase, _ := args["ignore_case"].(bool)
+		matches, truncated, err := s.coreSearchAppFiles(user, nonce, pattern, ignoreCase)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(map[string]interface{}{"matches": matches, "truncated": truncated})
+	})
+
 	// read_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "read_app_file",

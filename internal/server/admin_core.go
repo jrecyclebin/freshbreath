@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -881,6 +882,138 @@ func (s *Server) coreListAppWeb(actor *db.User, nonce, search string) ([]appFile
 	}
 	slices.SortFunc(files, func(a, b appFile) int { return strings.Compare(a.Path, b.Path) })
 	return files, nil
+}
+
+// appFileMatch is one matching line from searchAppFiles.
+type appFileMatch struct {
+	Nonce string `json:"nonce"`
+	App   string `json:"app"`
+	Path  string `json:"path"` // slash-separated path relative to the web dir
+	Line  int    `json:"line"` // 1-based
+	Text  string `json:"text"`
+}
+
+// Search output caps: a whole-server search or a minified bundle could
+// otherwise produce an unbounded result.
+const (
+	searchMaxMatches  = 500
+	searchMaxLineText = 300
+)
+
+// coreSearchAppFiles greps app web files for a regular expression (RE2
+// syntax), returning matching lines with 1-based line numbers, like rg. With
+// a nonce it searches that app; without one it searches every app the actor
+// can list (all apps for admin+, their own apps otherwise). Binary files are
+// skipped, long lines are clipped, and results stop at searchMaxMatches with
+// truncated=true.
+func (s *Server) coreSearchAppFiles(actor *db.User, nonce, pattern string, ignoreCase bool) ([]appFileMatch, bool, error) {
+	if pattern == "" {
+		return nil, false, cerr(http.StatusBadRequest, "pattern is required")
+	}
+	if ignoreCase {
+		pattern = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, false, cerr(http.StatusBadRequest, "invalid pattern: %v", err)
+	}
+
+	type appRef struct{ nonce, name string }
+	var apps []appRef
+	if nonce != "" {
+		if err := s.gateApp(actor, nonce); err != nil {
+			return nil, false, err
+		}
+		app, err := s.store.GetApp(nonce)
+		if err != nil {
+			return nil, false, cerr(http.StatusNotFound, "app not found: %v", err)
+		}
+		apps = append(apps, appRef{app.Nonce, app.Name})
+	} else {
+		if actor == nil {
+			return nil, false, cerr(http.StatusForbidden, "forbidden")
+		}
+		var rows []map[string]interface{}
+		if roleIn(actor.Role, rolesAdminPlus) {
+			rows, err = s.store.ListApps()
+		} else {
+			rows, err = s.store.ListAppsForUser(actor.ID)
+		}
+		if err != nil {
+			return nil, false, cerr(http.StatusInternalServerError, "list apps failed: %v", err)
+		}
+		for _, row := range rows {
+			n, _ := row["nonce"].(string)
+			name, _ := row["name"].(string)
+			apps = append(apps, appRef{n, name})
+		}
+	}
+
+	matches := []appFileMatch{}
+	for _, app := range apps {
+		webDir := filepath.Join(s.config.DataDir, "apps", app.nonce, "web")
+		if _, err := os.Stat(webDir); os.IsNotExist(err) {
+			continue
+		}
+		var paths []string
+		err := filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+			if err != nil || fi.IsDir() {
+				return err
+			}
+			paths = append(paths, path)
+			return nil
+		})
+		if err != nil {
+			return nil, false, cerr(http.StatusInternalServerError, "search failed: %v", err)
+		}
+		slices.Sort(paths)
+		for _, path := range paths {
+			data, err := os.ReadFile(path)
+			if err != nil || bytes.IndexByte(data, 0) >= 0 {
+				continue // unreadable or binary
+			}
+			rel, _ := filepath.Rel(webDir, path)
+			for i, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSuffix(line, "\r")
+				if !re.MatchString(line) {
+					continue
+				}
+				if len(matches) == searchMaxMatches {
+					return matches, true, nil
+				}
+				if len(line) > searchMaxLineText {
+					line = clipAroundMatch(line, re)
+				}
+				matches = append(matches, appFileMatch{
+					Nonce: app.nonce,
+					App:   app.name,
+					Path:  filepath.ToSlash(rel),
+					Line:  i + 1,
+					Text:  line,
+				})
+			}
+		}
+	}
+	return matches, false, nil
+}
+
+// clipAroundMatch cuts a long line down to searchMaxLineText bytes centered
+// near the first match, marking cut ends with "…". Keeps minified files
+// readable in search results.
+func clipAroundMatch(line string, re *regexp.Regexp) string {
+	start := 0
+	if loc := re.FindStringIndex(line); loc != nil {
+		start = max(0, loc[0]-searchMaxLineText/3)
+	}
+	end := min(len(line), start+searchMaxLineText)
+	text := strings.ToValidUTF8(line[start:end], "")
+	if start > 0 {
+		text = "…" + text
+	}
+	if end < len(line) {
+		text += "…"
+	}
+	return text
 }
 
 // coreDownloadAppWeb returns the app's web directory as a zip archive.

@@ -48,7 +48,7 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 	// Mirrors the HTTP routes in handler.go's requireAnyRole groups.
 	allAppTools := []string{
 		"list_apps", "get_app", "get_app_members", "get_app_services", // all-roles
-		"list_app_files", "read_app_file", "write_app_file", "delete_app_file", // all-roles
+		"list_app_files", "search_app_files", "read_app_file", "write_app_file", "delete_app_file", // all-roles
 	}
 	allAppManageTools := []string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services"}
 	allServiceTools := []string{"list_services", "get_service", "get_service_apps", "list_service_files", "read_service_file", "write_service_file", "delete_service_file"} // all-roles; files gated per service
