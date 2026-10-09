@@ -1676,6 +1676,7 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
         {app && !loading && (
           <div className="page-col">
             <HostUpload session={session} app={app} onRefresh={onRefresh}/>
+            <AppServiceTools session={session} app={app} navigate={navigate}/>
             {setupPrompt && (
               <div className="field">
                 <label>Setup prompt</label>
@@ -1971,6 +1972,56 @@ function ReplacePicker({ placeholder, emptyLabel, items, value, onChange }) {
         ))}
         {filtered.length === 0 && <div className="replace-empty muted">{emptyLabel}</div>}
       </div>
+    </div>
+  );
+}
+
+// An app's own virtual service is named for its route: app:<slug>.
+const appServiceName = (app) => 'app:' + hostRoute(app).slice(1);
+
+// The app's own virtual service: every app has one, blank until tools are
+// written. It's reachable over MCP and from the app itself, behind the app's
+// gate, and anyone who can edit the app can edit its tools.
+function AppServiceTools({ session, app, navigate }) {
+  const [tools, setTools] = useState(null);
+  const [error, setError] = useState('');
+  const toast = useToast();
+  const name = appServiceName(app);
+  const mcpUrl = `${window.__HOMESLICE_CONFIG.apiBase}/mcp/${name}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    frbr(session, 'GET', '/api/apps/' + app.nonce + '/service/tools')
+      .then(r => { if (!cancelled) { setTools(r.tools || []); setError(''); } })
+      .catch(e => { if (!cancelled) { setTools([]); setError(e.message); } });
+    return () => { cancelled = true; };
+  }, [app.nonce, session]);
+
+  return (
+    <div className="field">
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+        <label style={{margin:0}}>App service tools <Badge tone="gray" dot={false}>{tools ? tools.length : '…'}</Badge></label>
+        <button className="btn btn-sm btn-primary" onClick={()=>navigate('apptools', {nonce: app.nonce})}>
+          <Icon name="edit" size={12}/> Edit
+        </button>
+      </div>
+      <span className="help">
+        This app's own virtual service, behind the app's gate. MCP at <span className="mono">{mcpUrl}</span>
+        <button className="id-sub" onClick={() => copyText(mcpUrl, toast)} title="Copy URL"><Icon name="copy" size={12}/></button>
+        ; the app calls it at <span className="mono">/service/call/{name}</span>.
+      </span>
+      {error && <span className="help" style={{color:'var(--danger)'}}>{error}</span>}
+      {tools && !error && tools.length === 0 && <span className="muted">No tools yet. Edit to add some.</span>}
+      {tools && tools.length > 0 && (
+        <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
+          {tools.map((t,i)=>
+            <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
+              <b>{t.name}</b>
+              {t.description && <span className="muted"> — {t.description}</span>}
+            </li>
+          )}
+        </ul>
+      )}
     </div>
   );
 }
@@ -2756,10 +2807,10 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
 
 // ── Service tools editor ───────────────────────────────────────────────
 
-function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
-  const service = services.find(s => String(s.id) === serviceId);
-  const type = service?.descriptor?.type;
-  const isTasks = type === 'tasks';
+// Edits one definition file: a registered service's (filesPath
+// /api/services/:id/files) or an app's own service's
+// (/api/apps/:nonce/service/files). A missing name means nothing was found.
+function ServiceToolsEditor({ session, name, isTasks, filesPath, onBack, onSaved }) {
   const toast = useToast();
   const textareaRef = useRef(null);
 
@@ -2769,10 +2820,10 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
   const [dirty,setDirty] = useState(false);
 
   useEffect(() => {
-    if (!service) return;
+    if (!name) return;
     let cancelled = false;
     setLoading(true);
-    frbr(session, 'GET', '/api/services/' + serviceId + '/files', null, { rawText: true })
+    frbr(session, 'GET', filesPath, null, { rawText: true })
       .then(text => { if (!cancelled) { setContent(text || ''); setDirty(false); } })
       .catch(e => {
         if (cancelled) return;
@@ -2781,7 +2832,7 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [service, serviceId, session]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [name, filesPath, session]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onKey = (e) => {
@@ -2795,13 +2846,13 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
   }, [content, saving]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
-    if (!service) return;
+    if (!name) return;
     setSaving(true);
     try {
       const blob = new Blob([content], { type: 'text/plain' });
       const form = new FormData();
-      form.append('file', blob, service.name + '.txt');
-      await frbr(session, 'POST', '/api/services/' + serviceId + '/files', form, { rawText: true });
+      form.append('file', blob, name + '.txt');
+      await frbr(session, 'POST', filesPath, form, { rawText: true });
       setDirty(false);
       toast('File saved');
       onSaved?.();
@@ -2812,7 +2863,7 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
     }
   };
 
-  if (!service) {
+  if (!name) {
     return (
       <>
         <PageHead title="Service not found" back={onBack} backLabel="Back"/>
@@ -2828,9 +2879,9 @@ function ServiceToolsEditor({ session, services, serviceId, onBack, onSaved }) {
       <div className="editor-inner">
         <PageHead
           title={`Edit ${isTasks ? 'tasks' : 'virtual'} script`}
-          sub={`Plain-text definition for ${service.name}.`}
+          sub={`Plain-text definition for ${name}.`}
           back={onBack}
-          backLabel={service.name}
+          backLabel={name}
           actions={
             <>
               <button className="btn btn-ghost" onClick={onBack} disabled={saving}>Cancel</button>
@@ -3609,6 +3660,7 @@ const fmtShortTime = (iso) => {
 //   /control/apps/new · /control/apps/:nonce  -> app page
 //   /control/services/new · /control/services/:id
 //     · /control/services/:id/edit-tools      -> service page / tools editor
+//   /control/apps/:nonce/edit-tools           -> the app's own service's tools editor
 //   /control/auth/new · /control/auth/:id     -> auth record page
 //   /control/users|roles|audit|settings       -> the user area and settings
 //   /control/profile                          -> the signed-in user's own page
@@ -3618,6 +3670,7 @@ const parseRoute = () => {
   if (!a) return { page: 'home', params: {} };
   if (a === 'apps') {
     if (b === 'new') return { page: 'app', params: { isNew: true } };
+    if (b && c === 'edit-tools') return { page: 'apptools', params: { nonce: b } };
     if (b) return { page: 'app', params: { nonce: b } };
   }
   if (a === 'services') {
@@ -3637,6 +3690,7 @@ const buildPath = (page, params = {}) => {
   if (page === 'app') return params.isNew ? '/control/apps/new' : `/control/apps/${params.nonce}`;
   if (page === 'service') return params.isNew ? '/control/services/new' : `/control/services/${params.serviceId}`;
   if (page === 'tools') return `/control/services/${params.serviceId}/edit-tools`;
+  if (page === 'apptools') return `/control/apps/${params.nonce}/edit-tools`;
   if (page === 'authrecord') return params.isNew ? '/control/auth/new' : `/control/auth/${params.authId}`;
   return page === 'home' ? '/control' : `/control/${page}`;
 };
@@ -3727,7 +3781,18 @@ function AppShell() {
         {page==='home'      && <HomePage session={session} navigate={navigate} apps={apps} services={services} auth={auth} users={users} adminAuthID={adminAuthID} onRefresh={load}/>}
         {page==='app'       && <AppPage session={session} nonce={route.params.nonce} isNew={route.params.isNew} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load} navigate={navigate}/>}
         {page==='service'   && <ServicePage session={session} serviceId={route.params.serviceId} isNew={route.params.isNew} services={services} auth={auth} adminAuthID={adminAuthID} apps={apps} users={users} onRefresh={load} navigate={navigate}/>}
-        {page==='tools'     && <ServiceToolsEditor session={session} services={services} serviceId={route.params.serviceId} onBack={()=>navigate('service',{serviceId:route.params.serviceId})} onSaved={load}/>}
+        {page==='tools'     && (() => {
+          const svc = services.find(s => String(s.id) === route.params.serviceId);
+          return <ServiceToolsEditor session={session} name={svc?.name} isTasks={svc?.descriptor?.type === 'tasks'}
+                                     filesPath={'/api/services/' + route.params.serviceId + '/files'}
+                                     onBack={()=>navigate('service',{serviceId:route.params.serviceId})} onSaved={load}/>;
+        })()}
+        {page==='apptools'  && (() => {
+          const app = apps.find(a => a.nonce === route.params.nonce);
+          return <ServiceToolsEditor session={session} name={app && appServiceName(app)} isTasks={false}
+                                     filesPath={'/api/apps/' + route.params.nonce + '/service/files'}
+                                     onBack={()=>navigate('app',{nonce:route.params.nonce})} onSaved={load}/>;
+        })()}
         {page==='authrecord'&& <AuthPage session={session} authId={route.params.authId} isNew={route.params.isNew} auth={auth} services={services} apps={apps} onRefresh={load} navigate={navigate}/>}
         {page==='users'     && <UsersView session={session} users={users} apps={apps} onRefresh={load}/>}
         {page==='roles'     && <RolesView roles={roles}/>}

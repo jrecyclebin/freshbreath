@@ -99,6 +99,9 @@ type Service struct {
 	ActsAs      *int64            `json:"acts_as"`      // outbound credential record; nil = caller's own
 	UpdatedAt   time.Time         `json:"updated_at"`
 	Members     []int64           `json:"members,omitempty"` // users trusted with the definition file
+	// AppNonce marks an app's own implicit virtual service (never a row in
+	// the services table); empty for every registered service.
+	AppNonce string `json:"app_nonce,omitempty"`
 }
 
 // UpdateFeed is one remote-updates entry: either a receive feed (a remote URL

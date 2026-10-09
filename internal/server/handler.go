@@ -245,7 +245,8 @@ func (s *Server) SetupRoutes() {
 	s.mountAllMCP()
 }
 
-// mountAllMCP mounts every virtual and task service at /mcp/<slug>.
+// mountAllMCP mounts every virtual and task service at /mcp/<slug>, and
+// every app's own service at /mcp/app:<slug>.
 func (s *Server) mountAllMCP() {
 	services, err := s.store.ListServices()
 	if err != nil {
@@ -253,6 +254,13 @@ func (s *Server) mountAllMCP() {
 	}
 	for _, svc := range services {
 		s.mcpMounts.add(s, svc)
+	}
+	apps, err := s.store.ListHostedApps()
+	if err != nil {
+		return
+	}
+	for _, a := range apps {
+		s.syncAppServiceMount(a.Nonce)
 	}
 }
 
@@ -821,7 +829,29 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 // serviceBySlug finds the task or virtual service answering at
 // /service/call/<slug> and /mcp/<slug>: tasks://<slug> first, then
 // /mcp/<slug>.
+// serviceByURL finds a registered service by its URL, or an app service by
+// its /mcp/app:<slug>.
+func (s *Server) serviceByURL(url string) (*db.Service, error) {
+	if slug, ok := strings.CutPrefix(url, "/mcp/"+appServicePrefix); ok {
+		return s.appServiceBySlug(slug)
+	}
+	return s.store.GetServiceByURL(url)
+}
+
+// appMayUseService reports whether an app may reach a service from its
+// pages: its own app service, or a registered service it's linked to.
+func (s *Server) appMayUseService(nonce string, svc *db.Service) bool {
+	if svc.AppNonce != "" {
+		return svc.AppNonce == nonce
+	}
+	ok, err := s.store.IsServiceAllowedForApp(nonce, svc.ID)
+	return err == nil && ok
+}
+
 func (s *Server) serviceBySlug(slug string) (*db.Service, error) {
+	if appSlug, ok := strings.CutPrefix(slug, appServicePrefix); ok {
+		return s.appServiceBySlug(appSlug)
+	}
 	svc, err := s.store.GetServiceByURL("tasks://" + slug)
 	if err != nil {
 		svc, err = s.store.GetServiceByURL("/mcp/" + slug)
@@ -865,7 +895,7 @@ func (s *Server) loadServiceToolSummaries(svc *db.Service) ([]serviceToolSummary
 		}
 		return out, nil
 	case "virtual":
-		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+		tools, err := s.loadVirtualTools(svc)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return []serviceToolSummary{}, nil
@@ -903,8 +933,7 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unknown app", http.StatusUnauthorized)
 		return
 	}
-	allowed, err := s.store.IsServiceAllowedForApp(app.Nonce, svc.ID)
-	if err != nil || !allowed {
+	if !s.appMayUseService(app.Nonce, svc) {
 		http.Error(w, "Service not approved for this app", http.StatusForbidden)
 		return
 	}
@@ -1002,7 +1031,7 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, auth formats.VirtualAuth) {
 	switch r.Method {
 	case http.MethodGet:
-		tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+		tools, err := s.loadVirtualTools(svc)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -1019,7 +1048,7 @@ func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *db.Service, auth formats.VirtualAuth) {
-	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+	tools, err := s.loadVirtualTools(svc)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -1366,6 +1395,13 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/apps/{nonce}/service/{files|tools} — the app's own
+	// virtual service, as /api/services/{id}/… serves a registered one.
+	if len(parts) >= 5 && parts[3] == "service" {
+		s.handleAppService(w, r, nonce, parts[4])
+		return
+	}
+
 	// Sub-route: /api/apps/{nonce}/data — private files the web server never hosts
 	if len(parts) >= 4 && parts[3] == "data" {
 		s.handleAppData(w, r, nonce)
@@ -1544,6 +1580,28 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleAppService serves an app's own virtual service: "files" is its
+// definition (as /api/services/{id}/files), "tools" its tool summaries.
+func (s *Server) handleAppService(w http.ResponseWriter, r *http.Request, nonce, sub string) {
+	if !s.canAccessApp(r.Context(), nonce) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	switch sub {
+	case "files":
+		s.handleServiceFiles(w, r, -app.ID)
+	case "tools":
+		s.handleServiceTools(w, r, appService(app))
+	default:
+		http.NotFound(w, r)
 	}
 }
 

@@ -308,10 +308,14 @@ func appFileActPath(nonce, area, filePath string) string {
 }
 
 // serviceFileActPath builds the act-token target path for a service
-// definition file: /api/services/{id}/files. Services take no client path —
-// the definition path is server-derived.
-func serviceFileActPath(id int64) string {
-	return "/api/services/" + strconv.FormatInt(id, 10) + "/files"
+// definition file: /api/services/{id}/files, or /api/apps/{nonce}/service/files
+// for an app's own service. Services take no client path — the definition
+// path is server-derived.
+func serviceFileActPath(svc *db.Service) string {
+	if svc.AppNonce != "" {
+		return "/api/apps/" + svc.AppNonce + "/service/files"
+	}
+	return "/api/services/" + strconv.FormatInt(svc.ID, 10) + "/files"
 }
 
 // mcpToolError returns a tool result with an error message.
@@ -377,6 +381,20 @@ func (s *Server) serviceByName(name string) (*db.Service, error) {
 		return nil, fmt.Errorf("service not found: %v", err)
 	}
 	return svc, nil
+}
+
+// definitionServiceByName is serviceByName for the service-file tools, which
+// also reach an app's own service by its app:<slug> name. The core calls
+// they hand it to do the gating.
+func (s *Server) definitionServiceByName(name string) (*db.Service, error) {
+	if appSlug, ok := strings.CutPrefix(name, appServicePrefix); ok {
+		svc, err := s.appServiceBySlug(appSlug)
+		if err != nil {
+			return nil, fmt.Errorf("service not found: %v", err)
+		}
+		return svc, nil
+	}
+	return s.serviceByName(name)
 }
 
 // ── App Tools ───────────────────────────────────────────────────────
@@ -976,7 +994,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server, role string) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		name, _ := args["name"].(string)
 		search, _ := args["search"].(string)
-		svc, err := s.serviceByName(name)
+		svc, err := s.definitionServiceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -1014,11 +1032,11 @@ Description: "Read all or part of a virtual or task service's definition file. A
 		transport, _ := args["transport"].(string)
 		chunked := offset != 0 || limit != 0
 
-		svc, err := s.serviceByName(name)
+		svc, err := s.definitionServiceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
-		pathQuery := serviceFileActPath(svc.ID)
+		pathQuery := serviceFileActPath(svc)
 
 		switch transport {
 		case actTokenTransportInline:
@@ -1108,7 +1126,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			if content == "" && oldText == "" {
 				return mcpToolError("transport:\"inline\" requires new_text or old_text"), nil
 			}
-			svc, err := s.serviceByName(name)
+			svc, err := s.definitionServiceByName(name)
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -1121,16 +1139,16 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 			if oldText != "" {
 				return mcpToolError("transport:\"http\" is incompatible with old_text (patches stay inline)"), nil
 			}
-			svc, err := s.serviceByName(name)
+			svc, err := s.definitionServiceByName(name)
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
 			// Gate at mint time so a non-member gets a clear error instead of a
 			// URL that 403s at dispatch. coreWriteServiceFile gates on the PUT.
-			if err := s.gateServiceFile(user, svc.ID); err != nil {
+			if _, err := s.definitionService(user, svc.ID); err != nil {
 				return mcpToolError("%v", err), nil
 			}
-			u, err := s.mintActFileURL(user, http.MethodPut, serviceFileActPath(svc.ID))
+			u, err := s.mintActFileURL(user, http.MethodPut, serviceFileActPath(svc))
 			if err != nil {
 				return mcpToolError("%v", err), nil
 			}
@@ -1160,7 +1178,7 @@ Description: "Write or patch a virtual or task service's definition file. Withou
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		name, _ := args["name"].(string)
-		svc, err := s.serviceByName(name)
+		svc, err := s.definitionServiceByName(name)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}

@@ -622,6 +622,27 @@ as `"truncated": true` rather than silently shortened.
 > `recent-tasks` can't be talked into `DROP TABLE` no matter how confidently
 > it asks.
 
+## App Services — Every App Has One
+
+Every app comes with its own virtual service, ready to fill: no service to
+create, no link to make. It's named after the app's route — an app hosted
+at `/todo-board` has the service `app:todo-board` — and starts blank.
+
+- **Write its tools** like any virtual service: `write_service_file` with
+  `name: "app:todo-board"` over MCP, the **Edit** button under *App service
+  tools* on the app's page, or `POST /api/apps/{nonce}/service/files`.
+- **Call it** over MCP at `/mcp/app:todo-board`, or from the app's own pages
+  with `login("/mcp/app:todo-board")` and `callTool` — which goes to
+  `/service/call/app:todo-board`.
+
+It answers to its app. The app's gate (*Protected by*) guards it on both
+paths; only that app's pages can call it — other apps can't link it; anyone
+who can edit the app can edit its tools; and its SQL steps always use the
+app's own database, so no `app_nonce` argument is needed over MCP. It has no
+outbound credential, so `$token` is the caller's own. The definition is
+stored with the app and deleted with it. Renaming the app (or changing its
+route) renames the service.
+
 ## Elicitation Steps — FORM and URL
 
 Some tools need the *user*, not the model, to supply input: an approval, a
