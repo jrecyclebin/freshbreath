@@ -843,29 +843,45 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 
 // ── App Web operations ─────────────────────────────────────────────
 
-// appFile is one entry in an app's hosted web directory.
+// appFileDir resolves an app file area to its directory. "web" (the default)
+// is the Development slot the web server hosts; "data" sits beside it and is
+// never served — private storage such as user uploads.
+func (s *Server) appFileDir(nonce, area string) (string, error) {
+	switch area {
+	case "", "web":
+		return filepath.Join(s.config.DataDir, "apps", nonce, "web"), nil
+	case "data":
+		return filepath.Join(s.config.DataDir, "apps", nonce, "data"), nil
+	}
+	return "", cerr(http.StatusBadRequest, `area must be "web" or "data"`)
+}
+
+// appFile is one entry in an app's web or data directory.
 type appFile struct {
 	Path string `json:"path"` // slash-separated path relative to the web dir
 	Size int64  `json:"size"` // bytes
 }
 
-// coreListAppWeb lists the files in an app's web directory, sorted by path.
+// coreListAppFiles lists the files in an app's web or data area, sorted by path.
 // An app with no uploaded files lists empty (not an error). If search is
 // non-empty, only files whose path or content contains the term (case-
 // insensitive) are returned.
-func (s *Server) coreListAppWeb(actor *db.User, nonce, search string) ([]appFile, error) {
+func (s *Server) coreListAppFiles(actor *db.User, nonce, area, search string) ([]appFile, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
 	if _, err := s.store.GetApp(nonce); err != nil {
 		return nil, cerr(http.StatusNotFound, "app not found: %v", err)
 	}
-	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
+	webDir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(webDir); os.IsNotExist(err) {
 		return []appFile{}, nil
 	}
 	files := []appFile{}
-	err := filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+	err = filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
 		if err != nil || fi.IsDir() {
 			return err
 		}
@@ -900,13 +916,16 @@ const (
 	searchMaxLineText = 300
 )
 
-// coreSearchAppFiles greps app web files for a regular expression (RE2
+// coreSearchAppFiles greps an app file area (web or data) for a regular expression (RE2
 // syntax), returning matching lines with 1-based line numbers, like rg. With
 // a nonce it searches that app; without one it searches every app the actor
 // can list (all apps for admin+, their own apps otherwise). Binary files are
 // skipped, long lines are clipped, and results stop at searchMaxMatches with
 // truncated=true.
-func (s *Server) coreSearchAppFiles(actor *db.User, nonce, pattern string, ignoreCase bool) ([]appFileMatch, bool, error) {
+func (s *Server) coreSearchAppFiles(actor *db.User, nonce, area, pattern string, ignoreCase bool) ([]appFileMatch, bool, error) {
+	if _, err := s.appFileDir(nonce, area); err != nil {
+		return nil, false, err
+	}
 	if pattern == "" {
 		return nil, false, cerr(http.StatusBadRequest, "pattern is required")
 	}
@@ -951,7 +970,7 @@ func (s *Server) coreSearchAppFiles(actor *db.User, nonce, pattern string, ignor
 
 	matches := []appFileMatch{}
 	for _, app := range apps {
-		webDir := filepath.Join(s.config.DataDir, "apps", app.nonce, "web")
+		webDir, _ := s.appFileDir(app.nonce, area)
 		if _, err := os.Stat(webDir); os.IsNotExist(err) {
 			continue
 		}
@@ -1267,10 +1286,10 @@ func fileMatchesSearch(webDir, relPath, term string) bool {
 	return strings.Contains(strings.ToLower(string(data)), lower)
 }
 
-// coreReadAppFile reads all or part of a file from an app's web directory.
+// coreReadAppFile reads all or part of a file from an app's web or data area.
 // offset is a zero-based byte position; limit is the maximum bytes to return.
 // A zero limit reads to the end of the file.
-func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset, limit int64) ([]byte, error) {
+func (s *Server) coreReadAppFile(actor *db.User, nonce, area, filePath string, offset, limit int64) ([]byte, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
@@ -1281,8 +1300,11 @@ func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset,
 	if err != nil {
 		return nil, cerr(http.StatusBadRequest, "%v", err)
 	}
-	fullPath := filepath.Join(s.config.DataDir, "apps", nonce, "web", rel)
-	data, err := os.ReadFile(fullPath)
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, rel))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, cerr(http.StatusNotFound, "file not found")
@@ -1293,10 +1315,10 @@ func (s *Server) coreReadAppFile(actor *db.User, nonce, filePath string, offset,
 }
 
 // coreStatAppFile returns the size and sniffed content type of a file in an
-// app's web directory without reading the whole file. Used by the MCP
+// app's web or data area without reading the whole file. Used by the MCP
 // read_app_file transport:"http" and threshold-escape paths to populate
 // {size, content_type} without loading a potentially large file into memory.
-func (s *Server) coreStatAppFile(actor *db.User, nonce, filePath string) (int64, string, error) {
+func (s *Server) coreStatAppFile(actor *db.User, nonce, area, filePath string) (int64, string, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return 0, "", err
 	}
@@ -1307,7 +1329,11 @@ func (s *Server) coreStatAppFile(actor *db.User, nonce, filePath string) (int64,
 	if err != nil {
 		return 0, "", cerr(http.StatusBadRequest, "%v", err)
 	}
-	size, ct, err := sniffFile(filepath.Join(s.config.DataDir, "apps", nonce, "web", rel))
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return 0, "", err
+	}
+	size, ct, err := sniffFile(filepath.Join(dir, rel))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, "", cerr(http.StatusNotFound, "file not found")
@@ -1348,10 +1374,11 @@ func replaceUniqueText(src, old, repl []byte) ([]byte, error) {
 	return bytes.Replace(src, old, repl, 1), nil
 }
 
-// coreWriteAppFile writes or patches a file in an app's web directory. If
+// coreWriteAppFile writes or patches a file in an app's web or data area. If
 // oldText is empty the entire file is replaced. Otherwise the single occurrence
-// of oldText in the existing file is replaced with data.
-func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data []byte, oldText string) error {
+// of oldText in the existing file is replaced with data. Only web writes count
+// as a publish (LastUploaded, hosted routes).
+func (s *Server) coreWriteAppFile(actor *db.User, nonce, area, filePath string, data []byte, oldText string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
@@ -1364,8 +1391,11 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data [
 		return cerr(http.StatusBadRequest, "%v", err)
 	}
 
-	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
-	fullPath := filepath.Join(webDir, rel)
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return err
+	}
+	fullPath := filepath.Join(dir, rel)
 
 	var newData []byte
 	if oldText == "" {
@@ -1391,23 +1421,25 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, filePath string, data [
 		return cerr(http.StatusInternalServerError, "write failed")
 	}
 
-	now := time.Now().UTC()
-	details := app.Details
-	if details == nil {
-		details = &db.AppDetails{}
+	if area != "data" {
+		now := time.Now().UTC()
+		details := app.Details
+		if details == nil {
+			details = &db.AppDetails{}
+		}
+		details.LastUploaded = &now
+		if err := s.store.UpdateAppDetails(nonce, details); err != nil {
+			return cerr(http.StatusInternalServerError, "failed to save details")
+		}
+		s.rebuildHostedRoutes()
 	}
-	details.LastUploaded = &now
-	if err := s.store.UpdateAppDetails(nonce, details); err != nil {
-		return cerr(http.StatusInternalServerError, "failed to save details")
-	}
-	s.rebuildHostedRoutes()
 	_ = s.store.TouchApp(nonce)
-	s.audit(actor, "wrote app file", app.Name+"/"+rel)
+	s.audit(actor, "wrote app file", app.Name+"/"+appFileAuditPath(area, rel))
 	return nil
 }
 
-// coreDeleteAppFile removes a single file from an app's web directory.
-func (s *Server) coreDeleteAppFile(actor *db.User, nonce, filePath string) error {
+// coreDeleteAppFile removes a single file from an app's web or data area.
+func (s *Server) coreDeleteAppFile(actor *db.User, nonce, area, filePath string) error {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return err
 	}
@@ -1419,17 +1451,32 @@ func (s *Server) coreDeleteAppFile(actor *db.User, nonce, filePath string) error
 	if err != nil {
 		return cerr(http.StatusBadRequest, "%v", err)
 	}
-	fullPath := filepath.Join(s.config.DataDir, "apps", nonce, "web", rel)
-	if err := os.Remove(fullPath); err != nil {
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, rel)); err != nil {
 		if os.IsNotExist(err) {
 			return cerr(http.StatusNotFound, "file not found")
 		}
 		return cerr(http.StatusInternalServerError, "delete failed")
 	}
-	s.rebuildHostedRoutes()
+	if area != "data" {
+		s.rebuildHostedRoutes()
+	}
 	_ = s.store.TouchApp(nonce)
-	s.audit(actor, "deleted app file", app.Name+"/"+rel)
+	s.audit(actor, "deleted app file", app.Name+"/"+appFileAuditPath(area, rel))
 	return nil
+}
+
+// appFileAuditPath labels data-area files in the audit log so they aren't
+// mistaken for published web files.
+func appFileAuditPath(area, rel string) string {
+	rel = filepath.ToSlash(rel)
+	if area == "data" {
+		return "data:" + rel
+	}
+	return rel
 }
 
 // ── Service File operations ─────────────────────────────────────────

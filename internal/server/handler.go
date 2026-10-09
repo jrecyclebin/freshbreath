@@ -1365,6 +1365,12 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/apps/{nonce}/data — private files the web server never hosts
+	if len(parts) >= 4 && parts[3] == "data" {
+		s.handleAppData(w, r, nonce)
+		return
+	}
+
 	// Sub-route: /api/apps/{nonce}/db — query/watch/list/drop app databases
 	// (design/app-databases.md). Dispatched before the app lookup: the gate
 	// is gateDBTarget inside the core, and a database route shouldn't 404 on
@@ -1499,35 +1505,7 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 	// valid with ?file= — it's a full-file raw-body replace; patches stay
 	// MCP-only (no PATCH verb over HTTP).
 	if file := r.URL.Query().Get("file"); file != "" {
-		switch r.Method {
-		case http.MethodGet:
-			data, err := s.coreReadAppFile(actor, nonce, file, 0, 0)
-			if err != nil {
-				writeErr(w, err)
-				return
-			}
-			w.Header().Set("Content-Type", http.DetectContentType(data))
-			w.Write(data)
-		case http.MethodPut:
-			data, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, "read failed", http.StatusInternalServerError)
-				return
-			}
-			if err := s.coreWriteAppFile(actor, nonce, file, data, ""); err != nil {
-				writeErr(w, err)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		case http.MethodDelete:
-			if err := s.coreDeleteAppFile(actor, nonce, file); err != nil {
-				writeErr(w, err)
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
+		s.handleAppFile(w, r, nonce, "web", file)
 		return
 	}
 
@@ -1579,9 +1557,71 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 	}
 }
 
+// handleAppData serves an app's private data area: ?file=<relpath> selects
+// single-file GET/PUT/DELETE (as on /web); a bare GET lists the files as
+// {files:[{path,size}]}.
+func (s *Server) handleAppData(w http.ResponseWriter, r *http.Request, nonce string) {
+	if file := r.URL.Query().Get("file"); file != "" {
+		s.handleAppFile(w, r, nonce, "data", file)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	files, err := s.coreListAppFiles(userFromContext(r.Context()), nonce, "data", "")
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
+}
+
+// handleAppFile is single-file GET/PUT/DELETE in an app's web or data area.
+// PUT is a full-file raw-body replace; patches stay MCP-only.
+func (s *Server) handleAppFile(w http.ResponseWriter, r *http.Request, nonce, area, file string) {
+	actor := userFromContext(r.Context())
+	switch r.Method {
+	case http.MethodGet:
+		data, err := s.coreReadAppFile(actor, nonce, area, file, 0, 0)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", http.DetectContentType(data))
+		if area == "data" {
+			// Data files are untrusted uploads: never let one run script on
+			// this origin, whatever its sniffed type.
+			w.Header().Set("Content-Security-Policy", "sandbox")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
+		w.Write(data)
+	case http.MethodPut:
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read failed", http.StatusInternalServerError)
+			return
+		}
+		if err := s.coreWriteAppFile(actor, nonce, area, file, data, ""); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodDelete:
+		if err := s.coreDeleteAppFile(actor, nonce, area, file); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // handleSearchAppFiles greps app web files — the HTTP twin of the
 // search_app_files MCP tool.
-// GET /api/apps/search?pattern=<regex>[&nonce=<nonce>][&ignore_case=true]
+// GET /api/apps/search?pattern=<regex>[&nonce=<nonce>][&area=web|data][&ignore_case=true]
 func (s *Server) handleSearchAppFiles(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1589,7 +1629,7 @@ func (s *Server) handleSearchAppFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	ignoreCase, _ := strconv.ParseBool(q.Get("ignore_case"))
-	matches, truncated, err := s.coreSearchAppFiles(userFromContext(r.Context()), q.Get("nonce"), q.Get("pattern"), ignoreCase)
+	matches, truncated, err := s.coreSearchAppFiles(userFromContext(r.Context()), q.Get("nonce"), q.Get("area"), q.Get("pattern"), ignoreCase)
 	if err != nil {
 		writeErr(w, err)
 		return

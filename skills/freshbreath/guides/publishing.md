@@ -30,28 +30,44 @@ needing to stick to hash paths.
 
 The MCP tools work like the file tools LLMs are used to:
 
-- **`list_app_files`** — `{ nonce, search? }` → `{ files }`, each
+- **`list_app_files`** — `{ nonce, area?, search? }` → `{ files }`, each
   `{ path, size }`, sorted by path. Empty when nothing's published. If `search`
   is provided, only files whose path or content contains the term are returned.
-- **`search_app_files`** — `{ pattern, nonce?, ignore_case? }` →
+- **`search_app_files`** — `{ pattern, nonce?, area?, ignore_case? }` →
   `{ matches, truncated }`, each match `{ nonce, app, path, line, text }`.
   Works like `grep`/`rg`: `pattern` is a regular expression (RE2 syntax)
   matched per line, and `line` is 1-based. Omit `nonce` to search every app you
   can access. Binary files are skipped, long lines are clipped around the
   match, and results stop at 500 matches with `truncated: true`. Over HTTP:
-  `GET /api/apps/search?pattern=…&nonce=…&ignore_case=true`.
-- **`read_app_file`** — `{ nonce, path, offset?, limit?, transport? }` →
+  `GET /api/apps/search?pattern=…&nonce=…&area=…&ignore_case=true`.
+- **`read_app_file`** — `{ nonce, path, area?, offset?, limit?, transport? }` →
   `{ content }` (with `{ encoding: "base64" }` for binary files). `offset` and
   `limit` are zero-based byte bounds for reading chunks. `transport` (see §3)
   selects inline vs. a fetch URL; whole-file reads over 10 KiB auto-escape to
   a URL even at the default.
-- **`write_app_file`** — `{ nonce, path, content, old_text?, transport? }` →
+- **`write_app_file`** — `{ nonce, path, area?, content, old_text?, transport? }` →
   `{ status: "written" }`. Without `old_text` the entire file is replaced.
   With `old_text`, the single occurrence of `old_text` is replaced with
   `content`. An error is returned if `old_text` is not found or appears more
   than once. `transport` (see §3) selects inline vs. a PUT URL; writes never
   auto-escape.
-- **`delete_app_file`** — `{ nonce, path }` → `{ status: "deleted" }`.
+- **`delete_app_file`** — `{ nonce, path, area? }` → `{ status: "deleted" }`.
+
+### Web files vs. data files
+
+Every tool above takes an optional `area`:
+
+- **`"web"`** (default) — the Development slot. Everything here is served by
+  the web server and copied to Staging/Production on deploy.
+- **`"data"`** — private storage beside the web files that is **never served**
+  and never deployed. Use it for things like user uploads. Replacing or
+  deleting the web files leaves it alone; deleting the app removes it.
+
+Over HTTP, data files mirror the web single-file calls on their own route:
+`GET`/`PUT`/`DELETE /api/apps/{nonce}/data?file=<path>`, and a bare
+`GET /api/apps/{nonce}/data` lists them as `{ files }`. Data files are
+returned with `Content-Security-Policy: sandbox`, so an uploaded HTML or SVG
+file can't run script on the server's origin.
 
 ---
 

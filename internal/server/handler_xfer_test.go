@@ -337,3 +337,74 @@ func TestSearchAppFilesHTTP(t *testing.T) {
 		t.Fatalf("missing pattern: status = %d, want 400", rr.Code)
 	}
 }
+
+// ── App data area ──
+//
+// /api/apps/{nonce}/data mirrors /web's ?file= ops for files the web server
+// never hosts; a bare GET lists them.
+
+func TestAppDataFileRoundTrip(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "dataapp")
+	createAppFile(t, srv, nonce, "index.html", []byte("<h1>site</h1>"))
+
+	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/data?file=uploads/evil.html", bytes.NewReader([]byte("<script>alert(1)</script>")), nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("PUT status = %d, want 204; body=%q", rr.Code, rr.Body.String())
+	}
+
+	rr = testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/data?file=uploads/evil.html", nil, nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "<script>alert(1)</script>" {
+		t.Fatalf("GET = %d %q, want the stored bytes", rr.Code, rr.Body.String())
+	}
+	if csp := rr.Header().Get("Content-Security-Policy"); csp != "sandbox" {
+		t.Errorf("Content-Security-Policy = %q, want sandbox", csp)
+	}
+
+	// Listing shows it; the web area doesn't.
+	rr = testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/data", nil, nil)
+	want := `{"files":[{"path":"uploads/evil.html","size":25}]}`
+	if got := strings.TrimSpace(rr.Body.String()); got != want {
+		t.Fatalf("list = %s, want %s", got, want)
+	}
+	webFiles, _ := srv.coreListAppFiles(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "")
+	if len(webFiles) != 1 || webFiles[0].Path != "index.html" {
+		t.Errorf("web files = %+v, want only index.html", webFiles)
+	}
+
+	// The hosted app can't reach it, even by climbing out of the slot.
+	for _, p := range []string{"/dataapp/uploads/evil.html", "/dataapp/../data/uploads/evil.html", "/dataapp/%2e%2e/data/uploads/evil.html"} {
+		rr = testRequest(t, srv, http.MethodGet, p, nil, nil)
+		if strings.Contains(rr.Body.String(), "alert(1)") {
+			t.Errorf("GET %s served the data file", p)
+		}
+	}
+
+	rr = testRequest(t, srv, http.MethodDelete, "/api/apps/"+nonce+"/data?file=uploads/evil.html", nil, nil)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204", rr.Code)
+	}
+	rr = testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/data?file=uploads/evil.html", nil, nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("GET after delete = %d, want 404", rr.Code)
+	}
+}
+
+func TestAppDataSurvivesWebReplace(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	nonce := createApp(t, srv, "keepdata")
+	if err := srv.coreWriteAppFile(su, nonce, "data", "keep.txt", []byte("kept"), ""); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+	if _, err := srv.coreUploadAppWeb(su, nonce, []byte("<h1>v2</h1>"), "index.html"); err != nil {
+		t.Fatalf("upload web: %v", err)
+	}
+	if err := srv.coreDeleteAppWeb(su, nonce); err != nil {
+		t.Fatalf("delete web: %v", err)
+	}
+	data, err := srv.coreReadAppFile(su, nonce, "data", "keep.txt", 0, 0)
+	if err != nil || string(data) != "kept" {
+		t.Fatalf("data after web replace/delete = %q, %v; want kept", data, err)
+	}
+}

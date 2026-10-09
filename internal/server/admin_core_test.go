@@ -268,9 +268,9 @@ func TestGateApp(t *testing.T) {
 		op     func() error
 		wantOK bool
 	}{
-		{"list: admin", admin, func() error { _, e := srv.coreListAppWeb(admin, nonce, ""); return e }, true},
-		{"list: member", member, func() error { _, e := srv.coreListAppWeb(member, nonce, ""); return e }, true},
-		{"list: outsider", outsider, func() error { _, e := srv.coreListAppWeb(outsider, nonce, ""); return e }, false},
+		{"list: admin", admin, func() error { _, e := srv.coreListAppFiles(admin, nonce, "", ""); return e }, true},
+		{"list: member", member, func() error { _, e := srv.coreListAppFiles(member, nonce, "", ""); return e }, true},
+		{"list: outsider", outsider, func() error { _, e := srv.coreListAppFiles(outsider, nonce, "", ""); return e }, false},
 		{"upload: admin", admin, func() error { _, e := srv.coreUploadAppWeb(admin, nonce, []byte("<h1>x</h1>"), "index.html"); return e }, true},
 		{"upload: member", member, func() error {
 			_, e := srv.coreUploadAppWeb(member, nonce, []byte("<h1>x</h1>"), "index.html")
