@@ -1614,21 +1614,26 @@ func appFileAuditPath(area, rel string) string {
 //
 // Every app has its own virtual service, implicit rather than a row in the
 // services table. It starts blank and gains tools when its definition is
-// written, then works like any virtual service: MCP at /mcp/app:<slug>,
-// HTTP at /service/call/app:<slug>, and the usual service-file tools under
-// the name app:<slug>. It answers to the app: the app's gate protects it,
-// app members may edit it, only the app itself may call it over HTTP, and
-// its SQL steps use the app's own database. Its ID is the app's negated,
-// which can't collide with a real service. The definition lives at
-// apps/<nonce>/service.txt — outside every served slot — and goes with the
-// app.
+// written, then works like any virtual service: MCP at /mcp/app:<nonce>,
+// HTTP at /service/call/app:<nonce>, and the usual service-file tools
+// under the name app:<nonce>. The nonce is the name — unique by
+// construction and stable across renames, so the mount never moves — and
+// the bare /mcp/app: (or /service/call/app:) resolves to the current
+// app's nonce from the request (X-App-Nonce, Referer, ?loc=), so a page
+// can name its own service without naming its nonce. It answers to the
+// app: the app's gate protects it, app members may edit it, only the app
+// itself may call it over HTTP, and its SQL steps use the app's own
+// database. Its ID is the app's negated, which can't collide with a real
+// service. The definition lives at apps/<nonce>/service.txt — outside
+// every served slot — and goes with the app.
 
 // appServicePrefix starts every app service's name and slug.
 const appServicePrefix = "app:"
 
-// appService builds an app's implicit virtual service.
+// appService builds an app's implicit virtual service. The slug is the
+// nonce, so /mcp/app:<nonce> is a fixed address no rename ever moves.
 func appService(app *db.App) *db.Service {
-	slug := appServicePrefix + appSlug(app)
+	slug := appServicePrefix + app.Nonce
 	return &db.Service{
 		ID:          -app.ID,
 		Name:        slug,
@@ -1639,27 +1644,20 @@ func appService(app *db.App) *db.Service {
 	}
 }
 
-// appServiceBySlug finds the app service for an app slug (the part after
-// "app:").
-func (s *Server) appServiceBySlug(slug string) (*db.Service, error) {
-	apps, err := s.store.ListHostedApps()
+// appServiceByNonce finds the app service for an app nonce (the part
+// after "app:").
+func (s *Server) appServiceByNonce(nonce string) (*db.Service, error) {
+	app, err := s.store.GetApp(nonce)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("no app with nonce %q", nonce)
 	}
-	for _, a := range apps {
-		if appSlug(a) == slug {
-			app, err := s.store.GetApp(a.Nonce)
-			if err != nil {
-				return nil, err
-			}
-			return appService(app), nil
-		}
-	}
-	return nil, fmt.Errorf("no app with slug %q", slug)
+	return appService(app), nil
 }
 
-// syncAppServiceMount remounts an app's service after the app or its
-// definition changes — or unmounts it once the app is gone.
+// syncAppServiceMount refreshes an app's service mount after the app or
+// its definition changes — or unmounts it once the app is gone. The slug
+// itself never changes (it's the nonce); what needs refreshing is the
+// gate (protected_by is baked into the mounted entry) and the tools.
 func (s *Server) syncAppServiceMount(nonce string) {
 	s.mcpMounts.removeApp(nonce)
 	if app, err := s.store.GetApp(nonce); err == nil {

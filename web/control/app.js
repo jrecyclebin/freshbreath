@@ -1976,8 +1976,10 @@ function ReplacePicker({ placeholder, emptyLabel, items, value, onChange }) {
   );
 }
 
-// An app's own virtual service is named for its route: app:<slug>.
-const appServiceName = (app) => 'app:' + hostRoute(app).slice(1);
+// An app's own virtual service is named for its nonce: app:<nonce> — a
+// fixed address no rename moves. From the app's own pages the bare app:
+// form names it too (the server resolves the current app).
+const appServiceName = (app) => 'app:' + app.nonce;
 
 // The app's own virtual service: every app has one, blank until tools are
 // written. It's reachable over MCP and from the app itself, behind the app's
@@ -2006,9 +2008,9 @@ function AppServiceTools({ session, app, navigate }) {
         </button>
       </div>
       <span className="help">
-        This app's own virtual service, behind the app's gate. MCP at <span className="mono">{mcpUrl}</span>
+        This app's own virtual service, behind the app's gate, named for the nonce so renames never move it. MCP at <span className="mono">{mcpUrl}</span>
         <button className="id-sub" onClick={() => copyText(mcpUrl, toast)} title="Copy URL"><Icon name="copy" size={12}/></button>
-        ; the app calls it at <span className="mono">/service/call/{name}</span>.
+        ; the app calls it at <span className="mono">/service/call/{name}</span> — or the bare <span className="mono">/mcp/app:</span> from its own pages.
       </span>
       {error && <span className="help" style={{color:'var(--danger)'}}>{error}</span>}
       {tools && !error && tools.length === 0 && <span className="muted">No tools yet. Edit to add some.</span>}

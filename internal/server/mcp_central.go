@@ -384,11 +384,11 @@ func (s *Server) serviceByName(name string) (*db.Service, error) {
 }
 
 // definitionServiceByName is serviceByName for the service-file tools, which
-// also reach an app's own service by its app:<slug> name. The core calls
+// also reach an app's own service by its app:<nonce> name. The core calls
 // they hand it to do the gating.
 func (s *Server) definitionServiceByName(name string) (*db.Service, error) {
-	if appSlug, ok := strings.CutPrefix(name, appServicePrefix); ok {
-		svc, err := s.appServiceBySlug(appSlug)
+	if nonce, ok := strings.CutPrefix(name, appServicePrefix); ok {
+		svc, err := s.appServiceByNonce(nonce)
 		if err != nil {
 			return nil, fmt.Errorf("service not found: %v", err)
 		}

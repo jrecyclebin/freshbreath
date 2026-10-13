@@ -246,7 +246,7 @@ func (s *Server) SetupRoutes() {
 }
 
 // mountAllMCP mounts every virtual and task service at /mcp/<slug>, and
-// every app's own service at /mcp/app:<slug>.
+// every app's own service at /mcp/app:<nonce>.
 func (s *Server) mountAllMCP() {
 	services, err := s.store.ListServices()
 	if err != nil {
@@ -825,15 +825,12 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 
 // ── Tasks service ───────────────────────────────────────────────────────
 
-// loadTasksForService reads and parses the tasks file for a service.
-// serviceBySlug finds the task or virtual service answering at
-// /service/call/<slug> and /mcp/<slug>: tasks://<slug> first, then
-// /mcp/<slug>.
-// serviceByURL finds a registered service by its URL, or an app service by
-// its /mcp/app:<slug>.
+// serviceByURL finds a registered service by its URL, or an app service
+// by its /mcp/app:<nonce>.
+// app's nonce by its callers, who hold the request.
 func (s *Server) serviceByURL(url string) (*db.Service, error) {
-	if slug, ok := strings.CutPrefix(url, "/mcp/"+appServicePrefix); ok {
-		return s.appServiceBySlug(slug)
+	if nonce, ok := strings.CutPrefix(url, "/mcp/"+appServicePrefix); ok {
+		return s.appServiceByNonce(nonce)
 	}
 	return s.store.GetServiceByURL(url)
 }
@@ -848,9 +845,27 @@ func (s *Server) appMayUseService(nonce string, svc *db.Service) bool {
 	return err == nil && ok
 }
 
+// currentAppSlug resolves the bare "app:" slug — the current app's own
+// service — against a request, returning the full "app:<nonce>" slug it
+// stands for. Every other slug passes through unchanged. "" comes back
+// when the request carries no app context (resolveAppNonce found neither
+// an X-App-Nonce, a bare query nonce, nor a location it can resolve).
+func (s *Server) currentAppSlug(slug string, r *http.Request) string {
+	if slug != appServicePrefix {
+		return slug
+	}
+	if nonce := s.resolveAppNonce(r); nonce != "" && nonce != s.adminNonce {
+		return appServicePrefix + nonce
+	}
+	return ""
+}
+
+// serviceBySlug finds the task or virtual service answering at
+// /service/call/<slug> and /mcp/<slug>: tasks://<slug> first, then
+// /mcp/<slug>, with app:<nonce> the app's own service.
 func (s *Server) serviceBySlug(slug string) (*db.Service, error) {
-	if appSlug, ok := strings.CutPrefix(slug, appServicePrefix); ok {
-		return s.appServiceBySlug(appSlug)
+	if nonce, ok := strings.CutPrefix(slug, appServicePrefix); ok {
+		return s.appServiceByNonce(nonce)
 	}
 	svc, err := s.store.GetServiceByURL("tasks://" + slug)
 	if err != nil {
@@ -859,6 +874,7 @@ func (s *Server) serviceBySlug(slug string) (*db.Service, error) {
 	return svc, err
 }
 
+// loadTasksForService reads and parses the tasks file for a service.
 func (s *Server) loadTasksForService(svc *db.Service) ([]formats.Task, error) {
 	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
 	data, err := os.ReadFile(path)
@@ -921,6 +937,11 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slug := r.PathValue("name")
+	if slug == appServicePrefix {
+		// The bare form: this app's own service. The header nonce above is
+		// the whole app context on this path.
+		slug = appServicePrefix + nonce
+	}
 
 	svc, err := s.serviceBySlug(slug)
 	if err != nil {
