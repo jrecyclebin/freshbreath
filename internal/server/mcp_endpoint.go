@@ -98,6 +98,18 @@ func (r *mcpMountRegistry) remove(slug string) {
 	r.mu.Unlock()
 }
 
+// removeApp deletes an app service's entry, whatever slug the app had when
+// it was mounted.
+func (r *mcpMountRegistry) removeApp(nonce string) {
+	r.mu.Lock()
+	for slug, e := range r.entries {
+		if e.svc.AppNonce == nonce {
+			delete(r.entries, slug)
+		}
+	}
+	r.mu.Unlock()
+}
+
 // requireMCPGate enforces a mount's inbound gate. Every mount resolves its
 // protected_by per request — empty inherits the admin record — and demands
 // a bearer; the one exception is an explicit Anonymous record, which mounts
@@ -129,7 +141,7 @@ func (s *Server) requireMCPGate(svc *db.Service, next http.Handler) http.Handler
 // tools via the MCP protocol. Optional opts tweak the ServerOptions before the
 // server is built (tests use them to force an old protocol version).
 func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOptions)) (*mcp.Server, error) {
-	tools, err := formats.LoadVirtualTools(s.config.DataDir, svc.Name)
+	tools, err := s.loadVirtualTools(svc)
 	if err != nil {
 		return nil, fmt.Errorf("load virtual tools: %w", err)
 	}
@@ -404,8 +416,14 @@ func (s *Server) virtualPRM(svc *db.Service) *oauthex.ProtectedResourceMetadata 
 
 // handleMCP is the single route handler for all /mcp/{name} requests.
 // It looks up the virtual service by slug and dispatches to its MCP server.
+// The bare "app:" slug is the current app's own service, resolved from
+// the request (X-App-Nonce, Referer, ?loc=) — a page names no nonce.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("name")
+	slug := s.currentAppSlug(r.PathValue("name"), r)
+	if slug == "" {
+		http.Error(w, "app: requires an app context (X-App-Nonce or a same-origin request)", http.StatusBadRequest)
+		return
+	}
 	entry := s.mcpMounts.get(slug)
 	if entry == nil {
 		http.Error(w, "virtual service not found", http.StatusNotFound)
@@ -416,9 +434,14 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 // handleMCPPRM serves /.well-known/oauth-protected-resource/mcp/{name}.
 // An explicitly Anonymous mount advertises nothing; every other gate points
-// clients at Fresh Breath's own authorization server.
+// clients at Fresh Breath's own authorization server. The bare "app:"
+// slug resolves to the current app's own service, as in handleMCP.
 func (s *Server) handleMCPPRM(w http.ResponseWriter, r *http.Request) {
-	slug := r.PathValue("name")
+	slug := s.currentAppSlug(r.PathValue("name"), r)
+	if slug == "" {
+		http.Error(w, "app: requires an app context (X-App-Nonce or a same-origin request)", http.StatusBadRequest)
+		return
+	}
 	entry := s.mcpMounts.get(slug)
 	if entry == nil {
 		http.Error(w, "virtual service not found", http.StatusNotFound)

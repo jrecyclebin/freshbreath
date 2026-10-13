@@ -641,13 +641,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "The control panel logs in to its gate, not to services", http.StatusForbidden)
 			return
 		}
-		svc, err = s.store.GetServiceByURL(serviceURL)
+		if serviceURL == "/mcp/"+appServicePrefix {
+			// The bare form: this app's own service, named by the door itself.
+			serviceURL = "/mcp/" + appServicePrefix + nonce
+		}
+		svc, err = s.serviceByURL(serviceURL)
 		if err != nil {
 			http.Error(w, "Service not registered", http.StatusForbidden)
 			return
 		}
-		allowed, err := s.store.IsServiceAllowedForApp(nonce, svc.ID)
-		if err != nil || !allowed {
+		if !s.appMayUseService(nonce, svc) {
 			http.Error(w, "Service not approved for this app", http.StatusForbidden)
 			return
 		}

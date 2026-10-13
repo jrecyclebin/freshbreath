@@ -443,6 +443,18 @@ func (s *Store) ListAppsForUser(userID int64) ([]map[string]interface{}, error) 
 	return apps, rows.Err()
 }
 
+// GetAppByID looks an app up by its numeric ID.
+func (s *Store) GetAppByID(id int64) (*App, error) {
+	var nonce string
+	if err := s.db.QueryRow("SELECT nonce FROM apps WHERE id = ?", id).Scan(&nonce); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, errors.New("app not found")
+		}
+		return nil, err
+	}
+	return s.GetApp(nonce)
+}
+
 func (s *Store) GetApp(nonce string) (*App, error) {
 	row := s.db.QueryRow(
 		"SELECT id, nonce, name, url, environment, owner_id, details, protected_by FROM apps WHERE nonce = ?",
