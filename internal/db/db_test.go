@@ -527,3 +527,57 @@ func TestRefreshFamilyDeleteExpired(t *testing.T) {
 		t.Error("expected unexpired family to remain")
 	}
 }
+
+// Emails are stored lowercased so the UNIQUE constraint is a real guard
+// against case-variant duplicates, and lookups are case-insensitive so a
+// login typed with mixed case still finds the row — including rows written
+// before normalization (COLLATE NOCASE covers the cut-over).
+func TestUserEmailCaseInsensitive(t *testing.T) {
+	store := newTestStore(t)
+
+	u, err := store.CreateUser("Ada", "Ada@Company.COM", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if u.Email != "ada@company.com" {
+		t.Errorf("stored email = %q, want lowercased", u.Email)
+	}
+
+	// A case-variant duplicate is rejected, not silently created.
+	if _, err := store.CreateUser("Other", "ADA@COMPANY.COM", "Member", "Active"); err == nil {
+		t.Error("duplicate create with case-variant email succeeded; want UNIQUE failure")
+	}
+
+	// Lookups are case-insensitive: mixed-case and surrounding whitespace match.
+	for _, q := range []string{"ada@company.com", "ADA@Company.Com", "  Ada@Company.com  "} {
+		got, err := store.GetUserByEmail(q)
+		if err != nil {
+			t.Errorf("GetUserByEmail(%q): %v", q, err)
+			continue
+		}
+		if got.ID != u.ID {
+			t.Errorf("GetUserByEmail(%q) = user %d, want %d", q, got.ID, u.ID)
+		}
+	}
+
+	// An update that changes only the casing normalizes back to lowercase,
+	// so a re-save can't fork a case-variant duplicate.
+	if err := store.UpdateUser(u.ID, u.Name, "Ada@Company.COM", u.Role, u.Status, u.Metadata); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, _ := store.GetUser(u.ID)
+	if got.Email != "ada@company.com" {
+		t.Errorf("after update email = %q, want lowercased", got.Email)
+	}
+
+	// A legacy mixed-case row (written before normalization) is still found by
+	// a lowercase lookup, so the cut-over doesn't lock existing users out.
+	if _, err := store.db.Exec("INSERT INTO users (name, email, role, status, metadata) VALUES (?, ?, ?, ?, '{}')", "Legacy", "Mixed@Case.org", "Member", "Active"); err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+	if got, err := store.GetUserByEmail("mixed@case.org"); err != nil {
+		t.Errorf("legacy mixed-case lookup failed: %v", err)
+	} else if got.Email != "Mixed@Case.org" {
+		t.Errorf("legacy lookup returned %q, want the stored mixed-case row", got.Email)
+	}
+}

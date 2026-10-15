@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"poggers.institute/freshbreath/internal/utils"
@@ -550,6 +551,10 @@ func (s *Store) DeleteApp(nonce string) error {
 // ── Users ──
 
 func (s *Store) CreateUser(name, email, role, status string) (*User, error) {
+	// Emails are stored lowercased and trimmed so lookups and the UNIQUE
+	// constraint are case-insensitive — a provider that reports
+	// Ada@Company.com and one that reports ada@company.com land on one row.
+	email = strings.ToLower(strings.TrimSpace(email))
 	if role == "" {
 		role = "Member"
 	}
@@ -599,8 +604,12 @@ func (s *Store) GetUser(id int64) (*User, error) {
 }
 
 func (s *Store) GetUserByEmail(email string) (*User, error) {
+	// Case-insensitive match so a login typed as Ada@x.com finds the stored
+	// ada@x.com; COLLATE NOCASE also covers rows written before emails were
+	// normalized to lowercase, so the cut-over can't lock existing users out.
+	email = strings.TrimSpace(email)
 	row := s.db.QueryRow(
-		"SELECT id, name, email, role, status, last_seen, created_at, metadata FROM users WHERE email = ?", email,
+		"SELECT id, name, email, role, status, last_seen, created_at, metadata FROM users WHERE email = ? COLLATE NOCASE", email,
 	)
 	u := &User{}
 	var lastSeen sql.NullString
@@ -665,6 +674,9 @@ func (s *Store) TouchLastSeen(userID int64) error {
 }
 
 func (s *Store) UpdateUser(id int64, name, email, role, status string, metadata *UserMetadata) error {
+	// Normalize on write, matching CreateUser — keeps the UNIQUE constraint a
+	// real guard against case-variant duplicates.
+	email = strings.ToLower(strings.TrimSpace(email))
 	var metadataStr string
 	if metadata != nil {
 		data, err := json.Marshal(metadata)

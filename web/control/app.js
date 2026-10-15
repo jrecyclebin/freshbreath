@@ -2,6 +2,11 @@
 
 const { useState, useEffect, useCallback, useRef, createContext, useContext } = React;
 
+// slugify mirrors the server's slugify (internal/server/handler.go): lowercase,
+// runs of non-alphanumerics collapse to a single hyphen, ends trimmed. Used to
+// preview the provider slug an auth record is assigned when none is set.
+const slugify = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
 // ── Icons ──────────────────────────────────────────────────────────────
 
 const Icon = ({ name, size = 16 }) => {
@@ -529,7 +534,7 @@ function CreateAccountStep({ onSkip }) {
           </div>
           <div className="field">
             <label>Email</label>
-            <input className="input" type="email" autoComplete="email" value={form.email} onChange={set('email')}/>
+<input className="input" type="email" autoComplete="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value.toLowerCase() }))}/>
           </div>
           <div className="field">
             <label>Passphrase</label>
@@ -1319,7 +1324,7 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
     >
       <p><strong>NOTE:</strong> You don't need to create accounts for people who are just using the apps and logging in with their own creds! This is only for users who need to log in to this admin panel and manage apps and services.</p>
       <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Ada Lovelace"/></div>
-      <div className="field"><label>Email</label><input className="input" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))} placeholder="ada@company.com"/></div>
+<div className="field"><label>Email</label><input className="input" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value.toLowerCase()}))} placeholder="ada@company.com"/></div>
       <div className="field-row">
         <div className="field"><label>Role</label>
           <select className="input" value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}>
@@ -1608,10 +1613,11 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
         .catch(e=>toast(e.message,true))
         .finally(()=>setLoading(false));
     } else {
-      // A new app defaults to Anonymous: an app is a door onto the LAN,
-      // and inheriting admin auth would gate every dashboard by surprise.
+      // A new app inherits the admin auth gate — the common case is an
+      // internal tool behind the panel's own sign-in, and an explicit gate
+      // is the exception, so the default is "inherit" (null), not Anonymous.
       setForm({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],
-               protected_by: auth.find(r => r.kind === 'anonymous' && r.builtin)?.id ?? null});
+               protected_by: null});
     }
   }, [app ? app.nonce : null, isNew]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1749,7 +1755,7 @@ function UploadModal({ session, files, apps, services, users, auth, adminAuthID,
   useEffect(() => {
     if (isAppFile) {
       setAppForm({name:seeded,environment:'Development',url:'',owner_id:'',services:[],members:[],
-        protected_by: auth.find(r => r.kind === 'anonymous' && r.builtin)?.id ?? null});
+        protected_by: null});
     } else {
       setSvcForm({name:seeded,url:'',descriptor:{type:'tasks'},protected_by:null,acts_as:null});
     }
@@ -2322,7 +2328,7 @@ function AuthForm({ form, setForm, record }) {
             <span className="help">Never leaves the server — token exchange and refresh run here.</span>
           </div>
           <div className="field"><label>Provider slug</label>
-            <input className="input mono" value={d.provider||''} onChange={e=>upd('provider',e.target.value)} placeholder="github"/>
+            <input className="input mono" value={d.provider||''} onChange={e=>upd('provider',e.target.value)} placeholder={slugify(form.name) || 'github'}/>
             <span className="help">
               The upstream this record talks to. Two records over the same provider share one
               identity for the people behind them, so give them the same slug.
@@ -3222,7 +3228,7 @@ function ProfileView({ session }) {
               <input className="input" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))}/>
             </div>
             <div className="field"><label>Email</label>
-              <input className="input" type="email" value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value}))}/>
+<input className="input" type="email" value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value.toLowerCase()}))}/>
             </div>
             <div style={{display:'flex',gap:8,marginTop:16}}>
               <button className="btn btn-primary" onClick={save} disabled={saving || !dirty || !form.name.trim() || !form.email.trim()}>
