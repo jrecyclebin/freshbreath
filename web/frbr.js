@@ -79,15 +79,17 @@ function uuidv4() {
 //
 export async function api(session, path, opts = {}) {
   const init = { ...opts };
-  // Only stringify JSON-able bodies. Binary bodies (Blob/File, ArrayBuffer,
-  // typed arrays, ReadableStream) and pre-encoded forms must pass through
-  // untouched — JSON.stringify(file) yields "{}", which corrupts raw uploads
+  // Only objects and arrays are stringified. Strings, binary bodies
+  // (Blob/File, ArrayBuffer, typed arrays, ReadableStream) and pre-encoded
+  // forms pass through untouched — JSON.stringify(file) yields "{}", and a
+  // string would arrive in quotes, either of which corrupts raw uploads
   // (e.g. SSH file sync's hash-verified PUTs).
   const body = init.body;
-  const isBinaryBody = body instanceof Blob ||
+  const isRawBody = typeof body === "string" || body instanceof Blob ||
     body instanceof ArrayBuffer || ArrayBuffer.isView(body) ||
-    body instanceof ReadableStream;
-  if (body && !isBinaryBody && !(body instanceof FormData)) {
+    body instanceof ReadableStream || body instanceof FormData ||
+    body instanceof URLSearchParams;
+  if (body && !isRawBody) {
     init.headers = new Headers(init.headers || {});
     if (!init.headers.has('Content-Type')) init.headers.set('Content-Type', 'application/json');
     init.body = JSON.stringify(body);

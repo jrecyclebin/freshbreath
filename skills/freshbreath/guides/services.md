@@ -314,6 +314,11 @@ const res = await api(session,
 // check res.ok
 ```
 
+An object or array `body` is sent as JSON (with `Content-Type:
+application/json` unless you set one). Anything else (a string, Blob,
+ArrayBuffer, typed array, stream, FormData or URLSearchParams) is sent as it
+is, so a file's text arrives byte for byte.
+
 ---
 
 ## Notes
