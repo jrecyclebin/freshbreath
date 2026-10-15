@@ -46,6 +46,40 @@ func TestStoreCreateApp(t *testing.T) {
 	}
 }
 
+// A nil protected_by is preserved on create — "inherit the admin auth gate" —
+// not coerced to the built-in Anonymous record. This matches UpdateApp, so
+// the create/edit round-trip is stable, and lets the control panel's
+// inherit-by-default actually take effect.
+func TestStoreCreateAppPreservesNilProtectedBy(t *testing.T) {
+	store := newTestStore(t)
+
+	nonce, err := store.CreateApp("inherit-app", "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	app, err := store.GetApp(nonce)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if app.ProtectedBy != nil {
+		t.Errorf("protected_by = %d, want nil (inherit)", *app.ProtectedBy)
+	}
+
+	// An explicit gate is still stored when one is given.
+	anon, err := store.BuiltinAuthID(AuthAnonymous)
+	if err != nil {
+		t.Fatalf("builtin anon: %v", err)
+	}
+	nonce2, err := store.CreateApp("gated-app", "", "", nil, &anon)
+	if err != nil {
+		t.Fatalf("create gated: %v", err)
+	}
+	app2, _ := store.GetApp(nonce2)
+	if app2.ProtectedBy == nil || *app2.ProtectedBy != anon {
+		t.Errorf("gated protected_by = %v, want %d", app2.ProtectedBy, anon)
+	}
+}
+
 func TestStoreCreateAppDuplicateNonceRetries(t *testing.T) {
 	store := newTestStore(t)
 

@@ -314,13 +314,12 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 	if env == "" {
 		env = "Development"
 	}
-	if protectedBy == nil {
-		anonID, err := s.BuiltinAuthID(AuthAnonymous)
-		if err != nil {
-			return "", err
-		}
-		protectedBy = &anonID
-	}
+	// A nil protected_by means "inherit the admin auth gate" — resolved by
+	// resolveAppGate's fallback to adminAuthRecord, the same path an edited
+	// app with a cleared slot takes. Coercing nil to Anonymous here would
+	// silently pin every new app to open-to-the-LAN, which the control panel
+	// no longer offers as the default; an explicit Anonymous record is the
+	// opt-in. Kept nullable so the round-trip matches UpdateApp.
 	nonce := utils.GenNonce()
 	for {
 		_, err := s.db.Exec(
