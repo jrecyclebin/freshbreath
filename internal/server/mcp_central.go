@@ -278,8 +278,8 @@ const mcpInlineMaxBytes = 10 * 1024
 // the client fetches/PUTs over HTTP. Named to accept future sensible additions
 // without restructuring.
 const (
-	actTokenTransportInline  = "inline"
-	actTokenTransportHTTP = "http"
+	actTokenTransportInline = "inline"
+	actTokenTransportHTTP   = "http"
 )
 
 // mintActFileURL mints an act token for method+pathQuery and returns the full
@@ -788,7 +788,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// read_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "read_app_file",
-Description: "Read all or part of a file from an app's web or data area. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
+		Description: "Read all or part of a file from an app's web or data area. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -878,7 +878,7 @@ Description: "Read all or part of a file from an app's web or data area. Valid U
 	// write_app_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_app_file",
-Description: "Write or patch a file in an app's web or data area. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band.",
+		Description: "Write or patch a file in an app's web or data area. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1008,7 +1008,7 @@ func (s *Server) registerServiceTools(mcps *mcp.Server, role string) {
 	// read_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "read_service_file",
-Description: "Read all or part of a virtual or task service's definition file. Admin+ or a member of the service. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
+		Description: "Read all or part of a virtual or task service's definition file. Admin+ or a member of the service. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1098,14 +1098,14 @@ Description: "Read all or part of a virtual or task service's definition file. A
 	// write_service_file
 	mcps.AddTool(&mcp.Tool{
 		Name:        "write_service_file",
-Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band. Admin+ or a member of the service.",
+		Description: "Write or patch a virtual or task service's definition file. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band. Admin+ or a member of the service.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"name":      map[string]interface{}{"type": "string", "description": "Service name"},
-				"new_text":   map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
+				"new_text":  map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
 				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"http","inline"}, "description": "How to transfer bytes: \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files) or \"inline\" (directly from context)."},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"http", "inline"}, "description": "How to transfer bytes: \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files) or \"inline\" (directly from context)."},
 			},
 			"required": []string{"name", "transport"},
 		},

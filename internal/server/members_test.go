@@ -265,13 +265,20 @@ func TestAdminsCannotManageSuperusers(t *testing.T) {
 	root, _ = srv.store.GetUser(root.ID)
 
 	for name, op := range map[string]func() error{
-		"create a Superuser":        func() error { _, e := srv.coreCreateUser(admin, "New", "new@example.com", "Superuser", "Active"); return e },
-		"promote self to Superuser": func() error { return srv.coreUpdateUser(admin, admin.ID, admin.Name, admin.Email, "Superuser", "Active", nil) },
-		"edit a Superuser":          func() error { return srv.coreUpdateUser(admin, root.ID, root.Name, root.Email, "Admin", "Active", root.Metadata) },
-		"delete a Superuser":        func() error { return srv.coreDeleteUser(admin, root) },
-		"set a Superuser's apps":    func() error { return srv.coreSetUserApps(admin, root.ID, nil) },
-		"delete a Superuser's key":  func() error { return srv.coreDeleteSSHKey(admin, root) },
-		"reset a Superuser":         func() error { _, _, e := srv.coreCreatePassphraseLink(admin, root); return e },
+		"create a Superuser": func() error {
+			_, e := srv.coreCreateUser(admin, "New", "new@example.com", "Superuser", "Active")
+			return e
+		},
+		"promote self to Superuser": func() error {
+			return srv.coreUpdateUser(admin, admin.ID, admin.Name, admin.Email, "Superuser", "Active", nil)
+		},
+		"edit a Superuser": func() error {
+			return srv.coreUpdateUser(admin, root.ID, root.Name, root.Email, "Admin", "Active", root.Metadata)
+		},
+		"delete a Superuser":       func() error { return srv.coreDeleteUser(admin, root) },
+		"set a Superuser's apps":   func() error { return srv.coreSetUserApps(admin, root.ID, nil) },
+		"delete a Superuser's key": func() error { return srv.coreDeleteSSHKey(admin, root) },
+		"reset a Superuser":        func() error { _, _, e := srv.coreCreatePassphraseLink(admin, root); return e },
 	} {
 		if err := op(); !forbidden(err) {
 			t.Errorf("Admin may %s: got %v, want 403", name, err)

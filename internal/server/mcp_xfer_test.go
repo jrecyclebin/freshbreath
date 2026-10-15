@@ -286,8 +286,8 @@ func TestMCPReadAppFile(t *testing.T) {
 
 	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
 		"transport": "inline",
-		"nonce": nonce,
-		"path":  "index.html",
+		"nonce":     nonce,
+		"path":      "index.html",
 	})
 	if res.IsError {
 		t.Fatalf("read_app_file failed: %s", toolResultText(t, res))
@@ -305,10 +305,10 @@ func TestMCPReadAppFile(t *testing.T) {
 	// Chunk read.
 	res = callCentralTool(t, srv, "read_app_file", map[string]interface{}{
 		"transport": "inline",
-		"nonce":  nonce,
-		"path":   "index.html",
-		"offset": 4,
-		"limit":  5,
+		"nonce":     nonce,
+		"path":      "index.html",
+		"offset":    4,
+		"limit":     5,
 	})
 	if err := json.Unmarshal([]byte(toolResultText(t, res)), &readRes); err != nil {
 		t.Fatalf("parse chunk: %v", err)
@@ -328,8 +328,8 @@ func TestMCPReadAppFileBinary(t *testing.T) {
 
 	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
 		"transport": "inline",
-		"nonce": nonce,
-		"path":  "data.bin",
+		"nonce":     nonce,
+		"path":      "data.bin",
 	})
 	if res.IsError {
 		t.Fatalf("read_app_file failed: %s", toolResultText(t, res))
@@ -360,9 +360,9 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 	// Write whole file.
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
 		"transport": "inline",
-		"nonce":   nonce,
-		"path":    "index.html",
-		"new_text": "<h1>hello</h1>",
+		"nonce":     nonce,
+		"path":      "index.html",
+		"new_text":  "<h1>hello</h1>",
 	})
 	if res.IsError {
 		t.Fatalf("write_app_file failed: %s", toolResultText(t, res))
@@ -371,10 +371,10 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 	// Patch via old_text.
 	res = callCentralTool(t, srv, "write_app_file", map[string]interface{}{
 		"transport": "inline",
-		"nonce":    nonce,
-		"path":     "index.html",
+		"nonce":     nonce,
+		"path":      "index.html",
 		"new_text":  "goodbye",
-		"old_text": "hello",
+		"old_text":  "hello",
 	})
 	if res.IsError {
 		t.Fatalf("write_app_file patch failed: %s", toolResultText(t, res))
@@ -399,10 +399,10 @@ func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
 
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
 		"transport": "inline",
-		"nonce":    nonce,
-		"path":     "index.html",
+		"nonce":     nonce,
+		"path":      "index.html",
 		"new_text":  "x",
-		"old_text": "notfound",
+		"old_text":  "notfound",
 	})
 	if !res.IsError {
 		t.Fatal("expected error for missing old_text")
@@ -422,10 +422,10 @@ func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
 
 	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
 		"transport": "inline",
-		"nonce":    nonce,
-		"path":     "index.html",
+		"nonce":     nonce,
+		"path":      "index.html",
 		"new_text":  "x",
-		"old_text": "abc",
+		"old_text":  "abc",
 	})
 	if !res.IsError {
 		t.Fatal("expected error for non-unique old_text")
@@ -539,9 +539,9 @@ func TestMCPReadServiceFile(t *testing.T) {
 	// Chunk read.
 	res = callCentralTool(t, srv, "read_service_file", map[string]interface{}{
 		"transport": "inline",
-		"name":   svc.Name,
-		"offset": 1,
-		"limit":  5,
+		"name":      svc.Name,
+		"offset":    1,
+		"limit":     5,
 	})
 	if err := json.Unmarshal([]byte(toolResultText(t, res)), &readRes); err != nil {
 		t.Fatalf("parse chunk: %v", err)
@@ -562,8 +562,8 @@ func TestMCPWriteServiceFile(t *testing.T) {
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
 		"transport": "inline",
-		"name":    svc.Name,
-		"new_text": "[build]\nmake all\n",
+		"name":      svc.Name,
+		"new_text":  "[build]\nmake all\n",
 	})
 	if res.IsError {
 		t.Fatalf("write_service_file failed: %s", toolResultText(t, res))
@@ -571,9 +571,9 @@ func TestMCPWriteServiceFile(t *testing.T) {
 
 	res = callCentralTool(t, srv, "write_service_file", map[string]interface{}{
 		"transport": "inline",
-		"name":     svc.Name,
+		"name":      svc.Name,
 		"new_text":  "make install",
-		"old_text": "make all",
+		"old_text":  "make all",
 	})
 	if res.IsError {
 		t.Fatalf("write_service_file patch failed: %s", toolResultText(t, res))
@@ -621,8 +621,8 @@ func TestMCPServiceFileUnsupportedType(t *testing.T) {
 
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
 		"transport": "inline",
-		"name":    svc.Name,
-		"new_text": "x",
+		"name":      svc.Name,
+		"new_text":  "x",
 	})
 	if !res.IsError {
 		t.Fatal("expected error for unsupported service type")

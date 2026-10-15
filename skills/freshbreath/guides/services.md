@@ -300,6 +300,22 @@ relative to the service's registered URL; the leading slash is optional.
 
 ---
 
+## 7. Fresh Breath API
+
+The `api` function gives you a convenient wrapper around the fetch API to
+pass in a logged-in session and make an API call - with built-in retries and
+token refresh.
+
+```js
+const session = currentSession();
+const res = await api(session,
+  `/api/apps/${APP_NONCE}/web?file=${encodeURIComponent(path)}`,
+  {method: 'PUT', body});
+// check res.ok
+```
+
+---
+
 ## Notes
 
 - **App nonce** comes from `/api/apps` — a 10-character random string.

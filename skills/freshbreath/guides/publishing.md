@@ -75,7 +75,9 @@ The MCP tools work like the file tools LLMs are used to:
 Every tool above takes an optional `area`:
 
 - **`"web"`** (default) — the Development slot. Everything here is served by
-  the web server and copied to Staging/Production on deploy.
+  the web server and copied to Staging/Production on deploy. (Note that
+  only the web content has these slots - all data and services assigned to
+  the app are shared between all the slots.)
 - **`"data"`** — private storage beside the web files that is **never served**
   and never deployed. Use it for things like user uploads. Replacing or
   deleting the web files leaves it alone; deleting the app removes it.

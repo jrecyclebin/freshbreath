@@ -1445,10 +1445,10 @@ func TestRefreshCookieSecureFlag(t *testing.T) {
 	data := freshbreathRefreshData{Subject: "frbr:1", UserEmail: "r10@example.com", AuthID: 1}
 
 	cases := []struct {
-		name      string
-		nativeTLS bool   // r.TLS != nil
-		forwarded string // X-Forwarded-Proto header
-		certFile  string // s.config.TLSCertFile
+		name       string
+		nativeTLS  bool   // r.TLS != nil
+		forwarded  string // X-Forwarded-Proto header
+		certFile   string // s.config.TLSCertFile
 		wantSecure bool
 	}{
 		{"default localhost http", false, "", "", false},
@@ -1492,7 +1492,6 @@ func TestRefreshCookieSecureFlag(t *testing.T) {
 		})
 	}
 }
-
 
 // ── Refresh token rotation (token families) ─────────────────────────
 

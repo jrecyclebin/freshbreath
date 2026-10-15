@@ -53,8 +53,8 @@ type Server struct {
 	lastSeenMu        sync.Mutex
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedMu          sync.RWMutex
-	actTickets        actTickets // /api/act capability tickets (in-memory only)
-	pendingElicits    pendingElicits // virtual-tool elicitation suspend/resume state (in-memory only)
+	actTickets        actTickets                         // /api/act capability tickets (in-memory only)
+	pendingElicits    pendingElicits                     // virtual-tool elicitation suspend/resume state (in-memory only)
 	mcpMounts         *mcpMountRegistry                  // slug → MCP server entries
 	mcpAuthPending    *sync.Map                          // key → *mcpPendingAuth (MCP OAuth flow state)
 	oauthSrv          *oauthServer                       // Freshbreath OAuth authorization server

@@ -1863,7 +1863,7 @@ func TestEnumAnnotationGrammar(t *testing.T) {
 		`$x is "a" | 'b' | "c"`,
 		`$x is "a" | "b"?`,
 		`$x, $y is "a" | "b"?`,
-		`$x is ""`,        // single empty value
+		`$x is ""`,       // single empty value
 		`$x is "" | "x"`, // empty value among others
 	} {
 		if !enumAnnotationRe.MatchString(line) {
@@ -1872,13 +1872,13 @@ func TestEnumAnnotationGrammar(t *testing.T) {
 	}
 	// Shapes that must NOT parse as enums.
 	for _, line := range []string{
-		`$x is string`,       // type annotation, not enum
-		`$x is "a" "b"`,    // no `|` separator
+		`$x is string`,      // type annotation, not enum
+		`$x is "a" "b"`,     // no `|` separator
 		`$x is "a" | b`,     // unquoted value
-		`$x is a | b`,        // no quotes at all
+		`$x is a | b`,       // no quotes at all
 		`$x is "a" | "b" ?`, // space before `?`
-		`$x is "a" extra`,    // trailing garbage
-		`x is "a"`,           // missing leading $
+		`$x is "a" extra`,   // trailing garbage
+		`x is "a"`,          // missing leading $
 		`$x are "a" | "b"`,  // wrong keyword
 	} {
 		if enumAnnotationRe.MatchString(line) {

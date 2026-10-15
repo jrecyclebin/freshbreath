@@ -34,13 +34,18 @@ func TestCoreAuthority(t *testing.T) {
 		"coreDeleteApp":      func() error { return srv.coreDeleteApp(member, "n") },
 		"coreSetAppMembers":  func() error { return srv.coreSetAppMembers(member, "n", nil) },
 		"coreSetAppServices": func() error { return srv.coreSetAppServices(member, "n", nil) },
-		"coreCreateService":  func() error { _, e := srv.coreCreateService(member, "x", "http://x", db.ServiceDescriptor{}, nil, nil); return e },
-		"coreUpdateService":  func() error { return srv.coreUpdateService(member, 1, "x", "http://x", db.ServiceDescriptor{}, nil, nil) },
-		"coreDeleteService":  func() error { return srv.coreDeleteService(member, 1) },
-		"coreCreateUser":     func() error { _, e := srv.coreCreateUser(member, "n", "e@x", "Member", "Active"); return e },
-		"coreUpdateUser":     func() error { return srv.coreUpdateUser(member, 1, "n", "e@x", "Member", "Active", nil) },
-		"coreDeleteUser":     func() error { return srv.coreDeleteUser(member, other) },
-		"coreSetUserApps":    func() error { return srv.coreSetUserApps(member, 1, nil) },
+		"coreCreateService": func() error {
+			_, e := srv.coreCreateService(member, "x", "http://x", db.ServiceDescriptor{}, nil, nil)
+			return e
+		},
+		"coreUpdateService": func() error {
+			return srv.coreUpdateService(member, 1, "x", "http://x", db.ServiceDescriptor{}, nil, nil)
+		},
+		"coreDeleteService": func() error { return srv.coreDeleteService(member, 1) },
+		"coreCreateUser":    func() error { _, e := srv.coreCreateUser(member, "n", "e@x", "Member", "Active"); return e },
+		"coreUpdateUser":    func() error { return srv.coreUpdateUser(member, 1, "n", "e@x", "Member", "Active", nil) },
+		"coreDeleteUser":    func() error { return srv.coreDeleteUser(member, other) },
+		"coreSetUserApps":   func() error { return srv.coreSetUserApps(member, 1, nil) },
 	}
 	for name, op := range adminPlusOps {
 		if err := op(); !forbidden(err) {
@@ -271,7 +276,10 @@ func TestGateApp(t *testing.T) {
 		{"list: admin", admin, func() error { _, e := srv.coreListAppFiles(admin, nonce, "", ""); return e }, true},
 		{"list: member", member, func() error { _, e := srv.coreListAppFiles(member, nonce, "", ""); return e }, true},
 		{"list: outsider", outsider, func() error { _, e := srv.coreListAppFiles(outsider, nonce, "", ""); return e }, false},
-		{"upload: admin", admin, func() error { _, e := srv.coreUploadAppWeb(admin, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}}); return e }, true},
+		{"upload: admin", admin, func() error {
+			_, e := srv.coreUploadAppWeb(admin, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
+			return e
+		}, true},
 		{"upload: member", member, func() error {
 			_, e := srv.coreUploadAppWeb(member, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
 			return e
