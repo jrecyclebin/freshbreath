@@ -19,4 +19,9 @@ features:
     details: Apps live side-by-side and share authentication and whatever integrations they need.
   - title: Log in with their own creds
     details: Apps use the connections and credentials of the people using them — not a shared account you set up for them.
+
+reference:
+  - title: API and MCP
+    details: The complete reference to API and MCP calls.
+    link: /api-map
 ---
