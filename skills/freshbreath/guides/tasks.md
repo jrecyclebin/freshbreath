@@ -1,7 +1,7 @@
 # Writing Tool Scripts for Tasks
 
 Task services offer a way to write a set of custom tools that are each assigned
-shell scripts (in bash or Powershell, depending on the OS) to allow Fresh Breath
+shell scripts (bash, or PowerShell on Windows) to allow Fresh Breath
 apps to pass data to and from the underlying system.
 
 Input to each of these tools happens through environment variables. Output from
@@ -15,11 +15,11 @@ members. A sample tool script looks like this:
 ```
 [tool-name] Tool description here.
 
-echo "$TASK" >> task.log # Log the name of the task being executed
+echo "$TASK" >> /data/task.log # Log the name of the task being executed
 ---
 [import] For importing files from the browser.
 
-mv $TASK_MEME_IMAGE tmp/ # An argument named 'meme_image' is required for this
+mv "$TASK_MEME_IMAGE" /data/memes/ # An argument named 'meme_image' is required for this
                          # task - a file path is supplied as the var.
 printf '{"task":"%s","notes":"%s"}' "$TASK" "$TASK_NOTES" # The name of the task
                         # and the contents of the 'notes' argument are printed to stdout as a JSON object.
@@ -30,12 +30,16 @@ Some important points to note about the tool scripts:
 - Each tool script is separated by a line containing three dashes (`---`).
 - The first line of each tool script contains the name of the tool and a brief
   description.
-- The tool scripts can use any environment variables - including those set by
-  the task service itself.
-- Files uploaded to the task service are (by default) pathed according to the
-  uploaded file's name. For example, if a file named `image.png` is uploaded,
-  its path will be something like '/tmp/image.png'. This way you can have the
-  original name and extension in case you need it.
+- Each script runs in a clean environment: the server's own environment
+  variables are not passed through, only `PATH`, the `TASK*` variables
+  described here, and `HOME` (plus `TMPDIR`).
+- `HOME` is a fresh temporary directory for each run, and is also the
+  script's working directory. It is deleted when the script exits, so write
+  anything you want to keep to an absolute path elsewhere.
+- Uploaded files are written into that temporary `HOME` under the uploaded
+  file's name. For example, if a file named `image.png` is uploaded, its path
+  will be something like '/tmp/fbr-task-123/image.png'. This way you can have
+  the original name and extension in case you need it.
 
 ## Calling Conventions
 

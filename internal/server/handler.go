@@ -1240,42 +1240,62 @@ type taskFile struct {
 // /service/call unwraps via taskResultText. Stdout is the result text;
 // a failed script is an error result, with stderr alongside.
 //
+// The script runs under bash (sh where there's no bash; PowerShell on
+// Windows) in a clean environment: none of the server's own variables —
+// FRBR_* and the signing key among them — reach it, only a PATH carried
+// over so tools are still found. HOME is a fresh temp dir, also the
+// working dir and TMPDIR, removed when the script exits.
+//
 // Arguments reach the script as TASK_<NAME> environment variables, file
-// arguments as TASK_<NAME>=<path>. TASK names the task, and TASK_TOKEN
-// carries the resolved outbound credential — how a scheduled task acts as
-// a stored api_key record with nobody present (design/decoupled-auth.md,
-// stated limit). TASK_TOKEN goes in last so no argument can stand in for
-// it.
+// arguments as TASK_<NAME>=<path> to a copy in that temp dir. TASK names
+// the task, and TASK_TOKEN carries the resolved outbound credential — how
+// a scheduled task acts as a stored api_key record with nobody present
+// (design/decoupled-auth.md, stated limit). TASK_TOKEN goes in last so no
+// argument can stand in for it.
 func runTask(ctx context.Context, task *formats.Task, args map[string]interface{}, files map[string]taskFile, token string) (*mcp.CallToolResult, error) {
-	env := os.Environ()
+	home, err := os.MkdirTemp("", "fbr-task-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create task home")
+	}
+	defer os.RemoveAll(home)
+
+	shell, flag := "bash", "-c"
+	path := os.Getenv("PATH")
+	if path == "" {
+		path = "/usr/local/bin:/usr/bin:/bin"
+	}
+	env := []string{"PATH=" + path, "HOME=" + home, "TMPDIR=" + home}
+	if runtime.GOOS == "windows" {
+		shell, flag = "powershell", "-Command"
+		env = []string{"PATH=" + path, "USERPROFILE=" + home, "TEMP=" + home, "TMP=" + home}
+		// PowerShell and much of Windows won't start without these.
+		for _, k := range []string{"SystemRoot", "windir", "SystemDrive", "ComSpec", "PATHEXT"} {
+			if v, ok := os.LookupEnv(k); ok {
+				env = append(env, k+"="+v)
+			}
+		}
+	} else if _, err := exec.LookPath("bash"); err != nil {
+		shell = "sh"
+	}
+
 	env = append(env, "TASK="+task.Name)
 	for k, v := range args {
 		env = append(env, "TASK_"+strings.ToUpper(k)+"="+taskArgValue(v))
 	}
-	if len(files) > 0 {
-		tmpDir, err := os.MkdirTemp("", "fbr-task-*")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create temp dir")
+	for key, f := range files {
+		fp := filepath.Join(home, f.name)
+		if err := os.WriteFile(fp, f.data, 0600); err != nil {
+			return nil, fmt.Errorf("failed to write file arg %q", key)
 		}
-		defer os.RemoveAll(tmpDir)
-		for key, f := range files {
-			fp := filepath.Join(tmpDir, f.name)
-			if err := os.WriteFile(fp, f.data, 0600); err != nil {
-				return nil, fmt.Errorf("failed to write file arg %q", key)
-			}
-			env = append(env, "TASK_"+strings.ToUpper(key)+"="+fp)
-		}
+		env = append(env, "TASK_"+strings.ToUpper(key)+"="+fp)
 	}
 	if token != "" {
 		env = append(env, "TASK_TOKEN="+token)
 	}
 
-	shell, flag := "sh", "-c"
-	if runtime.GOOS == "windows" {
-		shell, flag = "powershell", "-Command"
-	}
 	cmd := exec.CommandContext(ctx, shell, flag, task.Script)
 	cmd.Env = env
+	cmd.Dir = home
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
