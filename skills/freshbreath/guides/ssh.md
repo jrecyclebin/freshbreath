@@ -174,6 +174,10 @@ const { files } = await res.json();
 // each: { path, name, size, isDir, updatedAt }
 ```
 
+Add `&recursive=1` for everything below `path` — files and directories, sorted
+by path, with hidden directories left unentered. It only stats, so it's cheap;
+use the diff below when you need hashes.
+
 ### Upload a file
 
 `PUT /sync/files/{path}?sessionId=...` — the request body *is* the file content.

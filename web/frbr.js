@@ -112,7 +112,7 @@ async function authedFetch(session, url, init) {
   };
 
   let r = await send(session);
-  if (r.status === 401 && renewable) {
+  if (r.status >= 400 && r.status < 500 && renewable) {
     try {
       await session.refresh();
       r = await send(session);

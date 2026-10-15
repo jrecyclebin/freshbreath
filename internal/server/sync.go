@@ -22,8 +22,9 @@ import (
 
 // ── File listing ──
 
-// handleSyncList handles GET /sync/files?sessionId=...&path=...
-// Returns directory listing with path, size, and modification time.
+// handleSyncList handles GET /sync/files?sessionId=...&path=...[&recursive=1]
+// Returns directory listing with path, size, and modification time. With
+// recursive, every entry below path, files and directories alike.
 func (s *Server) handleSyncList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -40,34 +41,68 @@ func (s *Server) handleSyncList(w http.ResponseWriter, r *http.Request) {
 	if dirPath == "" {
 		dirPath = "/"
 	}
-
-	entries, err := session.SFTPClient.ReadDir(dirPath)
+	recursive := r.URL.Query().Get("recursive")
+	files, err := listRemote(session.SFTPClient, dirPath, recursive == "1" || recursive == "true")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to read directory: %v", err), http.StatusBadGateway)
 		return
-	}
-
-	files := make([]map[string]interface{}, 0, len(entries))
-	for _, e := range entries {
-		name := e.Name()
-		// Skip hidden files and . / ..
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		fp := path.Join(dirPath, name)
-		files = append(files, map[string]interface{}{
-			"path":      fp,
-			"name":      name,
-			"size":      e.Size(),
-			"isDir":     e.IsDir(),
-			"updatedAt": e.ModTime().UTC().Format(time.RFC3339),
-		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"files": files,
 	})
+}
+
+// listRemote lists dirPath, or everything below it when recursive, sorted
+// by path. Hidden files are left out, and hidden directories aren't entered.
+func listRemote(client *sftp.Client, dirPath string, recursive bool) ([]map[string]interface{}, error) {
+	entry := func(fp string, e os.FileInfo) map[string]interface{} {
+		return map[string]interface{}{
+			"path":      fp,
+			"name":      e.Name(),
+			"size":      e.Size(),
+			"isDir":     e.IsDir(),
+			"updatedAt": e.ModTime().UTC().Format(time.RFC3339),
+		}
+	}
+	files := []map[string]interface{}{}
+
+	if !recursive {
+		entries, err := client.ReadDir(dirPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			files = append(files, entry(path.Join(dirPath, e.Name()), e))
+		}
+		return files, nil
+	}
+
+	// The root itself must be readable; below it, entries we can't stat are
+	// skipped, as the diff's walk does.
+	if _, err := client.ReadDir(dirPath); err != nil {
+		return nil, err
+	}
+	walker := client.Walk(dirPath)
+	for walker.Step() {
+		if walker.Err() != nil || walker.Path() == dirPath {
+			continue
+		}
+		e := walker.Stat()
+		if strings.HasPrefix(e.Name(), ".") {
+			if e.IsDir() {
+				walker.SkipDir()
+			}
+			continue
+		}
+		files = append(files, entry(walker.Path(), e))
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i]["path"].(string) < files[j]["path"].(string) })
+	return files, nil
 }
 
 // ── Diff ──
