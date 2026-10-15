@@ -541,22 +541,27 @@ func TestMCPServiceLegFollowsGate(t *testing.T) {
 
 // ── OIDC discovery cache ────────────────────────────────────────────
 
+// fakeOIDCIssuer stands up a minimal OIDC discovery server for tests that
+// exercise the begin/exchange paths without a real provider. It serves only
+// the discovery document — the begin path never fetches JWKS.
+func fakeOIDCIssuer(t *testing.T) *httptest.Server {
+	t.Helper()
+	var s *httptest.Server
+	s = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"issuer": s.URL, "authorization_endpoint": s.URL + "/authorize",
+			"token_endpoint": s.URL + "/token", "jwks_uri": s.URL + "/jwks",
+		})
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
 // An edited issuer is discovered afresh: the cache is keyed by issuer, so
 // the record's old provider can't answer for its new one.
 func TestOIDCProviderFollowsIssuerEdit(t *testing.T) {
-	newIssuer := func() *httptest.Server {
-		var s *httptest.Server
-		s = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{
-				"issuer": s.URL, "authorization_endpoint": s.URL + "/authorize",
-				"token_endpoint": s.URL + "/token", "jwks_uri": s.URL + "/jwks",
-			})
-		}))
-		t.Cleanup(s.Close)
-		return s
-	}
-	first, second := newIssuer(), newIssuer()
+	first, second := fakeOIDCIssuer(t), fakeOIDCIssuer(t)
 
 	srv := newTestServer(t)
 	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: first.URL, ClientID: "c"})

@@ -81,6 +81,23 @@ type AuthDescriptor struct {
 	ClientSecret string `json:"client_secret,omitempty"`
 	Scopes       string `json:"scopes,omitempty"`
 
+	// OfflineAccess emits access_type=offline on the authorize request —
+	// Google's non-standard switch for "hand back a refresh token" (Google
+	// ignores the standard offline_access scope). Without it a Google record
+	// never receives a refresh token, so once the first access token expires
+	// every Fresh Breath refresh mints a token with no sealed upstream
+	// credential. A no-op for providers that don't recognize the param; for a
+	// standards-compliant OIDC provider that isn't Google, prefer adding
+	// offline_access to Scopes instead.
+	OfflineAccess bool `json:"offline_access,omitempty"`
+
+	// ForceConsent sends prompt=consent on every authorize. Google returns a
+	// refresh token only on the first consent, so without this a re-login
+	// after the refresh family expires loses the refresh token again. Most
+	// OIDC providers honor prompt=consent too, at the cost of a consent
+	// screen on each login.
+	ForceConsent bool `json:"force_consent,omitempty"`
+
 	// mcp: the RFC 8707 resource indicator sent with authorization and
 	// token requests.
 	Resource string `json:"resource,omitempty"`

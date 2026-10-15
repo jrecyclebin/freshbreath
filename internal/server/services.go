@@ -109,6 +109,23 @@ type OIDCClaims struct {
 	Raw      map[string]interface{} `json:"-"`
 }
 
+// authCodeOptions builds the authorize-request options shared by the OIDC
+// and OAuth2 begin paths: PKCE, plus the descriptor's refresh/consent
+// toggles. access_type=offline is Google's non-standard switch for "give me
+// a refresh token" (it ignores the offline_access scope); prompt=consent
+// makes Google return one on every login, not just the first consent. Both
+// are harmless no-ops for providers that don't understand them.
+func authCodeOptions(verifier string, d db.AuthDescriptor) []oauth2.AuthCodeOption {
+	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
+	if d.OfflineAccess {
+		opts = append(opts, oauth2.SetAuthURLParam("access_type", "offline"))
+	}
+	if d.ForceConsent {
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", "consent"))
+	}
+	return opts
+}
+
 func (s *Server) oidcBeginAuth(ctx context.Context, rec *db.AuthRecord, redirectURI string) (authURL, state, verifier, oidcNonce, tokenURL string, err error) {
 	provider, err := s.getOIDCProvider(ctx, rec.Descriptor.Issuer)
 	if err != nil {
@@ -128,10 +145,9 @@ func (s *Server) oidcBeginAuth(ctx context.Context, rec *db.AuthRecord, redirect
 	verifier = oauth2.GenerateVerifier()
 	oidcNonce = randomNonce()
 
-	authURL = cfg.AuthCodeURL(state,
-		oauth2.S256ChallengeOption(verifier),
-		oauth2.SetAuthURLParam("nonce", oidcNonce),
-	)
+	opts := append(authCodeOptions(verifier, rec.Descriptor),
+		oauth2.SetAuthURLParam("nonce", oidcNonce))
+	authURL = cfg.AuthCodeURL(state, opts...)
 	return authURL, state, verifier, oidcNonce, endpoint.TokenURL, nil
 }
 
@@ -253,7 +269,7 @@ func (s *Server) oauth2BeginAuth(ctx context.Context, rec *db.AuthRecord, redire
 		RedirectURL: redirectURI,
 		Scopes:      strings.Fields(rec.Descriptor.Scopes),
 	}
-	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
+	opts := authCodeOptions(verifier, rec.Descriptor)
 	if rec.Descriptor.Resource != "" {
 		opts = append(opts, oauth2.SetAuthURLParam("resource", rec.Descriptor.Resource))
 	}

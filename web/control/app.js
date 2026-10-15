@@ -2328,6 +2328,24 @@ function AuthForm({ form, setForm, record }) {
               identity for the people behind them, so give them the same slug.
             </span>
           </div>
+          <div className="field-row">
+            <div className="field">
+              <label>Request refresh token</label>
+              <label style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer',fontSize:13,color:'var(--ink-1)',fontWeight:400}}>
+                <input type="checkbox" checked={!!d.offline_access} onChange={e=>upd('offline_access',e.target.checked)}/>
+                <span>Send <span className="mono">access_type=offline</span></span>
+              </label>
+              <span className="help">Google needs this to return a refresh token — it ignores the standard offline_access scope. Without it the sealed upstream credential is gone once the first access token expires. Harmless for providers that don't recognize the param.</span>
+            </div>
+            <div className="field">
+              <label>Re-prompt consent</label>
+              <label style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer',fontSize:13,color:'var(--ink-1)',fontWeight:400}}>
+                <input type="checkbox" checked={!!d.force_consent} onChange={e=>upd('force_consent',e.target.checked)}/>
+                <span>Send <span className="mono">prompt=consent</span></span>
+              </label>
+              <span className="help">Google returns a refresh token only on the first consent, so a re-login after the session expires needs this to get one again. Shows a consent screen on each login.</span>
+            </div>
+          </div>
         </>
       )}
 
