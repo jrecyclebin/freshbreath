@@ -192,7 +192,7 @@ func TestVirtualURLSuspendResumeViaCallback(t *testing.T) {
 		if err != nil {
 			return nil, fmt.Errorf("bad elicitation URL %q: %w", req.Params.URL, err)
 		}
-		if !strings.Contains(u.Query().Get("redirect"), "/elicitation/") {
+		if !strings.Contains(u.Query().Get("redirect"), "/api/elicitation/") {
 			return nil, fmt.Errorf("URL %q lacks the callback", req.Params.URL)
 		}
 		<-unblock
@@ -237,7 +237,7 @@ func TestVirtualURLSuspendResumeViaCallback(t *testing.T) {
 	}
 
 	// The out-of-band target redirects to the callback with data.
-	req := httptest.NewRequest(http.MethodGet, "/elicitation/"+id+"?code=abc123", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/elicitation/"+id+"?code=abc123", nil)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

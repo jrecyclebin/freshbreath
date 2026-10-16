@@ -11,7 +11,7 @@ import (
 	"poggers.institute/freshbreath/internal/sshkit"
 )
 
-// handleGitSign handles POST /ssh/git/sign — sign commit payloads with the
+// handleGitSign handles POST /api/ssh/git/sign — sign commit payloads with the
 // user's SSH key (no clone, no network). Returns the armored SSH SIGNATURE
 // block plus a verbatim body for GitHub's POST /repos/{o}/{r}/git/commits.
 func (s *Server) handleGitSign(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +45,7 @@ func (s *Server) handleGitSign(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"commits": signed})
 }
 
-// handleGitBranches handles POST /ssh/git/branches — list remote refs via
+// handleGitBranches handles POST /api/ssh/git/branches — list remote refs via
 // ls-remote (no clone, no packfile).
 func (s *Server) handleGitBranches(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -76,7 +76,7 @@ func (s *Server) handleGitBranches(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"head": head, "branches": branches})
 }
 
-// handleGitPull handles POST /ssh/git/pull — selective read side. No paths →
+// handleGitPull handles POST /api/ssh/git/pull — selective read side. No paths →
 // tree listing; paths → file contents (a directory path includes its subtree).
 func (s *Server) handleGitPull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -109,7 +109,7 @@ func (s *Server) handleGitPull(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, snap)
 }
 
-// handleGitCommit handles POST /ssh/git/commit — fused signed-commit-and-push.
+// handleGitCommit handles POST /api/ssh/git/commit — fused signed-commit-and-push.
 func (s *Server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

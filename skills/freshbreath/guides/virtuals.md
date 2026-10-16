@@ -703,7 +703,7 @@ Two behaviors, depending on position:
 
 A mid-script URL step usually needs the out-of-band site to send data back
 (an OAuth code, a signed confirmation). Fresh Breath serves a public callback
-at `/elicitation/{id}` — GET turns query params into the payload, POST takes
+at `/api/elicitation/{id}` — GET turns query params into the payload, POST takes
 a JSON body. The author interpolates the built-in **`$elicitation_url`**
 (reserved, unshadowable, query-escaped) into their link:
 

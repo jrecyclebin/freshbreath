@@ -22,14 +22,14 @@ The shape of it:
 
 ## 0. Prerequisites
 
-Before any `/ssh` or `/sync` call will work:
+Before any `/api/ssh` or `/api/sync` call will work:
 
 - The caller must be a **registered Fresh Breath user** (the key belongs to a
   user account, not to an anonymous app visitor).
 - Your app must have an **`ssh` service** registered and **allowed** for it. An
   admin sets this in the control panel. Without it the API returns
   `403 App does not have ssh service access`.
-- Every `/ssh/*` and `/sync/*` request must carry the **`X-App-Nonce`** header
+- Every `/api/ssh/*` and `/api/sync/*` request must carry the **`X-App-Nonce`** header
   and an **`Authorization: Bearer <token>`** header (the token you get back from
   the SSH login in step 3).
 
@@ -87,10 +87,10 @@ two things happen at once:
   **1-hour TTL**. That's the window in which the server can open SSH connections
   for this user.
 - Your app holds an `AuthSession` carrying a Fresh Breath access token.
-  **That's the bearer for every `/ssh` and `/sync` call below.**
+  **That's the bearer for every `/api/ssh` and `/api/sync` call below.**
 
 The `ssh://` service still exists and your app still needs it linked — that's
-what grants access to the `/ssh` and `/sync` endpoints. It just no longer
+what grants access to the `/api/ssh` and `/api/sync` endpoints. It just no longer
 carries the login; the auth record does.
 
 > Note: the agent TTL (1h) is deliberately decoupled from the web token and from
@@ -117,11 +117,11 @@ const sshFetch = (path, init = {}) => {
 
 ## 3. Open a Session
 
-`POST /ssh/sessions` dials the host using the agent's key and opens both SSH and
+`POST /api/ssh/sessions` dials the host using the agent's key and opens both SSH and
 SFTP. You get back a `sessionId` that everything else hangs off of.
 
 ```js
-const res = await sshFetch("/ssh/sessions", {
+const res = await sshFetch("/api/ssh/sessions", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
@@ -136,8 +136,8 @@ const { sessionId, expiresAt } = await res.json();
 Sessions live for **8 hours** (independent of the 1-hour agent TTL — once the
 connection is open, it stays open). Inspect or close them:
 
-- **`GET /ssh/sessions/{id}`** → `{ sessionId, host, port, username, connectedAt, expiresAt }`
-- **`DELETE /ssh/sessions/{id}`** → closes the SSH + SFTP connection (`204`).
+- **`GET /api/ssh/sessions/{id}`** → `{ sessionId, host, port, username, connectedAt, expiresAt }`
+- **`DELETE /api/ssh/sessions/{id}`** → closes the SSH + SFTP connection (`204`).
   Always close sessions you're done with; they also expire lazily on their own.
 
 ### Host key verification (TOFU)
@@ -148,27 +148,27 @@ The first time Fresh Breath connects to a host, it records that host's key
 connection is **rejected** with a clear error (it could be a legitimate rotation,
 or a MITM). To accept a new key after a genuine rotation:
 
-- **`GET /ssh/known-hosts`** → list stored host keys (`host`, `port`,
+- **`GET /api/ssh/known-hosts`** → list stored host keys (`host`, `port`,
   `fingerprint`, `trustedAt`).
-- **`DELETE /ssh/known-hosts/{host}:{port}`** → forget a host so the next connect
+- **`DELETE /api/ssh/known-hosts/{host}:{port}`** → forget a host so the next connect
   re-trusts it. (Admin-ish housekeeping — do it deliberately.)
 
 ---
 
 ## 4. File Sync
 
-With a `sessionId` in hand, the `/sync` API does file transfer over the session's
+With a `sessionId` in hand, the `/api/sync` API does file transfer over the session's
 SFTP channel. Paths are remote paths on the host you connected to; they're
 cleaned server-side to block traversal (`..`) tricks. Dot-files are hidden from
 listings.
 
 ### List a directory
 
-`GET /sync/files?sessionId=...&path=/some/dir` (path defaults to `/`).
+`GET /api/sync/files?sessionId=...&path=/some/dir` (path defaults to `/`).
 
 ```js
 const res = await sshFetch(
-  `/sync/files?sessionId=${sessionId}&path=${encodeURIComponent("/var/www")}`
+  `/api/sync/files?sessionId=${sessionId}&path=${encodeURIComponent("/var/www")}`
 );
 const { files } = await res.json();
 // each: { path, name, size, isDir, updatedAt }
@@ -180,7 +180,7 @@ use the diff below when you need hashes.
 
 ### Upload a file
 
-`PUT /sync/files/{path}?sessionId=...` — the request body *is* the file content.
+`PUT /api/sync/files/{path}?sessionId=...` — the request body *is* the file content.
 Parent directories are created as needed. Pass an **`X-Hash`** header with the
 SHA-256 of the content and the server verifies it after writing, deleting the
 file and returning `409` on mismatch (cheap integrity guard).
@@ -195,7 +195,7 @@ async function uploadFile(remotePath, content /* Blob | ArrayBuffer | string */)
     .map(b => b.toString(16).padStart(2, "0")).join("");
 
   const res = await sshFetch(
-    `/sync/files/${remotePath}?sessionId=${sessionId}`,
+    `/api/sync/files/${remotePath}?sessionId=${sessionId}`,
     { method: "PUT", headers: { "X-Hash": hash }, body: buf }
   );
   return res.json(); // { path, hash }
@@ -204,29 +204,29 @@ async function uploadFile(remotePath, content /* Blob | ArrayBuffer | string */)
 
 ### Download a file
 
-`GET /sync/files/{path}?sessionId=...` streams the raw bytes
+`GET /api/sync/files/{path}?sessionId=...` streams the raw bytes
 (`application/octet-stream`).
 
 ```js
-const res = await sshFetch(`/sync/files/${remotePath}?sessionId=${sessionId}`);
+const res = await sshFetch(`/api/sync/files/${remotePath}?sessionId=${sessionId}`);
 const blob = await res.blob();
 ```
 
 ### Delete a file
 
-`DELETE /sync/files/{path}?sessionId=...` → `204`.
+`DELETE /api/sync/files/{path}?sessionId=...` → `204`.
 
 ---
 
 ## 5. Diff-based Sync
 
 The clever bit. Rather than re-uploading everything, ask the server what's
-actually different. `POST /sync/files/diff` takes your local file list (path +
+actually different. `POST /api/sync/files/diff` takes your local file list (path +
 SHA-256 hash) and a `basePath`; it walks the remote tree under that base and
 hashes every file, then tells you what to do.
 
 ```js
-const res = await sshFetch("/sync/files/diff", {
+const res = await sshFetch("/api/sync/files/diff", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({
@@ -273,7 +273,7 @@ const sshFetch = (path, init = {}) => {
 };
 
 // open
-const { sessionId } = await (await sshFetch("/ssh/sessions", {
+const { sessionId } = await (await sshFetch("/api/ssh/sessions", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ host: "example.com", username: "deploy" }),
@@ -281,12 +281,12 @@ const { sessionId } = await (await sshFetch("/ssh/sessions", {
 
 // list
 const { files } = await (await sshFetch(
-  `/sync/files?sessionId=${sessionId}&path=/var/www`
+  `/api/sync/files?sessionId=${sessionId}&path=/var/www`
 )).json();
 console.log(files);
 
 // close when done
-await sshFetch(`/ssh/sessions/${sessionId}`, { method: "DELETE" });
+await sshFetch(`/api/ssh/sessions/${sessionId}`, { method: "DELETE" });
 ```
 
 ---
@@ -298,16 +298,16 @@ await sshFetch(`/ssh/sessions/${sessionId}`, { method: "DELETE" });
   hour. Open SSH sessions last 8 hours. They expire independently — a stale agent
   blocks *new* sessions but not existing ones.
 - **A session id outlives its connection.** Past the 8h TTL the connection
-  closes, but the id stays good for another 24h: the next `/sync` or
-  `/ssh/sessions/{id}` call reopens it to the same host. By then the agent key
+  closes, but the id stays good for another 24h: the next `/api/sync` or
+  `/api/ssh/sessions/{id}` call reopens it to the same host. By then the agent key
   has always lapsed, so that call answers `401 insufficient_user_authentication`, `api()` runs a
   fresh passphrase login, and its retry reconnects — nothing for your code to
   handle. A refreshed token never keeps SSH access alive on its own. Sessions
   answer only to the user who opened them; anyone else's id, or one past its
   24h, is a `404` (`session_not_found`).
-- **`X-App-Nonce` is mandatory** on every `/ssh` and `/sync` request. Forgetting
+- **`X-App-Nonce` is mandatory** on every `/api/ssh` and `/api/sync` request. Forgetting
   it returns `401 Missing X-App-Nonce header`, not a 400 — easy to misread.
-- **The `/ssh` and `/sync` endpoints are not service-proxied.** Unlike
+- **The `/api/ssh` and `/api/sync` endpoints are not service-proxied.** Unlike
   `service.fetch()` (which routes through `/service/{id}/`), you call these paths
   directly with your own headers. The `sshFetch` helper above is the pattern.
 - **Path safety.** Remote paths are cleaned server-side; `..` can't escape. Hidden

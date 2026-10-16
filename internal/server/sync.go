@@ -22,7 +22,7 @@ import (
 
 // ── File listing ──
 
-// handleSyncList handles GET /sync/files?sessionId=...&path=...[&recursive=1]
+// handleSyncList handles GET /api/sync/files?sessionId=...&path=...[&recursive=1]
 // Returns directory listing with path, size, and modification time. With
 // recursive, every entry below path, files and directories alike.
 func (s *Server) handleSyncList(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +118,7 @@ type diffRequestFile struct {
 	Hash string `json:"hash"`
 }
 
-// handleSyncDiff handles POST /sync/files/diff
+// handleSyncDiff handles POST /api/sync/files/diff
 // Compares client's file list against remote, returning what needs
 // uploading (missing or changed) and what should be deleted (remote
 // files the client doesn't have).
@@ -186,7 +186,7 @@ func (s *Server) handleSyncDiff(w http.ResponseWriter, r *http.Request) {
 
 // ── Upload ──
 
-// handleSyncUpload handles PUT /sync/files/{path...}?sessionId=...
+// handleSyncUpload handles PUT /api/sync/files/{path...}?sessionId=...
 // Writes the request body as a file at the given path. Verifies SHA256
 // after write using the X-Hash header.
 func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +245,7 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 
 // ── Download ──
 
-// handleSyncDownload handles GET /sync/files/{path...}?sessionId=...
+// handleSyncDownload handles GET /api/sync/files/{path...}?sessionId=...
 // Streams the file contents as a binary response.
 func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 	session, err := s.resolveSession(r)
@@ -283,7 +283,7 @@ func (s *Server) handleSyncDownload(w http.ResponseWriter, r *http.Request) {
 
 // ── Delete ──
 
-// handleSyncDelete handles DELETE /sync/files/{path...}?sessionId=...
+// handleSyncDelete handles DELETE /api/sync/files/{path...}?sessionId=...
 func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 	session, err := s.resolveSession(r)
 	if err != nil {
@@ -307,7 +307,7 @@ func (s *Server) handleSyncDelete(w http.ResponseWriter, r *http.Request) {
 
 // ── File ops dispatcher ──
 
-// handleSyncFileOps routes GET/PUT/DELETE on /sync/files/{path*}
+// handleSyncFileOps routes GET/PUT/DELETE on /api/sync/files/{path*}
 // to the appropriate handler.
 func (s *Server) handleSyncFileOps(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {

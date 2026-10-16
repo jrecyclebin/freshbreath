@@ -114,7 +114,7 @@ One Streamable HTTP handler dispatches by slug:
 - `/mcp/<slug>` — *virtual* service: each tool step in the virtual definition
   becomes an MCP tool (`frbr-<name>`, server instructions "Virtual service").
   Supports SEP-2322 elicitation suspend/resume (`RequestState` retry,
-  `/elicitation/{id}` completion callback); `!`-app-only tools carry MCP Apps
+  `/api/elicitation/{id}` completion callback); `!`-app-only tools carry MCP Apps
   `ui.visibility: [app]` metadata.
 - `/mcp/app:<nonce>` (or bare `/mcp/app:` with `X-App-Nonce`) — the *app's own*
   virtual service, without registering one.
@@ -128,7 +128,7 @@ Caller credentials are unwrapped at the server (browser never touches them).
 
 | Route | Method | Description |
 |---|---|---|
-| `/elicitation/{id}` | GET/POST | Public completion callback for URL/form elicitation steps; rides the SSE session back to the MCP caller |
+| `/api/elicitation/{id}` | GET/POST | Public completion callback for URL/form elicitation steps; rides the SSE session back to the MCP caller |
 
 ## 5. OAuth authorization server (`oauth_server.go`)
 
@@ -222,22 +222,22 @@ once the handler stashes the verified user in context.
 
 | Route | Method | Description |
 |---|---|---|
-| `/ssh/sessions` | POST | Open session `{host, port=22, username=email}` → `{sessionId, expiresAt}` |
-| `/ssh/sessions/{id}` | GET/DELETE | Inspect / close; 401 step-up when agent key lapsed |
-| `/ssh/known-hosts` | GET | TOFU host-key list |
-| `/ssh/known-hosts/{host}:{port}` | DELETE | Forget a host key (for changed keys) |
-| `/ssh/git/sign` | POST | SSH-sign commits `{commits: [...]}` → armored SIGNATURE + GitHub format |
-| `/ssh/git/branches` | POST | `{url}` → ls-remote refs |
-| `/ssh/git/pull` | POST | `{url, branch?, paths?}` → snapshot (no paths = tree listing) |
-| `/ssh/git/commit` | POST | Fused sign + commit + push |
+| `/api/ssh/sessions` | POST | Open session `{host, port=22, username=email}` → `{sessionId, expiresAt}` |
+| `/api/ssh/sessions/{id}` | GET/DELETE | Inspect / close; 401 step-up when agent key lapsed |
+| `/api/ssh/known-hosts` | GET | TOFU host-key list |
+| `/api/ssh/known-hosts/{host}:{port}` | DELETE | Forget a host key (for changed keys) |
+| `/api/ssh/git/sign` | POST | SSH-sign commits `{commits: [...]}` → armored SIGNATURE + GitHub format |
+| `/api/ssh/git/branches` | POST | `{url}` → ls-remote refs |
+| `/api/ssh/git/pull` | POST | `{url, branch?, paths?}` → snapshot (no paths = tree listing) |
+| `/api/ssh/git/commit` | POST | Fused sign + commit + push |
 
 ## 9. File sync over SFTP (gate: `ssh` service access)
 
 | Route | Method | Description |
 |---|---|---|
-| `/sync/files?sessionId=…&path=…&recursive=1` | GET | Remote directory listing (hidden files skipped) |
-| `/sync/files/diff` | POST | `{sessionId, basePath?, files: [{path, hash}]}` → `{upload: [...], delete: [...]}` (client compares hashes) |
-| `/sync/files/{path…}?sessionId=…` | GET/PUT/DELETE | Download / upload (`X-Hash` SHA-256 verified after write) / delete remote file |
+| `/api/sync/files?sessionId=…&path=…&recursive=1` | GET | Remote directory listing (hidden files skipped) |
+| `/api/sync/files/diff` | POST | `{sessionId, basePath?, files: [{path, hash}]}` → `{upload: [...], delete: [...]}` (client compares hashes) |
+| `/api/sync/files/{path…}?sessionId=…` | GET/PUT/DELETE | Download / upload (`X-Hash` SHA-256 verified after write) / delete remote file |
 
 ## 10. Remote update feeds (`handler_updates.go`)
 

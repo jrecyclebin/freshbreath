@@ -150,7 +150,7 @@ func (s *Server) SetupRoutes() {
 
 	// Public completion callback for URL elicitation steps: the out-of-band
 	// target redirects here when the user finishes. Capability = the ID.
-	s.mux.HandleFunc("/elicitation/{id}", s.handleElicitationComplete)
+	s.mux.HandleFunc("/api/elicitation/{id}", s.handleElicitationComplete)
 
 	// Central MCP server — exposes admin API as MCP tools
 	s.setupCentralMCP()
@@ -221,23 +221,23 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/updates/apply", s.handleUpdateApply)
 
 	// SSH host keys (TOFU) — same access gate as SSH sessions
-	s.mux.HandleFunc("/ssh/known-hosts", s.authWrap(pipeline(s.handleSSHHostKeys, s.requireAppServiceAccess("ssh"))))
-	s.mux.HandleFunc("/ssh/known-hosts/", s.authWrap(pipeline(s.handleSSHHostKeyDetail, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/known-hosts", s.authWrap(pipeline(s.handleSSHHostKeys, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/known-hosts/", s.authWrap(pipeline(s.handleSSHHostKeyDetail, s.requireAppServiceAccess("ssh"))))
 
 	// SSH sessions — require app access
-	s.mux.HandleFunc("/ssh/sessions", s.authWrap(pipeline(s.handleSSHSessions, s.requireAppServiceAccess("ssh"))))
-	s.mux.HandleFunc("/ssh/sessions/", s.authWrap(pipeline(s.handleSSHSessionDetail, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/sessions", s.authWrap(pipeline(s.handleSSHSessions, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/sessions/", s.authWrap(pipeline(s.handleSSHSessionDetail, s.requireAppServiceAccess("ssh"))))
 
 	// Git over SSH — same access gate as SSH sessions (sign/branches/pull/commit)
-	s.mux.HandleFunc("/ssh/git/sign", s.authWrap(pipeline(s.handleGitSign, s.requireAppServiceAccess("ssh"))))
-	s.mux.HandleFunc("/ssh/git/branches", s.authWrap(pipeline(s.handleGitBranches, s.requireAppServiceAccess("ssh"))))
-	s.mux.HandleFunc("/ssh/git/pull", s.authWrap(pipeline(s.handleGitPull, s.requireAppServiceAccess("ssh"))))
-	s.mux.HandleFunc("/ssh/git/commit", s.authWrap(pipeline(s.handleGitCommit, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/git/sign", s.authWrap(pipeline(s.handleGitSign, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/git/branches", s.authWrap(pipeline(s.handleGitBranches, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/git/pull", s.authWrap(pipeline(s.handleGitPull, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/ssh/git/commit", s.authWrap(pipeline(s.handleGitCommit, s.requireAppServiceAccess("ssh"))))
 
 	// File sync — same access gate as SSH sessions
-	s.mux.HandleFunc("/sync/files/diff", s.authWrap(pipeline(s.handleSyncDiff, s.requireAppServiceAccess("ssh"))))
-	s.mux.HandleFunc("/sync/files/{path...}", s.authWrap(pipeline(s.handleSyncFileOps, s.requireAppServiceAccess("ssh"))))
-	s.mux.HandleFunc("/sync/files", s.authWrap(pipeline(s.handleSyncList, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/sync/files/diff", s.authWrap(pipeline(s.handleSyncDiff, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/sync/files/{path...}", s.authWrap(pipeline(s.handleSyncFileOps, s.requireAppServiceAccess("ssh"))))
+	s.mux.HandleFunc("/api/sync/files", s.authWrap(pipeline(s.handleSyncList, s.requireAppServiceAccess("ssh"))))
 
 	s.rebuildHostedRoutes()
 
@@ -2719,7 +2719,7 @@ func (s *Server) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleSSHSessions handles POST /ssh/sessions — open a new SSH session.
+// handleSSHSessions handles POST /api/ssh/sessions — open a new SSH session.
 func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2773,12 +2773,12 @@ func (s *Server) handleSSHSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSSHSessionDetail handles GET/DELETE /ssh/sessions/{id}.
+// handleSSHSessionDetail handles GET/DELETE /api/ssh/sessions/{id}.
 func (s *Server) handleSSHSessionDetail(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		// Fallback: parse from URL path for Go <1.22 style
-		id = strings.TrimPrefix(r.URL.Path, "/ssh/sessions/")
+		id = strings.TrimPrefix(r.URL.Path, "/api/ssh/sessions/")
 	}
 	if id == "" {
 		http.Error(w, "Missing session ID", http.StatusBadRequest)
@@ -2818,7 +2818,7 @@ func (s *Server) handleSSHSessionDetail(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// handleSSHHostKeys handles GET /ssh/known-hosts — list all stored host keys.
+// handleSSHHostKeys handles GET /api/ssh/known-hosts — list all stored host keys.
 func (s *Server) handleSSHHostKeys(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2855,7 +2855,7 @@ func (s *Server) handleSSHHostKeys(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"keys": keys})
 }
 
-// handleSSHHostKeyDetail handles DELETE /ssh/known-hosts/{host}:{port}
+// handleSSHHostKeyDetail handles DELETE /api/ssh/known-hosts/{host}:{port}
 // Removes a stored host key so a changed key can be accepted on next connect.
 func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
@@ -2865,7 +2865,7 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 
 	id := r.PathValue("id")
 	if id == "" {
-		id = strings.TrimPrefix(r.URL.Path, "/ssh/known-hosts/")
+		id = strings.TrimPrefix(r.URL.Path, "/api/ssh/known-hosts/")
 	}
 	if id == "" {
 		http.Error(w, "Missing host key identifier", http.StatusBadRequest)

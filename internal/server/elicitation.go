@@ -32,7 +32,7 @@ import (
 // are swept by the cleanup ticker next to the act tickets.
 //
 // URL steps additionally get a public completion callback,
-// /elicitation/{id}: the out-of-band target (or a page it redirects to) hits
+// /api/elicitation/{id}: the out-of-band target (or a page it redirects to) hits
 // it when the user finishes, which records any query/body payload — it
 // becomes the resumed scope — and fires notifications/elicitation/complete
 // so hosts that hold the URL prompt open until it arrives retry the call.
@@ -194,7 +194,7 @@ func (s *Server) virtualHooks(svc *db.Service) *formats.VirtualHooks {
 	key := s.deriveSubkey(fmt.Sprintf("%s%d", serviceSecretLabel, svc.ID))
 	return &formats.VirtualHooks{
 		ElicitationURL: func(elicitationID string) string {
-			return s.config.PublicBaseURL + "/elicitation/" + elicitationID
+			return s.config.PublicBaseURL + "/api/elicitation/" + elicitationID
 		},
 		Seal: func(plain string) (string, error) {
 			return seal(key, []byte(plain))
@@ -241,7 +241,7 @@ func (s *Server) suspendVirtualTool(susp *formats.Suspension, slug string, sessi
 
 // ── Completion callback ──────────────────────────────────────────────
 
-// handleElicitationComplete serves /elicitation/{id}: the public callback the
+// handleElicitationComplete serves /api/elicitation/{id}: the public callback the
 // out-of-band target (or a page it redirects to) hits when the user finishes
 // a URL elicitation step. It records the completion payload — query params
 // on GET, a JSON body on POST — which becomes the resumed scope, and fires

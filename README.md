@@ -397,7 +397,7 @@ the Linux binaries are statically linked — see below.
 ├── internal/
 │   ├── db/                   # SQLite store, migrations, queries, types
 │   ├── formats/              # Virtual-tool + task-file parsers
-│   ├── server/               # HTTP server, handlers, MCP, OAuth, admin, /ssh/git
+│   ├── server/               # HTTP server, handlers, MCP, OAuth, admin, /api/ssh/git
 │   └── sshkit/               # SSH keys, agent, sessions, GitGateway
 ├── web/
 │   ├── control.html          # Admin panel shell

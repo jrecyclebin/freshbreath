@@ -293,7 +293,7 @@ func (e *gitEnv) addSigner(t *testing.T) ssh.PublicKey {
 	return testKeyPub
 }
 
-// gitPost issues an authenticated POST to a /ssh/git/* route. The
+// gitPost issues an authenticated POST to a /api/ssh/git/* route. The
 // Authorization header is added only when the env has a token (so the
 // pre-auth env exercises the auth-off path).
 func gitPost(t *testing.T, e *gitEnv, path string, body interface{}) *httptest.ResponseRecorder {
@@ -341,7 +341,7 @@ func wantStatus(t *testing.T, rr *httptest.ResponseRecorder, want int) {
 func TestGitHTTP_AuthOff401(t *testing.T) {
 	f := newGitFixture(t)
 	e := newGitEnvPreAuth(t) // no token: auth still off
-	rr := gitPost(t, e, "/ssh/git/branches", map[string]string{"url": f.url})
+	rr := gitPost(t, e, "/api/ssh/git/branches", map[string]string{"url": f.url})
 	wantStatus(t, rr, http.StatusUnauthorized)
 }
 
@@ -349,7 +349,7 @@ func TestGitHTTP_AuthOff401(t *testing.T) {
 
 func TestGitHTTP_BranchesNoKeySSH(t *testing.T) {
 	e := newGitEnv(t) // no signer planted
-	rr := gitPost(t, e, "/ssh/git/branches", map[string]string{
+	rr := gitPost(t, e, "/api/ssh/git/branches", map[string]string{
 		"url": "ssh://nonexistent.invalid:2999/x.git",
 	})
 	wantStatus(t, rr, http.StatusUnauthorized)
@@ -363,7 +363,7 @@ func TestGitHTTP_BranchesNoKeySSH(t *testing.T) {
 func TestGitHTTP_CommitNoKey(t *testing.T) {
 	f := newGitFixture(t)
 	e := newGitEnv(t)
-	rr := gitPost(t, e, "/ssh/git/commit", sshkit.GitCommitRequest{
+	rr := gitPost(t, e, "/api/ssh/git/commit", sshkit.GitCommitRequest{
 		URL:     f.url,
 		Message: "x",
 	})
@@ -376,7 +376,7 @@ func TestGitHTTP_SignNoKey(t *testing.T) {
 	f := newGitFixture(t)
 	e := newGitEnv(t)
 	when := time.Unix(1700000000, 0)
-	rr := gitPost(t, e, "/ssh/git/sign", struct {
+	rr := gitPost(t, e, "/api/ssh/git/sign", struct {
 		Commits []sshkit.CommitToSign `json:"commits"`
 	}{Commits: []sshkit.CommitToSign{{
 		Tree:    f.treeSHA,
@@ -395,10 +395,10 @@ func TestGitHTTP_BadRequest(t *testing.T) {
 		path string
 		body interface{}
 	}{
-		{"branches empty url", "/ssh/git/branches", map[string]string{"url": ""}},
-		{"pull empty url", "/ssh/git/pull", map[string]string{"url": ""}},
-		{"commit empty message", "/ssh/git/commit", sshkit.GitCommitRequest{URL: f.url}},
-		{"sign empty commits", "/ssh/git/sign", struct {
+		{"branches empty url", "/api/ssh/git/branches", map[string]string{"url": ""}},
+		{"pull empty url", "/api/ssh/git/pull", map[string]string{"url": ""}},
+		{"commit empty message", "/api/ssh/git/commit", sshkit.GitCommitRequest{URL: f.url}},
+		{"sign empty commits", "/api/ssh/git/sign", struct {
 			Commits []sshkit.CommitToSign `json:"commits"`
 		}{}},
 	}
@@ -417,7 +417,7 @@ func TestGitHTTP_MethodNotAllowed(t *testing.T) {
 	e := newGitEnv(t)
 	// The method check is the handler's first gate, before resolveGitUser or
 	// any git work, so a GET on a POST-only route → 405 with no fixture needed.
-	rr := gitGet(t, e, "/ssh/git/branches")
+	rr := gitGet(t, e, "/api/ssh/git/branches")
 	wantStatus(t, rr, http.StatusMethodNotAllowed)
 }
 
@@ -426,7 +426,7 @@ func TestGitHTTP_MethodNotAllowed(t *testing.T) {
 func TestGitHTTP_UnknownBranch404(t *testing.T) {
 	f := newGitFixture(t)
 	e := newGitEnv(t)
-	rr := gitPost(t, e, "/ssh/git/pull", map[string]interface{}{
+	rr := gitPost(t, e, "/api/ssh/git/pull", map[string]interface{}{
 		"url":    f.url,
 		"branch": "nope",
 	})
@@ -438,7 +438,7 @@ func TestGitHTTP_UnknownBranch404(t *testing.T) {
 func TestGitHTTP_MissingPath404(t *testing.T) {
 	f := newGitFixture(t)
 	e := newGitEnv(t)
-	rr := gitPost(t, e, "/ssh/git/pull", map[string]interface{}{
+	rr := gitPost(t, e, "/api/ssh/git/pull", map[string]interface{}{
 		"url":   f.url,
 		"paths": []string{"nope.txt"},
 	})
@@ -451,7 +451,7 @@ func TestGitHTTP_StaleBase409(t *testing.T) {
 	f := newGitFixture(t)
 	e := newGitEnv(t)
 	e.addSigner(t)
-	rr := gitPost(t, e, "/ssh/git/commit", sshkit.GitCommitRequest{
+	rr := gitPost(t, e, "/api/ssh/git/commit", sshkit.GitCommitRequest{
 		URL:        f.url,
 		BaseCommit: strings.Repeat("0", 40), // != head
 		Message:    "x",
@@ -465,7 +465,7 @@ func TestGitHTTP_NothingToCommit409(t *testing.T) {
 	f := newGitFixture(t)
 	e := newGitEnv(t)
 	e.addSigner(t)
-	rr := gitPost(t, e, "/ssh/git/commit", sshkit.GitCommitRequest{
+	rr := gitPost(t, e, "/api/ssh/git/commit", sshkit.GitCommitRequest{
 		URL:        f.url,
 		BaseCommit: f.headSHA,
 		Message:    "no-op",
@@ -481,7 +481,7 @@ func TestGitHTTP_HappyPath(t *testing.T) {
 	pub := e.addSigner(t)
 
 	// 1. branches — head + both refs.
-	rr := gitPost(t, e, "/ssh/git/branches", map[string]string{"url": f.url})
+	rr := gitPost(t, e, "/api/ssh/git/branches", map[string]string{"url": f.url})
 	wantStatus(t, rr, http.StatusOK)
 	var br struct {
 		Head     string              `json:"head"`
@@ -506,7 +506,7 @@ func TestGitHTTP_HappyPath(t *testing.T) {
 	}
 
 	// 2. pull tree (discovery) — listing + head sha, no files.
-	rr = gitPost(t, e, "/ssh/git/pull", map[string]interface{}{"url": f.url})
+	rr = gitPost(t, e, "/api/ssh/git/pull", map[string]interface{}{"url": f.url})
 	wantStatus(t, rr, http.StatusOK)
 	var snap sshkit.GitSnapshot
 	decodeBody(t, rr, &snap)
@@ -527,7 +527,7 @@ func TestGitHTTP_HappyPath(t *testing.T) {
 	}
 
 	// 3. pull a single file.
-	rr = gitPost(t, e, "/ssh/git/pull", map[string]interface{}{
+	rr = gitPost(t, e, "/api/ssh/git/pull", map[string]interface{}{
 		"url":   f.url,
 		"paths": []string{"README.md"},
 	})
@@ -545,7 +545,7 @@ func TestGitHTTP_HappyPath(t *testing.T) {
 	}
 
 	// 4. commit — writes + deletes, with baseCommit from the pulled head.
-	rr = gitPost(t, e, "/ssh/git/commit", sshkit.GitCommitRequest{
+	rr = gitPost(t, e, "/api/ssh/git/commit", sshkit.GitCommitRequest{
 		URL:        f.url,
 		BaseCommit: f.headSHA,
 		Message:    "add new, delete stale",
@@ -603,7 +603,7 @@ func TestGitHTTP_Sign(t *testing.T) {
 	pub := e.addSigner(t)
 	when := time.Unix(1700000123, 0)
 
-	rr := gitPost(t, e, "/ssh/git/sign", struct {
+	rr := gitPost(t, e, "/api/ssh/git/sign", struct {
 		Commits []sshkit.CommitToSign `json:"commits"`
 	}{Commits: []sshkit.CommitToSign{{
 		Tree:    f.treeSHA,
