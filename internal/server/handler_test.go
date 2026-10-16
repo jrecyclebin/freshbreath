@@ -42,6 +42,7 @@ func TestTaskArgValue(t *testing.T) {
 
 // A task script runs under bash with nothing of the server's environment
 // but PATH, in a temp HOME (also its working dir) that's gone afterwards.
+// Fresh Breath's directories and the calling app come in as FRBR_ vars.
 func TestRunTaskEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("bash environment test")
@@ -51,11 +52,13 @@ func TestRunTaskEnvironment(t *testing.T) {
 	}
 	t.Setenv("FRBR_SIGNING_KEY", "secret")
 	task := &formats.Task{Name: "env", Script: `cat "$TASK_UPLOAD" >/dev/null
-printf '{"bash":"%s","home":"%s","pwd":"%s","upload":"%s","path":"%s","env":"%s"}' \
-  "$BASH_VERSION" "$HOME" "$PWD" "$TASK_UPLOAD" "$PATH" "$(env | cut -d= -f1 | sort | tr '\n' ' ')"`}
-	files := map[string]taskFile{"upload": {name: "a.txt", data: []byte("hi")}}
+printf '{"bash":"%s","home":"%s","pwd":"%s","upload":"%s","path":"%s","dir":"%s","app_dir":"%s","app_nonce":"%s","env":"%s"}' \
+  "$BASH_VERSION" "$HOME" "$PWD" "$TASK_UPLOAD" "$PATH" "$FRBR_DIR" "$FRBR_APP_DIR" "$FRBR_APP_NONCE" \
+  "$(env | cut -d= -f1 | sort | tr '\n' ' ')"`}
+ 	files := map[string]taskFile{"upload": {name: "a.txt", data: []byte("hi")}}
+	srv := &Server{config: Config{Dir: "/opt/frbr", DataDir: "/var/frbr"}}
 
-	result, err := runTask(t.Context(), task, map[string]interface{}{"note": "x"}, files, "tok")
+	result, err := srv.runTask(t.Context(), task, "abc123", map[string]interface{}{"note": "x"}, files, "tok")
 	if err != nil || result.IsError {
 		t.Fatalf("runTask: %v %q", err, taskResultText(result))
 	}
@@ -75,12 +78,31 @@ printf '{"bash":"%s","home":"%s","pwd":"%s","upload":"%s","path":"%s","env":"%s"
 	if got["path"] != os.Getenv("PATH") {
 		t.Errorf("PATH = %q, want the server's", got["path"])
 	}
-	if strings.Contains(got["env"], "FRBR_") {
+	if strings.Contains(got["env"], "FRBR_SIGNING_KEY") {
 		t.Errorf("server environment leaked: %s", got["env"])
+	}
+	if got["dir"] != "/opt/frbr" || got["app_dir"] != "/var/frbr/apps/abc123" || got["app_nonce"] != "abc123" {
+		t.Errorf("FRBR_DIR/APP_DIR/APP_NONCE = %q/%q/%q", got["dir"], got["app_dir"], got["app_nonce"])
 	}
 	for _, k := range []string{"TASK", "TASK_NOTE", "TASK_UPLOAD", "TASK_TOKEN"} {
 		if !strings.Contains(" "+got["env"], " "+k+" ") {
 			t.Errorf("env %q is missing %s", got["env"], k)
 		}
+	}
+}
+
+// With no calling app (the /mcp/ path) the app variables are left unset.
+func TestRunTaskWithoutApp(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash environment test")
+	}
+	task := &formats.Task{Name: "env", Script: `env | cut -d= -f1 | grep '^FRBR_' | sort | tr '\n' ' '`}
+	srv := &Server{config: Config{Dir: "/opt/frbr", DataDir: "/var/frbr"}}
+	result, err := srv.runTask(t.Context(), task, "", nil, nil, "")
+	if err != nil || result.IsError {
+		t.Fatalf("runTask: %v %q", err, taskResultText(result))
+	}
+	if got := taskResultText(result); got != "FRBR_DIR " {
+		t.Errorf("FRBR_ vars = %q, want only FRBR_DIR", got)
 	}
 }

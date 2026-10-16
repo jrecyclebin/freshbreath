@@ -259,7 +259,7 @@ func (s *Server) newTaskMCPServer(svc *db.Service) (*mcp.Server, error) {
 					return mcpAuthError("arguments must be an object: %v", err), nil
 				}
 			}
-			result, err := runTask(ctx, task, args, nil, token)
+			result, err := s.runTask(ctx, task, "", args, nil, token)
 			if err != nil {
 				return mcpAuthError("%v", err), nil
 			}

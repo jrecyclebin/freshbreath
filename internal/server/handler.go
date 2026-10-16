@@ -1190,7 +1190,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 		return
 	}
 
-	result, err := runTask(r.Context(), task, args, fileArgs, token)
+	result, err := s.runTask(r.Context(), task, r.Header.Get("X-App-Nonce"), args, fileArgs, token)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1242,9 +1242,16 @@ type taskFile struct {
 //
 // The script runs under bash (sh where there's no bash; PowerShell on
 // Windows) in a clean environment: none of the server's own variables —
-// FRBR_* and the signing key among them — reach it, only a PATH carried
+// FRBR_SIGNING_KEY among them — reach it, only a PATH carried
 // over so tools are still found. HOME is a fresh temp dir, also the
 // working dir and TMPDIR, removed when the script exits.
+//
+// Fresh Breath's own directories come in its place: FRBR_DIR is the
+// install directory, and when an app is calling (nonce non-empty — the
+// browser path, where handleServiceCall has already verified the app and
+// its link to the service) FRBR_APP_NONCE names it and FRBR_APP_DIR is
+// its directory, holding web/ and data/. Over /mcp/ there's no app, so
+// those two are left unset.
 //
 // Arguments reach the script as TASK_<NAME> environment variables, file
 // arguments as TASK_<NAME>=<path> to a copy in that temp dir. TASK names
@@ -1252,7 +1259,7 @@ type taskFile struct {
 // a scheduled task acts as a stored api_key record with nobody present
 // (design/decoupled-auth.md, stated limit). TASK_TOKEN goes in last so no
 // argument can stand in for it.
-func runTask(ctx context.Context, task *formats.Task, args map[string]interface{}, files map[string]taskFile, token string) (*mcp.CallToolResult, error) {
+func (s *Server) runTask(ctx context.Context, task *formats.Task, nonce string, args map[string]interface{}, files map[string]taskFile, token string) (*mcp.CallToolResult, error) {
 	home, err := os.MkdirTemp("", "fbr-task-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create task home")
@@ -1276,6 +1283,11 @@ func runTask(ctx context.Context, task *formats.Task, args map[string]interface{
 		}
 	} else if _, err := exec.LookPath("bash"); err != nil {
 		shell = "sh"
+	}
+
+	env = append(env, "FRBR_DIR="+s.config.Dir)
+	if nonce != "" {
+		env = append(env, "FRBR_APP_NONCE="+nonce, "FRBR_APP_DIR="+filepath.Join(s.config.DataDir, "apps", nonce))
 	}
 
 	env = append(env, "TASK="+task.Name)

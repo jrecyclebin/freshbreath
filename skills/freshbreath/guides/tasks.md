@@ -19,7 +19,7 @@ echo "$TASK" >> /data/task.log # Log the name of the task being executed
 ---
 [import] For importing files from the browser.
 
-mv "$TASK_MEME_IMAGE" /data/memes/ # An argument named 'meme_image' is required for this
+mv "$TASK_MEME_IMAGE" "$FRBR_APP_DIR/data/" # An argument named 'meme_image' is required for this
                          # task - a file path is supplied as the var.
 printf '{"task":"%s","notes":"%s"}' "$TASK" "$TASK_NOTES" # The name of the task
                         # and the contents of the 'notes' argument are printed to stdout as a JSON object.
@@ -32,10 +32,19 @@ Some important points to note about the tool scripts:
   description.
 - Each script runs in a clean environment: the server's own environment
   variables are not passed through, only `PATH`, the `TASK*` variables
-  described here, and `HOME` (plus `TMPDIR`).
+  described here, the `FRBR_*` directories below, and `HOME` (plus `TMPDIR`).
+- Fresh Breath tells the script where things are:
+  - `FRBR_DIR` — the directory Fresh Breath is installed and running from.
+  - `FRBR_APP_DIR` — the calling app's directory, containing its `web/` and
+    `data/` directories. `data/` is private storage that is never served;
+    it's a good place for files a script wants to keep.
+  - `FRBR_APP_NONCE` — the calling app's nonce.
+
+  `FRBR_APP_DIR` and `FRBR_APP_NONCE` are only set when an app calls the task
+  (via `callTool`). Over MCP there's no calling app, so they're unset.
 - `HOME` is a fresh temporary directory for each run, and is also the
   script's working directory. It is deleted when the script exits, so write
-  anything you want to keep to an absolute path elsewhere.
+  anything you want to keep elsewhere, such as `$FRBR_APP_DIR/data`.
 - Uploaded files are written into that temporary `HOME` under the uploaded
   file's name. For example, if a file named `image.png` is uploaded, its path
   will be something like '/tmp/fbr-task-123/image.png'. This way you can have
