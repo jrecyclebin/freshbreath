@@ -165,6 +165,7 @@ func TestMCPSQLRunnerGatesByMembership(t *testing.T) {
 
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{}}
 	claims := &freshbreathClaims{UserEmail: "jo@example.com"}
+	claims.Subject = subjectForUser(u)
 
 	// Own app: passes the gate and runs.
 	runner := srv.mcpSQLRunner(svc, claims, map[string]interface{}{"app_nonce": nonce1})
@@ -194,11 +195,35 @@ func TestMCPSQLRunnerGatesByMembership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = admin
 	adminClaims := &freshbreathClaims{UserEmail: "boss@example.com"}
+	adminClaims.Subject = subjectForUser(admin)
 	runner = srv.mcpSQLRunner(globalSvc, adminClaims, nil)
 	if _, err := runner("SELECT 1", nil); err != nil {
 		t.Errorf("admin on global: %v", err)
+	}
+}
+
+// An ext: caller (a non-admin gate) whose provider reported a Fresh Breath
+// user's email is still not that user: the actor comes from the subject.
+func TestMCPSQLRunnerExtSubjectWithMatchingEmailRefused(t *testing.T) {
+	srv, _, _ := newVirtualSvcServer(t, sqlToolFile, db.ServiceDescriptor{})
+	nonce, err := srv.store.CreateApp("mine", "Development", "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := srv.store.CreateUser("Jo", "jo@example.com", "Member", "Active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.store.AddAppMember(nonce, u.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	claims := &freshbreathClaims{UserEmail: "jo@example.com"}
+	claims.Subject = "ext:github:4242"
+	runner := srv.mcpSQLRunner(&db.Service{ID: 1}, claims, map[string]interface{}{"app_nonce": nonce})
+	if _, err := runner("SELECT 1", nil); err == nil || !strings.Contains(err.Error(), "Freshbreath user token") {
+		t.Errorf("ext: subject with a member's email: want refusal, got %v", err)
 	}
 }
 

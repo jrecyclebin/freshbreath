@@ -55,7 +55,7 @@ func TestRunTaskEnvironment(t *testing.T) {
 printf '{"bash":"%s","home":"%s","pwd":"%s","upload":"%s","path":"%s","dir":"%s","app_dir":"%s","app_nonce":"%s","env":"%s"}' \
   "$BASH_VERSION" "$HOME" "$PWD" "$TASK_UPLOAD" "$PATH" "$FRBR_DIR" "$FRBR_APP_DIR" "$FRBR_APP_NONCE" \
   "$(env | cut -d= -f1 | sort | tr '\n' ' ')"`}
- 	files := map[string]taskFile{"upload": {name: "a.txt", data: []byte("hi")}}
+	files := map[string]taskFile{"upload": {name: "a.txt", data: []byte("hi")}}
 	srv := &Server{config: Config{Dir: "/opt/frbr", DataDir: "/var/frbr"}}
 
 	result, err := srv.runTask(t.Context(), task, "abc123", map[string]interface{}{"note": "x"}, files, "tok")

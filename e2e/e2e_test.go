@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"reflect"
 	"strings"
@@ -70,36 +71,66 @@ func checkGitHubResults(t *testing.T, got githubResults) {
 
 var githubTools = []string{"get-repo", "list-issues", "whoami"}
 
+// githubSession is what the GitHub app scenario reports back.
+type githubSession struct {
+	githubResults
+	Tools   []string `json:"tools"`
+	Session struct {
+		Kind    string `json:"kind"`
+		Subject string `json:"subject"`
+	} `json:"session"`
+}
+
+// runGitHubApp drives the GitHub app scenario and checks its tool results.
+func runGitHubApp(t *testing.T, fb *freshbreath, gh *fakeGitHub, a app, svc service) githubSession {
+	t.Helper()
+	browser := newBrowser(t)
+	raw := runScenario(t, browser, fb.URL+a.Route, "github", map[string]string{"service": svc.URL})
+
+	var got githubSession
+	json.Unmarshal(raw, &got)
+	if !reflect.DeepEqual(got.Tools, githubTools) {
+		t.Errorf("tools = %v, want %v", got.Tools, githubTools)
+	}
+	checkGitHubResults(t, got.githubResults)
+	if gh.Logins() != 1 {
+		t.Errorf("GitHub logins = %d, want 1", gh.Logins())
+	}
+	return got
+}
+
 // An app behind a GitHub login calls a virtual GitHub service: one popup
 // through GitHub, then each tool reaches GitHub with the user's own token.
+// GitHub isn't the admin gate, so a Fresh Breath user sharing its email
+// stays an ext: caller.
 func TestGitHubVirtualServiceFromApp(t *testing.T) {
 	gh := newFakeGitHub(t)
 	fb := startFreshbreath(t)
 	gate := githubAuth(fb, gh)
 	svc := githubVirtual(t, fb, gh, gate)
 	a := fb.createApp("e2e-github", gate, testdata(t, "app.html", nil), svc)
+	fb.createUser("Octo", githubUser["email"].(string), "Member")
 
-	browser := newBrowser(t)
-	raw := runScenario(t, browser, fb.URL+a.Route, "github", map[string]string{"service": svc.URL})
-
-	var got struct {
-		githubResults
-		Tools   []string `json:"tools"`
-		Session struct {
-			Kind    string `json:"kind"`
-			Subject string `json:"subject"`
-		} `json:"session"`
-	}
-	json.Unmarshal(raw, &got)
-	if !reflect.DeepEqual(got.Tools, githubTools) {
-		t.Errorf("tools = %v, want %v", got.Tools, githubTools)
-	}
-	checkGitHubResults(t, got.githubResults)
+	got := runGitHubApp(t, fb, gh, a, svc)
 	if got.Session.Kind != db.AuthOAuth2 || got.Session.Subject != "ext:github:4242" {
 		t.Errorf("session = %+v, want an oauth2 session for ext:github:4242", got.Session)
 	}
-	if gh.Logins() != 1 {
-		t.Errorf("GitHub logins = %d, want 1", gh.Logins())
+}
+
+// The same app with GitHub as the admin gate: the matching email signs
+// the caller in as that Fresh Breath user.
+func TestGitHubAdminGateFromAppYieldsUser(t *testing.T) {
+	gh := newFakeGitHub(t)
+	fb := startFreshbreath(t)
+	gate := githubAuth(fb, gh)
+	svc := githubVirtual(t, fb, gh, gate)
+	a := fb.createApp("e2e-github", gate, testdata(t, "app.html", nil), svc)
+	userID := fb.createUser("Octo", githubUser["email"].(string), "Member")
+	fb.setAdminAuth(gate)
+
+	got := runGitHubApp(t, fb, gh, a, svc)
+	if want := fmt.Sprintf("frbr:%d", userID); got.Session.Kind != db.AuthOAuth2 || got.Session.Subject != want {
+		t.Errorf("session = %+v, want an oauth2 session for %s", got.Session, want)
 	}
 }
 

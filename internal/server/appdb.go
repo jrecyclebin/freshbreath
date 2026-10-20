@@ -950,9 +950,11 @@ func (s *Server) mcpSQLRunner(svc *db.Service, claims *freshbreathClaims, args m
 		if err != nil {
 			return nil, err
 		}
+		// The actor comes from the subject: an ext: caller's email is a
+		// provider's label, not proof of a Fresh Breath user.
 		var actor *db.User
-		if claims != nil && claims.UserEmail != "" {
-			actor, _ = s.store.GetUserByEmail(claims.UserEmail)
+		if claims != nil {
+			actor, _ = s.userFromSubject(claims.Subject)
 		}
 		if actor == nil {
 			return nil, cerr(http.StatusForbidden, "database tools require a Freshbreath user token")

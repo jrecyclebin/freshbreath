@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,21 @@ func (fb *freshbreath) createAuth(name, kind string, d db.AuthDescriptor) int64 
 	var rec struct{ ID int64 }
 	fb.api("POST", "/api/auth", map[string]any{"name": name, "kind": kind, "descriptor": d}, &rec)
 	return rec.ID
+}
+
+// createUser adds an active Fresh Breath user and returns its id.
+func (fb *freshbreath) createUser(name, email, role string) int64 {
+	fb.t.Helper()
+	var u struct{ ID int64 }
+	fb.api("POST", "/api/users", map[string]any{"name": name, "email": email, "role": role, "status": "Active"}, &u)
+	return u.ID
+}
+
+// setAdminAuth makes a record the admin auth gate. It ends setup mode, so
+// the admin API needs a credential afterwards — call it last.
+func (fb *freshbreath) setAdminAuth(id int64) {
+	fb.t.Helper()
+	fb.api("PUT", "/api/settings", map[string]any{"admin_auth_service": strconv.FormatInt(id, 10)}, nil)
 }
 
 // builtinAuth finds one of the seeded records (anonymous, ssh_key).
