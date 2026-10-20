@@ -32,6 +32,23 @@ func (s *Server) adminAuthRecord() (*db.AuthRecord, error) {
 	return s.store.GetAuthRecord(id)
 }
 
+// isAdminAuthRecord reports whether rec is the configured admin auth gate.
+// Only the admin gate's provider-asserted email may mint a frbr: subject
+// (see mintSubject); any other record's email yields ext:, so a service's
+// SSO can't elevate its caller into a Fresh Breath user. SSH passphrase
+// logins prove a user directly and don't go through mintSubject, so they
+// mint frbr regardless of which record they clear.
+func (s *Server) isAdminAuthRecord(rec *db.AuthRecord) bool {
+	if rec == nil {
+		return false
+	}
+	admin, err := s.adminAuthRecord()
+	if err != nil || admin == nil {
+		return false
+	}
+	return admin.ID == rec.ID
+}
+
 // resolveServiceGate returns the inbound gate for a service's direct door.
 func (s *Server) resolveServiceGate(svc *db.Service) (*db.AuthRecord, error) {
 	if svc.ProtectedBy != nil {

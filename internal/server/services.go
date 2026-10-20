@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"slices"
@@ -301,99 +302,54 @@ func (s *Server) oauth2ExchangeCode(ctx context.Context, rec *db.AuthRecord, tok
 // identityFromUserInfo resolves who the user is when no id_token exists:
 // the record's userinfo endpoint (or the OIDC provider's, when available),
 // with the emails endpoint as the GitHub-private-email fallback.
+//
+// Identity is best-effort. A provider that hands back tokens but no email
+// — and no userinfo, or a userinfo that 401s for lack of scope — still
+// completes its leg: the sealed access/refresh tokens are what the login
+// exists for. Email is a human label that can elevate a caller to a Fresh
+// Breath user only when the leg is the admin gate (see mintSubject); a leg
+// that proved no identity gets a per-session subject, so one visitor's
+// device can't be revoked under another's name.
 func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, provider *oidc.Provider, tok *oauth2.Token) (*OIDCClaims, error) {
 	var email, name, sub string
 
 	if rec.Descriptor.UserInfoURL != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rec.Descriptor.UserInfoURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("userinfo request: %w", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		req.Header.Set("Accept", "application/json")
-		resp, err := s.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("userinfo fetch: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("userinfo returned %d", resp.StatusCode)
-		}
-		var ui struct {
-			Email string `json:"email"`
-			Name  string `json:"name"`
-			Login string `json:"login"`
-			Sub   string `json:"sub"`
-			ID    any    `json:"id"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&ui); err != nil {
-			return nil, fmt.Errorf("userinfo decode: %w", err)
-		}
-		email, name = ui.Email, ui.Name
-		// Provider-subject preference: a real sub, then a numeric id, then
-		// the login handle — the most stable identifier available.
-		sub = ui.Sub
-		if sub == "" && ui.ID != nil {
-			sub = fmt.Sprintf("%v", ui.ID)
-		}
-		if sub == "" {
-			sub = ui.Login
+		if ui, ok := fetchUserInfoEndpoint(ctx, s.httpClient, rec.Descriptor.UserInfoURL, tok); ok {
+			email, name = ui.Email, ui.Name
+			// Provider-subject preference: a real sub, then a numeric id,
+			// then the login handle — the most stable identifier available.
+			sub = ui.Sub
+			if sub == "" && ui.ID != nil {
+				sub = fmt.Sprintf("%v", ui.ID)
+			}
+			if sub == "" {
+				sub = ui.Login
+			}
 		}
 	} else if provider != nil {
-		userInfo, err := provider.UserInfo(ctx, oauth2.StaticTokenSource(tok))
-		if err != nil {
-			return nil, fmt.Errorf("userinfo: %w", err)
+		e, n, st, ok := fetchOIDCUserInfo(ctx, provider, tok)
+		if ok {
+			email, name, sub = e, n, st
 		}
-		var ui struct {
-			Email string `json:"email"`
-			Name  string `json:"name"`
-		}
-		if err := userInfo.Claims(&ui); err != nil {
-			return nil, fmt.Errorf("userinfo claims: %w", err)
-		}
-		email, name, sub = ui.Email, ui.Name, userInfo.Subject
-	} else {
-		return nil, fmt.Errorf("record %q has no userinfo_url and the provider returned no id_token", rec.Name)
 	}
 
 	// Some providers (e.g. GitHub with private email) omit email from the
 	// main profile.
 	if email == "" && rec.Descriptor.UserEmailsURL != "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rec.Descriptor.UserEmailsURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("emails request: %w", err)
-		}
-		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-		req.Header.Set("Accept", "application/json")
-		resp, err := s.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("emails fetch: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("emails returned %d", resp.StatusCode)
-		}
-		var entries []struct {
-			Email    string `json:"email"`
-			Primary  bool   `json:"primary"`
-			Verified bool   `json:"verified"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-			return nil, fmt.Errorf("emails decode: %w", err)
-		}
-		for _, e := range entries {
-			if e.Primary && e.Verified {
-				email = e.Email
-				break
-			}
+		if e, ok := fetchPrimaryEmail(ctx, s.httpClient, rec.Descriptor.UserEmailsURL, tok); ok {
+			email = e
 		}
 	}
 
-	if email == "" {
-		return nil, fmt.Errorf("no email in userinfo")
-	}
+	// No stable identity at all → per-session subject, the same shape MCP
+	// servers get (mcpExchangeCode). We still complete the leg.
 	if sub == "" {
-		sub = email
+		if email != "" {
+			sub = email // a stable-enough handle when the provider gave no sub
+		} else {
+			log.Printf("identity: %s leg proved no identity; minting per-session subject", rec.Name)
+			sub = utils.GenNonce()
+		}
 	}
 	return &OIDCClaims{
 		Email:   email,
@@ -401,6 +357,93 @@ func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, p
 		Subject: sub,
 		Raw:     map[string]interface{}{},
 	}, nil
+}
+
+// fetchUserInfoEndpoint calls a record's userinfo_url best-effort. A fetch
+// that fails — network error, non-200, bad JSON — returns ok=false so the
+// leg completes with no identity rather than dying on a provider that
+// exposes no usable userinfo.
+func fetchUserInfoEndpoint(ctx context.Context, c *http.Client, url string, tok *oauth2.Token) (struct {
+	Email string `json:"email"`
+	Name  string `json:"name"`
+	Login string `json:"login"`
+	Sub   string `json:"sub"`
+	ID    any    `json:"id"`
+}, bool) {
+	var ui struct {
+		Email string `json:"email"`
+		Name  string `json:"name"`
+		Login string `json:"login"`
+		Sub   string `json:"sub"`
+		ID    any    `json:"id"`
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ui, false
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		return ui, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ui, false
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ui); err != nil {
+		return ui, false
+	}
+	return ui, true
+}
+
+// fetchOIDCUserInfo calls the OIDC provider's userinfo best-effort.
+func fetchOIDCUserInfo(ctx context.Context, p *oidc.Provider, tok *oauth2.Token) (email, name, sub string, ok bool) {
+	userInfo, err := p.UserInfo(ctx, oauth2.StaticTokenSource(tok))
+	if err != nil {
+		return "", "", "", false
+	}
+	var ui struct {
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+	if err := userInfo.Claims(&ui); err != nil {
+		return "", "", "", false
+	}
+	return ui.Email, ui.Name, userInfo.Subject, true
+}
+
+// fetchPrimaryEmail calls a record's emails endpoint best-effort and returns
+// the primary verified address, or ok=false.
+func fetchPrimaryEmail(ctx context.Context, c *http.Client, url string, tok *oauth2.Token) (string, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var entries []struct {
+		Email    string `json:"email"`
+		Primary  bool   `json:"primary"`
+		Verified bool   `json:"verified"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if e.Primary && e.Verified {
+			return e.Email, true
+		}
+	}
+	return "", false
 }
 
 // ── MCP (discovered at login) ───────────────────────────────────────
@@ -676,10 +719,16 @@ func activeUser(u *db.User) error {
 }
 
 // mintSubject decides the token subject for a completed interactive login:
-// frbr:<id> when the reported email belongs to a Fresh Breath user (and
-// role/name come from that row, never the provider), else ext:<provider>:<sub>.
+// frbr:<id> when the leg is the admin auth gate AND its provider-asserted
+// email belongs to a Fresh Breath user (role/name come from that row, never
+// the provider); ext:<provider>:<sub> otherwise. A non-admin gate's email
+// never elevates to frbr — signing in to a service is not signing in to
+// Fresh Breath, so a service SSO can't mint a Fresh Breath user's identity
+// no matter what email it reports. SSH passphrase logins prove a user
+// directly (leg.user) and never reach here, so they mint frbr by their own
+// trust path regardless of which record they clear.
 func (s *Server) mintSubject(rec *db.AuthRecord, email, providerSub string) (subject string, user *db.User) {
-	if email != "" {
+	if email != "" && s.isAdminAuthRecord(rec) {
 		if u, err := s.store.GetUserByEmail(email); err == nil {
 			return subjectForUser(u), u
 		}

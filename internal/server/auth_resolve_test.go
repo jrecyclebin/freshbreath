@@ -3,9 +3,13 @@ package server
 import (
 	"context"
 	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 
 	"poggers.institute/freshbreath/internal/db"
+
+	"golang.org/x/oauth2"
 )
 
 // ── Slot eligibility: every kind, both slots ────────────────────────
@@ -159,9 +163,15 @@ func TestDoorOwnsTheGate(t *testing.T) {
 
 // ── Subject minting ──────────────────────────────────────────────────
 
-func TestMintSubjectKnownEmailYieldsFrbr(t *testing.T) {
+// frbr is minted only when the leg is the admin gate. A provider-asserted
+// email that matches a Fresh Breath user elevates to frbr:<id> through the
+// admin gate — and through nothing else.
+func TestMintSubjectAdminGateKnownEmailYieldsFrbr(t *testing.T) {
 	srv := newTestServer(t)
 	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
 	user, err := srv.store.CreateUser("Known", "known@example.com", "Member", "Active")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -176,6 +186,49 @@ func TestMintSubjectKnownEmailYieldsFrbr(t *testing.T) {
 	}
 }
 
+// A non-admin gate's matching email must NOT mint frbr — signing in to a
+// service is not signing in to Fresh Breath. Even with a user row for that
+// email, the subject stays ext:.
+func TestMintSubjectNonAdminGateMatchingEmailYieldsExt(t *testing.T) {
+	srv := newTestServer(t)
+	// An admin gate exists, so the boundary is real — the test record is a
+	// *different* record, the way a service SSO is not the control panel's IdP.
+	admin := newAuthRecord(t, srv, "Admin IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://admin.example", Provider: "admin-idp"})
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(admin.ID, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
+	svcRec := newAuthRecord(t, srv, "Service IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://svc.example", Provider: "svc-idp"})
+	if _, err := srv.store.CreateUser("Known", "known@example.com", "Member", "Active"); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	subject, u := srv.mintSubject(svcRec, "known@example.com", "provider-sub-1")
+	if subject != "ext:svc-idp:provider-sub-1" {
+		t.Errorf("subject = %q, want ext:svc-idp:provider-sub-1 (no elevation via a service gate)", subject)
+	}
+	if u != nil {
+		t.Errorf("expected no resolved user for a non-admin gate, got %+v", u)
+	}
+}
+
+// The admin gate with no email (a provider that hands back tokens but no
+// identity) stays ext: — it cleared the door but proved no one we know.
+func TestMintSubjectAdminGateNoEmailYieldsExt(t *testing.T) {
+	srv := newTestServer(t)
+	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(rec.ID, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
+
+	subject, u := srv.mintSubject(rec, "", "provider-sub-9")
+	if subject != "ext:idp:provider-sub-9" {
+		t.Errorf("subject = %q, want ext:idp:provider-sub-9", subject)
+	}
+	if u != nil {
+		t.Errorf("expected no user for an email-less admin gate, got %+v", u)
+	}
+}
+
 func TestMintSubjectUnknownEmailYieldsExt(t *testing.T) {
 	srv := newTestServer(t)
 	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
@@ -186,6 +239,132 @@ func TestMintSubjectUnknownEmailYieldsExt(t *testing.T) {
 	}
 	if u != nil {
 		t.Errorf("expected no user, got %+v", u)
+	}
+}
+
+// ── Best-effort identity (email not required) ───────────────────────
+//
+// A provider that hands back tokens but no email, or whose userinfo
+// endpoint errors, must still complete its leg. identityFromUserInfo is
+// best-effort: it returns whatever it learned (email maybe empty) and a
+// subject (provider sub if known, else per-session), never erroring on
+// missing identity.
+
+func testIdentityRec(t *testing.T, srv *Server, d db.AuthDescriptor) *db.AuthRecord {
+	t.Helper()
+	return newAuthRecord(t, srv, "IdP", db.AuthOIDC, d)
+}
+
+func TestIdentityFromUserInfoWithEmailAndSub(t *testing.T) {
+	srv := newTestServer(t)
+	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+		if req.URL.Path == "/userinfo" {
+			return jsonResp(200, map[string]interface{}{"email": "a@x.test", "sub": "sub-7", "name": "A"})
+		}
+		return jsonResp(404, nil)
+	})
+	rec := testIdentityRec(t, srv, db.AuthDescriptor{Provider: "idp", UserInfoURL: "https://idp.example/userinfo"})
+
+	c, err := srv.identityFromUserInfo(context.Background(), rec, nil, &oauth2.Token{AccessToken: "tok"})
+	if err != nil {
+		t.Fatalf("identityFromUserInfo: %v", err)
+	}
+	if c.Email != "a@x.test" || c.Subject != "sub-7" || c.Name != "A" {
+		t.Errorf("claims = %+v, want email=a@x.test sub=sub-7 name=A", c)
+	}
+}
+
+// A userinfo endpoint that errors (e.g. 401 for lack of scope) must not
+// kill the leg: tokens are what the login exists for. Identity is empty,
+// subject is per-session.
+func TestIdentityFromUserInfoEndpointErrorCompletesLeg(t *testing.T) {
+	srv := newTestServer(t)
+	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+		return jsonResp(401, map[string]interface{}{"error": "insufficient_scope"})
+	})
+	rec := testIdentityRec(t, srv, db.AuthDescriptor{Provider: "idp", UserInfoURL: "https://idp.example/userinfo"})
+
+	c, err := srv.identityFromUserInfo(context.Background(), rec, nil, &oauth2.Token{AccessToken: "tok"})
+	if err != nil {
+		t.Fatalf("identityFromUserInfo: %v", err)
+	}
+	if c.Email != "" {
+		t.Errorf("email = %q, want empty", c.Email)
+	}
+	if c.Subject == "" {
+		t.Error("subject empty; want a per-session nonce")
+	}
+	if strings.HasPrefix(c.Subject, "idp:") {
+		t.Errorf("subject %q should not carry a provider prefix — no identity was proved", c.Subject)
+	}
+}
+
+// A record with no userinfo endpoint and no OIDC provider (just tokens)
+// still completes: per-session subject, no email.
+func TestIdentityFromUserInfoNoEndpointCompletesLeg(t *testing.T) {
+	srv := newTestServer(t)
+	rec := testIdentityRec(t, srv, db.AuthDescriptor{Provider: "idp"})
+
+	c, err := srv.identityFromUserInfo(context.Background(), rec, nil, &oauth2.Token{AccessToken: "tok"})
+	if err != nil {
+		t.Fatalf("identityFromUserInfo: %v", err)
+	}
+	if c.Email != "" {
+		t.Errorf("email = %q, want empty", c.Email)
+	}
+	if c.Subject == "" {
+		t.Error("subject empty; want a per-session nonce")
+	}
+}
+
+// A provider that returns a stable sub but no email gets a stable ext
+// subject (ext:provider:sub), not per-session — the same person keeps the
+// same subject across logins.
+func TestIdentityFromUserInfoSubWithoutEmailIsStable(t *testing.T) {
+	srv := newTestServer(t)
+	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+		return jsonResp(200, map[string]interface{}{"sub": "stable-1"})
+	})
+	rec := testIdentityRec(t, srv, db.AuthDescriptor{Provider: "idp", UserInfoURL: "https://idp.example/userinfo"})
+
+	c, err := srv.identityFromUserInfo(context.Background(), rec, nil, &oauth2.Token{AccessToken: "tok"})
+	if err != nil {
+		t.Fatalf("identityFromUserInfo: %v", err)
+	}
+	if c.Email != "" {
+		t.Errorf("email = %q, want empty", c.Email)
+	}
+	if c.Subject != "stable-1" {
+		t.Errorf("subject = %q, want stable-1", c.Subject)
+	}
+}
+
+// The emails endpoint still fills a missing email (GitHub private email).
+func TestIdentityFromUserInfoEmailsEndpointFillsEmail(t *testing.T) {
+	srv := newTestServer(t)
+	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+		switch req.URL.Path {
+		case "/user":
+			return jsonResp(200, map[string]interface{}{"sub": "sub-1", "login": "octo"})
+		case "/user/emails":
+			return jsonResp(200, []map[string]interface{}{
+				{"email": "octo@x.test", "primary": true, "verified": true},
+				{"email": "other@x.test", "primary": false, "verified": true},
+			})
+		}
+		return jsonResp(404, nil)
+	})
+	rec := testIdentityRec(t, srv, db.AuthDescriptor{Provider: "idp", UserInfoURL: "https://idp.example/user", UserEmailsURL: "https://idp.example/user/emails"})
+
+	c, err := srv.identityFromUserInfo(context.Background(), rec, nil, &oauth2.Token{AccessToken: "tok"})
+	if err != nil {
+		t.Fatalf("identityFromUserInfo: %v", err)
+	}
+	if c.Email != "octo@x.test" {
+		t.Errorf("email = %q, want octo@x.test", c.Email)
+	}
+	if c.Subject != "sub-1" {
+		t.Errorf("subject = %q, want sub-1", c.Subject)
 	}
 }
 
