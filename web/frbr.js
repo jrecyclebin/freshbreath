@@ -387,8 +387,9 @@ async function beginLogin(serviceURL, state, session, returnTo) {
 // The stored entry worth presenting is the one covering the most of what
 // this door asks for. A two-leg login is stored under its outbound record
 // with the inbound listed in `legs`, so that entry beats the gate-only one
-// and skips the popup entirely.
-async function candidateSession(legIDs) {
+// and skips the popup entirely. complete asks for an entry covering every
+// leg — silent mode has no login to finish a partial one.
+async function candidateSession(legIDs, complete = false) {
   let best = null, bestCount = 0;
   for (const id of legIDs) {
     const e = readEntry(id);
@@ -396,7 +397,7 @@ async function candidateSession(legIDs) {
     const covered = legIDs.filter(l => l === e.auth_id || (e.legs || []).includes(l)).length;
     if (covered > bestCount) { best = e; bestCount = covered; }
   }
-  if (!best) return null;
+  if (!best || (complete && bestCount < legIDs.length)) return null;
   const session = AuthSession.for(best);
   try { await session.check(); } catch { return null; }
   return session;
@@ -603,7 +604,7 @@ export async function login(serviceURL, mode = "normal") {
 
     // A fresh login presents nothing, so the server runs every leg.
     const legIDs = (door.legs || []).map(l => l.auth_id);
-    let session = mode === "fresh" ? null : await candidateSession(legIDs);
+    let session = mode === "fresh" ? null : await candidateSession(legIDs, mode === "silent");
     if (mode === "silent") return session ? proxyFor(door.service, session) : null;
 
     const state = uuidv4();

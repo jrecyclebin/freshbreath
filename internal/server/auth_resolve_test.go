@@ -669,3 +669,32 @@ func TestAPIKeyGateAcceptsOwnToken(t *testing.T) {
 		t.Error("wrong key should be rejected")
 	}
 }
+
+// An upstream that issues no refresh token (Kantata's long-lived tokens,
+// say) keeps its credential through a Fresh Breath refresh — the refreshed
+// token still carries what its legs claim.
+func TestRefreshKeepsUpstreamWithoutRefreshToken(t *testing.T) {
+	srv := newTestServer(t)
+	gate := setAdminAuth(t, srv)
+	kantata := newAuthRecord(t, srv, "Kantata OX", db.AuthOAuth2, db.AuthDescriptor{TokenURL: "https://kantata.example/token", Provider: "kantata-ox"})
+	legs := []*completedLeg{
+		{rec: gate, sub: "admin-sub"},
+		{rec: kantata, sub: "k-1", upstream: &sealedUpstreamData{UpstreamToken: "k-token"}},
+	}
+	_, rd, err := srv.mintForLegs(legs, gate.ID, kantata.ID)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	at, _, err := srv.oauthSrv.refreshLegs(context.Background(), &rd)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	claims, err := srv.verifyFreshbreathToken(at)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got := claims.Creds["kantata-ox"].UpstreamToken; got != "k-token" {
+		t.Errorf("refreshed kantata-ox credential = %q, want k-token", got)
+	}
+}

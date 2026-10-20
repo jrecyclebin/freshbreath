@@ -818,8 +818,9 @@ func (s *Server) refreshRecord(ctx context.Context, authID int64) (*db.AuthRecor
 // refreshLegs re-mints an access token from refresh data: the identity is
 // re-resolved from the subject (a deleted user can't extend a session; a
 // role change propagates within one cycle), and every upstream leg with a
-// refresh token is rotated against its record's provider. An upstream that
-// refuses costs the whole refresh — re-login is the honest answer.
+// refresh token is rotated against its record's provider; one without just
+// carries its access token forward. An upstream that refuses costs the
+// whole refresh — re-login is the honest answer.
 func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefreshData) (string, freshbreathRefreshData, error) {
 	s := os.server
 
@@ -840,6 +841,16 @@ func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefresh
 		rec, err := s.refreshRecord(ctx, leg.AuthID)
 		if err != nil {
 			return "", freshbreathRefreshData{}, fmt.Errorf("auth record for %s: %w", provider, err)
+		}
+		if leg.RefreshToken == "" {
+			// Nothing to rotate: the upstream token rides on unchanged.
+			creds[provider] = sealedUpstreamData{
+				UpstreamToken:    leg.AccessToken,
+				UpstreamTokenURL: leg.TokenURL,
+				UpstreamScopes:   leg.Scopes,
+			}
+			newUpstreams[provider] = leg
+			continue
 		}
 		tokenEndpoint := leg.TokenURL
 		if tokenEndpoint == "" {

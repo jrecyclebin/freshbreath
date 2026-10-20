@@ -312,14 +312,16 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		if leg.upstream != nil {
 			provider := authProvider(leg.rec)
 			creds[provider] = *leg.upstream
-			if leg.upstream.UpstreamRefresh != "" {
-				upstreams[provider] = upstreamRefreshLeg{
-					AuthID:       leg.rec.ID,
-					RefreshToken: leg.upstream.UpstreamRefresh,
-					TokenURL:     leg.upstream.UpstreamTokenURL,
-					Scopes:       leg.upstream.UpstreamScopes,
-				}
+			up := upstreamRefreshLeg{
+				AuthID:       leg.rec.ID,
+				RefreshToken: leg.upstream.UpstreamRefresh,
+				TokenURL:     leg.upstream.UpstreamTokenURL,
+				Scopes:       leg.upstream.UpstreamScopes,
 			}
+			if up.RefreshToken == "" {
+				up.AccessToken = leg.upstream.UpstreamToken
+			}
+			upstreams[provider] = up
 		}
 	}
 

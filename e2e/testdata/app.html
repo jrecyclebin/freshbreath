@@ -39,6 +39,24 @@
         return { tools, search };
       },
 
+      // Signs in to the page's own gate and nothing else.
+      async gate() {
+        await login();
+        return {};
+      },
+
+      // A service that acts as a second record, after a gate-only sign-in
+      // (the gate scenario): silent must come back empty until the second
+      // leg is cleared, then serve from the stored two-leg login.
+      async silent() {
+        const url = params.get("service");
+        const before = await login(url, "silent");
+        await login(url);
+        const after = await login(url, "silent");
+        const user = await after.callTool("whoami");
+        return { before: before !== null, after: after !== null, user };
+      },
+
       // A task service: one script that answers, one that fails.
       async tasks() {
         const tasks = await login(params.get("service"));

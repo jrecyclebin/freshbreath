@@ -227,9 +227,16 @@ type service struct {
 
 func (fb *freshbreath) createService(name, serviceURL string, d db.ServiceDescriptor, protectedBy *int64) service {
 	fb.t.Helper()
+	return fb.createServiceActingAs(name, serviceURL, d, protectedBy, nil)
+}
+
+// createServiceActingAs registers a service whose outbound credential comes
+// from actsAs.
+func (fb *freshbreath) createServiceActingAs(name, serviceURL string, d db.ServiceDescriptor, protectedBy, actsAs *int64) service {
+	fb.t.Helper()
 	var created service
 	fb.api("POST", "/api/services", map[string]any{
-		"name": name, "url": serviceURL, "descriptor": d, "protected_by": protectedBy,
+		"name": name, "url": serviceURL, "descriptor": d, "protected_by": protectedBy, "acts_as": actsAs,
 	}, &created)
 	var list struct{ Services []service }
 	fb.api("GET", "/api/services", nil, &list)

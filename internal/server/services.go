@@ -889,9 +889,12 @@ func (s *Server) verifyAndUnwrapToken(raw string, expectedAuthID int64) (*freshb
 // upstreamRefreshLeg carries what's needed to refresh one provider's
 // upstream credential: the refresh token itself, the endpoint it rotated
 // from, and the record whose client credentials authenticate the request.
+// An upstream that issued no refresh token keeps its access token here
+// instead, and each refresh carries it forward as-is.
 type upstreamRefreshLeg struct {
 	AuthID       int64  `json:"auth_id"`
-	RefreshToken string `json:"refresh_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	AccessToken  string `json:"access_token,omitempty"`
 	TokenURL     string `json:"token_url,omitempty"`
 	Scopes       string `json:"scopes,omitempty"`
 }

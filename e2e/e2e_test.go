@@ -134,6 +134,43 @@ func TestGitHubAdminGateFromAppYieldsUser(t *testing.T) {
 	}
 }
 
+// Silent login to a two-leg door — the app's GitHub gate plus a service
+// acting as a second GitHub-shaped record — must not pass off the
+// gate-only login as the service's. It comes back null until the second
+// leg is cleared, then serves from the stored two-leg login.
+func TestSilentLoginNeedsEveryLeg(t *testing.T) {
+	gh := newFakeGitHub(t)
+	other := newFakeGitHub(t)
+	fb := startFreshbreath(t)
+	gate := githubAuth(fb, gh)
+	d := githubDescriptor(other)
+	d.Provider = "other-gh"
+	actsAs := fb.createAuth("Other GitHub", db.AuthOAuth2, d)
+	svc := fb.createServiceActingAs("other", "", db.ServiceDescriptor{Type: "virtual"}, &gate, &actsAs)
+	fb.uploadServiceFile(svc, "github.txt", testdata(t, "github.txt", map[string]string{"GITHUB": other.URL}))
+	a := fb.createApp("e2e-silent", gate, testdata(t, "app.html", nil), svc)
+
+	browser := newBrowser(t)
+	runScenario(t, browser, fb.URL+a.Route, "gate", nil)
+	raw := runScenario(t, browser, fb.URL+a.Route, "silent", map[string]string{"service": svc.URL})
+
+	var got struct {
+		Before bool           `json:"before"`
+		After  bool           `json:"after"`
+		User   map[string]any `json:"user"`
+	}
+	json.Unmarshal(raw, &got)
+	if got.Before {
+		t.Error("silent login returned the gate-only session for a two-leg door; want null")
+	}
+	if !got.After || got.User["login"] != githubUser["login"] {
+		t.Errorf("after the second leg: silent = %v, whoami = %v; want a working proxy", got.After, got.User)
+	}
+	if gh.Logins() != 1 || other.Logins() != 1 {
+		t.Errorf("logins: gate %d, other %d; want 1 each", gh.Logins(), other.Logins())
+	}
+}
+
 // An MCP client connects straight to the virtual GitHub service, signing
 // in to GitHub through the browser, and gets the same data.
 func TestGitHubVirtualServiceOverMCP(t *testing.T) {
