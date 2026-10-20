@@ -243,3 +243,44 @@ func TestAppDoorSSHGateOffAdminYieldsFrbr(t *testing.T) {
 		t.Errorf("subject = %q, want %s", sub, subjectForUser(u))
 	}
 }
+
+// The control panel's frbr: grant survives signing in at an app whose gate
+// proves a different (ext:) subject — the two gates hold the pass together.
+func TestControlPassSurvivesOtherGateSignIn(t *testing.T) {
+	srv := newTestServer(t)
+	slug, _ := gatedAppNamed(t, srv, "keyed", "keyed") // before the admin gate ends setup mode
+	sshRec := builtinAuth(t, srv, db.AuthSSHKey)
+	makeAdminAuth(t, srv, sshRec)
+	u := knownUser(t, srv)
+	key, err := sshkit.GenerateSSHKey("correct horse")
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	if err := srv.store.UpdateUser(u.ID, u.Name, u.Email, u.Role, u.Status, &db.UserMetadata{SSHKey: key}); err != nil {
+		t.Fatalf("store key: %v", err)
+	}
+
+	// Into the control panel by passphrase.
+	rr := pageRequest(srv, "/control", "navigate", nil, nil)
+	leg, _ := url.Parse(rr.Header().Get("Location"))
+	if leg.Path != "/service/ssh-auth" {
+		t.Fatalf("control: redirect = %q, want the passphrase form", rr.Header().Get("Location"))
+	}
+	body := `{"state":"` + leg.Query().Get("state") + `","email":"` + knownEmail + `","passphrase":"correct horse"}`
+	rr = testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), nil)
+	pass := gateCookie(rr)
+	if pass == nil {
+		t.Fatalf("passphrase login set no pass: %d %s", rr.Code, rr.Body.String())
+	}
+
+	// Then into the key-gated app, holding that pass.
+	rr = pageRequest(srv, "/"+slug+"/", "navigate", []*http.Cookie{pass}, nil)
+	pass = signInByKeyHolding(t, srv, rr.Header().Get("Location"), pass)
+
+	if rr := pageRequest(srv, "/control", "navigate", []*http.Cookie{pass}, nil); rr.Code != http.StatusOK {
+		t.Errorf("control after the app sign-in: status = %d, want 200", rr.Code)
+	}
+	if rr := pageRequest(srv, "/"+slug+"/", "navigate", []*http.Cookie{pass}, nil); rr.Code != http.StatusOK {
+		t.Errorf("app: status = %d, want 200", rr.Code)
+	}
+}

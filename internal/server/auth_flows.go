@@ -182,7 +182,7 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 		if err != nil {
 			return "", err
 		}
-		s.grantGatePass(w, r, subject, familyID, []int64{rec.ID})
+		s.grantGatePass(w, r, familyID, []int64{rec.ID})
 		writeCallbackPage(w, p, map[string]interface{}{
 			"v": 1, "auth_id": rec.ID, "kind": rec.Kind,
 			"key": p.done[0].presentedKey, "header": rec.Descriptor.Header,
@@ -220,7 +220,7 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 		return "", err
 	}
 	if rd.FamilyID != "" {
-		s.grantGatePass(w, r, rd.Subject, rd.FamilyID, append([]int64{rd.AuthID}, rd.Legs...))
+		s.grantGatePass(w, r, rd.FamilyID, append([]int64{rd.AuthID}, rd.Legs...))
 	}
 
 	primary := p.done[len(p.done)-1].rec
@@ -318,9 +318,12 @@ func returnAllowed(app *db.App, ret string) bool {
 // and it is a view pass only: no API route may read it, or it becomes an
 // ambient credential open to CSRF.
 //
-// Liveness comes from the family, not the cookie: a signed-out, revoked or
-// expired family voids its grants at once, and a deleted user voids them
-// all. The families table holds JTIs, never credentials.
+// Liveness and identity come from the family, not the cookie: a signed-out,
+// revoked or expired family voids its grants at once, a deleted user voids
+// theirs, and each grant answers as the subject its own gate proved — so
+// gates with different identities (frbr: at the admin gate, ext: at a
+// service SSO) hold their grants side by side. The families table holds
+// JTIs, never credentials.
 
 const (
 	gatePassCookie = "frbr_gate"
@@ -328,8 +331,7 @@ const (
 )
 
 type gatePass struct {
-	Subject string      `json:"sub"`
-	Grants  []gateGrant `json:"grants"`
+	Grants []gateGrant `json:"grants"`
 }
 
 type gateGrant struct {
@@ -388,12 +390,11 @@ func (s *Server) writeGatePass(w http.ResponseWriter, r *http.Request, pass *gat
 }
 
 // grantGatePass records a finished browser login on the pass: each cleared
-// record, under the login's family. A different subject starts a fresh
-// pass — one browser, one person's grants.
-func (s *Server) grantGatePass(w http.ResponseWriter, r *http.Request, subject, familyID string, authIDs []int64) {
+// record, under the login's family, replacing any earlier grant for it.
+func (s *Server) grantGatePass(w http.ResponseWriter, r *http.Request, familyID string, authIDs []int64) {
 	pass := s.readGatePass(r)
-	if pass == nil || pass.Subject != subject {
-		pass = &gatePass{Subject: subject}
+	if pass == nil {
+		pass = &gatePass{}
 	}
 	kept := pass.Grants[:0]
 	for _, g := range pass.Grants {
@@ -409,24 +410,25 @@ func (s *Server) grantGatePass(w http.ResponseWriter, r *http.Request, subject, 
 }
 
 // gatePassUser checks the request's pass against a gate. ok reports a live
-// grant for the record; user is the subject's row (nil for ext: subjects).
+// grant for the record; user is its family subject's row (nil for ext:).
 func (s *Server) gatePassUser(r *http.Request, gate *db.AuthRecord) (user *db.User, ok bool) {
 	pass := s.readGatePass(r)
 	if pass == nil {
 		return nil, false
-	}
-	user, err := s.userFromSubject(pass.Subject)
-	if err != nil {
-		return nil, false // a frbr: subject whose user is gone
 	}
 	for _, g := range pass.Grants {
 		if g.AuthID != gate.ID {
 			continue
 		}
 		fam, found, err := s.store.GetRefreshFamily(g.FamilyID)
-		if err == nil && found && !fam.Revoked && fam.ExpiresAt.After(time.Now()) && fam.Subject == pass.Subject {
-			return user, true
+		if err != nil || !found || fam.Revoked || !fam.ExpiresAt.After(time.Now()) {
+			continue
 		}
+		user, err := s.userFromSubject(fam.Subject)
+		if err != nil {
+			continue // a frbr: subject whose user is gone
+		}
+		return user, true
 	}
 	return nil, false
 }

@@ -21,8 +21,15 @@ import (
 // gatedApp creates an app behind an api_key record and gives it a page.
 func gatedApp(t *testing.T, srv *Server) (slug string, rec *db.AuthRecord) {
 	t.Helper()
-	rec = newAuthRecord(t, srv, "Gate key", db.AuthAPIKey, db.AuthDescriptor{Key: "sekret"})
-	body := `{"name":"gated","protected_by":` + strconv.FormatInt(rec.ID, 10) + `}`
+	return gatedAppNamed(t, srv, "gated", "")
+}
+
+// gatedAppNamed is gatedApp with its own slug and record provider; distinct
+// providers give distinct subjects (ext:<provider>:key).
+func gatedAppNamed(t *testing.T, srv *Server, name, provider string) (slug string, rec *db.AuthRecord) {
+	t.Helper()
+	rec = newAuthRecord(t, srv, name+" key", db.AuthAPIKey, db.AuthDescriptor{Key: "sekret", Provider: provider})
+	body := `{"name":"` + name + `","protected_by":` + strconv.FormatInt(rec.ID, 10) + `}`
 	rr := testRequest(t, srv, "POST", "/api/apps", strings.NewReader(body), nil)
 	if rr.Code != 200 {
 		t.Fatalf("create app: %d %s", rr.Code, rr.Body.String())
@@ -33,7 +40,7 @@ func gatedApp(t *testing.T, srv *Server) (slug string, rec *db.AuthRecord) {
 	createSlotFile(t, srv, res["nonce"], "web", "index.html", []byte("<h1>secret page</h1>"))
 	createSlotFile(t, srv, res["nonce"], "web", "app.js", []byte("// secret code"))
 	srv.rebuildHostedRoutes()
-	return "gated", rec
+	return name, rec
 }
 
 // pageRequest makes a request the way a browser would, carrying cookies.
@@ -64,12 +71,22 @@ func gateCookie(rr *httptest.ResponseRecorder) *http.Cookie {
 // gate pass the login set.
 func signInByKey(t *testing.T, srv *Server, loginURL string) *http.Cookie {
 	t.Helper()
+	return signInByKeyHolding(t, srv, loginURL, nil)
+}
+
+// signInByKeyHolding signs in while the browser already holds pass.
+func signInByKeyHolding(t *testing.T, srv *Server, loginURL string, pass *http.Cookie) *http.Cookie {
+	t.Helper()
 	u, err := url.Parse(loginURL)
 	if err != nil || u.Path != "/service/apikey-auth" {
 		t.Fatalf("login URL = %q, want the api key form", loginURL)
 	}
+	var headers map[string]string
+	if pass != nil {
+		headers = map[string]string{"Cookie": gatePassCookie + "=" + pass.Value}
+	}
 	body := `{"state":"` + u.Query().Get("state") + `","api_key":"sekret"}`
-	rr := testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), nil)
+	rr := testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), headers)
 	if rr.Code != 200 {
 		t.Fatalf("key form: %d %s", rr.Code, rr.Body.String())
 	}
@@ -185,6 +202,25 @@ func TestGatePassDiesWithSignOut(t *testing.T) {
 	rr = pageRequest(srv, "/"+slug+"/", "navigate", []*http.Cookie{pass}, nil)
 	if rr.Code != http.StatusFound {
 		t.Errorf("after logout: status = %d, want 302", rr.Code)
+	}
+}
+
+// Gates hold their grants side by side: signing in at a second gate, whose
+// login proves a different subject, adds to the pass instead of replacing it.
+func TestGatePassKeepsGrantsAcrossSubjects(t *testing.T) {
+	srv := newTestServer(t)
+	first, _ := gatedAppNamed(t, srv, "first", "first-key")
+	second, _ := gatedAppNamed(t, srv, "second", "second-key")
+
+	rr := pageRequest(srv, "/"+first+"/", "navigate", nil, nil)
+	pass := signInByKey(t, srv, rr.Header().Get("Location"))
+	rr = pageRequest(srv, "/"+second+"/", "navigate", []*http.Cookie{pass}, nil)
+	pass = signInByKeyHolding(t, srv, rr.Header().Get("Location"), pass)
+
+	for _, slug := range []string{first, second} {
+		if rr := pageRequest(srv, "/"+slug+"/", "navigate", []*http.Cookie{pass}, nil); rr.Code != http.StatusOK {
+			t.Errorf("%s after both sign-ins: status = %d, want 200", slug, rr.Code)
+		}
 	}
 }
 
