@@ -359,6 +359,7 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 	os.server.putPending(contState, &pendingAuth{
 		mcpKey:    mcpKey,
 		legs:      legs,
+		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
 	})
 

@@ -13,7 +13,7 @@ import (
 func sshPending(t *testing.T, srv *Server) *pendingAuth {
 	t.Helper()
 	rec := builtinAuth(t, srv, db.AuthSSHKey)
-	return &pendingAuth{legs: []*db.AuthRecord{rec}, primaryID: rec.ID}
+	return &pendingAuth{legs: []*db.AuthRecord{rec}, gateID: rec.ID, primaryID: rec.ID}
 }
 
 // A failed credential attempt must not kill the login state: the user can

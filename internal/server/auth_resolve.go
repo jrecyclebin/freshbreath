@@ -274,20 +274,19 @@ func (s *Server) legIdentity(leg *completedLeg) (subject string, user *db.User) 
 // refresh payload. primaryID names the record the token is minted under —
 // the outbound record when there is one, since that credential is the
 // scarcer one and names the session; every other cleared record rides in
-// Legs. Identity comes from the first leg that proved one.
-func (s *Server) mintForLegs(legs []*completedLeg, primaryID int64) (accessToken string, rd freshbreathRefreshData, err error) {
-	if len(legs) == 0 {
-		return "", rd, fmt.Errorf("no legs to mint")
-	}
-
-	// Identity comes from the first leg that proved one — normally the
-	// gate; an identity-free gate (api_key) defers to a later interactive leg.
-	idLeg := legs[0]
+// Legs. Identity comes from the gate leg (gateID) alone: other legs add
+// credentials, never identity, so a service's SSO can't decide who the
+// caller is. An api_key gate yields the fixed ext:<provider>:key.
+func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (accessToken string, rd freshbreathRefreshData, err error) {
+	var idLeg *completedLeg
 	for _, leg := range legs {
-		if leg.user != nil || leg.email != "" {
+		if leg.rec.ID == gateID {
 			idLeg = leg
 			break
 		}
+	}
+	if idLeg == nil {
+		return "", rd, fmt.Errorf("gate leg %d not among completed legs", gateID)
 	}
 	subject, user := s.legIdentity(idLeg)
 	if user != nil {

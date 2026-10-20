@@ -250,7 +250,7 @@ func TestOnlyActiveUsersSignIn(t *testing.T) {
 		}
 		// A fresh login (any kind) can't mint a token for them either.
 		leg := &completedLeg{rec: builtinAuth(t, srv, db.AuthSSHKey), user: u}
-		if _, _, err := srv.mintForLegs([]*completedLeg{leg}, leg.rec.ID); err == nil {
+		if _, _, err := srv.mintForLegs([]*completedLeg{leg}, leg.rec.ID, leg.rec.ID); err == nil {
 			t.Errorf("%s user got a token minted", u.Status)
 		}
 	}

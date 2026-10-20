@@ -106,6 +106,7 @@ type pendingAuth struct {
 	legs      []*db.AuthRecord // records still to clear, in order
 	at        int              // cursor into legs
 	done      []*completedLeg  // cleared legs (including any pre-covered by a presented token)
+	gateID    int64            // first record of the login; the token's identity comes from it
 	primaryID int64            // record the finished token is minted under
 
 	// Active-leg OAuth state (interactive kinds only).

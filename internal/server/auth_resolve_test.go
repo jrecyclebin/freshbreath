@@ -242,6 +242,62 @@ func TestMintSubjectUnknownEmailYieldsExt(t *testing.T) {
 	}
 }
 
+// ── Gate-only identity ──────────────────────────────────────────────
+
+func TestMintForLegsIdentityFromGateOnly(t *testing.T) {
+	srv := newTestServer(t)
+	admin := newAuthRecord(t, srv, "Admin IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://admin.example", Provider: "admin-idp"})
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(admin.ID, 10)); err != nil {
+		t.Fatalf("set admin_auth_service: %v", err)
+	}
+	gh := newAuthRecord(t, srv, "GitHub", db.AuthOAuth2, db.AuthDescriptor{Provider: "github"})
+	u, err := srv.store.CreateUser("Known", "known@example.com", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// The service leg comes first (pre-covered by a presented token) and
+	// carries an email of its own; the gate still decides.
+	legs := []*completedLeg{
+		{rec: gh, email: "someone-else@example.com", sub: "4242"},
+		{rec: admin, email: "known@example.com", sub: "admin-sub"},
+	}
+	_, rd, err := srv.mintForLegs(legs, admin.ID, gh.ID)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if want := subjectForUser(u); rd.Subject != want {
+		t.Errorf("subject = %q, want %q (from the gate leg)", rd.Subject, want)
+	}
+}
+
+func TestMintForLegsAPIKeyGateHasFixedIdentity(t *testing.T) {
+	srv := newTestServer(t)
+	keyGate := newAuthRecord(t, srv, "Key", db.AuthAPIKey, db.AuthDescriptor{Provider: "keyed", Header: "X-Key"})
+	gh := newAuthRecord(t, srv, "GitHub", db.AuthOAuth2, db.AuthDescriptor{Provider: "github"})
+
+	legs := []*completedLeg{
+		{rec: keyGate, presentedKey: "k"},
+		{rec: gh, email: "dev@example.com", sub: "4242"},
+	}
+	_, rd, err := srv.mintForLegs(legs, keyGate.ID, gh.ID)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if rd.Subject != "ext:keyed:key" {
+		t.Errorf("subject = %q, want ext:keyed:key (service leg never supplies identity)", rd.Subject)
+	}
+}
+
+func TestMintForLegsMissingGateLegErrors(t *testing.T) {
+	srv := newTestServer(t)
+	gh := newAuthRecord(t, srv, "GitHub", db.AuthOAuth2, db.AuthDescriptor{Provider: "github"})
+	legs := []*completedLeg{{rec: gh, sub: "4242"}}
+	if _, _, err := srv.mintForLegs(legs, gh.ID+1000, gh.ID); err == nil {
+		t.Error("mint without the gate leg succeeded; want error")
+	}
+}
+
 // ── Best-effort identity (email not required) ───────────────────────
 //
 // A provider that hands back tokens but no email, or whose userinfo

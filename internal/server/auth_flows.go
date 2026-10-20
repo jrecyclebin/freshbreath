@@ -190,7 +190,7 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 		return "", nil
 	}
 
-	token, rd, err := s.mintForLegs(p.done, p.primaryID)
+	token, rd, err := s.mintForLegs(p.done, p.gateID, p.primaryID)
 	if err != nil {
 		return "", err
 	}
@@ -472,6 +472,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		appState:  utils.GenNonce(),
 		returnTo:  r.URL.RequestURI(),
 		legs:      legs,
+		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
 	}
 	next, err := s.beginLeg(r.Context(), p)
@@ -712,6 +713,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		returnTo:  ret,
 		legs:      todo,
 		done:      done,
+		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
 	}
 
