@@ -402,23 +402,43 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if rest != "" {
-		clean := filepath.Clean(rest)
-		if !strings.HasPrefix(clean, "..") {
-			filePath := filepath.Join(webDir, clean)
-			if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
-				setRevalidateHeaders(w, fi)
-				http.ServeFile(w, r, filePath)
-				return
-			}
+	// Rooting before Clean drops any ".." and leading slashes, leaving a
+	// relative path whose filepath.Dir chain ends at ".".
+	clean := strings.TrimPrefix(filepath.Clean("/"+rest), "/")
+	if clean == "" {
+		clean = "."
+	}
+	if clean != "." {
+		filePath := filepath.Join(webDir, clean)
+		if fi, err := os.Stat(filePath); err == nil && !fi.IsDir() {
+			setRevalidateHeaders(w, fi)
+			http.ServeFile(w, r, filePath)
+			return
 		}
 	}
 
-	// SPA fallback
-	f, err := os.Open(filepath.Join(webDir, "index.html"))
-	if err != nil {
-		http.NotFound(w, r)
-		return
+	// SPA fallback: the nearest index.html at or above the requested path
+	// handles it, so /blog/post/1 goes to blog/index.html before the root's.
+	// A directory with its own index.html gets the same trailing-slash
+	// redirect as the app root, so its relative asset paths resolve.
+	var f *os.File
+	for dir := clean; ; dir = filepath.Dir(dir) {
+		if f, err = os.Open(filepath.Join(webDir, dir, "index.html")); err == nil {
+			if dir == clean && dir != "." && !strings.HasSuffix(r.URL.Path, "/") {
+				f.Close()
+				target := r.URL.Path + "/"
+				if r.URL.RawQuery != "" {
+					target += "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
+				return
+			}
+			break
+		}
+		if dir == "." {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	defer f.Close()
 	fi, _ := f.Stat()

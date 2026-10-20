@@ -37,9 +37,11 @@ the first `.html` file alphabetically becomes it. The upload is checked
 before anything is replaced: an upload with no HTML file, a bad zip or an
 escaping path is rejected and the live files stay put. 100 MB per request.
 
-HTML is served in single-page app style: any URL paths that don't resolve to
-filesystem paths are sent to the index.html. You can use common routers without
-needing to stick to hash paths.
+HTML is served in single-page app style: any URL path that doesn't resolve to
+a file is sent to the nearest `index.html` at or above it — `/blog/post/1` goes
+to `blog/index.html` if there is one, otherwise the root `index.html`. You can
+use common routers without needing to stick to hash paths, and give a
+subdirectory its own app.
 
 ---
 

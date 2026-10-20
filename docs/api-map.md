@@ -23,7 +23,7 @@ Routes are registered in `internal/server/server.go` → `SetupRoutes()`
 | Route | Method | Description |
 |---|---|---|
 | `/` | GET | Redirects to default app (setting `default_app`) or `/control` |
-| `/{slug}/…` | GET | Hosted static app. Gate-checked (app's `protected_by`), SPA index.html fallback, `no-cache`+ETag headers for revalidation |
+| `/{slug}/…` | GET | Hosted static app. Gate-checked (app's `protected_by`), SPA fallback to the nearest index.html up the tree, `no-cache`+ETag headers for revalidation |
 | `/{slug}@{slot}/…` | GET | Same, explicit deployment slot: `@dev`, `@staging`, `@prod` |
 | `/control` | GET/… | Admin control panel (single-page app); gated by the admin auth record |
 | `/control/*` | GET | Control panel static assets (no auth; `vendor/` immutable, rest `no-cache`) |

@@ -404,3 +404,42 @@ func TestHostedAppRevalidates(t *testing.T) {
 		t.Fatalf("rewritten file: status = %d body = %q, want 200 js2", rr.Code, rr.Body.String())
 	}
 }
+
+// TestHostedAppNestedIndex pins that the nearest index.html at or above a
+// path handles it, and that a directory with its own index.html is
+// redirected to its trailing-slash form like the app root.
+func TestHostedAppNestedIndex(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "nestapp")
+	cleanupSlotApp(t, srv, nonce)
+	createSlotFile(t, srv, nonce, "web", "index.html", []byte("root"))
+	createSlotFile(t, srv, nonce, "web", "blog/index.html", []byte("blog"))
+	createSlotFile(t, srv, nonce, "web", "docs/guide.html", []byte("guide"))
+	srv.rebuildHostedRoutes()
+
+	for path, want := range map[string]string{
+		"/nestapp/":                "root",
+		"/nestapp/missing":         "root",
+		"/nestapp/blog/":           "blog",
+		"/nestapp/blog/post/1":     "blog",
+		"/nestapp/blog/x.js":       "blog",
+		"/nestapp/docs/":           "root",
+		"/nestapp/docs/a/b":        "root",
+		"/nestapp/docs/guide.html": "guide",
+	} {
+		rr := testRequest(t, srv, http.MethodGet, path, nil, nil)
+		if rr.Code != http.StatusOK || rr.Body.String() != want {
+			t.Errorf("%s: status = %d body = %q, want 200 %q", path, rr.Code, rr.Body.String(), want)
+		}
+	}
+
+	rr := testRequest(t, srv, http.MethodGet, "/nestapp/blog?tag=go", nil, nil)
+	if rr.Code != http.StatusMovedPermanently || rr.Header().Get("Location") != "/nestapp/blog/?tag=go" {
+		t.Errorf("/nestapp/blog: status = %d Location = %q, want 301 /nestapp/blog/?tag=go", rr.Code, rr.Header().Get("Location"))
+	}
+	// A directory without its own index.html falls back without a redirect.
+	rr = testRequest(t, srv, http.MethodGet, "/nestapp/docs", nil, nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "root" {
+		t.Errorf("/nestapp/docs: status = %d body = %q, want 200 root", rr.Code, rr.Body.String())
+	}
+}
