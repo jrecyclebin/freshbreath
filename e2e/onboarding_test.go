@@ -22,12 +22,12 @@ func TestOnboardingThenSignIn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(browser, 45*time.Second)
 	defer cancel()
 
-	newPass := `(//input[@autocomplete="new-password"])`
+	newPass := `(//input[@type="password"])`
 	err := chromedp.Run(ctx,
 		chromedp.Navigate(fb.URL+"/control"),
 		chromedp.WaitVisible(`//h1[text()="Welcome to Fresh Breath"]`, chromedp.BySearch),
-		chromedp.SendKeys(`input[autocomplete="name"]`, "Ada Lovelace", chromedp.ByQuery),
-		chromedp.SendKeys(`input[autocomplete="email"]`, "ada@example.com", chromedp.ByQuery),
+		chromedp.SendKeys(`input[name="name"]`, "Ada Lovelace", chromedp.ByQuery),
+		chromedp.SendKeys(`input[name="email"]`, "ada@example.com", chromedp.ByQuery),
 		chromedp.SendKeys(newPass+`[1]`, "analytical engine", chromedp.BySearch),
 		chromedp.SendKeys(newPass+`[2]`, "analytical engine", chromedp.BySearch),
 		chromedp.Click(`form button[type="submit"]`, chromedp.ByQuery),

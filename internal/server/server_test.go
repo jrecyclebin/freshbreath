@@ -1545,3 +1545,25 @@ func TestControlCaching(t *testing.T) {
 		}
 	}
 }
+
+// A service acting as an interactive record needs the caller's credential
+// for it. Without one the answer is a 401 invalid_token — the caller's
+// cue to log in at the service's door — not a 400 it can't recover from.
+func TestProxyMissingActsAsCredentialIs401(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "acts-as-missing")
+	rec := newAuthRecord(t, srv, "Kantata OX", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://kantata.example/authorize", TokenURL: "https://kantata.example/token", Provider: "kantata-ox",
+	})
+	id := registerService(t, srv, "kantata", "https://kantata.example/api", db.ServiceDescriptor{Type: "api"})
+	setServiceActsAs(t, srv, id, rec.ID)
+	linkServiceToApp(t, srv, nonce, id)
+
+	rr := testRequest(t, srv, "GET", "/service/"+id+"/projects", nil, map[string]string{"X-App-Nonce": nonce})
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body = %s", rr.Code, rr.Body.String())
+	}
+	if ch := rr.Header().Get("WWW-Authenticate"); !strings.Contains(ch, `error="invalid_token"`) {
+		t.Errorf("WWW-Authenticate = %q, want an invalid_token challenge", ch)
+	}
+}

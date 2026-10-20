@@ -1809,3 +1809,52 @@ func postForm(t *testing.T, srv *Server, path string, form url.Values) *httptest
 	srv.ServeHTTP(rr, req)
 	return rr
 }
+
+// A refresh whose upstream refuses leaves the family where it was: the
+// client still holds the current token, so retrying it later — even past
+// the grace window — refreshes rather than tripping reuse detection.
+func TestOAuthRefreshUpstreamFailureKeepsFamily(t *testing.T) {
+	srv := newTestServer(t)
+	upstreamDown := true
+	srv.httpClient = mockHTTPClient(func(req *http.Request) *http.Response {
+		if upstreamDown {
+			return &http.Response{StatusCode: 500, Body: io.NopCloser(strings.NewReader("down"))}
+		}
+		return jsonResp(200, map[string]interface{}{"access_token": "fresh-upstream", "refresh_token": "fresh-refresh"})
+	})
+	rec := newAuthRecord(t, srv, "Up IdP", db.AuthOAuth2, db.AuthDescriptor{
+		TokenURL: "https://up.example/token", ClientID: "up-client", Provider: "up",
+	})
+	subject := extSubject("up", "u-42")
+	jti := utils.GenNonce()
+	famID := createRefreshFamily(t, srv.store, subject, rec.ID, jti)
+	rt, err := srv.mintRefreshToken(freshbreathRefreshData{
+		Subject: subject, AuthID: rec.ID,
+		Upstreams: map[string]upstreamRefreshLeg{
+			"up": {AuthID: rec.ID, RefreshToken: "old-refresh", TokenURL: "https://up.example/token"},
+		},
+		FamilyID: famID, JTI: jti,
+	})
+	if err != nil {
+		t.Fatalf("mint refresh token: %v", err)
+	}
+	refresh := func() *httptest.ResponseRecorder {
+		return postForm(t, srv, "/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {rt}})
+	}
+
+	if rr := refresh(); rr.Code == 200 {
+		t.Fatalf("refresh with upstream down succeeded: %s", rr.Body.String())
+	}
+	if fam, _, _ := srv.store.GetRefreshFamily(famID); fam.CurrentJTI != jti {
+		t.Errorf("failed refresh rotated the family: current jti = %q, want %q", fam.CurrentJTI, jti)
+	}
+
+	srv.store.DB().Exec("UPDATE refresh_families SET rotated_at = datetime('now', '-60 seconds') WHERE id = ?", famID)
+	upstreamDown = false
+	if rr := refresh(); rr.Code != 200 {
+		t.Fatalf("retry after upstream recovered: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if fam, _, _ := srv.store.GetRefreshFamily(famID); fam.Revoked {
+		t.Error("retry revoked the family")
+	}
+}

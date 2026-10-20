@@ -812,7 +812,7 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpOutboundCredError(w, err)
 		return
 	}
 
@@ -999,7 +999,7 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		httpOutboundCredError(w, err)
 		return
 	}
 	token := cred.Token
@@ -2434,6 +2434,16 @@ func httpInvalidToken(w http.ResponseWriter, description string) {
 		"error":             "invalid_token",
 		"error_description": description,
 	})
+}
+
+// httpOutboundCredError answers a failed resolveOutboundCred: a missing
+// login is a 401 the client can act on; anything else is the request's fault.
+func httpOutboundCredError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errNeedsLogin) {
+		httpInvalidToken(w, err.Error())
+		return
+	}
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
 func httpStepUp(w http.ResponseWriter, description string, maxAge time.Duration) {

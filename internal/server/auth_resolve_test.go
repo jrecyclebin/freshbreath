@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -550,13 +551,13 @@ func TestOutboundVerdictInteractiveActsAsUsesCallerCred(t *testing.T) {
 
 	// No claims at all → the caller never logged in to that leg: an error,
 	// not a silent empty credential.
-	if _, err := srv.resolveOutboundCred(svc, nil, nil, ""); err == nil {
+	if _, err := srv.resolveOutboundCred(svc, nil, nil, ""); !errors.Is(err, errNeedsLogin) {
 		t.Error("expected error when acts_as is interactive but the caller has no token")
 	}
 
 	// A token that never cleared this provider's leg → an error naming it.
 	otherClaims := &freshbreathClaims{Creds: sealedCreds{"other": {UpstreamToken: "x"}}}
-	if _, err := srv.resolveOutboundCred(svc, nil, otherClaims, ""); err == nil {
+	if _, err := srv.resolveOutboundCred(svc, nil, otherClaims, ""); !errors.Is(err, errNeedsLogin) {
 		t.Error("expected error when the caller's token carries no github credential")
 	}
 }

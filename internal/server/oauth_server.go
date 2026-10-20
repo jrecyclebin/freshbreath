@@ -736,41 +736,13 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	var nextJTI string
-	switch {
-	case data.JTI == fam.CurrentJTI:
-		// Happy path: rotate the family atomically.
-		nextJTI = newJTI()
-		if ok, err := os.server.store.RotateRefreshFamily(fam.ID, fam.CurrentJTI, nextJTI, time.Now()); err != nil {
-			oauthWriteError(w, http.StatusInternalServerError, "server_error", "rotation failed")
-			return
-		} else if !ok {
-			// Lost the race; someone else rotated. Re-read and retry.
-			fam2, ok2, err2 := os.server.store.GetRefreshFamily(data.FamilyID)
-			if err2 != nil || !ok2 {
-				oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "family concurrent update")
-				return
-			}
-			if data.JTI == fam2.PrevJTI && !fam2.RotatedAt.IsZero() && time.Since(fam2.RotatedAt) <= refreshGraceWindow {
-				// Grace-window: accept without a second rotate.
-				nextJTI = fam2.CurrentJTI
-			} else {
-				oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token rotated elsewhere")
-				return
-			}
-		}
-	case data.JTI == fam.PrevJTI && !fam.RotatedAt.IsZero() && time.Since(fam.RotatedAt) <= refreshGraceWindow:
-		// Grace-window retry: the client sent the previous token within the
-		// grace period. Re-issue the current pair without rotating again.
-		nextJTI = fam.CurrentJTI
-	case data.JTI == fam.PrevJTI:
-		// Reuse detected: the previous token is outside the grace window.
-		// Revoke the family and reject.
-		_ = os.server.store.RevokeRefreshFamily(fam.ID)
-		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token reuse detected")
-		return
-	default:
-		// Stale or unknown jti — possible theft.
+	// Classify the jti first, so a replay is revoked before anything goes
+	// upstream; but rotate only once the legs have refreshed, so a refusing
+	// upstream leaves the client holding a still-current token to retry.
+	inGrace := data.JTI == fam.PrevJTI && !fam.RotatedAt.IsZero() && time.Since(fam.RotatedAt) <= refreshGraceWindow
+	if data.JTI != fam.CurrentJTI && !inGrace {
+		// The previous token outside the grace window, or a stale or
+		// unknown jti — possible theft either way.
 		_ = os.server.store.RevokeRefreshFamily(fam.ID)
 		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token reuse detected")
 		return
@@ -780,6 +752,30 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
+	}
+
+	// A grace-window retry re-issues the current pair without rotating again.
+	nextJTI := fam.CurrentJTI
+	if !inGrace {
+		nextJTI = newJTI()
+		if ok, err := os.server.store.RotateRefreshFamily(fam.ID, fam.CurrentJTI, nextJTI, time.Now()); err != nil {
+			oauthWriteError(w, http.StatusInternalServerError, "server_error", "rotation failed")
+			return
+		} else if !ok {
+			// Lost the race; someone else rotated. Within the grace window
+			// this token is now the previous one — accept the winner's jti.
+			fam2, ok2, err2 := os.server.store.GetRefreshFamily(data.FamilyID)
+			if err2 != nil || !ok2 {
+				oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "family concurrent update")
+				return
+			}
+			if data.JTI == fam2.PrevJTI && !fam2.RotatedAt.IsZero() && time.Since(fam2.RotatedAt) <= refreshGraceWindow {
+				nextJTI = fam2.CurrentJTI
+			} else {
+				oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "refresh token rotated elsewhere")
+				return
+			}
+		}
 	}
 
 	// Stamp the new family state into the refresh token.

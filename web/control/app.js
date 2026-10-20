@@ -69,6 +69,22 @@ const PasswordInput = ({ className = 'input', ...props }) => {
   );
 };
 
+// Keeps password managers off a field that isn't the admin's own login —
+// a client ID, a URL, somebody else's email. Each manager has its own
+// opt-out (1Password, LastPass, Bitwarden, Dashlane); autocomplete="off"
+// covers the browser's form history.
+const NO_FILL = {
+  autoComplete: 'off',
+  'data-1p-ignore': 'true',
+  'data-lpignore': 'true',
+  'data-bwignore': 'true',
+  'data-form-type': 'other',
+};
+
+// A stored credential — a client secret, an API key. Masked like a
+// password, but never offered for fill or save as one.
+const SecretInput = (props) => <PasswordInput {...props} {...NO_FILL}/>;
+
 // A hand-drawn "window with a view", deterministic from the user's email
 // (falling back to their name). The drawing lives in window-avatar.js, a
 // dependency-free ES module that also works in Node for SSR / .svg
@@ -530,19 +546,19 @@ function CreateAccountStep({ onSkip }) {
         <form onSubmit={submit}>
           <div className="field">
             <label>Name</label>
-            <input className="input" autoComplete="name" value={form.name} onChange={set('name')} autoFocus/>
+            <input className="input" name="name" autoComplete="name" value={form.name} onChange={set('name')} autoFocus/>
           </div>
           <div className="field">
             <label>Email</label>
-<input className="input" type="email" autoComplete="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value.toLowerCase() }))}/>
+<input className="input" type="email" name="email" autoComplete="username" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value.toLowerCase() }))}/>
           </div>
           <div className="field">
             <label>Passphrase</label>
-            <PasswordInput autoComplete="new-password" value={form.passphrase} onChange={set('passphrase')} placeholder="Min 8 characters"/>
+            <PasswordInput name="passphrase" autoComplete="new-password" value={form.passphrase} onChange={set('passphrase')} placeholder="Min 8 characters"/>
           </div>
           <div className="field">
             <label>Confirm passphrase</label>
-            <PasswordInput autoComplete="new-password" value={form.confirm} onChange={set('confirm')} placeholder="Re-enter passphrase"/>
+            <PasswordInput name="passphrase_confirm" autoComplete="new-password" value={form.confirm} onChange={set('confirm')} placeholder="Re-enter passphrase"/>
           </div>
           <button className="btn btn-primary" type="submit" disabled={busy || !ready}>
             <Icon name="lock" size={14}/> {busy ? 'Setting up…' : 'Create account and lock the panel'}
@@ -753,7 +769,7 @@ function Toolbar({ search, onSearch, placeholder, filters=[], activeFilter, onFi
     <div className="toolbar">
       <div className="search">
         <span className="icn"><Icon name="search" size={14}/></span>
-        <input value={search} onChange={e=>onSearch(e.target.value)} placeholder={placeholder}/>
+        <input type="search" name="search" {...NO_FILL} value={search} onChange={e=>onSearch(e.target.value)} placeholder={placeholder}/>
       </div>
       {filters.map(f=>{
         const value = typeof f === 'string' ? f : f.value;
@@ -933,7 +949,7 @@ function DropZone({ onFiles, updateOnly }) {
       <span className="dz-icon"><Icon name="upload" size={22}/></span>
       <b>{updateOnly ? 'Drop an update' : 'Drop a new app or update'}</b>
       <span>.html, .zip, several files or a folder for apps · .txt for tasks & virtual services · or click to browse</span>
-      <input ref={inputRef} type="file" multiple style={{display:'none'}}
+      <input ref={inputRef} type="file" name="files" multiple style={{display:'none'}}
         onChange={e => { const files = pickedFiles(e.target.files); if (files.length) onFiles(files); e.target.value = ''; }}/>
     </div>
   );
@@ -1078,7 +1094,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
             <div className="entity-toolbar">
               <div className="search">
                 <span className="icn"><Icon name="search" size={14}/></span>
-                <input value={q} onChange={e => setQ(e.target.value)} placeholder={`Search ${activeView.label.toLowerCase()}…`}/>
+                <input type="search" name="search" {...NO_FILL} value={q} onChange={e => setQ(e.target.value)} placeholder={`Search ${activeView.label.toLowerCase()}…`}/>
               </div>
             </div>
             <table className="tbl" data-mobile>
@@ -1323,16 +1339,16 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
       </>}
     >
       <p><strong>NOTE:</strong> You don't need to create accounts for people who are just using the apps and logging in with their own creds! This is only for users who need to log in to this admin panel and manage apps and services.</p>
-      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Ada Lovelace"/></div>
-<div className="field"><label>Email</label><input className="input" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value.toLowerCase()}))} placeholder="ada@company.com"/></div>
+      <div className="field"><label>Name</label><input className="input" name="user_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Ada Lovelace"/></div>
+<div className="field"><label>Email</label><input className="input" type="email" name="user_email" {...NO_FILL} value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value.toLowerCase()}))} placeholder="ada@company.com"/></div>
       <div className="field-row">
         <div className="field"><label>Role</label>
-          <select className="input" value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}>
+          <select className="input" name="role" value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}>
             {isSuperuser && <option>Superuser</option>}<option>Admin</option><option>Member</option><option>Read-only</option>
           </select>
         </div>
         <div className="field"><label>Status</label>
-          <select className="input" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}>
+          <select className="input" name="status" value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}>
             <option>Active</option><option>Invited</option><option>Suspended</option>
           </select>
         </div>
@@ -1360,10 +1376,10 @@ function UserDrawer({ user, session, apps, onClose, onSaved }) {
           </span>
           <div className="field-row">
             <div className="field"><label>Passphrase</label>
-              <PasswordInput autoComplete="new-password" value={passphrase} onChange={e=>setPassphrase(e.target.value)} placeholder="Min 8 characters"/>
+              <SecretInput name="user_passphrase" value={passphrase} onChange={e=>setPassphrase(e.target.value)} placeholder="Min 8 characters"/>
             </div>
             <div className="field"><label>Confirm</label>
-              <PasswordInput autoComplete="new-password" value={passConfirm} onChange={e=>setPassConfirm(e.target.value)} placeholder="Re-enter passphrase"/>
+              <SecretInput name="user_passphrase_confirm" value={passConfirm} onChange={e=>setPassConfirm(e.target.value)} placeholder="Re-enter passphrase"/>
             </div>
           </div>
           {passphraseProblem && <span className="help" style={{color:'var(--danger)'}}>{passphraseProblem}</span>}
@@ -1432,13 +1448,13 @@ function PassphraseLinkModal({ link, onClose }) {
         <div className="field">
           <label>Link</label>
           <div style={{display:'flex',gap:8}}>
-            <input className="input mono" value={link.url} readOnly style={{fontSize:12,flex:1,minWidth:0}}/>
+            <input className="input mono" name="invite_link" {...NO_FILL} value={link.url} readOnly style={{fontSize:12,flex:1,minWidth:0}}/>
             <button className="btn btn-ghost" onClick={() => copyText(link.url, toast)} title="Copy link"><Icon name="copy" size={14}/></button>
           </div>
         </div>
         <div className="field">
           <label>Email</label>
-          <textarea className="input" rows={12} value={email} onChange={e => setEmail(e.target.value)} style={{fontSize:12.5,lineHeight:1.5,resize:'vertical'}}/>
+          <textarea className="input" name="invite_email" {...NO_FILL} rows={12} value={email} onChange={e => setEmail(e.target.value)} style={{fontSize:12.5,lineHeight:1.5,resize:'vertical'}}/>
         </div>
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
           <button className="btn btn-ghost" onClick={onClose}>Done</button>
@@ -1505,9 +1521,9 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
   return (
     <>
       <div className="field-row">
-        <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
+        <div className="field"><label>Name</label><input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
         <div className="field"><label>URL</label>
-          <input className="input" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
+          <input className="input" name="app_url" {...NO_FILL} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
         </div>
       </div>
       {app && app.nonce && (
@@ -1523,13 +1539,13 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
       )}
       <div className="field-row">
         <div className="field"><label>Default environment</label>
-          <select className="input" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
+          <select className="input" name="environment" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
             <option>Production</option><option>Staging</option><option>Development</option>
           </select>
           <span className="help">Which deployment slot the bare app URL serves.</span>
         </div>
         <div className="field"><label>Owner</label>
-          <select className="input" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
+          <select className="input" name="owner_id" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
             <option value="">No owner</option>
             {users.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
           </select>
@@ -1690,6 +1706,7 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
                 <div style={{position:'relative'}}>
                   <textarea
                     className="input"
+                    name="setup_prompt"
                     readOnly
                     style={{fontFamily:'var(--font-mono)',fontSize:11,lineHeight:1.6,resize:'vertical',paddingRight:38,width:'100%',fieldSizing:'content'}}
                     value={setupPrompt}
@@ -1935,7 +1952,7 @@ function UploadModal({ session, files, apps, services, users, auth, adminAuthID,
 function SlotPick({ slot, setSlot }) {
   return (
     <div className="field"><label>Slot</label>
-      <select className="input" value={slot} onChange={e=>setSlot(e.target.value)}>
+      <select className="input" name="slot" value={slot} onChange={e=>setSlot(e.target.value)}>
         <option value="dev">Development</option>
         <option value="staging">Staging</option>
         <option value="prod">Production</option>
@@ -1960,7 +1977,7 @@ function ReplacePicker({ placeholder, emptyLabel, items, value, onChange }) {
     <div>
       <div className="replace-search">
         <Icon name="search" size={14}/>
-        <input value={q} onChange={e=>setQ(e.target.value)} placeholder={placeholder} spellCheck={false}/>
+        <input type="search" name="search" {...NO_FILL} value={q} onChange={e=>setQ(e.target.value)} placeholder={placeholder} spellCheck={false}/>
       </div>
       <div className="replace-list">
         {filtered.map(it => (
@@ -2133,7 +2150,7 @@ function HostUpload({ session, app, onRefresh }) {
         <span className="dz-icon"><Icon name="upload" size={22}/></span>
         <b>{uploading ? 'Uploading…' : (hosted ? 'Drop to replace' : 'Drop an app bundle')}</b>
         <span>.html, .zip, several files or a folder · or click to browse</span>
-        <input ref={inputRef} type="file" multiple style={{display:'none'}}
+        <input ref={inputRef} type="file" name="files" multiple style={{display:'none'}}
           onChange={e=>{ upload(pickedFiles(e.target.files)); e.target.value = ''; }}/>
       </div>
 
@@ -2238,6 +2255,7 @@ function AuthSlot({ label, help, placeholder, records, value, onChange, onCreate
       <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
         <select
           className="input"
+          name={slugify(label)}
           disabled={disabled}
           value={value == null ? '' : String(value)}
           onChange={e => onChange(e.target.value === '' ? null : Number(e.target.value))}
@@ -2279,12 +2297,12 @@ function AuthForm({ form, setForm, record }) {
     <>
       <div className="field">
         <label>Name</label>
-        <input className="input" value={form.name}
+        <input className="input" name="auth_name" {...NO_FILL} value={form.name}
                onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="Company SSO"/>
       </div>
       <div className="field">
         <label>Kind</label>
-        <select className="input" value={kind} onChange={e=>setKind(e.target.value)}>
+        <select className="input" name="kind" value={kind} onChange={e=>setKind(e.target.value)}>
           {AUTH_KINDS.map(k => <option key={k.kind} value={k.kind}>{k.label}</option>)}
         </select>
         <span className="help">{authKind(kind)?.blurb}</span>
@@ -2294,41 +2312,41 @@ function AuthForm({ form, setForm, record }) {
         <>
           {kind === 'oidc' ? (
             <div className="field"><label>Issuer</label>
-              <input className="input mono" value={d.issuer||''} onChange={e=>upd('issuer',e.target.value)} placeholder="https://accounts.example.com"/>
+              <input className="input mono" name="issuer" {...NO_FILL} value={d.issuer||''} onChange={e=>upd('issuer',e.target.value)} placeholder="https://accounts.example.com"/>
               <span className="help">Endpoints are discovered from here.</span>
             </div>
           ) : (
             <>
               <div className="field"><label>Authorize URL</label>
-                <input className="input mono" value={d.authorize_url||''} onChange={e=>upd('authorize_url',e.target.value)} placeholder="https://github.com/login/oauth/authorize"/>
+                <input className="input mono" name="authorize_url" {...NO_FILL} value={d.authorize_url||''} onChange={e=>upd('authorize_url',e.target.value)} placeholder="https://github.com/login/oauth/authorize"/>
               </div>
               <div className="field"><label>Token URL</label>
-                <input className="input mono" value={d.token_url||''} onChange={e=>upd('token_url',e.target.value)} placeholder="https://github.com/login/oauth/access_token"/>
+                <input className="input mono" name="token_url" {...NO_FILL} value={d.token_url||''} onChange={e=>upd('token_url',e.target.value)} placeholder="https://github.com/login/oauth/access_token"/>
               </div>
               <div className="field"><label>Userinfo URL</label>
-                <input className="input mono" value={d.userinfo_url||''} onChange={e=>upd('userinfo_url',e.target.value)} placeholder="https://api.github.com/user"/>
+                <input className="input mono" name="userinfo_url" {...NO_FILL} value={d.userinfo_url||''} onChange={e=>upd('userinfo_url',e.target.value)} placeholder="https://api.github.com/user"/>
               </div>
               <div className="field"><label>User emails URL</label>
-                <input className="input mono" value={d.userinfo_emails_url||''} onChange={e=>upd('userinfo_emails_url',e.target.value)} placeholder="https://api.github.com/user/emails"/>
+                <input className="input mono" name="userinfo_emails_url" {...NO_FILL} value={d.userinfo_emails_url||''} onChange={e=>upd('userinfo_emails_url',e.target.value)} placeholder="https://api.github.com/user/emails"/>
                 <span className="help">Only when the provider keeps email off the main userinfo response.</span>
               </div>
             </>
           )}
           <div className="field-row">
             <div className="field"><label>Client ID</label>
-              <input className="input mono" value={d.client_id||''} onChange={e=>upd('client_id',e.target.value)}/>
+              <input className="input mono" name="client_id" {...NO_FILL} value={d.client_id||''} onChange={e=>upd('client_id',e.target.value)}/>
             </div>
             <div className="field"><label>Scopes</label>
-              <input className="input" value={d.scopes||''} onChange={e=>upd('scopes',e.target.value)} placeholder={kind==='oidc'?'openid profile email':'repo read:user'}/>
+              <input className="input" name="scopes" {...NO_FILL} value={d.scopes||''} onChange={e=>upd('scopes',e.target.value)} placeholder={kind==='oidc'?'openid profile email':'repo read:user'}/>
             </div>
           </div>
           <div className="field"><label>Client Secret</label>
-            <PasswordInput className="input mono" value={d.client_secret||''}
+            <SecretInput className="input mono" name="client_secret" value={d.client_secret||''}
                    onChange={e=>upd('client_secret',e.target.value)} placeholder={secretPlaceholder}/>
             <span className="help">Never leaves the server — token exchange and refresh run here.</span>
           </div>
           <div className="field"><label>Provider slug</label>
-            <input className="input mono" value={d.provider||''} onChange={e=>upd('provider',e.target.value)} placeholder={slugify(form.name) || 'github'}/>
+            <input className="input mono" name="provider" {...NO_FILL} value={d.provider||''} onChange={e=>upd('provider',e.target.value)} placeholder={slugify(form.name) || 'github'}/>
             <span className="help">
               The upstream this record talks to. Two records over the same provider share one
               identity for the people behind them, so give them the same slug.
@@ -2338,7 +2356,7 @@ function AuthForm({ form, setForm, record }) {
             <div className="field">
               <label>Request refresh token</label>
               <label style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer',fontSize:13,color:'var(--ink-1)',fontWeight:400}}>
-                <input type="checkbox" checked={!!d.offline_access} onChange={e=>upd('offline_access',e.target.checked)}/>
+                <input type="checkbox" name="offline_access" checked={!!d.offline_access} onChange={e=>upd('offline_access',e.target.checked)}/>
                 <span>Send <span className="mono">access_type=offline</span></span>
               </label>
               <span className="help">Google needs this to return a refresh token — it ignores the standard offline_access scope. Without it the sealed upstream credential is gone once the first access token expires. Harmless for providers that don't recognize the param.</span>
@@ -2346,7 +2364,7 @@ function AuthForm({ form, setForm, record }) {
             <div className="field">
               <label>Re-prompt consent</label>
               <label style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer',fontSize:13,color:'var(--ink-1)',fontWeight:400}}>
-                <input type="checkbox" checked={!!d.force_consent} onChange={e=>upd('force_consent',e.target.checked)}/>
+                <input type="checkbox" name="force_consent" checked={!!d.force_consent} onChange={e=>upd('force_consent',e.target.checked)}/>
                 <span>Send <span className="mono">prompt=consent</span></span>
               </label>
               <span className="help">Google returns a refresh token only on the first consent, so a re-login after the session expires needs this to get one again. Shows a consent screen on each login.</span>
@@ -2358,18 +2376,18 @@ function AuthForm({ form, setForm, record }) {
       {kind === 'api_key' && (
         <>
           <div className="field"><label>Key</label>
-            <PasswordInput className="input mono" value={d.key||''}
+            <SecretInput className="input mono" name="api_key" value={d.key||''}
                    onChange={e=>upd('key',e.target.value)} placeholder={secretPlaceholder}/>
           </div>
           <div className="field"><label>Header</label>
-            <input className="input mono" value={d.header||''} onChange={e=>upd('header',e.target.value)} placeholder="X-API-Key (blank for Authorization: Bearer)"/>
+            <input className="input mono" name="header" {...NO_FILL} value={d.header||''} onChange={e=>upd('header',e.target.value)} placeholder="X-API-Key (blank for Authorization: Bearer)"/>
           </div>
         </>
       )}
 
       {kind === 'ssh_key' && (
         <div className="field"><label>Stored private key</label>
-          <textarea className="input mono" rows={4} value={d.key||''}
+          <textarea className="input mono" name="private_key" {...NO_FILL} rows={4} value={d.key||''}
                     onChange={e=>upd('key',e.target.value)} placeholder={secretPlaceholder || '-----BEGIN OPENSSH PRIVATE KEY-----'}
                     style={{fontSize:11,resize:'vertical'}}/>
           <span className="help">
@@ -2558,16 +2576,16 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
 
   return (
     <>
-      <div className="field"><label>Name</label><input className="input" value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
-      {!isTasks && !isVirtual && <div className="field"><label>URL</label><input className="input mono" value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))}/></div>}
+      <div className="field"><label>Name</label><input className="input" name="service_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
+      {!isTasks && !isVirtual && <div className="field"><label>URL</label><input className="input mono" name="service_url" {...NO_FILL} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))}/></div>}
       <div className="field-row">
         <div className="field"><label>Type</label>
-          <select className="input" value={form.descriptor.type} onChange={e=>setType(e.target.value)}>
+          <select className="input" name="type" value={form.descriptor.type} onChange={e=>setType(e.target.value)}>
             {typeOptions.map(t=><option key={t} value={t}>{t.toLocaleUpperCase()}</option>)}
           </select>
         </div>
         {!isTasks && !isVirtual && <div className="field"><label>Proxied</label>
-          <select className="input" value={form.descriptor.proxied?'true':'false'} onChange={e=>updDesc('proxied',e.target.value==='true')}>
+          <select className="input" name="proxied" value={form.descriptor.proxied?'true':'false'} onChange={e=>updDesc('proxied',e.target.value==='true')}>
             <option value="true">Yes</option><option value="false">No</option>
           </select>
         </div>}
@@ -2614,7 +2632,7 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
         <>
           <div className="field-row">
             <div className="field"><label>Database</label>
-              <select className="input" value={form.descriptor.database_target==='global'?'global':(form.descriptor.database_target||'').startsWith('app:')?'app':''} onChange={e=>{
+              <select className="input" name="database_target" value={form.descriptor.database_target==='global'?'global':(form.descriptor.database_target||'').startsWith('app:')?'app':''} onChange={e=>{
                 const v = e.target.value;
                 const d = {...form.descriptor};
                 delete d.database_target;
@@ -2629,12 +2647,12 @@ function ServiceFormFields({ form, setForm, auth, adminAuthID, onCreateGate, typ
               <span className="help">Which database SQL steps in this service's tools run against.</span>
             </div>
             <div className="field"><label>Database name</label>
-              <input className="input mono" value={form.descriptor.database_name||''} onChange={e=>updDesc('database_name',e.target.value)} placeholder="app"/>
+              <input className="input mono" name="database_name" {...NO_FILL} value={form.descriptor.database_name||''} onChange={e=>updDesc('database_name',e.target.value)} placeholder="app"/>
             </div>
           </div>
           {(form.descriptor.database_target||'').startsWith('app:') && (
             <div className="field"><label>App nonce</label>
-              <input className="input mono" value={form.descriptor.database_target.slice(4)||''} onChange={e=>updDesc('database_target','app:'+e.target.value)} placeholder="nonce of the app whose data this service touches"/>
+              <input className="input mono" name="database_app_nonce" {...NO_FILL} value={form.descriptor.database_target.slice(4)||''} onChange={e=>updDesc('database_target','app:'+e.target.value)} placeholder="nonce of the app whose data this service touches"/>
             </div>
           )}
         </>
@@ -2923,6 +2941,7 @@ function ServiceToolsEditor({ session, name, isTasks, filesPath, onBack, onSaved
           <textarea
             ref={textareaRef}
             className="editor-textarea"
+            name="file_content"
             value={content}
             onChange={e => { setContent(e.target.value); setDirty(true); }}
             spellCheck={false}
@@ -3138,7 +3157,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
         {loading ? <span className="muted">Loading…</span> : (
           <div className="field" style={{maxWidth:380}}>
             <label>Landing page</label>
-            <select className="input" value={defaultApp} onChange={e => setDefaultApp(e.target.value)}>
+            <select className="input" name="landing_app" value={defaultApp} onChange={e => setDefaultApp(e.target.value)}>
               <option value="">Control Panel</option>
               {apps.filter(isHosted).map(a => (
                 <option key={a.nonce} value={a.nonce}>{a.name}</option>
@@ -3168,7 +3187,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
         {loading ? <span className="muted">Loading…</span> : (
           <div className="field" style={{maxWidth:380}}>
             <label>Mode</label>
-            <select className="input" value={dbMode} onChange={e => setDbMode(e.target.value)}>
+            <select className="input" name="db_mode" value={dbMode} onChange={e => setDbMode(e.target.value)}>
               <option value="read-only">Read-only (default)</option>
               <option value="full-access">Full access</option>
             </select>
@@ -3225,10 +3244,10 @@ function ProfileView({ session }) {
         >
           <div style={{maxWidth:380}}>
             <div className="field"><label>Name</label>
-              <input className="input" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))}/>
+              <input className="input" name="name" autoComplete="name" value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))}/>
             </div>
             <div className="field"><label>Email</label>
-<input className="input" type="email" value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value.toLowerCase()}))}/>
+<input className="input" type="email" name="email" autoComplete="email" value={form.email} onChange={e => setForm(f => ({...f, email: e.target.value.toLowerCase()}))}/>
             </div>
             <div style={{display:'flex',gap:8,marginTop:16}}>
               <button className="btn btn-primary" onClick={save} disabled={saving || !dirty || !form.name.trim() || !form.email.trim()}>
@@ -3293,7 +3312,7 @@ function SSHKeySection({ session, keyPath, whose }) {
       <div className="field" style={{maxWidth:560}}>
         <label>Public key</label>
         <div style={{display:'flex',gap:8}}>
-          <input className="input mono" value={sshKey.public_key?.trim()} readOnly style={{fontSize:12,flex:1,minWidth:0}} />
+          <input className="input mono" name="public_key" {...NO_FILL} value={sshKey.public_key?.trim()} readOnly style={{fontSize:12,flex:1,minWidth:0}} />
           <button className="btn btn-ghost" onClick={() => copyText(sshKey.public_key?.trim(), toast)}><Icon name="copy" size={14}/></button>
         </div>
       </div>
@@ -3326,11 +3345,11 @@ function PassphraseModal({ title, blurb, onClose, onSubmit }) {
         <p className="muted" style={{fontSize:13,marginBottom:16}}>{blurb}</p>
         <div className="field">
           <label>Passphrase</label>
-          <PasswordInput value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
+          <PasswordInput name="passphrase" autoComplete="new-password" value={passphrase} onChange={e => setPassphrase(e.target.value)} placeholder="Min 8 characters" autoFocus />
         </div>
         <div className="field">
           <label>Confirm passphrase</label>
-          <PasswordInput value={confirmed} onChange={e => setConfirmed(e.target.value)} placeholder="Re-enter passphrase" />
+          <PasswordInput name="passphrase_confirm" autoComplete="new-password" value={confirmed} onChange={e => setConfirmed(e.target.value)} placeholder="Re-enter passphrase" />
         </div>
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:20}}>
           <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
@@ -3550,23 +3569,23 @@ function RemoteUpdates({ session, apps, services }) {
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
           <div className="field" style={{width:110}}>
             <label>Mode</label>
-            <select className="input" value={mode} onChange={e => setMode(e.target.value)}>
+            <select className="input" name="feed_mode" value={mode} onChange={e => setMode(e.target.value)}>
               <option value="receive">receive</option>
               <option value="publish">publish</option>
             </select>
           </div>
           <div className="field" style={{flex:1,minWidth:220}}>
             <label>{mode === 'receive' ? 'Archive URL' : 'Feed URL (label)'}</label>
-            <input className="input mono" style={{fontSize:12}} value={url} onChange={e => setUrl(e.target.value)}
+            <input className="input mono" name="feed_url" {...NO_FILL} style={{fontSize:12}} value={url} onChange={e => setUrl(e.target.value)}
               placeholder={mode === 'receive' ? 'https://…/update.tar.gz.enc' : 'https://…/where-you-host-it'} />
           </div>
           <div className="field" style={{width:180}}>
             <label>Name</label>
-            <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="optional" />
+            <input className="input" name="feed_name" {...NO_FILL} value={name} onChange={e => setName(e.target.value)} placeholder="optional" />
           </div>
           <div className="field" style={{width:260}}>
             <label>Key (optional)</label>
-            <input className="input mono" style={{fontSize:12}} value={keyHex} onChange={e => setKeyHex(e.target.value)} placeholder="64 hex chars — else generated" />
+            <input className="input mono" name="feed_key" {...NO_FILL} style={{fontSize:12}} value={keyHex} onChange={e => setKeyHex(e.target.value)} placeholder="64 hex chars — else generated" />
           </div>
           <div className="field" style={{alignSelf:'flex-end'}}>
             <button className="btn btn-primary" disabled={busy || (mode === 'receive' && !url.trim())} onClick={add}>
@@ -3590,7 +3609,7 @@ function RemoteUpdates({ session, apps, services }) {
             when pairing, you already know it). It will not be shown again.
           </p>
           <div style={{display:'flex',gap:8}}>
-            <input className="input mono" style={{fontSize:12}} value={newKey.key} readOnly />
+            <input className="input mono" name="feed_key_shown" {...NO_FILL} style={{fontSize:12}} value={newKey.key} readOnly />
             <button className="btn btn-ghost" onClick={() => copyText(newKey.key, toast)}><Icon name="copy" size={14}/></button>
             <button className="btn btn-ghost" onClick={() => setNewKey(null)}>Done</button>
           </div>
@@ -3608,7 +3627,7 @@ function RemoteUpdates({ session, apps, services }) {
             </p>
             <div className="field">
               <label>Version</label>
-              <input className="input mono" style={{fontSize:12}} value={buildVersion} onChange={e => setBuildVersion(e.target.value)} placeholder="blank = timestamp" />
+              <input className="input mono" name="build_version" {...NO_FILL} style={{fontSize:12}} value={buildVersion} onChange={e => setBuildVersion(e.target.value)} placeholder="blank = timestamp" />
             </div>
             <div className="field">
               <label>Apps ({buildSel.apps.length} selected)</label>
@@ -3616,7 +3635,7 @@ function RemoteUpdates({ session, apps, services }) {
                 {apps.length === 0 && <span className="muted" style={{fontSize:13}}>no apps</span>}
                 {apps.map(a => (
                   <label key={a.nonce} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
-                    <input type="checkbox" checked={buildSel.apps.includes(a.nonce)} onChange={() => toggleSel('apps', a.nonce)} />
+                    <input type="checkbox" name="apps" value={a.nonce} checked={buildSel.apps.includes(a.nonce)} onChange={() => toggleSel('apps', a.nonce)} />
                     {a.name} <span className="muted" style={{fontSize:11}}>{a.nonce}</span>
                   </label>
                 ))}
@@ -3628,7 +3647,7 @@ function RemoteUpdates({ session, apps, services }) {
                 {pubServices.length === 0 && <span className="muted" style={{fontSize:13}}>no tasks/virtual services</span>}
                 {pubServices.map(s => (
                   <label key={s.id} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
-                    <input type="checkbox" checked={buildSel.services.includes(s.name)} onChange={() => toggleSel('services', s.name)} />
+                    <input type="checkbox" name="services" value={s.name} checked={buildSel.services.includes(s.name)} onChange={() => toggleSel('services', s.name)} />
                     {s.name} <span className="muted" style={{fontSize:11}}>{s.descriptor?.type}</span>
                   </label>
                 ))}

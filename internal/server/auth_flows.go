@@ -443,8 +443,13 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 	if gateIsOpen(gate) {
 		return true
 	}
+	stamp, stamped := signinStamp(r.URL)
 	user, ok := s.gatePassUser(r, gate)
 	if ok && (appNonce != s.adminNonce || user != nil) {
+		if stamped {
+			http.Redirect(w, r, withoutSigninStamp(r.URL), http.StatusFound)
+			return false
+		}
 		return true
 	}
 	if ok {
@@ -458,7 +463,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 	}
 	// A login that just finished and still left no pass means the browser
 	// isn't keeping the cookie. Sending it round again would loop forever.
-	if cameFromLogin(r) {
+	if stamped && time.Since(stamp) < signinStampWindow {
 		gatePageError(w, http.StatusUnauthorized, "Sign-in didn't stick",
 			"You signed in, but this browser didn't keep the sign-in cookie. Check that cookies are allowed for this site.")
 		return false
@@ -472,7 +477,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 	p := &pendingAuth{
 		appNonce:  appNonce,
 		appState:  utils.GenNonce(),
-		returnTo:  r.URL.RequestURI(),
+		returnTo:  withSigninStamp(withoutSigninStamp(r.URL), time.Now()),
 		legs:      legs,
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
@@ -498,18 +503,43 @@ func isNavigation(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// cameFromLogin reports whether a request was sent by one of our own login
-// pages — the callback bouncing back, or a form that finished in place.
-func cameFromLogin(r *http.Request) bool {
-	ref, err := url.Parse(r.Header.Get("Referer"))
-	if err != nil || ref.Host != r.Host {
-		return false
+// A gate login returns to the page it interrupted with a sign-in stamp
+// (frbr_signin=<unix seconds>) on the query. Arriving with a pass, the
+// stamp is stripped before the page is served; arriving without one soon
+// after, the browser dropped the cookie. A stale stamp just signs in again.
+const (
+	signinStampParam  = "frbr_signin"
+	signinStampWindow = 5 * time.Minute
+)
+
+func signinStamp(u *url.URL) (time.Time, bool) {
+	secs, err := strconv.ParseInt(u.Query().Get(signinStampParam), 10, 64)
+	if err != nil {
+		return time.Time{}, false
 	}
-	switch ref.Path {
-	case "/service/callback", "/service/ssh-auth", "/service/apikey-auth":
-		return true
+	return time.Unix(secs, 0), true
+}
+
+// withoutSigninStamp is u's request URI minus any stamp, the rest of the
+// query left as it came.
+func withoutSigninStamp(u *url.URL) string {
+	var kept []string
+	for _, part := range strings.Split(u.RawQuery, "&") {
+		if part != "" && !strings.HasPrefix(part, signinStampParam+"=") {
+			kept = append(kept, part)
+		}
 	}
-	return false
+	clean := *u
+	clean.RawQuery = strings.Join(kept, "&")
+	return clean.RequestURI()
+}
+
+func withSigninStamp(uri string, at time.Time) string {
+	sep := "?"
+	if strings.Contains(uri, "?") {
+		sep = "&"
+	}
+	return uri + sep + signinStampParam + "=" + strconv.FormatInt(at.Unix(), 10)
 }
 
 func gatePageError(w http.ResponseWriter, status int, title, detail string) {
@@ -1114,11 +1144,11 @@ var sshAuthFormHTML = authPage("Sign in", `
 <form id="f">
   <div class="field">
     <label for="e">Email</label>
-    <input id="e" class="input" type="email" required autocomplete="email" autofocus/>
+    <input id="e" class="input" type="email" name="email" required autocomplete="username" autofocus/>
   </div>
   <div class="field">
     <label for="p">Passphrase</label>
-    <div class="reveal"><input id="p" class="input" type="password" required autocomplete="current-password"/>`+revealButton+`</div>
+    <div class="reveal"><input id="p" class="input" type="password" name="passphrase" required autocomplete="current-password"/>`+revealButton+`</div>
   </div>
   <button type="submit" id="btn" class="btn btn-primary">Sign in</button>
 </form>
@@ -1187,11 +1217,11 @@ var passphraseLinkFormHTML = authPage("Set passphrase", `
 <form id="f">
   <div class="field">
     <label for="p">New passphrase</label>
-    <div class="reveal"><input id="p" class="input" type="password" required minlength="8" autocomplete="new-password" autofocus/>`+revealButton+`</div>
+    <div class="reveal"><input id="p" class="input" type="password" name="passphrase" required minlength="8" autocomplete="new-password" autofocus/>`+revealButton+`</div>
   </div>
   <div class="field">
     <label for="c">Confirm passphrase</label>
-    <div class="reveal"><input id="c" class="input" type="password" required minlength="8" autocomplete="new-password"/>`+revealButton+`</div>
+    <div class="reveal"><input id="c" class="input" type="password" name="passphrase_confirm" required minlength="8" autocomplete="new-password"/>`+revealButton+`</div>
   </div>
   <button type="submit" id="btn" class="btn btn-primary">Set passphrase</button>
 </form>
@@ -1237,7 +1267,7 @@ var apiKeyAuthFormHTML = authPage("API key", `
 <form id="f">
   <div class="field">
     <label for="k">API key</label>
-    <div class="reveal"><input id="k" class="input mono" type="password" required autocomplete="off" autofocus/>`+revealButton+`</div>
+    <div class="reveal"><input id="k" class="input mono" type="password" name="api_key" required autocomplete="off" autofocus/>`+revealButton+`</div>
   </div>
   <button type="submit" id="btn" class="btn btn-primary">Continue</button>
 </form>

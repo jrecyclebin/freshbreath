@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/hmac"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -161,6 +162,10 @@ type outboundCred struct {
 	Strip    bool   // drop the caller's Authorization (explicit Anonymous acts_as)
 }
 
+// errNeedsLogin marks an outbound credential only a login can supply: the
+// caller should log in at the service's door, not change the request.
+var errNeedsLogin = errors.New("login required")
+
 // resolveOutboundCred decides what goes upstream for a request that already
 // cleared its gate. presentedKey is the raw key a caller presented at an
 // api_key gate (claims are nil there); it becomes the passthrough value.
@@ -208,11 +213,11 @@ func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claim
 			return outboundCred{Token: rec.Descriptor.Key}, nil
 		default: // oidc, oauth2
 			if claims == nil {
-				return outboundCred{}, fmt.Errorf("service acts as %q but the caller has no token", rec.Name)
+				return outboundCred{}, fmt.Errorf("%w: service acts as %q but the caller has no token", errNeedsLogin, rec.Name)
 			}
 			cred, ok := claims.Creds[authProvider(rec)]
 			if !ok {
-				return outboundCred{}, fmt.Errorf("caller's token carries no %s credential — log in to %q", authProvider(rec), rec.Name)
+				return outboundCred{}, fmt.Errorf("%w: caller's token carries no %s credential — log in to %q", errNeedsLogin, authProvider(rec), rec.Name)
 			}
 			return outboundCred{Token: cred.UpstreamToken}, nil
 		}

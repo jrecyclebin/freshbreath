@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -145,7 +147,7 @@ func TestGatePassReturnsToThePageAsked(t *testing.T) {
 	u, _ := url.Parse(rr.Header().Get("Location"))
 	body := `{"state":"` + u.Query().Get("state") + `","api_key":"sekret"}`
 	rr = testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), nil)
-	if !strings.Contains(rr.Body.String(), `window.location.replace("/gated/deep?x=1")`) {
+	if !strings.Contains(rr.Body.String(), `window.location.replace("/gated/deep?x=1&frbr_signin=`) {
 		t.Errorf("callback page does not return to the page asked:\n%s", rr.Body.String())
 	}
 }
@@ -224,16 +226,52 @@ func TestGatePassKeepsGrantsAcrossSubjects(t *testing.T) {
 	}
 }
 
+// A gate login returns to a stamped copy of the page asked. Landing there
+// with the pass, the stamp is stripped; landing without it, the browser
+// didn't keep the cookie — and sending it round again would loop.
 func TestGatePassBreaksLoginLoop(t *testing.T) {
 	srv := newTestServer(t)
 	slug, _ := gatedApp(t, srv)
 
-	// Back from a login with no pass: the browser didn't keep the cookie.
-	rr := pageRequest(srv, "/"+slug+"/", "navigate", nil, map[string]string{
-		"Referer": "http://example.com/service/callback?code=x",
-	})
+	rr := pageRequest(srv, "/"+slug+"/deep?x=1", "navigate", nil, nil)
+	u, _ := url.Parse(rr.Header().Get("Location"))
+	body := `{"state":"` + u.Query().Get("state") + `","api_key":"sekret"}`
+	rr = testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), nil)
+	pass := gateCookie(rr)
+	m := regexp.MustCompile(`window\.location\.replace\("([^"]+)"\)`).FindStringSubmatch(rr.Body.String())
+	if m == nil || !strings.HasPrefix(m[1], "/"+slug+"/deep?x=1&frbr_signin=") {
+		t.Fatalf("callback page does not return to a stamped page:\n%s", rr.Body.String())
+	}
+	returnTo := m[1]
+
+	rr = pageRequest(srv, returnTo, "navigate", nil, nil)
 	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "Sign-in didn&#39;t stick") {
-		t.Errorf("status = %d, want the cookie error page", rr.Code)
+		t.Errorf("stamped page without a pass: status = %d, want the cookie error page", rr.Code)
+	}
+
+	rr = pageRequest(srv, returnTo, "navigate", []*http.Cookie{pass}, nil)
+	if rr.Code != http.StatusFound || rr.Header().Get("Location") != "/"+slug+"/deep?x=1" {
+		t.Errorf("stamped page with a pass: status = %d, Location = %q, want 302 to the clean page",
+			rr.Code, rr.Header().Get("Location"))
+	}
+}
+
+// Only a fresh stamp means a login just finished. A reload that still
+// carries a login page's Referer, or a stamp long past, signs in again.
+func TestGatePassStaleSignInStartsLogin(t *testing.T) {
+	srv := newTestServer(t)
+	slug, _ := gatedApp(t, srv)
+
+	stale := strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
+	for name, rr := range map[string]*httptest.ResponseRecorder{
+		"login Referer": pageRequest(srv, "/"+slug+"/", "navigate", nil, map[string]string{
+			"Referer": "http://example.com/service/callback?code=x",
+		}),
+		"stale stamp": pageRequest(srv, "/"+slug+"/?frbr_signin="+stale, "navigate", nil, nil),
+	} {
+		if loc := rr.Header().Get("Location"); rr.Code != http.StatusFound || !strings.Contains(loc, "/service/apikey-auth?state=") {
+			t.Errorf("%s: status = %d, Location = %q, want 302 into the login", name, rr.Code, loc)
+		}
 	}
 }
 
