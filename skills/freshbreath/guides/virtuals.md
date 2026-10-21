@@ -59,11 +59,13 @@ Aside from the request and response layouts, tool scripts can also include:
   is expected to be of a certain type (string, object, number, boolean, array,
   encrypted)
   and whether it is optional with a question mark (`number?`).
-- Assignments: Lines starting with `$var = expression` assign a value to a
-  variable. The expression can be a string, number, boolean, object, or array.
-- Assertions: Lines starting with `assert` can be used to assert that a variable is of
-  a certain type or has a certain value. If the assertion fails, the tool will
-  return a custom error with a 400 response.
+- Assignments: Lines starting with `$var = <jq>` assign a jq expression's
+  result to a `$var` (visible to the rest of the tool). The expression is jq:
+  `.displayName`, `.rows | map(.id)`, `host($url)`, `42`, `"literal"`.
+- Assertions: A bare `assert(<jq cond>; "message")` checks a condition and
+  fails the tool with a 400 if it's false (jq-falsy — only `false` and `null`
+  fail). It returns its input unchanged on success, so it composes in a
+  pipeline: `.nextLink | host(.) | assert(. == "graph.microsoft.com"; "bad host")`.
 
 These additions affect the HTTP requests that they precede, and can be used to
 modify the request or response.
@@ -132,7 +134,7 @@ can be seen in the example below for a SharePoint virtual service:
 [get-site] Resolve a SharePoint site URL to a site ID.
 
 $hostname = host($url)
-$pathname = path($url)
+$pathname = urlpath($url)
 GET https://graph.microsoft.com/v1.0/sites/$hostname:$pathname
 Authorization: Bearer $token
 
@@ -153,7 +155,7 @@ HTTP 201
 ---
 [get-list-next] Fetch the next page of items using the @odata.nextLink from a previous response.
 
-assert(host($next_link) == "graph.microsoft.com", "Invalid nextLink")
+assert(host($next_link) == "graph.microsoft.com"; "Invalid nextLink")
 GET $next_link
 Authorization: Bearer $token
 
@@ -165,30 +167,26 @@ HTTP 200
 PATCH https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items/$item_id/fields
 Authorization: Bearer $token
 Content-Type: application/json
-{...$fields}
+$fields
 
 HTTP 200
 ```
 
-First off, notice the use of the `host` and `path` functions. These can be used
-in expressions to extract the hostname and path from a URL stored in a variable.
-(Note that the `host` function is also used in the expression for the `assert`
-statement in the `get-list-next` tool.) Those custom variables can also be used
-in the JSON response - like arguments can.
+First off, notice the use of the `host` and `urlpath` functions. These are
+jq functions (registered by Fresh Breath) that extract the hostname and path
+of a URL stored in a variable — usable anywhere a jq expression is, including
+the `assert(...; ...)` check in `get-list-next`. (`urlpath` is named that
+rather than `path` because jq already has a `path` builtin that returns the
+selection path of an expression.) Those custom variables can also be used
+in the response — like arguments can.
 
 Variables that are *assigned* in the tool script are not treated as arguments - so
 those names will be eliminated from the tool's argument list.
 
-We also have two examples of object output in the response JSON:
-
-- The `add-list-item` tool embeds the `fields` object in the request body.
-- The `update-list-item` tool uses the spread operator to merge the `fields`
-  object into the request body.
-
-The `add-list-item` tool above demonstrates the use of a type annotation, to
-indicate that the `fields` argument is expected to be an object - and it will
-be typed that way in the tool definition in the Fresh Breath MCP endpoint for
-this service.
+Both tools build a request body. `add-list-item`'s body is `$fields` — the
+object goes on the wire as JSON. `update-list-item`'s body is also just
+`$fields` (it sends the whole fields object); to merge a fields object with
+extra keys, use jq's `+`: `$fields + {title: $new}`. See Request Bodies below.
 
 Possible types for tool arguments are: 'string', 'object', 'number', 'boolean',
 'array' and 'encrypted' (see Encrypted Parameters below). The default type is
@@ -213,12 +211,21 @@ These are still strings - a string is expected as input. But the tool will
 give back an error if the string doesn't match. For MCPs, this list shows up
 in the tool definition so a caller will know what to pass in.
 
-## Object Traversal
+## Object Traversal and jq
 
-In the case of object arguments and responses, the tool script can use dot
-notation in expressions - to traverse the object and access nested properties.
+The workhorse of a virtual service is [jq](https://jqlang.github.io/jq/manual/).
+Reading the response, reshaping it, building a request body, running an
+assertion, redacting a field — these are all jq expressions. A few Fresh
+Breath additions (`host`, `urlpath`, `assert`, `decrypt`) are registered as
+jq functions so they compose in pipelines like any builtin.
 
-For example, if a response returns a JSON object like this:
+In a jq expression, `.` is **the response the step just got** (or the SQL
+result, or the form answers), and `$name` is a **$-variable**: a caller
+argument, a value an earlier step assigned with `$name = expr`, or one of
+the `$token*` identity built-ins. So `.displayName` reads the response,
+`$site_id` reads a variable — they never mix.
+
+For example, given this response:
 
 ```
 {
@@ -231,15 +238,19 @@ For example, if a response returns a JSON object like this:
 }
 ```
 
-The tool script can access the `items` array using `$.data.items`.
-Alternatively, the bracket notation can be used: `$['data']['items']`. Both
-notations are equivalent. (Both of these syntaxes are supported thanks to the
-`gson` library used in Fresh Breath.)
+`.data.items` is the array; `.data.items[]` fans the elements out;
+`.data.items | map(.name)` is `["Item 1", "Item 2"]`; `[.data.items[] | select(.id > 1)]`
+is `[{"id":2,"name":"Item 2"}]`. jq's full query syntax — `#(...)` filters,
+`...` recurses, `@base64` formats, `|` pipes — is available everywhere a jq
+expression is. (One Fresh Breath limit: each expression produces a single
+result, so use `[... ]` to collect a stream rather than `... | ...` bare.)
 
-## String Bodies
+## Request Bodies
 
-To send raw file data or string content in place of a JSON object, use the
-string spread operator without the curly braces.
+The request body is a jq expression. Its result is what goes on the wire:
+a **string** result is sent verbatim as raw bytes (with a `Content-Type` you
+must set yourself — no default, and missing it is an error), and anything
+else is JSON-encoded and sent as `application/json` when you didn't set one.
 
 ```
 [upload-file] Upload a file's contents to a path.
@@ -247,24 +258,39 @@ string spread operator without the curly braces.
 PUT https://api.example.com/files/$path
 Authorization: Bearer $token
 Content-Type: text/plain
-...$content
+$content
 
 HTTP 200
 ```
 
-Be sure to set a `Content-Type` header. String-spread bodies don't pick a
-default for you and missing it is an error.
-
-Since the spread takes an expression, you can use the `base64dec` and
-`base64enc` functions here as well, if needed:
+Here the body is just `$content`, a string, so its bytes go through
+unchanged. Need to transform it first? Make the body an expression:
 
 ```
-...base64dec($content)
+$content | @base64d
 ```
 
-Here `$content` is the base64 text of the PNG; `base64dec($content)` decodes it
-and the raw PNG bytes are what hits the wire. (`base64enc` is the inverse — it
-encodes a string to base64 text.)
+This decodes `$content` (base64 text of a PNG) and sends the raw PNG bytes.
+(`@base64` is the inverse — encodes a string to base64 text.) And because the
+body is jq, you can build a JSON object with computed fields, not just
+interpolate variables:
+
+```
+[create-issue] File an issue upstream.
+
+POST https://api.example.com/issues
+Authorization: Bearer $token
+{title: $title, body: $body, ts: (now | todate)}
+
+HTTP 201
+```
+
+To merge an object argument into the body, jq's `+` does it — there is no
+spread operator (jq 1.6 has no `...`):
+
+```
+$fields + {title: $title}
+```
 
 ## Encrypted Parameters
 
@@ -290,16 +316,16 @@ INSERT INTO settings (name, value)
 
 SELECT value FROM settings WHERE name = 'acme_key'
 
-$key = decrypt($.rows.0.0)
+$key = decrypt(.rows[0][0])
 GET https://api.acme.example/widgets
 Authorization: Bearer $key
 
 HTTP 200
 ```
 
-Like `base64dec`, `decrypt` works wherever an expression does: assignments,
-assertions and string-spread bodies (`...decrypt($blob)`). Headers, URLs and
-JSON bodies take variables, so decrypt into a variable first, as above.
+Like `@base64d`, `decrypt` works wherever a jq expression does: assignments,
+assertions, mutations and bodies. Headers, URLs and the `$`-variable parts
+of those templates take variables, so decrypt into a variable first, as above.
 
 Worth knowing:
 
@@ -320,12 +346,14 @@ Worth knowing:
 
 ## Response Shaping
 
-A `{...}` block that follows a status line replaces the raw upstream body with
-whatever you say the tool returns. Shaping ends the tool right there — nothing
-after it runs.
+A `{...}` block that follows a status line is a jq object expression whose
+result replaces the raw upstream body — that's the tool's return value.
+Shaping ends the tool right there; nothing after it runs. Inside the block,
+`.` is the response that status line describes and `$name` is any variable
+an earlier step assigned.
 
 If you want to batch up several request responses and send them as one result,
-use variables:
+assign each into a `$var` and build the result from the variables:
 
 ```
 [get-anything] Two fetches, one answer.
@@ -333,13 +361,13 @@ use variables:
 GET https://httpbin.org/json
 
 HTTP 200
-$author = $.slideshow.author
+$author = .slideshow.author
 
 GET https://httpbin.org/headers
 X-Test: 1
 
 HTTP 200
-$headers = $.headers
+$headers = .headers
 
 {
   "slideshow_author": $author,
@@ -348,9 +376,36 @@ $headers = $.headers
 ```
 
 The caller sees only `slideshow_author` and `raw_headers` — the two upstream
-bodies stay backstage. Note the rhythm: `$.` always means *the response the step
-just got*, so each assignment has to be written under its own request. The
-closing block is the only place where all of them are in scope at once.
+bodies stay backstage. Note the rhythm: `.` always means *the response the
+step just got*, so each assignment has to be written under its own request.
+The closing block is the only place where all of them are in scope at once.
+
+### Redacting and reshaping responses
+
+Because shaping (and the bare statements before a request) are jq, you can do
+far more than select fields. Strip secrets, add derived fields, encode
+binary — all with jq's built-in `del`, `map`, `|=` and `+`:
+
+```
+[list-users] List users with secrets stripped and a URL added.
+
+GET https://api.example.com/users
+Authorization: Bearer $token
+
+HTTP 200
+.rows |= map(del(.password) | del(.api_key) | . + {url: ($scheme + "://" + $host + $path)})
+{users: .rows}
+```
+
+`.rows |= map(...)` is a jq **update**: it runs the right side against each
+element of `.rows` and stores the result back. `del(.password)` deletes the
+field; `. + {url: ...}` merges a new field onto the object. The closing
+`{users: .rows}` then shapes the (now-redacted) rows as the tool result.
+
+Bare jq statements between a status line and the next request aren't limited
+to updates — anything goes, including `assert(...; ...)` checks (see
+Assertions) and assignments. They run in source order against the current
+scope before the next request fires.
 
 ## SQL Steps — Querying a Database
 
@@ -444,7 +499,7 @@ A SQL step's result is the same object the database API returns:
 }
 ```
 
-So `$.rows`, assignments, and `{...}` shaping blocks all work against it,
+So `.rows`, assignments, and `{...}` shaping blocks all work against it,
 exactly as they do after an HTTP response:
 
 ```
@@ -457,8 +512,8 @@ SELECT id, title
   LIMIT 10
 
 {
-  "tasks": $.rows,
-  "tasks_columns": $.columns
+  "tasks": .rows,
+  "tasks_columns": .columns
 }
 ```
 
@@ -473,14 +528,14 @@ Authorization: Bearer $token
 
 HTTP 200
 
-$title = $.title
-$body = $.body
+$title = .title
+$body = .body
 
 INSERT INTO issues (title, body, source)
   VALUES ($title, $body, 'github')
 
 {
-  "imported": $.lastInsertId
+  "imported": .lastInsertId
 }
 ```
 
@@ -513,7 +568,7 @@ SELECT title, snippet(notes, 1, '<b>', '</b>', '…', 10) AS excerpt
   LIMIT 20
 
 {
-  "hits": $.rows
+  "hits": .rows
 }
 ```
 
@@ -662,7 +717,7 @@ capture-first is the authoring idiom.
 ```
 [send-payment] Send a payment after explicit user approval.
 
-$amount = $.quote.total
+$amount = .quote.total
 
 FORM "Send $amount to the payee?"
     $confirm is boolean
@@ -694,7 +749,7 @@ Two behaviors, depending on position:
   the run resumes when the user finishes — see the completion callback below.
 - **URL as the LAST step with no shaping after it**: pure hand-off. No
   elicitation happens at all; the resolved link lands in scope as
-  **`$.handoff_url`** and is included in the tool result. (An eager
+  **`.handoff_url`** and is included in the tool result. (An eager
   elicitation here would write its completion notification to the wire
   *before* the input-required result it relates to, hanging spec-conscious
   hosts.)

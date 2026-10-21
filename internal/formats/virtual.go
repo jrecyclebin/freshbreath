@@ -2,7 +2,6 @@ package formats
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-
-	"github.com/tidwall/gjson"
 
 	"poggers.institute/freshbreath/internal/utils"
 )
@@ -110,36 +107,37 @@ type VirtualElicit struct {
 }
 
 // VirtualStep is one step within a tool's script — an HTTP request, a SQL
-// statement, or an assignments-only post-processing step.
+// statement, an elicitation, or a pre/post-processing block of jq statements.
 type VirtualStep struct {
-	Assignments []VirtualAssignment
-	Assertions  []VirtualAssertion
-	Method      string // GET, POST, PUT, PATCH, DELETE
-	URL         string // URL template with $variable interpolation
-	Headers     map[string]string
-	Body        string                   // Raw JSON body template
-	BodyRaw     string                   // String-spread body expression, e.g. "$content" or "base64dec($content)"
-	SQL         string                   // Compiled SQL: $var → :var bindings
-	SQLNames    []string                 // Unique bind names, first-appearance order
-	Responses   map[int]*VirtualResponse // Expected status → response handling (0 = SQL step shaping)
-	Elicit      *VirtualElicit           // FORM or URL directive: elicitation step
+	// Pre is the ordered list of jq statements that run before this step's
+	// request, against the scope left by the previous step (caller args for
+	// the first step). Assignments ($x = expr) bind a $-variable; bare
+	// expressions transform "." (e.g. ".rows |= map(del(.password))") or check
+	// it (assert(...; ...)). Source order is preserved so an assert can follow
+	// a mutation in the same block.
+	Pre       []VirtualStmt
+	Method    string // GET, POST, PUT, PATCH, DELETE
+	URL       string // URL template with $variable interpolation
+	Headers   map[string]string
+	Body      string                   // jq expression; its result is the request body (string → raw bytes, else JSON)
+	SQL       string                   // Compiled SQL: $var → :var bindings
+	SQLNames  []string                 // Unique bind names, first-appearance order
+	Responses map[int]*VirtualResponse // Expected status → response handling (0 = SQL step shaping)
+	Elicit    *VirtualElicit           // FORM or URL directive: elicitation step
 }
 
-// VirtualAssignment binds a variable name to an expression.
-type VirtualAssignment struct {
-	VarName string // without the $
-	Expr    string // e.g. "host($url)", "$.value", "$['@odata']['nextLink']"
-}
-
-// VirtualAssertion is a safety check that must pass before proceeding.
-type VirtualAssertion struct {
-	Expr string // e.g. 'host($next_link) == "graph.microsoft.com"'
-	Msg  string // error message if the assertion fails
+// VirtualStmt is one line of a step's pre-block: either an assignment
+// (Assign non-nil, the new $-variable's bare name) or a bare jq
+// expression whose result replaces "." (a mutation) or is discarded
+// after a check (an assert, which passes its input through).
+type VirtualStmt struct {
+	Assign *string // bare variable name for "$x = expr"; nil for a bare expression
+	Expr   string  // jq expression
 }
 
 // VirtualResponse describes what to do after receiving a particular status code.
 type VirtualResponse struct {
-	Shaping string // Raw JSON template for response shaping
+	Shaping string // jq expression; its result is the tool's return value
 }
 
 // ── Parser ───────────────────────────────────────────────────────────
@@ -215,10 +213,8 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 // the parameters the caller must supply. $token is excluded (it's the auth token).
 //
 // Types are inferred:
-//   - Variables used in spread syntax (e.g. ...$fields) are typed as "object".
 //   - Explicit type annotations (e.g. "$fields is object") override inference.
 //   - All other parameters default to "string".
-var spreadVarRe = regexp.MustCompile(`\.\.\.\$([a-zA-Z_]\w*)`)
 var typeAnnotationRe = regexp.MustCompile(
 	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array|encrypted|email|uri|date-time|date)(\?)?$`)
 
@@ -253,11 +249,14 @@ func toolParams(tool VirtualTool) []ToolParam {
 	// token* are server-injected (auth token + identity claims), never caller params.
 	defined := map[string]bool{"token": true, "token_email": true, "token_sub": true, "token_id": true, "elicitation_url": true, "handoff_url": true}
 	for _, step := range tool.Steps {
-		for _, a := range step.Assignments {
-			defined[a.VarName] = true
+		// An assignment's LHS binds a $-variable locally; its RHS is scanned
+		// below. FORM fields bind runtime scope from the user's answers, not
+		// caller arguments — they must never surface as caller params.
+		for _, st := range step.Pre {
+			if st.Assign != nil {
+				defined[*st.Assign] = true
+			}
 		}
-		// FORM fields bind runtime scope from the user's answers, not caller
-		// arguments — they must never surface as caller params.
 		if step.Elicit != nil && step.Elicit.Form != nil {
 			for _, f := range step.Elicit.Form.Fields {
 				defined[f.Name] = true
@@ -266,20 +265,15 @@ func toolParams(tool VirtualTool) []ToolParam {
 	}
 
 	seen := map[string]bool{}
-	types := map[string]ParamType{} // name → inferred type
+	types := map[string]ParamType{} // name → inferred/annotated type
 	formats := map[string]string{}  // name → JSON Schema format (email/uri/…)
 
+	// scan finds $name references a template or jq expression introduces.
+	// $name in a jq expression is a jq variable backed by a caller arg.
 	scan := func(s string) {
 		for _, m := range plainVarRe.FindAllStringSubmatch(s, -1) {
 			if name := m[1]; !defined[name] {
 				seen[name] = true
-			}
-		}
-		// Spread syntax: ...$var implies object type
-		for _, m := range spreadVarRe.FindAllStringSubmatch(s, -1) {
-			if name := m[1]; !defined[name] {
-				seen[name] = true
-				types[name] = ParamObject
 			}
 		}
 	}
@@ -290,7 +284,6 @@ func toolParams(tool VirtualTool) []ToolParam {
 			scan(v)
 		}
 		scan(step.Body)
-		scan(step.BodyRaw)
 		if step.Elicit != nil {
 			if step.Elicit.Form != nil {
 				scan(step.Elicit.Form.Message)
@@ -304,11 +297,8 @@ func toolParams(tool VirtualTool) []ToolParam {
 				seen[name] = true
 			}
 		}
-		for _, a := range step.Assignments {
-			scan(a.Expr)
-		}
-		for _, a := range step.Assertions {
-			scan(a.Expr)
+		for _, st := range step.Pre {
+			scan(st.Expr)
 		}
 		for _, resp := range step.Responses {
 			scan(resp.Shaping)
@@ -361,23 +351,28 @@ func parseVirtualToolHeader(line string) (name, desc string, appOnly, ok bool) {
 }
 
 // parseVirtualToolBody parses the lines of a tool definition into steps.
+//
+// A step is a pre-block of jq statements (assignments and bare mutations/
+// asserts) followed by at most one request (HTTP, SQL, FORM or URL). After a
+// request, a shaping block ({...}) terminates the tool with a jq result;
+// otherwise the next step's pre-block begins. Lines are dispatched by a
+// small state machine (sPre, sHeaders, sResp). Multiline jq expressions —
+// bodies, shaping blocks and bare statements — are consumed whole by
+// collectJQ, which tracks bracket depth so there is no separate body or
+// shaping state to carry across iterations.
 func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 	var step *VirtualStep
-	var bodyLines, shapingLines []string
-	var braceDepth int
 	var lastHTTPStatus int
 
 	const (
 		sPre = iota
 		sHeaders
-		sBody
 		sResp
-		sShaping
 	)
 	state := sPre
 
 	newStep := func() {
-		if step != nil && (step.Method != "" || step.SQL != "" || step.Elicit != nil || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+		if step != nil && (step.Method != "" || step.SQL != "" || step.Elicit != nil || len(step.Pre) > 0 || shapingOf(step) != "") {
 			tool.Steps = append(tool.Steps, *step)
 		}
 		step = &VirtualStep{Responses: make(map[int]*VirtualResponse)}
@@ -387,37 +382,24 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
-
-		// Inside JSON blocks, only skip comment lines; preserve blanks
-		if state == sBody || state == sShaping {
-			if strings.HasPrefix(line, "#") {
-				continue
-			}
-		} else {
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
 
-		// In response/shaping states, detect start of a new step
-		if state == sResp || state == sShaping {
-			if isPreRequestLine(line) {
-				if state == sShaping && len(shapingLines) > 0 {
-					if block := step.Responses[lastHTTPStatus]; block != nil {
-						block.Shaping = strings.Join(shapingLines, "\n")
-					}
-					shapingLines = nil
-				}
-				newStep()
-			}
+		// In the response state, anything that isn't a shaping block ("{")
+		// or another status ("HTTP ") begins a new step: an assignment, a
+		// bare jq mutation/assert, or a request/SQL/FORM/URL. collectJQ and
+		// the request parsers consume their own continuation lines, so there
+		// is no shaping/body state to finalize before switching.
+		if state == sResp && startsNewStep(line) {
+			newStep()
 		}
 
 		switch state {
 		case sPre:
 			if ok, vn, ex := tryParseAssignment(line); ok {
-				step.Assignments = append(step.Assignments, VirtualAssignment{VarName: vn, Expr: ex})
-			} else if ok, ex, msg := tryParseAssertion(line); ok {
-				step.Assertions = append(step.Assertions, VirtualAssertion{Expr: ex, Msg: msg})
+				name := vn
+				step.Pre = append(step.Pre, VirtualStmt{Assign: &name, Expr: ex})
 			} else if ann, ok := parseAnnotation(line); ok {
 				tool.typeAnnotations = append(tool.typeAnnotations, ann)
 			} else if ok, form := tryParseForm(line); ok {
@@ -507,35 +489,21 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				// status line here to hang it on.
 				step.Responses[0] = &VirtualResponse{}
 				lastHTTPStatus = 0
-				shapingLines = []string{lines[i]}
-				braceDepth = countBraces(line)
-				if braceDepth <= 0 {
-					step.Responses[0].Shaping = strings.Join(shapingLines, "\n")
-					shapingLines = nil
-					state = sResp
-				} else {
-					state = sShaping
-				}
+				expr, k := collectJQ(lines, i)
+				step.Responses[0].Shaping = expr
+				i = k
+				state = sResp
+			} else {
+				// Bare jq statement: a mutation (".rows |= map(del(.password))")
+				// or an assert ("assert(host(.x) == \"y\"; \"msg\")") that runs
+				// against the current scope before the next request.
+				expr, k := collectJQ(lines, i)
+				step.Pre = append(step.Pre, VirtualStmt{Expr: expr})
+				i = k
 			}
 
 		case sHeaders:
-			if strings.HasPrefix(line, "...") {
-				// String-spread body: ...$expr sends the expr's string value
-				// verbatim (no JSON). Discriminated from object-spread
-				// {...$fields} by the lack of braces.
-				step.BodyRaw = strings.TrimSpace(line[3:])
-				state = sResp
-			} else if strings.HasPrefix(line, "{") {
-				bodyLines = []string{lines[i]}
-				braceDepth = countBraces(line)
-				if braceDepth <= 0 {
-					step.Body = strings.Join(bodyLines, "\n")
-					bodyLines = nil
-					state = sResp
-				} else {
-					state = sBody
-				}
-			} else if ok, code := tryParseHTTPStatus(line); ok {
+			if ok, code := tryParseHTTPStatus(line); ok {
 				step.Responses[code] = &VirtualResponse{}
 				lastHTTPStatus = code
 				state = sResp
@@ -544,56 +512,35 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 					step.Headers = make(map[string]string)
 				}
 				step.Headers[k] = v
-			}
-
-		case sBody:
-			bodyLines = append(bodyLines, lines[i])
-			braceDepth += countBraces(line)
-			if braceDepth <= 0 {
-				step.Body = strings.Join(bodyLines, "\n")
-				bodyLines = nil
+			} else {
+				// The request body is a jq expression. Its result is sent
+				// verbatim when it's a string (with a required Content-Type),
+				// or JSON-encoded otherwise — handled at execution. Anything
+				// that isn't a header or an HTTP status begins the body.
+				expr, k := collectJQ(lines, i)
+				step.Body = expr
+				i = k
 				state = sResp
 			}
 
 		case sResp:
 			if strings.HasPrefix(line, "{") {
-				shapingLines = []string{lines[i]}
-				braceDepth = countBraces(line)
-				if braceDepth <= 0 {
-					if block := step.Responses[lastHTTPStatus]; block != nil {
-						block.Shaping = strings.Join(shapingLines, "\n")
-					}
-					shapingLines = nil
-				} else {
-					state = sShaping
+				// Shaping: a jq object expression whose result is the tool's
+				// return value. It terminates the tool at execution.
+				expr, k := collectJQ(lines, i)
+				if block := step.Responses[lastHTTPStatus]; block != nil {
+					block.Shaping = expr
 				}
+				i = k
 			} else if ok, code := tryParseHTTPStatus(line); ok {
 				step.Responses[code] = &VirtualResponse{}
 				lastHTTPStatus = code
 			}
-
-		case sShaping:
-			shapingLines = append(shapingLines, lines[i])
-			braceDepth += countBraces(line)
-			if braceDepth <= 0 {
-				if block := step.Responses[lastHTTPStatus]; block != nil {
-					block.Shaping = strings.Join(shapingLines, "\n")
-				}
-				shapingLines = nil
-				state = sResp
-			}
-		}
-	}
-
-	// Finalize any open shaping block
-	if state == sShaping && len(shapingLines) > 0 {
-		if block := step.Responses[lastHTTPStatus]; block != nil {
-			block.Shaping = strings.Join(shapingLines, "\n")
 		}
 	}
 
 	// Finalize last step
-	if step != nil && (step.Method != "" || step.SQL != "" || step.Elicit != nil || len(step.Assignments) > 0 || len(step.Assertions) > 0) {
+	if step != nil && (step.Method != "" || step.SQL != "" || step.Elicit != nil || len(step.Pre) > 0 || shapingOf(step) != "") {
 		tool.Steps = append(tool.Steps, *step)
 	}
 	return nil
@@ -617,37 +564,6 @@ func tryParseAssignment(line string) (ok bool, varName, expr string) {
 		return false, "", ""
 	}
 	return true, name, strings.TrimSpace(rest[eqIdx+3:])
-}
-
-func tryParseAssertion(line string) (ok bool, expr, msg string) {
-	if !strings.HasPrefix(line, "assert(") || !strings.HasSuffix(line, ")") {
-		return false, "", ""
-	}
-	inner := line[7 : len(line)-1]
-
-	// Find the last top-level comma to split expr from message.
-	// The message is always a string literal at the end.
-	depth := 0
-	lastComma := -1
-	for i, ch := range inner {
-		switch ch {
-		case '(', '[', '{':
-			depth++
-		case ')', ']', '}':
-			depth--
-		case ',':
-			if depth == 0 {
-				lastComma = i
-			}
-		}
-	}
-	if lastComma < 0 {
-		return true, inner, ""
-	}
-	expr = strings.TrimSpace(inner[:lastComma])
-	msg = strings.TrimSpace(inner[lastComma+1:])
-	msg = strings.Trim(msg, "\"")
-	return true, expr, msg
 }
 
 func tryParseRequest(line string) (ok bool, method, reqURL string) {
@@ -756,7 +672,7 @@ func rejectReservedParams(tool VirtualTool) error {
 		return nil
 	}
 	for _, st := range tool.Steps {
-		for _, s := range []string{st.URL, st.Body, st.BodyRaw} {
+		for _, s := range []string{st.URL, st.Body} {
 			if err := check(s); err != nil {
 				return err
 			}
@@ -789,13 +705,8 @@ func rejectReservedParams(tool VirtualTool) error {
 				return fmt.Errorf("$app_nonce is reserved (the server supplies it for database tools); rename the parameter")
 			}
 		}
-		for _, a := range st.Assignments {
-			if err := check(a.Expr); err != nil {
-				return err
-			}
-		}
-		for _, a := range st.Assertions {
-			if err := check(a.Expr); err != nil {
+		for _, st2 := range st.Pre {
+			if err := check(st2.Expr); err != nil {
 				return err
 			}
 		}
@@ -921,71 +832,137 @@ func parseHeaderLine(line string) (key, value string, ok bool) {
 	return key, value, true
 }
 
-func isPreRequestLine(line string) bool {
-	if ok, _, _ := tryParseAssignment(line); ok {
-		return true
-	}
-	if ok, _, _ := tryParseAssertion(line); ok {
-		return true
-	}
-	if strings.HasPrefix(line, "FORM ") || strings.HasPrefix(line, "URL ") {
-		return true
-	}
-	if isSQLVerbLine(line) {
-		return true
-	}
-	if ok, _, _ := tryParseRequest(line); ok {
-		return true
-	}
-	return false
+// startsNewStep reports whether a line in the response state begins a
+// new step rather than continuing the current one. A shaping block ("{")
+// and another status ("HTTP ") stay with the current step; everything
+// else — an assignment, a bare jq statement, or a request/SQL/FORM/URL —
+// starts the next step's pre-block. Bare jq never begins with "{" (a
+// leading brace is shaping), so the two never collide.
+func startsNewStep(line string) bool {
+	return !strings.HasPrefix(line, "{") && !strings.HasPrefix(line, "HTTP ")
 }
 
-func countBraces(s string) int {
-	d := 0
-	for _, ch := range s {
-		if ch == '{' {
-			d++
+// jqAccumDepth scans one line of a jq expression, updating the running
+// bracket depth and string-literal state. It counts { } [ ] ( ) outside
+// string literals and toggles inStr on unescaped double quotes (jq
+// string literals are double-quoted; single quotes are not used).
+func jqAccumDepth(line string, depth int, inStr bool) (int, bool) {
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if inStr {
+			if ch == '\\' && i+1 < len(line) {
+				i++ // skip the escaped character
+				continue
+			}
+			if ch == '"' {
+				inStr = false
+			}
+			continue
 		}
-		if ch == '}' {
-			d--
+		switch ch {
+		case '"':
+			inStr = true
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			depth--
 		}
 	}
-	return d
+	return depth, inStr
 }
 
-// ── Variable Resolution ──────────────────────────────────────────────
+// collectJQ consumes a jq expression starting at lines[start] (included)
+// and returns the joined expression and the index of the last consumed
+// line. A single-line expression whose brackets balance ends on its
+// line; an unbalanced line continues until it closes, spanning newlines.
+// Blank lines and #-comment lines between (while depth > 0) are skipped:
+// jq has no comments inside expressions, so they're authoring notes the
+// way they were for JSON bodies, not content jq would parse.
+func collectJQ(lines []string, start int) (string, int) {
+	var out []string
+	depth, inStr := 0, false
+	for i := start; i < len(lines); i++ {
+		t := strings.TrimSpace(lines[i])
+		if i > start && (t == "" || strings.HasPrefix(t, "#")) {
+			continue
+		}
+		out = append(out, t)
+		depth, inStr = jqAccumDepth(t, depth, inStr)
+		if depth <= 0 && !inStr {
+			return strings.Join(out, "\n"), i
+		}
+	}
+	return strings.Join(out, "\n"), len(lines) - 1
+}
 
-// ResolveMode controls how variable values are encoded when substituted into a template.
+// ── Variable Resolution (URL and header templates) ───────────────────
+//
+// URLs and headers interpolate $-variables by string substitution (with
+// query escaping in URL query strings). They are NOT jq — scope reads go
+// through jq (assignments read ".field", then "$var feeds the URL). The
+// lookup is the same $-variable set jq sees: caller args + assigned vars +
+// token built-ins, so a $name means the same thing in a URL and in a jq
+// expression.
+
+// ResolveMode controls how a variable value is encoded when substituted.
 type ResolveMode int
 
 const (
 	ResolveURL    ResolveMode = iota // Split path/query; query values escaped
-	ResolveBody                      // JSON-encode values; skip $ inside JSON strings
 	ResolveHeader                    // Raw string substitution
 
 	resolvePath  // Internal: raw substitution, $$ → $
 	resolveQuery // Internal: QueryEscape values, $$ → $
 )
 
+// buildLookup assembles the $-variable map URL/header templates resolve
+// against: caller args (persisting across steps), assigned vars, omitted
+// optional params (as ""), and the token built-ins when authenticated.
+// It mirrors buildJQVars' value set so $name means the same value in a
+// URL and in a jq expression at the same point.
+func buildLookup(args map[string]interface{}, vars map[string]interface{}, auth VirtualAuth, omitted map[string]bool) map[string]interface{} {
+	m := make(map[string]interface{}, len(args)+len(vars)+4)
+	for k, v := range args {
+		m[k] = v
+	}
+	for k, v := range vars {
+		m[k] = v
+	}
+	for name := range omitted {
+		if _, ok := m[name]; !ok {
+			m[name] = ""
+		}
+	}
+	if auth.Token != "" {
+		m["token"] = auth.Token
+	}
+	if auth.Email != "" {
+		m["token_email"] = auth.Email
+		m["token_sub"] = auth.Sub
+		m["token_id"] = auth.UserID
+	}
+	return m
+}
+
 // resolveTemplate replaces $variable references in a template string.
-func resolveTemplate(tmpl string, vars map[string]interface{}, scope interface{}, token string, mode ResolveMode) (string, error) {
+func resolveTemplate(tmpl string, lookup map[string]interface{}, mode ResolveMode) (string, error) {
 	// For URL mode, split path and query so query values get escaped.
 	if mode == ResolveURL {
 		qIdx := strings.Index(tmpl, "?")
 		if qIdx == -1 {
-			return resolveTemplateInner(tmpl, vars, scope, token, resolvePath)
+			return resolveTemplateInner(tmpl, lookup, resolvePath)
 		}
-		path, err := resolveTemplateInner(tmpl[:qIdx], vars, scope, token, resolvePath)
+		path, err := resolveTemplateInner(tmpl[:qIdx], lookup, resolvePath)
 		if err != nil {
 			return "", err
 		}
-		query, err := resolveTemplateInner(tmpl[qIdx+1:], vars, scope, token, resolveQuery)
+		query, err := resolveTemplateInner(tmpl[qIdx+1:], lookup, resolveQuery)
 		if err != nil {
 			return "", err
 		}
 		return path + "?" + query, nil
 	}
-	return resolveTemplateInner(tmpl, vars, scope, token, mode)
+	return resolveTemplateInner(tmpl, lookup, mode)
 }
 
 // dropEmptyOptionalPairs removes `name=` pairs (empty value) for the
@@ -1014,176 +991,51 @@ func dropEmptyOptionalPairs(rawURL string, optional map[string]bool) string {
 	return path + "?" + b.String()
 }
 
-// resolveTemplateInner does the actual variable replacement.
-func resolveTemplateInner(tmpl string, vars map[string]interface{}, scope interface{}, token string, mode ResolveMode) (string, error) {
+// resolveTemplateInner does the actual variable replacement. $name is
+// looked up in the map; $$ → $ in path/query modes (a literal dollar in a
+// URL). There is no body mode: request bodies and shaping are jq.
+func resolveTemplateInner(tmpl string, lookup map[string]interface{}, mode ResolveMode) (string, error) {
 	var b strings.Builder
 	i := 0
-	inString := false
-
 	for i < len(tmpl) {
 		ch := tmpl[i]
-
-		// In body mode, track JSON string boundaries so $ inside
-		// quoted strings stays literal.
-		if mode == ResolveBody {
-			if ch == '"' && (i == 0 || tmpl[i-1] != '\\') {
-				inString = !inString
-				b.WriteByte(ch)
-				i++
-				continue
-			}
-			if inString {
-				b.WriteByte(ch)
-				i++
-				continue
-			}
-		}
-
-		// In body mode, detect spread syntax: ...$var
-		if mode == ResolveBody && ch == '.' && i+2 < len(tmpl) && tmpl[i+1] == '.' && tmpl[i+2] == '.' {
-			// Look ahead for $
-			if i+3 < len(tmpl) && tmpl[i+3] == '$' {
-				val, consumed, err := resolveVarRef(tmpl[i+3:], vars, scope, token)
-				if err != nil {
-					return "", fmt.Errorf("position %d: %w", i, err)
-				}
-				m, ok := val.(map[string]interface{})
-				if !ok {
-					return "", fmt.Errorf("position %d: spread requires an object, got %T", i, val)
-				}
-				j, err := json.Marshal(m)
-				if err != nil {
-					return "", fmt.Errorf("position %d: marshal spread: %w", i, err)
-				}
-				// Strip outer { } so the inner key-value pairs merge into the surrounding object.
-				inner := string(j[1 : len(j)-1])
-				b.WriteString(inner)
-				i += 3 + consumed // skip ... and the variable reference
-				continue
-			}
-			// Not a spread — literal dots
-			b.WriteString("...")
-			i += 3
-			continue
-		}
-
 		if ch != '$' {
 			b.WriteByte(ch)
 			i++
 			continue
 		}
-
 		// $$ → literal $ (path and query modes)
 		if (mode == resolvePath || mode == resolveQuery) && i+1 < len(tmpl) && tmpl[i+1] == '$' {
 			b.WriteByte('$')
 			i += 2
 			continue
 		}
-
-		// Resolve variable reference starting at $
-		val, consumed, err := resolveVarRef(tmpl[i:], vars, scope, token)
+		val, consumed, err := resolveVarRef(tmpl[i:], lookup)
 		if err != nil {
 			return "", fmt.Errorf("position %d: %w", i, err)
 		}
-
-		encoded, err := encodeValue(val, mode)
-		if err != nil {
-			return "", err
-		}
-		b.WriteString(encoded)
+		b.WriteString(encodeValue(val, mode))
 		i += consumed
 	}
-
 	return b.String(), nil
 }
 
-// resolveVarRef parses a variable reference starting at $ and returns
-// the resolved value and the number of characters consumed.
-func resolveVarRef(s string, vars map[string]interface{}, scope interface{}, token string) (interface{}, int, error) {
+// resolveVarRef parses a $name reference and returns its value plus the
+// number of characters consumed. $name is looked up in the merged variable
+// map; an absent name is an error (so $token without a logged-in caller
+// fails, the same gate the old resolver enforced).
+func resolveVarRef(s string, lookup map[string]interface{}) (interface{}, int, error) {
 	if len(s) < 2 {
 		return nil, 0, fmt.Errorf("lonely $ at end of string")
 	}
-
-	// $.field.path — dot-notation JSON path (gjson)
-	if s[1] == '.' {
-		path, consumed := parseDotPath(s[1:])
-		val, err := gjsonQuery(scope, path)
-		if err != nil {
-			return nil, consumed + 1, err
-		}
-		return val, consumed + 1, nil
-	}
-
-	// $['key'] — bracket-notation JSON path (gjson)
-	if len(s) > 2 && s[1] == '[' {
-		path, consumed := parseBracketPath(s[1:])
-		if len(path) > 0 {
-			val, err := gjsonQuery(scope, path)
-			if err != nil {
-				return nil, consumed + 1, err
-			}
-			return val, consumed + 1, nil
-		}
-	}
-
-	// $name — plain variable lookup
 	name, consumed := parseIdent(s[1:])
 	if name == "" {
 		return nil, 0, fmt.Errorf("invalid variable reference after $")
 	}
-	total := consumed + 1
-
-	// Special: $token from auth context
-	if name == "token" && token != "" {
-		return token, total, nil
+	if val, ok := lookup[name]; ok {
+		return val, consumed + 1, nil
 	}
-
-	// Look up in assigned variables
-	if val, ok := vars[name]; ok {
-		return val, total, nil
-	}
-
-	// Look up in scope (input args before first request, response after)
-	if m, ok := scope.(map[string]interface{}); ok {
-		if val, ok := m[name]; ok {
-			return val, total, nil
-		}
-	}
-
 	return nil, 0, fmt.Errorf("undefined variable: $%s", name)
-}
-
-func parseDotPath(s string) ([]string, int) {
-	var segs []string
-	i := 0
-	for i < len(s) && s[i] == '.' {
-		i++ // skip dot
-		name, consumed := parseIdent(s[i:])
-		if name == "" {
-			break
-		}
-		segs = append(segs, name)
-		i += consumed
-	}
-	return segs, i
-}
-
-func parseBracketPath(s string) ([]string, int) {
-	var segs []string
-	i := 0
-	for i < len(s) && s[i] == '[' {
-		if i+1 >= len(s) || s[i+1] != '\'' {
-			break
-		}
-		closeIdx := strings.Index(s[i+2:], "']")
-		if closeIdx < 0 {
-			break
-		}
-		key := s[i+2 : i+2+closeIdx]
-		segs = append(segs, key)
-		i += 2 + closeIdx + 2 // [ ' key ' ]
-	}
-	return segs, i
 }
 
 func parseIdent(s string) (string, int) {
@@ -1195,237 +1047,48 @@ func parseIdent(s string) (string, int) {
 	return s, len(s)
 }
 
-func encodeValue(val interface{}, mode ResolveMode) (string, error) {
-	// A JSON null (or an unknown $token_id) renders as nothing in URLs and
+func encodeValue(val interface{}, mode ResolveMode) string {
+	// A JSON null (or an unset $token_id) renders as nothing in URLs and
 	// headers — "<nil>" is never what anyone wants.
 	if val == nil {
-		if mode == ResolveBody {
-			return "null", nil
-		}
-		return "", nil
+		return ""
 	}
 	switch mode {
-	case ResolveURL, resolvePath, ResolveHeader:
-		return fmt.Sprintf("%v", val), nil
 	case resolveQuery:
-		return url.QueryEscape(fmt.Sprintf("%v", val)), nil
-	case ResolveBody:
-		j, err := json.Marshal(val)
-		if err != nil {
-			return "", err
-		}
-		return string(j), nil
-	default:
-		return fmt.Sprintf("%v", val), nil
+		return url.QueryEscape(fmt.Sprintf("%v", val))
+	default: // resolvePath, ResolveURL, ResolveHeader
+		return fmt.Sprintf("%v", val)
 	}
 }
 
-// ── JSON Path Queries ────────────────────────────────────────────────
+// ── Expression Evaluation (jq) ──────────────────────────────────────────
+// Assignments, assertions, mutations, shaping and request bodies are all
+// jq expressions evaluated by jqRun (see jq.go) against the current scope
+// (".") with the $-variable set from buildJQVars. host(), urlpath(),
+// assert() and decrypt() are registered as jq functions so they compose in
+// pipelines. There is no hand-rolled evaluator here.
 
-// jsonPathQuery navigates a JSON structure using path segments.
-// gjsonQuery resolves a JSON path against a scope using gjson.
-// path is the dot-separated keys (e.g. ["displayName", "webUrl"] → "displayName.webUrl").
-func gjsonQuery(scope interface{}, path []string) (interface{}, error) {
-	jsonBytes, err := json.Marshal(scope)
-	if err != nil {
-		return nil, fmt.Errorf("$.%s: marshal scope: %w", strings.Join(path, "."), err)
-	}
-	gjsonPath := strings.Join(path, ".")
-	result := gjson.GetBytes(jsonBytes, gjsonPath)
-	if !result.Exists() {
-		return nil, fmt.Errorf("$.%s: not found", gjsonPath)
-	}
-	return result.Value(), nil
+// jqEval binds the per-run state a jq expression needs: the caller args
+// and assigned vars (live — assignments mutate vars and the next jq
+// evaluation sees them), the authenticated identity (token built-ins),
+// and the hooks that back decrypt(). scope is passed per call because it
+// changes every step (each response replaces it).
+type jqEval struct {
+	args    map[string]interface{}
+	vars    map[string]interface{}
+	auth    VirtualAuth
+	omitted map[string]bool
+	hooks   *VirtualHooks
 }
 
-// ── Expression Evaluation ────────────────────────────────────────────
-
-// evalExpr evaluates an expression string and returns its value.
-func evalExpr(expr string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks) (interface{}, error) {
-	expr = strings.TrimSpace(expr)
-
-	// Function call: name(args)
-	if idx := strings.Index(expr, "("); idx > 0 && strings.HasSuffix(expr, ")") {
-		fnName := expr[:idx]
-		argsStr := expr[idx+1 : len(expr)-1]
-		return evalFunction(fnName, argsStr, vars, scope, token, hooks)
-	}
-
-	// JSON path or variable: $.field, $['key'], $name
-	if strings.HasPrefix(expr, "$") {
-		val, _, err := resolveVarRef(expr, vars, scope, token)
-		return val, err
-	}
-
-	// String literal
-	if len(expr) >= 2 && expr[0] == '"' && expr[len(expr)-1] == '"' {
-		return expr[1 : len(expr)-1], nil
-	}
-
-	// Number literal
-	if n, err := strconv.ParseInt(expr, 10, 64); err == nil {
-		return n, nil
-	}
-
-	return nil, fmt.Errorf("unsupported expression: %s", expr)
-}
-
-func evalFunction(name, argsStr string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks) (interface{}, error) {
-	args := splitFunctionArgs(argsStr)
-	resolved := make([]interface{}, len(args))
-	for i, arg := range args {
-		val, err := evalExpr(strings.TrimSpace(arg), vars, scope, token, hooks)
-		if err != nil {
-			return nil, fmt.Errorf("%s arg %d: %w", name, i+1, err)
-		}
-		resolved[i] = val
-	}
-
-	switch name {
-	case "host":
-		if len(resolved) != 1 {
-			return nil, fmt.Errorf("host() takes 1 argument, got %d", len(resolved))
-		}
-		u, err := url.Parse(fmt.Sprintf("%v", resolved[0]))
-		if err != nil {
-			return nil, fmt.Errorf("host(): %w", err)
-		}
-		return u.Host, nil
-	case "path":
-		if len(resolved) != 1 {
-			return nil, fmt.Errorf("path() takes 1 argument, got %d", len(resolved))
-		}
-		u, err := url.Parse(fmt.Sprintf("%v", resolved[0]))
-		if err != nil {
-			return nil, fmt.Errorf("path(): %w", err)
-		}
-		return u.Path, nil
-	case "base64dec":
-		if len(resolved) != 1 {
-			return nil, fmt.Errorf("base64dec() takes 1 argument, got %d", len(resolved))
-		}
-		s, ok := resolved[0].(string)
-		if !ok {
-			return nil, fmt.Errorf("base64dec() requires a string argument, got %T", resolved[0])
-		}
-		decoded, err := base64.StdEncoding.DecodeString(s)
-		if err != nil {
-			return nil, fmt.Errorf("base64dec(): %w", err)
-		}
-		return string(decoded), nil
-	case "base64enc":
-		if len(resolved) != 1 {
-			return nil, fmt.Errorf("base64enc() takes 1 argument, got %d", len(resolved))
-		}
-		s, ok := resolved[0].(string)
-		if !ok {
-			return nil, fmt.Errorf("base64enc() requires a string argument, got %T", resolved[0])
-		}
-		return base64.StdEncoding.EncodeToString([]byte(s)), nil
-	case "decrypt":
-		if len(resolved) != 1 {
-			return nil, fmt.Errorf("decrypt() takes 1 argument, got %d", len(resolved))
-		}
-		s, ok := resolved[0].(string)
-		if !ok {
-			return nil, fmt.Errorf("decrypt() requires a string argument, got %T", resolved[0])
-		}
-		if hooks == nil || hooks.Open == nil {
-			return nil, fmt.Errorf("decrypt(): this server has no secret key for the service")
-		}
-		plain, err := hooks.Open(s)
-		if err != nil {
-			// Never echo the argument: it's either ciphertext or something
-			// that was meant to be.
-			return nil, fmt.Errorf("decrypt(): value was not encrypted by this service")
-		}
-		return plain, nil
-	default:
-		return nil, fmt.Errorf("unknown function: %s", name)
-	}
-}
-
-// splitFunctionArgs splits a comma-separated argument list, respecting nesting.
-func splitFunctionArgs(s string) []string {
-	var args []string
-	depth := 0
-	start := 0
-	for i, ch := range s {
-		switch ch {
-		case '(', '[', '{':
-			depth++
-		case ')', ']', '}':
-			depth--
-		case ',':
-			if depth == 0 {
-				args = append(args, s[start:i])
-				start = i + 1
-			}
-		}
-	}
-	if start < len(s) {
-		args = append(args, s[start:])
-	}
-	return args
-}
-
-// ── Assertion Evaluation ─────────────────────────────────────────────
-
-// evalAssertion evaluates an assertion expression. Returns nil on success.
-func evalAssertion(expr, msg string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks) error {
-	if parts := splitComparison(expr, "=="); len(parts) == 2 {
-		return evalComparison(parts[0], parts[1], msg, vars, scope, token, hooks, false)
-	}
-	if parts := splitComparison(expr, "!="); len(parts) == 2 {
-		return evalComparison(parts[0], parts[1], msg, vars, scope, token, hooks, true)
-	}
-	return fmt.Errorf("unsupported assertion: %s", expr)
-}
-
-func splitComparison(expr, op string) []string {
-	search := " " + op + " "
-	idx := strings.Index(expr, search)
-	if idx < 0 {
-		return nil
-	}
-	return []string{
-		strings.TrimSpace(expr[:idx]),
-		strings.TrimSpace(expr[idx+len(search):]),
-	}
-}
-
-func evalComparison(leftExpr, rightExpr, msg string, vars map[string]interface{}, scope interface{}, token string, hooks *VirtualHooks, negate bool) error {
-	left, err := evalExpr(leftExpr, vars, scope, token, hooks)
-	if err != nil {
-		return fmt.Errorf("%s: %w", msg, err)
-	}
-	right, err := evalExpr(rightExpr, vars, scope, token, hooks)
-	if err != nil {
-		return fmt.Errorf("%s: %w", msg, err)
-	}
-	lStr := fmt.Sprintf("%v", left)
-	rStr := fmt.Sprintf("%v", right)
-	eq := lStr == rStr
-	if negate {
-		eq = !eq
-	}
-	if !eq {
-		op := "=="
-		if negate {
-			op = "!="
-		}
-		if msg != "" {
-			return fmt.Errorf("%s (%v %s %v)", msg, lStr, op, rStr)
-		}
-		return fmt.Errorf("assertion failed: %v %s %v", lStr, op, rStr)
-	}
-	return nil
+// run evaluates a jq query against scope and returns its single result.
+func (e *jqEval) run(query string, scope interface{}) (interface{}, error) {
+	return jqRun(query, scope, buildJQVars(e.args, e.vars, e.auth, e.omitted), e.hooks)
 }
 
 // ── Executor ─────────────────────────────────────────────────────────
-
 // hasContentType reports whether the headers contain a Content-Type entry
-// (case-insensitive). Used to enforce that string-spread bodies declare their
+// (case-insensitive). Used to enforce that string (raw) bodies declare their
 // content type explicitly.
 func hasContentType(headers map[string]string) bool {
 	for k := range headers {
@@ -1600,7 +1263,7 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 // runVirtualTool is the executor core.
 func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]interface{}, auth VirtualAuth, sqlRunner SQLRunner, hooks *VirtualHooks, rs *ResumeState) (interface{}, error) {
 	vars := make(map[string]interface{})
-	scope := map[string]interface{}{}
+	scope := interface{}(map[string]interface{}{})
 	startIdx := 0
 	if rs != nil {
 		// Resuming: the stored scope already carries caller args, optional
@@ -1644,42 +1307,41 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			sealed[p.Name] = c
 		}
 		args = sealed
-		// Input args become the initial scope for JSON path queries.
-		for k, v := range args {
-			scope[k] = v
-		}
+		// jq reads caller args as $name variables (buildJQVars); the initial
+		// scope (jq's ".") is empty, since no response has arrived yet. A
+		// shaping-only first step with "." is empty by design.
+		scope = map[string]interface{}{}
 	}
 
 	// Identity built-ins are server-injected claims, not inputs: namesake
 	// caller arguments are dropped outright. They're injected only when the
 	// caller has a verified identity — a tool referencing one without a
 	// logged-in caller fails with the same "undefined variable" error as
-	// $token, rather than stamping empty values into anything.
-	delete(scope, "token_email")
-	delete(scope, "token_sub")
-	delete(scope, "token_id")
-	delete(scope, "elicitation_url") // reserved: injected per elicitation step
-	delete(scope, "handoff_url")     // reserved: hand-off URL step output
+	// $token, rather than stamping empty values into anything. They ride as
+	// jq $-variables (buildJQVars adds them), not on scope.
+	delete(args, "token_email")
+	delete(args, "token_sub")
+	delete(args, "token_id")
+	delete(args, "elicitation_url") // reserved: injected per elicitation step
+	delete(args, "handoff_url")     // reserved: hand-off URL step output
 	if auth.Email != "" {
 		vars["token_email"] = auth.Email
 		vars["token_sub"] = auth.Sub
 		vars["token_id"] = auth.UserID
 	}
-	token := auth.Token
 
 	// Optional params the caller didn't supply resolve as empty strings
-	// (so template resolution doesn't error), and their empty query pairs
-	// are dropped from resolved URLs: an optional filter the caller passed
-	// on should vanish from the query, not ride along as `state=`. In SQL
-	// steps the same omission binds as NULL — the honest value for "not
-	// given" in a database.
+	// (so a $name in a URL doesn't error, and jq sees "" not undefined),
+	// and their empty query pairs are dropped from resolved URLs: an
+	// optional filter the caller passed on should vanish from the query,
+	// not ride along as `state=`. In SQL steps the same omission binds as
+	// NULL — the honest value for "not given" in a database.
 	optionalNames := make(map[string]bool)
 	omittedOptionals := make(map[string]bool)
 	for _, p := range tool.Params {
 		if p.Optional {
 			optionalNames[p.Name] = true
-			if _, ok := scope[p.Name]; !ok {
-				scope[p.Name] = ""
+			if _, ok := args[p.Name]; !ok {
 				omittedOptionals[p.Name] = true
 			}
 		}
@@ -1698,7 +1360,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		if omittedOptionals[p.Name] {
 			continue
 		}
-		val, ok := scope[p.Name]
+		val, ok := args[p.Name]
 		if !ok {
 			// A required enum the caller didn't send: the MCP SDK's
 			// required-check rejects this on the MCP path; elsewhere it
@@ -1719,23 +1381,55 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		}
 	}
 
+	// jq evaluation context: scope changes every step (passed per call);
+	// the rest is live across the tool. buildJQVars rebuilds the $-variable
+	// set from these each call so assignments are visible to the next.
+	eval := &jqEval{
+		args:    args,
+		vars:    vars,
+		auth:    auth,
+		omitted: omittedOptionals,
+		hooks:   hooks,
+	}
+	lookup := func() map[string]interface{} {
+		// URL/header $-interpolation reaches the $-variable set (caller args,
+		// assigned vars, token built-ins) AND the current scope (the
+		// response the previous step returned): a URL like /next/$id reads
+		// the id field of the last response, an assigned $next_url shadows a
+		// same-named scope field. Same precedence the old resolver enforced.
+		m := buildLookup(args, vars, auth, omittedOptionals)
+		if sc, ok := scope.(map[string]interface{}); ok {
+			for k, v := range sc {
+				if _, has := m[k]; !has {
+					m[k] = v
+				}
+			}
+		}
+		return m
+	}
+
 	for stepIdx := startIdx; stepIdx < len(tool.Steps); stepIdx++ {
 		step := tool.Steps[stepIdx]
 
-		// Execute assignments first.
-		// Execute assignments first.
-		for _, a := range step.Assignments {
-			val, err := evalExpr(a.Expr, vars, scope, token, hooks)
+		// Run the pre-block: assignments and bare jq statements, in source
+		// order, against the scope the previous step left. An assignment
+		// binds a $-variable (visible to the rest of the tool); a bare
+		// expression's result replaces scope (a mutation like
+		// ".rows |= map(del(.password))") or is discarded after a check
+		// (an assert, which passes its input through). Source order matters:
+		// an assert can gate a later mutation in the same block.
+		for _, st := range step.Pre {
+			val, err := eval.run(st.Expr, scope)
 			if err != nil {
-				return nil, fmt.Errorf("step %d, assignment $%s: %w", stepIdx, a.VarName, err)
-			}
-			vars[a.VarName] = val
-		}
-
-		// Run assertions.
-		for _, a := range step.Assertions {
-			if err := evalAssertion(a.Expr, a.Msg, vars, scope, token, hooks); err != nil {
+				if st.Assign != nil {
+					return nil, fmt.Errorf("step %d, assignment $%s: %w", stepIdx, *st.Assign, err)
+				}
 				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
+			}
+			if st.Assign != nil {
+				vars[*st.Assign] = val
+			} else {
+				scope = val
 			}
 		}
 
@@ -1753,11 +1447,18 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			// wait for it would hang. The elicitation UI is for steps that
 			// gate further work.)
 			if step.Elicit.Form == nil && stepIdx == len(tool.Steps)-1 && shapingOf(&step) == "" {
-				u, err := resolveTemplate(step.Elicit.URL, vars, scope, token, ResolveURL)
+				el, err := buildElicitRequest(step.Elicit, lookup())
 				if err != nil {
 					return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
 				}
-				scope["handoff_url"] = u
+				// Land the resolved link in scope (so it carries through to the
+				// tool result) and in vars (so a later step's jq sees $handoff_url).
+				if sc, ok := scope.(map[string]interface{}); ok {
+					sc["handoff_url"] = el.URL
+				} else {
+					scope = map[string]interface{}{"handoff_url": el.URL}
+				}
+				vars["handoff_url"] = el.URL
 				continue
 			}
 			elicitationID := elicitationID()
@@ -1768,7 +1469,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 				// a later step gets a fresh ID.
 				vars["elicitation_url"] = hooks.ElicitationURL(elicitationID)
 			}
-			el, err := buildElicitRequest(step.Elicit, vars, scope, token)
+			el, err := buildElicitRequest(step.Elicit, lookup())
 			if err != nil {
 				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
 			}
@@ -1792,13 +1493,13 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 						resp.Content = map[string]interface{}{}
 					}
 					scope = resp.Content
-					// Optional fields the user left blank resolve as "" so
-					// later templates don't hit undefined-variable errors
+					// Optional fields the user left blank resolve as "" so later jq
+					// expressions / URL templates don't hit undefined-variable errors
 					// (mirrors optional caller params).
 					for _, f := range step.Elicit.Form.Fields {
 						if f.Optional {
-							if _, ok := scope[f.Name]; !ok {
-								scope[f.Name] = ""
+							if _, ok := resp.Content[f.Name]; !ok {
+								resp.Content[f.Name] = ""
 							}
 						}
 					}
@@ -1815,7 +1516,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 					Args:          args,
 					Auth:          auth,
 					Vars:          copyMap(vars),
-					Scope:         copyMap(scope),
+					Scope:         copyMap(scopeMap(scope)),
 					StepIdx:       stepIdx,
 					ElicitationID: elicitationID,
 					Elicit:        *el,
@@ -1823,7 +1524,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 				}}
 			}
 			if vr := step.Responses[0]; vr != nil && vr.Shaping != "" {
-				return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
+				return eval.run(vr.Shaping, scope)
 			}
 			continue
 		}
@@ -1838,7 +1539,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			params := make(map[string]interface{}, len(step.SQLNames))
 			for _, name := range step.SQLNames {
 				if name == "token" {
-					params[name] = token
+					params[name] = auth.Token
 					continue
 				}
 				if omittedOptionals[name] {
@@ -1847,16 +1548,12 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 					params[name] = nil
 					continue
 				}
+				// Assigned vars and caller args are the $-variable set jq sees;
+				// SQL binds the same names (assigned vars shadow caller args).
 				if v, ok := vars[name]; ok {
 					params[name] = v
 					continue
 				}
-				if v, ok := scope[name]; ok {
-					params[name] = v
-					continue
-				}
-				// scope was replaced by the previous SQL result; caller args
-				// stay bindable for the whole tool regardless.
 				if v, ok := args[name]; ok {
 					params[name] = v
 					continue
@@ -1867,26 +1564,26 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			if err != nil {
 				return nil, fmt.Errorf("step %d, sql: %w", stepIdx, err)
 			}
-			scope = result
+			scope = jqNormalize(result)
 			if vr := step.Responses[0]; vr != nil && vr.Shaping != "" {
-				return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
+				return eval.run(vr.Shaping, scope)
 			}
 			continue
 		}
 
-		// Assignments-only step (post-processing for a previous step): its
-		// work is done, nothing to request. A shaping block riding along is
-		// the tool's return value — the assignments above have just run, so
-		// it sees everything gathered on the way here.
+		// Pre-block-only step (post-processing for a previous step): no
+		// request to make. A shaping block riding along is the tool's return
+		// value — the pre-block has just run, so it sees everything gathered
+		// on the way here.
 		if step.Method == "" {
 			if vr := step.Responses[0]; vr != nil && vr.Shaping != "" {
-				return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
+				return eval.run(vr.Shaping, scope)
 			}
 			continue
 		}
 
-		// Resolve URL, headers, body.
-		resolvedURL, err := resolveTemplate(step.URL, vars, scope, token, ResolveURL)
+		// Resolve URL and headers (string $-interpolation; not jq).
+		resolvedURL, err := resolveTemplate(step.URL, lookup(), ResolveURL)
 		if err != nil {
 			return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
 		}
@@ -1894,36 +1591,37 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 
 		resolvedHeaders := make(map[string]string)
 		for k, v := range step.Headers {
-			resolved, err := resolveTemplate(v, vars, scope, token, ResolveHeader)
+			resolved, err := resolveTemplate(v, lookup(), ResolveHeader)
 			if err != nil {
 				return nil, fmt.Errorf("step %d, header %s: %w", stepIdx, k, err)
 			}
 			resolvedHeaders[k] = resolved
 		}
 
+		// The request body is a jq expression. A string result is sent
+		// verbatim as bytes (raw — with a required Content-Type, no
+		// default); anything else is JSON-encoded and sent as
+		// application/json when the step didn't set its own Content-Type.
 		var bodyReader io.Reader
-		if step.BodyRaw != "" {
-			// String-spread body: evaluate the expression and send the
-			// resulting string's bytes verbatim (no JSON encoding, no
-			// $-interpolation, so $ in file data survives intact).
-			val, err := evalExpr(step.BodyRaw, vars, scope, token, hooks)
-			if err != nil {
-				return nil, fmt.Errorf("step %d, raw body: %w", stepIdx, err)
-			}
-			s, ok := val.(string)
-			if !ok {
-				return nil, fmt.Errorf("step %d, raw body: ...%s requires a string, got %T", stepIdx, step.BodyRaw, val)
-			}
-			if !hasContentType(resolvedHeaders) {
-				return nil, fmt.Errorf("step %d, raw body: ...%s requires a Content-Type header", stepIdx, step.BodyRaw)
-			}
-			bodyReader = strings.NewReader(s)
-		} else if step.Body != "" {
-			resolvedBody, err := resolveTemplate(step.Body, vars, scope, token, ResolveBody)
+		var bodyIsJSON bool
+		if step.Body != "" {
+			val, err := eval.run(step.Body, scope)
 			if err != nil {
 				return nil, fmt.Errorf("step %d, body: %w", stepIdx, err)
 			}
-			bodyReader = strings.NewReader(resolvedBody)
+			if s, ok := val.(string); ok {
+				if !hasContentType(resolvedHeaders) {
+					return nil, fmt.Errorf("step %d: a string body requires a Content-Type header", stepIdx)
+				}
+				bodyReader = strings.NewReader(s)
+			} else {
+				j, err := json.Marshal(val)
+				if err != nil {
+					return nil, fmt.Errorf("step %d, body: marshal: %w", stepIdx, err)
+				}
+				bodyReader = strings.NewReader(string(j))
+				bodyIsJSON = true
+			}
 		}
 
 		// Build the HTTP request.
@@ -1934,7 +1632,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		for k, v := range resolvedHeaders {
 			req.Header.Set(k, v)
 		}
-		if step.Body != "" {
+		if bodyIsJSON && !hasContentType(resolvedHeaders) {
 			req.Header.Set("Content-Type", "application/json")
 		}
 
@@ -1973,15 +1671,16 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			}
 		}
 		if m, ok := parsed.(map[string]interface{}); ok {
-			scope = m
+			scope = jqNormalize(m)
 		} else {
-			// Non-object response: wrap under a "value" key so JSON path still works.
-			scope = map[string]interface{}{"value": parsed}
+			// Non-object response: wrap under a "value" key so jq can still
+			// select it (.value).
+			scope = map[string]interface{}{"value": jqNormalize(parsed)}
 		}
 
 		// Apply shaping if present.
 		if vr.Shaping != "" {
-			return applyShaping(vr.Shaping, vars, scope, token, stepIdx)
+			return eval.run(vr.Shaping, scope)
 		}
 	}
 
@@ -1999,8 +1698,10 @@ func elicitationID() string {
 }
 
 // buildElicitRequest resolves an elicitation directive's templates into the
-// neutral request the server adapter sends.
-func buildElicitRequest(ev *VirtualElicit, vars map[string]interface{}, scope interface{}, token string) (*ElicitRequest, error) {
+// neutral request the server adapter sends. lookup already merges scope
+// (see runVirtualTool), so a URL step's $verification_url reads the field of
+// the last response just as a GET URL reads $id.
+func buildElicitRequest(ev *VirtualElicit, lookup map[string]interface{}) (*ElicitRequest, error) {
 	el := &ElicitRequest{}
 	msgTmpl := ev.Message
 	if ev.Form != nil {
@@ -2011,14 +1712,14 @@ func buildElicitRequest(ev *VirtualElicit, vars map[string]interface{}, scope in
 		el.Mode = "url"
 	}
 	if msgTmpl != "" {
-		msg, err := resolveTemplate(msgTmpl, vars, scope, token, ResolveHeader)
+		msg, err := resolveTemplate(msgTmpl, lookup, ResolveHeader)
 		if err != nil {
 			return nil, fmt.Errorf("message: %w", err)
 		}
 		el.Message = msg
 	}
 	if ev.Form == nil {
-		u, err := resolveTemplate(ev.URL, vars, scope, token, ResolveURL)
+		u, err := resolveTemplate(ev.URL, lookup, ResolveURL)
 		if err != nil {
 			return nil, fmt.Errorf("url: %w", err)
 		}
@@ -2049,6 +1750,20 @@ func copyMap(m map[string]interface{}) map[string]interface{} {
 		out[k] = v
 	}
 	return out
+}
+
+// scopeMap normalizes a jq result into a map[string]interface{} for storage
+// in a suspension: an object stays itself; anything else (a scalar or array
+// a jq mutation produced) is wrapped under "value" so the next step can still
+// select it as .value. A nil scope (no response yet) is an empty map.
+func scopeMap(v interface{}) map[string]interface{} {
+	if v == nil {
+		return map[string]interface{}{}
+	}
+	if m, ok := v.(map[string]interface{}); ok {
+		return m
+	}
+	return map[string]interface{}{"value": v}
 }
 
 // BuildFormSchema renders a form's fields as the flat JSON Schema object the
@@ -2151,20 +1866,4 @@ func stringList(v interface{}) []string {
 		return list
 	}
 	return nil
-}
-
-// applyShaping resolves a shaping template against the current scope and
-// parses the result into structured data. Shaping terminates the tool —
-// it is the tool's return value.
-func applyShaping(shaping string, vars map[string]interface{}, scope interface{}, token string, stepIdx int) (interface{}, error) {
-	shaped, err := resolveTemplate(shaping, vars, scope, token, ResolveBody)
-	if err != nil {
-		return nil, fmt.Errorf("step %d, shaping: %w", stepIdx, err)
-	}
-	// Parse shaped output so we return structured data, not a string.
-	var shapedVal interface{}
-	if err := json.Unmarshal([]byte(shaped), &shapedVal); err != nil {
-		return nil, fmt.Errorf("step %d, shaping parse: %w", stepIdx, err)
-	}
-	return shapedVal, nil
 }

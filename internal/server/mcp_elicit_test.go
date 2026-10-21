@@ -32,8 +32,8 @@ FORM "Approve the pending payout?"
     $note is string?
 
 {
-  "approved": $approved,
-  "note": $note
+  "approved": .approved,
+  "note": .note
 }
 ---
 [link] Hand a link to the user and finish.

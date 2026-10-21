@@ -64,7 +64,7 @@ SELECT id, title
   LIMIT 10
 
 {
-  "tasks": $.rows
+  "tasks": .rows
 }
 `
 
@@ -550,7 +550,7 @@ SELECT title, snippet(notes, 1, '<b>', '</b>', '…', 10) AS excerpt
   LIMIT 20
 
 {
-  "hits": $.rows
+  "hits": .rows
 }
 `
 
@@ -615,7 +615,7 @@ INSERT INTO keys (secret)
 
 SELECT secret FROM keys ORDER BY id DESC LIMIT 1
 
-$key = decrypt($.rows.0.0)
+$key = decrypt(.rows[0][0])
 GET %s/whoami
 Authorization: Bearer $key
 

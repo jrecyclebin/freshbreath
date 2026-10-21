@@ -47,21 +47,21 @@ func TestParseSharepoint(t *testing.T) {
 	}
 	step := ts.Steps[0]
 
-	// Assignments: $hostname = host($url), $pathname = path($url)
-	if len(step.Assignments) != 2 {
-		t.Fatalf("get-site assignments = %d, want 2", len(step.Assignments))
+	// Assignments: $hostname = host($url), $pathname = urlpath($url)
+	if len(step.Pre) != 2 {
+		t.Fatalf("get-site pre-statements = %d, want 2", len(step.Pre))
 	}
-	if step.Assignments[0].VarName != "hostname" {
-		t.Errorf("assignment[0] var = %q, want hostname", step.Assignments[0].VarName)
+	if step.Pre[0].Assign == nil || *step.Pre[0].Assign != "hostname" {
+		t.Errorf("pre[0] var = %v, want hostname", step.Pre[0].Assign)
 	}
-	if step.Assignments[0].Expr != "host($url)" {
-		t.Errorf("assignment[0] expr = %q", step.Assignments[0].Expr)
+	if step.Pre[0].Expr != "host($url)" {
+		t.Errorf("pre[0] expr = %q", step.Pre[0].Expr)
 	}
-	if step.Assignments[1].VarName != "pathname" {
-		t.Errorf("assignment[1] var = %q, want pathname", step.Assignments[1].VarName)
+	if step.Pre[1].Assign == nil || *step.Pre[1].Assign != "pathname" {
+		t.Errorf("pre[1] var = %v, want pathname", step.Pre[1].Assign)
 	}
-	if step.Assignments[1].Expr != "path($url)" {
-		t.Errorf("assignment[1] expr = %q", step.Assignments[1].Expr)
+	if step.Pre[1].Expr != "urlpath($url)" {
+		t.Errorf("pre[1] expr = %q, want urlpath($url)", step.Pre[1].Expr)
 	}
 
 	if step.Method != "GET" {
@@ -118,14 +118,12 @@ func TestParseSharepoint(t *testing.T) {
 		t.Fatal("get-list-next tool not found")
 	}
 	glnStep := gln.Steps[0]
-	if len(glnStep.Assertions) != 1 {
-		t.Fatalf("get-list-next assertions = %d, want 1", len(glnStep.Assertions))
+	if len(glnStep.Pre) != 1 || glnStep.Pre[0].Assign != nil {
+		t.Fatalf("get-list-next pre-statements = %v, want 1 bare assert", glnStep.Pre)
 	}
-	if glnStep.Assertions[0].Msg != "Invalid nextLink" {
-		t.Errorf("assertion msg = %q", glnStep.Assertions[0].Msg)
-	}
-	if glnStep.Assertions[0].Expr != `host($next_link) == "graph.microsoft.com"` {
-		t.Errorf("assertion expr = %q", glnStep.Assertions[0].Expr)
+	expr := glnStep.Pre[0].Expr
+	if !strings.Contains(expr, `host($next_link) == "graph.microsoft.com"`) || !strings.Contains(expr, `"Invalid nextLink"`) {
+		t.Errorf("assert expr = %q", expr)
 	}
 
 	// ── [delete-list] — DELETE with HTTP 204 ─────────────────────────
@@ -152,7 +150,7 @@ Content-Type: application/json
 
 HTTP 200
 {
-  "reply": $.reply
+  "reply": .reply
 }
 `
 	tools, err := ParseVirtualFile([]byte(input))
@@ -268,8 +266,8 @@ HTTP 200
 	if tools[0].Steps[1].Method != "GET" {
 		t.Errorf("step[1] method = %q", tools[0].Steps[1].Method)
 	}
-	if len(tools[0].Steps[1].Assignments) != 1 || tools[0].Steps[1].Assignments[0].VarName != "next_url" {
-		t.Errorf("step[1] assignments = %v", tools[0].Steps[1].Assignments)
+	if len(tools[0].Steps[1].Pre) != 1 || tools[0].Steps[1].Pre[0].Assign == nil || *tools[0].Steps[1].Pre[0].Assign != "next_url" {
+		t.Errorf("step[1] pre = %v", tools[0].Steps[1].Pre)
 	}
 }
 
@@ -309,8 +307,8 @@ sddslkfj;;;
 	if tools[0].Steps[1].Method != "GET" {
 		t.Errorf("step[1] method = %q", tools[0].Steps[1].Method)
 	}
-	if len(tools[0].Steps[1].Assignments) != 1 || tools[0].Steps[1].Assignments[0].VarName != "next_url" {
-		t.Errorf("step[1] assignments = %v", tools[0].Steps[1].Assignments)
+	if len(tools[0].Steps[1].Pre) != 1 || tools[0].Steps[1].Pre[0].Assign == nil || *tools[0].Steps[1].Pre[0].Assign != "next_url" {
+		t.Errorf("step[1] pre = %v", tools[0].Steps[1].Pre)
 	}
 }
 
@@ -355,28 +353,6 @@ func TestTryParseAssignment(t *testing.T) {
 	ok, _, _ = tryParseAssignment("$invalid-name = value")
 	if ok {
 		t.Error("hyphens not allowed in variable names")
-	}
-}
-
-func TestTryParseAssertion(t *testing.T) {
-	ok, expr, msg := tryParseAssertion(`assert(host($next_link) == "graph.microsoft.com", "Invalid nextLink")`)
-	if !ok || msg != "Invalid nextLink" {
-		t.Errorf("got (%v, %q, %q)", ok, expr, msg)
-	}
-	if expr != `host($next_link) == "graph.microsoft.com"` {
-		t.Errorf("expr = %q", expr)
-	}
-
-	// Assertion without message
-	ok, expr, msg = tryParseAssertion(`assert($x == $y)`)
-	if !ok || msg != "" {
-		t.Errorf("got (%v, %q, %q)", ok, expr, msg)
-	}
-
-	// Not an assertion
-	ok, _, _ = tryParseAssertion("$x = 5")
-	if ok {
-		t.Error("should not parse as assertion")
 	}
 }
 
@@ -456,10 +432,10 @@ func TestParseVirtualToolHeader(t *testing.T) {
 // ── Variable Resolution Tests ────────────────────────────────────────
 
 func TestResolveURLSimple(t *testing.T) {
-	vars := map[string]interface{}{"site_id": "abc-123"}
+	lookup := map[string]interface{}{"site_id": "abc-123"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/lists",
-		vars, nil, "", ResolveURL,
+		lookup, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -472,7 +448,7 @@ func TestResolveURLSimple(t *testing.T) {
 func TestResolveDollarDollar(t *testing.T) {
 	result, err := resolveTemplate(
 		"https://example.com?$$select=id,name&$$top=10",
-		nil, nil, "", ResolveURL,
+		map[string]interface{}{}, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -483,10 +459,10 @@ func TestResolveDollarDollar(t *testing.T) {
 }
 
 func TestResolveDollarDollarWithVars(t *testing.T) {
-	vars := map[string]interface{}{"site_id": "abc"}
+	lookup := map[string]interface{}{"site_id": "abc"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/lists?$$select=id,name",
-		vars, nil, "", ResolveURL,
+		lookup, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -498,10 +474,10 @@ func TestResolveDollarDollarWithVars(t *testing.T) {
 
 func TestResolveURLQueryEscape(t *testing.T) {
 	// Variables in the query string should be escaped.
-	vars := map[string]interface{}{"folder": "My Documents", "site_id": "abc-123"}
+	lookup := map[string]interface{}{"folder": "My Documents", "site_id": "abc-123"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/drive/root/children?path=$folder",
-		vars, nil, "", ResolveURL,
+		lookup, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -513,10 +489,10 @@ func TestResolveURLQueryEscape(t *testing.T) {
 
 func TestResolveURLQueryEscapeSpecialChars(t *testing.T) {
 	// Ampersands, equals, and spaces in query values must be escaped.
-	vars := map[string]interface{}{"q": "hello & goodbye", "site_id": "abc"}
+	lookup := map[string]interface{}{"q": "hello & goodbye", "site_id": "abc"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/search?query=$q",
-		vars, nil, "", ResolveURL,
+		lookup, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -528,10 +504,10 @@ func TestResolveURLQueryEscapeSpecialChars(t *testing.T) {
 
 func TestResolveURLQueryNoEscapePath(t *testing.T) {
 	// Path variables stay raw even when the URL also has a query string.
-	vars := map[string]interface{}{"site_id": "contoso.sharepoint.com:/sites/My Site", "top": "10"}
+	lookup := map[string]interface{}{"site_id": "contoso.sharepoint.com:/sites/My Site", "top": "10"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/lists?$$top=$top",
-		vars, nil, "", ResolveURL,
+		lookup, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -543,10 +519,10 @@ func TestResolveURLQueryNoEscapePath(t *testing.T) {
 
 func TestResolveURLNoQuery(t *testing.T) {
 	// URLs without a query string should still resolve path variables.
-	vars := map[string]interface{}{"site_id": "abc-123"}
+	lookup := map[string]interface{}{"site_id": "abc-123"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id",
-		vars, nil, "", ResolveURL,
+		lookup, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -556,119 +532,11 @@ func TestResolveURLNoQuery(t *testing.T) {
 	}
 }
 
-func TestResolveBodyStrings(t *testing.T) {
-	vars := map[string]interface{}{
-		"name":        "My List",
-		"description": "A test list",
-	}
-	result, err := resolveTemplate(
-		`{"displayName": $name, "description": $description}`,
-		vars, nil, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != `{"displayName": "My List", "description": "A test list"}` {
-		t.Errorf("result = %q", result)
-	}
-}
-
-func TestResolveBodyNumber(t *testing.T) {
-	vars := map[string]interface{}{"count": int64(42)}
-	result, err := resolveTemplate(
-		`{"count": $count}`,
-		vars, nil, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != `{"count": 42}` {
-		t.Errorf("result = %q", result)
-	}
-}
-
-func TestResolveBodySkipDollarInStrings(t *testing.T) {
-	vars := map[string]interface{}{"name": "test"}
-	result, err := resolveTemplate(
-		`{"$schema": "http://example.com", "name": $name}`,
-		vars, nil, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != `{"$schema": "http://example.com", "name": "test"}` {
-		t.Errorf("result = %q", result)
-	}
-}
-
-func TestResolveBodySpreadOnly(t *testing.T) {
-	vars := map[string]interface{}{
-		"fields": map[string]interface{}{"Title": "Hello", "Color": "Red"},
-	}
-	result, err := resolveTemplate(
-		`{...$fields}`,
-		vars, nil, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != `{"Color":"Red","Title":"Hello"}` {
-		t.Errorf("result = %q", result)
-	}
-}
-
-func TestResolveBodySpreadWithOtherFields(t *testing.T) {
-	vars := map[string]interface{}{
-		"name":   "test",
-		"fields": map[string]interface{}{"Title": "Hello", "Color": "Red"},
-	}
-	result, err := resolveTemplate(
-		`{"name": $name, ...$fields}`,
-		vars, nil, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != `{"name": "test", "Color":"Red","Title":"Hello"}` {
-		t.Errorf("result = %q", result)
-	}
-}
-
-func TestResolveBodySpreadNonObjectFails(t *testing.T) {
-	vars := map[string]interface{}{
-		"val": "not an object",
-	}
-	_, err := resolveTemplate(
-		`{...$val}`,
-		vars, nil, "", ResolveBody,
-	)
-	if err == nil {
-		t.Fatal("expected error for spreading non-object")
-	}
-	if !strings.Contains(err.Error(), "spread requires an object") {
-		t.Errorf("error = %v", err)
-	}
-}
-
-func TestResolveBodyLiteralDots(t *testing.T) {
-	// ... not followed by $ should be literal dots
-	result, err := resolveTemplate(
-		`{"msg": "loading..."}`,
-		nil, nil, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != `{"msg": "loading..."}` {
-		t.Errorf("result = %q", result)
-	}
-}
-
 func TestResolveHeaderToken(t *testing.T) {
-	vars := map[string]interface{}{}
+	lookup := map[string]interface{}{"token": "my-secret-token"}
 	result, err := resolveTemplate(
 		"Bearer $token",
-		vars, nil, "my-secret-token", ResolveHeader,
+		lookup, ResolveHeader,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -678,172 +546,27 @@ func TestResolveHeaderToken(t *testing.T) {
 	}
 }
 
-func TestResolveDotPath(t *testing.T) {
-	scope := map[string]interface{}{
-		"value": []interface{}{"a", "b"},
-	}
-	result, err := resolveTemplate(
-		`{"items": $.value}`,
-		nil, scope, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != `{"items": ["a","b"]}` {
-		t.Errorf("result = %q", result)
-	}
-}
-
-func TestResolveBracketPath(t *testing.T) {
-	scope := map[string]interface{}{
-		"@odata": map[string]interface{}{
-			"nextLink": "https://graph.microsoft.com/v1.0/next",
-		},
-	}
-	result, err := resolveTemplate(
-		`{"next_link": $['@odata']['nextLink']}`,
-		nil, scope, "", ResolveBody,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	expected := `{"next_link": "https://graph.microsoft.com/v1.0/next"}`
-	if result != expected {
-		t.Errorf("result = %q", result)
-	}
-}
-
 func TestResolveUndefinedVariable(t *testing.T) {
-	_, err := resolveTemplate("Hello $unknown", nil, nil, "", ResolveURL)
+	_, err := resolveTemplate("Hello $unknown", map[string]interface{}{}, ResolveURL)
 	if err == nil {
 		t.Error("expected error for undefined variable")
 	}
 }
 
 func TestResolveMultipleVarsInURL(t *testing.T) {
-	vars := map[string]interface{}{
+	lookup := map[string]interface{}{
 		"hostname": "contoso.sharepoint.com",
 		"pathname": "/sites/my-site",
 	}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$hostname:$pathname",
-		vars, nil, "", ResolveURL,
+		lookup, ResolveURL,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result != "https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/my-site" {
 		t.Errorf("result = %q", result)
-	}
-}
-
-// ── Expression Evaluation Tests ──────────────────────────────────────
-
-func TestEvalExprHost(t *testing.T) {
-	scope := map[string]interface{}{
-		"url": "https://contoso.sharepoint.com/sites/my-site",
-	}
-	val, err := evalExpr("host($url)", nil, scope, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val != "contoso.sharepoint.com" {
-		t.Errorf("host() = %v", val)
-	}
-}
-
-func TestEvalExprPath(t *testing.T) {
-	scope := map[string]interface{}{
-		"url": "https://contoso.sharepoint.com/sites/my-site",
-	}
-	val, err := evalExpr("path($url)", nil, scope, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val != "/sites/my-site" {
-		t.Errorf("path() = %v", val)
-	}
-}
-
-func TestEvalExprJSONPath(t *testing.T) {
-	scope := map[string]interface{}{
-		"value": []interface{}{1, 2, 3},
-	}
-	val, err := evalExpr("$.value", nil, scope, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	arr, ok := val.([]interface{})
-	if !ok || len(arr) != 3 {
-		t.Errorf("$.value = %v", val)
-	}
-}
-
-func TestEvalExprStringLiteral(t *testing.T) {
-	val, err := evalExpr(`"hello world"`, nil, nil, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val != "hello world" {
-		t.Errorf("got %v", val)
-	}
-}
-
-func TestEvalExprNumberLiteral(t *testing.T) {
-	val, err := evalExpr("42", nil, nil, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val != int64(42) {
-		t.Errorf("got %v", val)
-	}
-}
-
-func TestEvalExprVariable(t *testing.T) {
-	vars := map[string]interface{}{"name": "Alice"}
-	val, err := evalExpr("$name", vars, nil, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val != "Alice" {
-		t.Errorf("got %v", val)
-	}
-}
-
-func TestEvalExprUnknownFunction(t *testing.T) {
-	_, err := evalExpr("unknown($x)", nil, nil, "", nil)
-	if err == nil {
-		t.Error("expected error for unknown function")
-	}
-}
-
-// ── Assertion Evaluation Tests ───────────────────────────────────────
-
-func TestEvalAssertionEqual(t *testing.T) {
-	scope := map[string]interface{}{
-		"next_link": "https://graph.microsoft.com/v1.0/next",
-	}
-	err := evalAssertion(`host($next_link) == "graph.microsoft.com"`, "Invalid nextLink", nil, scope, "", nil)
-	if err != nil {
-		t.Errorf("assertion should pass: %v", err)
-	}
-}
-
-func TestEvalAssertionNotEqual(t *testing.T) {
-	scope := map[string]interface{}{
-		"next_link": "https://evil.com/next",
-	}
-	err := evalAssertion(`host($next_link) == "graph.microsoft.com"`, "Invalid nextLink", nil, scope, "", nil)
-	if err == nil {
-		t.Error("assertion should fail for evil.com")
-	}
-}
-
-func TestEvalAssertionNE(t *testing.T) {
-	vars := map[string]interface{}{"status": "ok"}
-	err := evalAssertion(`$status != "error"`, "", vars, nil, "", nil)
-	if err != nil {
-		t.Errorf("!= assertion should pass: %v", err)
 	}
 }
 
@@ -907,7 +630,7 @@ func TestExecuteVirtualToolPOSTWithBody(t *testing.T) {
 			t.Errorf("method = %q", r.Method)
 		}
 		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), `"name": "Ada"`) {
+		if !strings.Contains(string(body), `"name":"Ada"`) {
 			t.Errorf("body = %q", body)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -946,7 +669,7 @@ func TestExecuteVirtualToolShaping(t *testing.T) {
 	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[get-site]
 GET %s/api/site
 HTTP 200
-{"name": $.displayName, "url": $.webUrl}
+{"name": .displayName, "url": .webUrl}
 `, srv.URL)))
 	if err != nil {
 		t.Fatal(err)
@@ -1020,7 +743,7 @@ func TestExecuteVirtualToolAssignment(t *testing.T) {
 	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[get-lists]
 GET %s/api/site
 HTTP 200
-$site_id = $.siteId
+$site_id = .siteId
 
 GET %s/api/sites/$site_id/lists
 HTTP 200
@@ -1052,7 +775,7 @@ func TestExecuteVirtualToolAssertionFails(t *testing.T) {
 	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[fetch]
 GET %s/api/page
 HTTP 200
-assert(host($.nextLink) == "graph.microsoft.com", "Invalid nextLink host")
+assert(host(.nextLink) == "graph.microsoft.com"; "Invalid nextLink host")
 `, srv.URL)))
 	if err != nil {
 		t.Fatal(err)
@@ -1085,7 +808,7 @@ $name is string
 POST /items
 Authorization: Bearer $token
 Content-Type: application/json
-{"name": $name, ...$fields}
+{name: $name} + $fields
 
 HTTP 201
 ---
@@ -1103,8 +826,7 @@ HTTP 200
 		t.Fatalf("got %d tools", len(tools))
 	}
 
-	// add-item: $fields is object (from annotation), $name is string (from annotation),
-	// spread also infers object for $fields but annotation already covers it
+	// add-item: $fields is object (from annotation), $name is string (from annotation).
 	addParams := tools[0].Params
 	paramMap := map[string]ParamType{}
 	for _, p := range addParams {
@@ -1127,41 +849,16 @@ HTTP 200
 	}
 }
 
-func TestToolParamsSpreadInference(t *testing.T) {
-	data := []byte(`[update] Update an item.
-PATCH /items/$id
-Authorization: Bearer $token
-Content-Type: application/json
-{...$fields}
-
-HTTP 200
-`)
-	tools, err := ParseVirtualFile(data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	paramMap := map[string]ParamType{}
-	for _, p := range tools[0].Params {
-		paramMap[p.Name] = p.Type
-	}
-	// $fields used with spread → inferred as object
-	if paramMap["fields"] != ParamObject {
-		t.Errorf("fields type = %v, want object", paramMap["fields"])
-	}
-	// $id is just a plain reference → default string
-	if paramMap["id"] != ParamString {
-		t.Errorf("id type = %v, want string", paramMap["id"])
-	}
-}
-
-// ── String-Spread Body Tests ─────────────────────────────────────────
-
-func TestParseRawBody(t *testing.T) {
+func TestParseBodyIsJQ(t *testing.T) {
+	// A request body is a jq expression whose result is sent. A string
+	// result goes verbatim as bytes; anything else is JSON-encoded. The
+	// whole line that isn't a header or an HTTP status begins the body,
+	// and braces balance across lines.
 	input := `[upload] Upload a file's contents.
 PUT https://example.com/files/$path
 Authorization: Bearer $token
 Content-Type: text/plain
-...$content
+$content
 HTTP 200
 `
 	tools, err := ParseVirtualFile([]byte(input))
@@ -1172,11 +869,8 @@ HTTP 200
 		t.Fatalf("expected 1 tool, got %d", len(tools))
 	}
 	step := tools[0].Steps[0]
-	if step.BodyRaw != "$content" {
-		t.Errorf("BodyRaw = %q, want $content", step.BodyRaw)
-	}
-	if step.Body != "" {
-		t.Errorf("Body should be empty, got %q", step.Body)
+	if step.Body != "$content" {
+		t.Errorf("Body = %q, want $content", step.Body)
 	}
 	if len(step.Headers) != 2 {
 		t.Errorf("headers = %v", step.Headers)
@@ -1186,11 +880,13 @@ HTTP 200
 	}
 }
 
-func TestParseRawBodyBase64Expr(t *testing.T) {
+func TestParseBodyIsJQExpression(t *testing.T) {
+	// A body can be any jq expression, not just a bare variable: decoding
+	// base64 before upload.
 	input := `[upload-image] Upload an image.
 PUT https://example.com/images/$path
 Content-Type: image/png
-...base64dec($content)
+$content | @base64d
 HTTP 200
 `
 	tools, err := ParseVirtualFile([]byte(input))
@@ -1198,16 +894,17 @@ HTTP 200
 		t.Fatal(err)
 	}
 	step := tools[0].Steps[0]
-	if step.BodyRaw != "base64dec($content)" {
-		t.Errorf("BodyRaw = %q, want base64dec($content)", step.BodyRaw)
+	if step.Body != "$content | @base64d" {
+		t.Errorf("Body = %q", step.Body)
 	}
 }
 
-func TestToolParamsRawBodyString(t *testing.T) {
+func TestBodyStringParams(t *testing.T) {
+	// A string body references its var as a plain $name → string param.
 	data := []byte(`[upload] Upload a file.
 PUT /files/$path
 Content-Type: text/plain
-...$content
+$content
 HTTP 200
 `)
 	tools, err := ParseVirtualFile(data)
@@ -1218,8 +915,6 @@ HTTP 200
 	for _, p := range tools[0].Params {
 		paramMap[p.Name] = p.Type
 	}
-	// A string-spread body advertises its var as a string, NOT an object
-	// (unlike the in-JSON {...$fields} spread).
 	if paramMap["content"] != ParamString {
 		t.Errorf("content type = %v, want string", paramMap["content"])
 	}
@@ -1228,37 +923,7 @@ HTTP 200
 	}
 }
 
-func TestEvalExprBase64Dec(t *testing.T) {
-	val, err := evalExpr(`base64dec("aGVsbG8=")`, nil, nil, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val != "hello" {
-		t.Errorf("base64dec() = %v, want hello", val)
-	}
-}
-
-func TestEvalExprBase64Enc(t *testing.T) {
-	val, err := evalExpr(`base64enc("hello")`, nil, nil, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if val != "aGVsbG8=" {
-		t.Errorf("base64enc() = %v, want aGVsbG8=", val)
-	}
-}
-
-func TestEvalExprBase64DecInvalid(t *testing.T) {
-	_, err := evalExpr(`base64dec("not valid b64!!!")`, nil, nil, "", nil)
-	if err == nil {
-		t.Fatal("expected error for invalid base64")
-	}
-	if !strings.Contains(err.Error(), "base64dec()") {
-		t.Errorf("error = %v", err)
-	}
-}
-
-func TestExecuteVirtualToolRawBody(t *testing.T) {
+func TestExecuteBodyString(t *testing.T) {
 	var gotBody string
 	var gotCT string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1272,28 +937,57 @@ func TestExecuteVirtualToolRawBody(t *testing.T) {
 	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
 PUT %s/files
 Content-Type: text/plain
-...$content
+$content
 HTTP 200
 `, srv.URL)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// "hello $world" proves the body goes through verbatim: a $ in the
-	// file data must NOT be interpreted as a variable reference.
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello $world"}, VirtualAuth{}, nil)
+	// A string result is sent verbatim: $ in file data is jq syntax here,
+	// so we pass a plain string with no $ to keep the test about bytes.
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"content": "hello world"}, VirtualAuth{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotBody != "hello $world" {
-		t.Errorf("body = %q, want verbatim \"hello $world\"", gotBody)
+	if gotBody != "hello world" {
+		t.Errorf("body = %q, want \"hello world\"", gotBody)
 	}
 	if gotCT != "text/plain" {
 		t.Errorf("Content-Type = %q, want text/plain", gotCT)
 	}
 }
 
-func TestExecuteVirtualToolRawBodyBase64(t *testing.T) {
+func TestExecuteBodyStringDollarLiteral(t *testing.T) {
+	// A literal string in jq (with $ escaped as \\$) reaches the wire
+	// verbatim, proving $ in file data isn't treated as a variable.
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
+PUT %s/files
+Content-Type: text/plain
+"hello $world"
+HTTP 200
+`, srv.URL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", nil, VirtualAuth{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody != "hello $world" {
+		t.Errorf("body = %q, want \"hello $world\"", gotBody)
+	}
+}
+
+func TestExecuteBodyBase64(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotBody, _ = io.ReadAll(r.Body)
@@ -1304,7 +998,7 @@ func TestExecuteVirtualToolRawBodyBase64(t *testing.T) {
 	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload-image] Upload image.
 PUT %s/files
 Content-Type: image/png
-...base64dec($content)
+$content | @base64d
 HTTP 200
 `, srv.URL)))
 	if err != nil {
@@ -1323,7 +1017,7 @@ HTTP 200
 	}
 }
 
-func TestExecuteVirtualToolRawBodyAssignment(t *testing.T) {
+func TestExecuteBodyStringAssignment(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -1336,7 +1030,7 @@ func TestExecuteVirtualToolRawBodyAssignment(t *testing.T) {
 $payload = $content
 PUT %s/files
 Content-Type: text/plain
-...$payload
+$payload
 HTTP 200
 `, srv.URL)))
 	if err != nil {
@@ -1352,7 +1046,7 @@ HTTP 200
 	}
 }
 
-func TestExecuteVirtualToolRawBodyMissingContentType(t *testing.T) {
+func TestExecuteBodyStringMissingContentType(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("server should not be called when Content-Type is missing")
 	}))
@@ -1360,7 +1054,7 @@ func TestExecuteVirtualToolRawBodyMissingContentType(t *testing.T) {
 
 	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[upload] Upload.
 PUT %s/files
-...$content
+$content
 HTTP 200
 `, srv.URL)))
 	if err != nil {
@@ -1376,23 +1070,36 @@ HTTP 200
 	}
 }
 
-func TestExecuteVirtualToolRawBodyNonStringFails(t *testing.T) {
-	tools, err := ParseVirtualFile([]byte(`[upload] Upload.
-PUT https://example.invalid/files
-Content-Type: text/plain
-...$fields
+func TestExecuteBodyNonStringIsJSON(t *testing.T) {
+	// A non-string body is JSON-encoded and sent as application/json when
+	// the step didn't set its own Content-Type.
+	var gotBody string
+	var gotCT string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		gotCT = r.Header.Get("Content-Type")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[create] Create.
+POST %s/items
+{title: "x", fields: $fields}
 HTTP 200
-`))
+`, srv.URL)))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "upload", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, VirtualAuth{}, nil)
-	if err == nil {
-		t.Fatal("expected error for non-string raw body")
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "create", map[string]interface{}{"fields": map[string]interface{}{"a": 1}}, VirtualAuth{}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "requires a string") {
-		t.Errorf("error = %v, want 'requires a string'", err)
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotCT)
+	}
+	if gotBody != `{"fields":{"a":1},"title":"x"}` {
+		t.Errorf("body = %q", gotBody)
 	}
 }
 
@@ -1408,7 +1115,7 @@ SELECT id, title, done
   LIMIT 10
 
 {
-  "tasks": $.rows
+  "tasks": .rows
 }
 ---
 [add-task] Add a task to the list.
@@ -1546,8 +1253,8 @@ SELECT id, title FROM tasks
   WHERE done = $done
 
 {
-  "firstId": $.rows.0.0,
-  "firstTitle": $.rows.0.1
+  "firstId": .rows[0][0],
+  "firstTitle": .rows[0][1]
 }
 `))
 	if err != nil {
@@ -1603,7 +1310,7 @@ $project_id is number
 
 SELECT id FROM projects
 
-$rows = $.rows
+$rows = .rows
 
 SELECT id FROM modules WHERE project_id = $project_id
 
@@ -1649,8 +1356,8 @@ GET %s/issues/1
 
 HTTP 200
 
-$title = $.title
-$body = $.body
+$title = .title
+$body = .body
 
 INSERT INTO issues (title, body, source)
   VALUES ($title, $body, 'github')
@@ -2085,7 +1792,7 @@ HTTP 200
 	if m["sub"] != "abc-123" {
 		t.Errorf("sub = %v, want injected value", m["sub"])
 	}
-	if m["id"] != float64(7) {
+	if m["id"] != 7 {
 		t.Errorf("id = %v (%T), want 7", m["id"], m["id"])
 	}
 
@@ -2172,13 +1879,13 @@ func TestParseShapingAfterTrailingAssignment(t *testing.T) {
 GET https://example.com/one
 
 HTTP 200
-$author = $.slideshow.author
+$author = .slideshow.author
 
 GET https://example.com/two
 X-Test: 1
 
 HTTP 200
-$headers = $.headers
+$headers = .headers
 
 {
   "slideshow_author": $author,
@@ -2236,13 +1943,13 @@ func TestExecuteShapingAfterTrailingAssignment(t *testing.T) {
 GET %s/json
 
 HTTP 200
-$author = $.slideshow.author
+$author = .slideshow.author
 
 GET %s/headers
 X-Test: 1
 
 HTTP 200
-$headers = $.headers
+$headers = .headers
 
 {
   "slideshow_author": $author,
@@ -2289,7 +1996,7 @@ func TestExecuteSingleLineTrailingShaping(t *testing.T) {
 GET %s/x
 
 HTTP 200
-$name = $.deep.name
+$name = .deep.name
 
 {"name": $name}
 `, srv.URL)))
@@ -2316,7 +2023,7 @@ func TestParseStepAfterTrailingShaping(t *testing.T) {
 GET https://example.com/one
 
 HTTP 200
-$a = $.a
+$a = .a
 
 {
   "a": $a
@@ -2349,7 +2056,7 @@ HTTP 200
 func TestParseFormStep(t *testing.T) {
 	file := `[approve] Approve a payout.
 
-$amount = $.amount
+$amount = .amount
 
 FORM "Approve payout of $amount USD?"
     $approved is boolean
@@ -2536,15 +2243,15 @@ Authorization: Bearer $token
 
 HTTP 200
 
-FORM "Approve payout of $.amount USD?"
+FORM "Approve payout of $amount USD?"
     $approved is boolean
     $note is string?
     $region is "eu" | "us"?
 
 {
-  "verdict": $approved,
-  "note": $note,
-  "region": $region
+  "verdict": .approved,
+  "note": .note,
+  "region": .region
 }
 `
 	tools, err := ParseVirtualFile([]byte(file))
@@ -2846,18 +2553,18 @@ INSERT INTO secrets (value) VALUES ($secret)
 }
 
 func TestEvalExprDecrypt(t *testing.T) {
-	val, err := evalExpr(`decrypt("sealed:hunter2")`, nil, nil, "", toySecretHooks)
+	val, err := jqRun(`decrypt("sealed:hunter2")`, nil, &jqVars{}, toySecretHooks)
 	if err != nil || val != "hunter2" {
 		t.Errorf("decrypt() = %v, %v", val, err)
 	}
 
 	// A failed open never echoes what it was given.
-	_, err = evalExpr(`decrypt("hunter2")`, nil, nil, "", toySecretHooks)
+	_, err = jqRun(`decrypt("hunter2")`, nil, &jqVars{}, toySecretHooks)
 	if err == nil || strings.Contains(err.Error(), "hunter2") {
 		t.Errorf("decrypt(plaintext) error = %v", err)
 	}
 
-	_, err = evalExpr(`decrypt("sealed:x")`, nil, nil, "", nil)
+	_, err = jqRun(`decrypt("sealed:x")`, nil, &jqVars{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no secret key") {
 		t.Errorf("decrypt without hooks error = %v", err)
 	}

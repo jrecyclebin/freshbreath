@@ -1,7 +1,7 @@
 [get-site] Resolve a SharePoint site URL to a site ID.
 
 $hostname = host($url)
-$pathname = path($url)
+$pathname = urlpath($url)
 GET https://graph.microsoft.com/v1.0/sites/$hostname:$pathname
 Authorization: Bearer $token
 
@@ -67,7 +67,7 @@ HTTP 200
 ---
 [get-list-next] Fetch the next page of items using the @odata.nextLink from a previous response.
 
-assert(host($next_link) == "graph.microsoft.com", "Invalid nextLink")
+assert(host($next_link) == "graph.microsoft.com"; "Invalid nextLink")
 GET $next_link
 Authorization: Bearer $token
 
@@ -92,7 +92,7 @@ HTTP 201
 PATCH https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items/$item_id/fields
 Authorization: Bearer $token
 Content-Type: application/json
-{...$fields}
+{$fields}
 
 HTTP 200
 ---
