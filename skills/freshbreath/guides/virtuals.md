@@ -222,8 +222,11 @@ jq functions so they compose in pipelines like any builtin.
 In a jq expression, `.` is **the response the step just got** (or the SQL
 result, or the form answers), and `$name` is a **$-variable**: a caller
 argument, a value an earlier step assigned with `$name = expr`, or one of
-the `$token*` identity built-ins. So `.displayName` reads the response,
-`$site_id` reads a variable — they never mix.
+the `$token*` identity built-ins. They live in separate namespaces — a
+response can even have a field named `site_id` alongside a `$site_id`
+variable, and neither shadows the other — but you traverse and combine
+them with the same jq operators: `$projects | map(.name)`, `$projects[0].id`,
+`.rows + {caller: $token_email}`.
 
 For example, given this response:
 
