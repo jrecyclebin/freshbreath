@@ -1,7 +1,8 @@
 [get-site] Resolve a SharePoint site URL to a site ID.
 
-$hostname = host($url)
-$pathname = urlpath($url)
+$site = url($url)
+$hostname = $site.host
+$pathname = $site.path
 GET https://graph.microsoft.com/v1.0/sites/$hostname:$pathname
 Authorization: Bearer $token
 
@@ -61,13 +62,13 @@ HTTP 200
 GET https://graph.microsoft.com/v1.0/sites/$site_id/lists/$list_id/items?expand=fields&$$top=50
 Authorization: Bearer $token
 
-# $obj = $.value
-# $next_link = $['@odata']['nextLink']
+# $obj = .value
+# $next_link = .["@odata"].nextLink
 HTTP 200
 ---
 [get-list-next] Fetch the next page of items using the @odata.nextLink from a previous response.
 
-assert(host($next_link) == "graph.microsoft.com"; "Invalid nextLink")
+assert(url($next_link).host == "graph.microsoft.com"; "Invalid nextLink")
 GET $next_link
 Authorization: Bearer $token
 

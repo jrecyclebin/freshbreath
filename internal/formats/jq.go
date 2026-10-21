@@ -16,9 +16,9 @@ import (
 //
 // Reads, mutations, assertions, shaping and request bodies are all jq
 // expressions. jqRun evaluates one against a scope (jq's ".") with a set
-// of $-variables (caller args + assigned vars + token built-ins). host(),
-// urlpath(), assert() and decrypt() are registered as jq functions so they
-// compose in pipelines like any builtin.
+// of $-variables (caller args + assigned vars + token built-ins). url(),
+// assert() and decrypt() are registered as jq functions so they compose
+// in pipelines like any builtin.
 //
 // We parse and compile per call rather than caching compiled codes: decrypt
 // needs the per-call service secret key (VirtualHooks), which is a runtime
@@ -54,8 +54,7 @@ func jqRun(query string, scope any, vars *jqVars, hooks *VirtualHooks) (any, err
 	}
 	code, err := gojq.Compile(q,
 		gojq.WithVariables(vars.names),
-		gojq.WithFunction("host", 1, 1, jqHost),
-		gojq.WithFunction("urlpath", 1, 1, jqURLPath),
+		gojq.WithFunction("url", 1, 1, jqURL),
 		gojq.WithFunction("assert", 1, 2, jqAssert),
 		gojq.WithFunction("decrypt", 1, 1, func(v any, args []any) any {
 			return jqDecrypt(hooks, args)
@@ -137,25 +136,40 @@ func buildJQVars(args map[string]any, vars map[string]any, auth VirtualAuth, omi
 
 // ── jq functions ─────────────────────────────────────────────────────
 
-// jqHost is host(<url>): the host part of a parsed URL. Mirrors the old
-// host() helper; unchanged in behavior.
-func jqHost(v any, args []any) any {
+// jqURL is url(<url>): a parsed URL as a jq object. All fields are
+// strings; absent parts are "" so the shape is stable:
+//
+//	scheme, host, hostname, port, path, query, fragment
+//	user, password   (only when the URL carries userinfo)
+//
+// host is the authority — hostname plus :port when one is present — so
+// url($x).host is the drop-in for the old host() and url($x).path for the
+// old urlpath(). query is the raw query string ("a=1&b=2"), not a parsed
+// object — it splices into derived URLs, and parsing it in jq is possible
+// when a tool needs to. A string that isn't a URL parses leniently as a
+// relative path (Go's url.Parse), same as the old pair: url("foo").path
+// is "foo".
+func jqURL(v any, args []any) any {
 	u, err := url.Parse(jqToString(args[0]))
 	if err != nil {
-		return fmt.Errorf("host(): %w", err)
+		return fmt.Errorf("url(): %w", err)
 	}
-	return u.Host
-}
-
-// jqURLPath is urlpath(<url>): the path part of a parsed URL. Named
-// urlpath (not path) to avoid clobbering jq's path(f) builtin, which
-// returns the path an expression would select.
-func jqURLPath(v any, args []any) any {
-	u, err := url.Parse(jqToString(args[0]))
-	if err != nil {
-		return fmt.Errorf("urlpath(): %w", err)
+	obj := map[string]any{
+		"scheme":   u.Scheme,
+		"host":     u.Host,
+		"hostname": u.Hostname(),
+		"port":     u.Port(),
+		"path":     u.Path,
+		"query":    u.RawQuery,
+		"fragment": u.Fragment,
 	}
-	return u.Path
+	if u.User != nil {
+		obj["user"] = u.User.Username()
+		if pw, ok := u.User.Password(); ok {
+			obj["password"] = pw
+		}
+	}
+	return obj
 }
 
 // jqAssert is assert(cond; msg). It returns its input unchanged on
@@ -252,7 +266,7 @@ func jqNormalize(v any) any {
 // jqToString coerces a jq value to a string for URL parsing. nil → "",
 // bool → its word, numbers/objects/arrays use fmt's %v rendering (good
 // enough for a URL that was stored as a string; a non-string input to
-// host()/urlpath() is almost certainly a mistake, but we don't hard-fail
+// url() is almost certainly a mistake, but we don't hard-fail
 // to stay lenient like the old helpers).
 func jqToString(v any) string {
 	switch x := v.(type) {

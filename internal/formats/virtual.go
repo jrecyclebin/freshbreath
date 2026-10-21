@@ -1064,8 +1064,8 @@ func encodeValue(val interface{}, mode ResolveMode) string {
 // ── Expression Evaluation (jq) ──────────────────────────────────────────
 // Assignments, assertions, mutations, shaping and request bodies are all
 // jq expressions evaluated by jqRun (see jq.go) against the current scope
-// (".") with the $-variable set from buildJQVars. host(), urlpath(),
-// assert() and decrypt() are registered as jq functions so they compose in
+// (".") with the $-variable set from buildJQVars. url(), assert() and
+// decrypt() are registered as jq functions so they compose in
 // pipelines. There is no hand-rolled evaluator here.
 
 // jqEval binds the per-run state a jq expression needs: the caller args

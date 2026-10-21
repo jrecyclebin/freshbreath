@@ -1,6 +1,7 @@
 package formats
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -37,21 +38,91 @@ func TestJQVars(t *testing.T) {
 	}
 }
 
-func TestJQHostURLPath(t *testing.T) {
-	scope := map[string]any{"u": "https://contoso.sharepoint.com/sites/x"}
-	h, err := jqRun(`host(.u)`, scope, &jqVars{}, nil)
+func TestJQURL(t *testing.T) {
+	// Full parse: scheme, authority parts, path, query, fragment.
+	scope := map[string]any{"u": "https://contoso.sharepoint.com:8443/sites/x?filter=a#sec"}
+	got, err := jqRun(`url(.u)`, scope, &jqVars{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h != "contoso.sharepoint.com" {
-		t.Errorf("host = %v", h)
+	m, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("expected object, got %T", got)
 	}
-	p, err := jqRun(`urlpath(.u)`, scope, &jqVars{}, nil)
+	want := map[string]any{
+		"scheme":   "https",
+		"host":     "contoso.sharepoint.com:8443",
+		"hostname": "contoso.sharepoint.com",
+		"port":     "8443",
+		"path":     "/sites/x",
+		"query":    "filter=a",
+		"fragment": "sec",
+	}
+	if !reflect.DeepEqual(m, want) {
+		t.Errorf("url() = %v, want %v", m, want)
+	}
+
+	// Field traversal — the old host()/urlpath() drop-ins.
+	h, err := jqRun(`url(.u).host`, scope, &jqVars{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h != "contoso.sharepoint.com:8443" {
+		t.Errorf("url(.).host = %v", h)
+	}
+	p, err := jqRun(`url(.u).path`, scope, &jqVars{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p != "/sites/x" {
-		t.Errorf("urlpath = %v", p)
+		t.Errorf("url(.).path = %v", p)
+	}
+
+	// Absent parts are "" — the shape stays stable (no userinfo keys when
+	// the URL carries none, no port, no query, no fragment).
+	got, err = jqRun(`url("https://h.example/a")`, scope, &jqVars{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = got.(map[string]any)
+	for _, k := range []string{"scheme", "host", "hostname", "port", "path", "query", "fragment"} {
+		if _, has := m[k]; !has {
+			t.Errorf("missing key %s in %v", k, m)
+		}
+	}
+	if m["port"] != "" || m["query"] != "" || m["fragment"] != "" {
+		t.Errorf("absent parts should be empty: %v", m)
+	}
+	if _, has := m["user"]; has {
+		t.Errorf("userinfo key present without userinfo: %v", m)
+	}
+
+	// Userinfo appears only when the URL carries it.
+	got, err = jqRun(`url("https://alice:secret@h.example/a")`, scope, &jqVars{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = got.(map[string]any)
+	if m["user"] != "alice" || m["password"] != "secret" {
+		t.Errorf("userinfo = %v", m)
+	}
+
+	// Composition: pipeline + assert, the get-list-next guard shape.
+	okv, err := jqRun(`.u | url(.).host | assert(. == "contoso.sharepoint.com:8443"; "bad host")`, scope, &jqVars{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if okv != "contoso.sharepoint.com:8443" {
+		t.Errorf("pipeline = %v", okv)
+	}
+
+	// Lenient parse: not-a-URL is a relative path, same as the old pair.
+	got, err = jqRun(`url("foo").path`, scope, &jqVars{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "foo" {
+		t.Errorf("lenient parse path = %v", got)
 	}
 }
 
@@ -79,7 +150,7 @@ func TestJQAssertFails(t *testing.T) {
 func TestJQAssertBareStatement(t *testing.T) {
 	// A bare assert(...) statement: input is scope, returns scope unchanged.
 	scope := map[string]any{"nextLink": "https://graph.microsoft.com/x"}
-	got, err := jqRun(`assert(host(.nextLink) == "graph.microsoft.com"; "bad host")`, scope, &jqVars{}, nil)
+	got, err := jqRun(`assert(url(.nextLink).host == "graph.microsoft.com"; "bad host")`, scope, &jqVars{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +164,7 @@ func TestJQAssertBareStatement(t *testing.T) {
 }
 
 func TestJQAssertBareFails(t *testing.T) {
-	_, err := jqRun(`assert(host(.nextLink) == "graph.microsoft.com"; "Invalid nextLink host")`,
+	_, err := jqRun(`assert(url(.nextLink).host == "graph.microsoft.com"; "Invalid nextLink host")`,
 		map[string]any{"nextLink": "https://evil.com/x"}, &jqVars{}, nil)
 	if err == nil {
 		t.Fatal("expected error")

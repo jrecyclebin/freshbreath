@@ -61,11 +61,11 @@ Aside from the request and response layouts, tool scripts can also include:
   and whether it is optional with a question mark (`number?`).
 - Assignments: Lines starting with `$var = <jq>` assign a jq expression's
   result to a `$var` (visible to the rest of the tool). The expression is jq:
-  `.displayName`, `.rows | map(.id)`, `host($url)`, `42`, `"literal"`.
+  `.displayName`, `.rows | map(.id)`, `url($url).host`, `42`, `"literal"`.
 - Assertions: A bare `assert(<jq cond>; "message")` checks a condition and
   fails the tool with a 400 if it's false (jq-falsy — only `false` and `null`
   fail). It returns its input unchanged on success, so it composes in a
-  pipeline: `.nextLink | host(.) | assert(. == "graph.microsoft.com"; "bad host")`.
+  pipeline: `.nextLink | url(.).host | assert(. == "graph.microsoft.com"; "bad host")`.
 
 These additions affect the HTTP requests that they precede, and can be used to
 modify the request or response.
@@ -133,8 +133,9 @@ can be seen in the example below for a SharePoint virtual service:
 ```
 [get-site] Resolve a SharePoint site URL to a site ID.
 
-$hostname = host($url)
-$pathname = urlpath($url)
+$site = url($url)
+$hostname = $site.host
+$pathname = $site.path
 GET https://graph.microsoft.com/v1.0/sites/$hostname:$pathname
 Authorization: Bearer $token
 
@@ -155,7 +156,7 @@ HTTP 201
 ---
 [get-list-next] Fetch the next page of items using the @odata.nextLink from a previous response.
 
-assert(host($next_link) == "graph.microsoft.com"; "Invalid nextLink")
+assert(url($next_link).host == "graph.microsoft.com"; "Invalid nextLink")
 GET $next_link
 Authorization: Bearer $token
 
@@ -172,13 +173,18 @@ $fields
 HTTP 200
 ```
 
-First off, notice the use of the `host` and `urlpath` functions. These are
-jq functions (registered by Fresh Breath) that extract the hostname and path
-of a URL stored in a variable — usable anywhere a jq expression is, including
-the `assert(...; ...)` check in `get-list-next`. (`urlpath` is named that
-rather than `path` because jq already has a `path` builtin that returns the
-selection path of an expression.) Those custom variables can also be used
-in the response — like arguments can.
+First off, notice the use of the `url` function. It's a jq function
+(registered by Fresh Breath) that parses a URL into an object — usable
+anywhere a jq expression is, including the `assert(...; ...)` check in
+`get-list-next`. The object carries `scheme`, `host` (the authority —
+hostname plus `:port` when one is present), `hostname` and `port` split
+out, `path`, `query` (the raw query string, not a parsed object) and
+`fragment`, plus `user` and `password` when the URL carries userinfo.
+`get-site` assigns it once (`$site = url($url)`) and reads the parts off
+it (`$site.host`, `$site.path`) — they become separate strings again
+because a URL line interpolates whole `$vars` only, so the `GET` line
+splices `$hostname` and `$pathname`. Those custom variables can also be
+used in the response — like arguments can.
 
 Variables that are *assigned* in the tool script are not treated as arguments - so
 those names will be eliminated from the tool's argument list.
@@ -216,7 +222,7 @@ in the tool definition so a caller will know what to pass in.
 The workhorse of a virtual service is [jq](https://jqlang.github.io/jq/manual/).
 Reading the response, reshaping it, building a request body, running an
 assertion, redacting a field — these are all jq expressions. A few Fresh
-Breath additions (`host`, `urlpath`, `assert`, `decrypt`) are registered as
+Breath additions (`url`, `assert`, `decrypt`) are registered as
 jq functions so they compose in pipelines like any builtin.
 
 In a jq expression, `.` is **the response the step just got** (or the SQL
@@ -396,7 +402,7 @@ GET https://api.example.com/users
 Authorization: Bearer $token
 
 HTTP 200
-.rows |= map(del(.password) | del(.api_key) | . + {url: ($scheme + "://" + $host + $path)})
+.rows |= map(del(.password) | del(.api_key) | . + {url: ("https://api.example.com/users/" + (.id | tostring))})
 {users: .rows}
 ```
 

@@ -47,21 +47,28 @@ func TestParseSharepoint(t *testing.T) {
 	}
 	step := ts.Steps[0]
 
-	// Assignments: $hostname = host($url), $pathname = urlpath($url)
-	if len(step.Pre) != 2 {
-		t.Fatalf("get-site pre-statements = %d, want 2", len(step.Pre))
+	// Assignments: $site = url($url), then $hostname = $site.host,
+	// $pathname = $site.path — url() parses once, the fields traverse.
+	if len(step.Pre) != 3 {
+		t.Fatalf("get-site pre-statements = %d, want 3", len(step.Pre))
 	}
-	if step.Pre[0].Assign == nil || *step.Pre[0].Assign != "hostname" {
-		t.Errorf("pre[0] var = %v, want hostname", step.Pre[0].Assign)
+	if step.Pre[0].Assign == nil || *step.Pre[0].Assign != "site" {
+		t.Errorf("pre[0] var = %v, want site", step.Pre[0].Assign)
 	}
-	if step.Pre[0].Expr != "host($url)" {
+	if step.Pre[0].Expr != "url($url)" {
 		t.Errorf("pre[0] expr = %q", step.Pre[0].Expr)
 	}
-	if step.Pre[1].Assign == nil || *step.Pre[1].Assign != "pathname" {
-		t.Errorf("pre[1] var = %v, want pathname", step.Pre[1].Assign)
+	if step.Pre[1].Assign == nil || *step.Pre[1].Assign != "hostname" {
+		t.Errorf("pre[1] var = %v, want hostname", step.Pre[1].Assign)
 	}
-	if step.Pre[1].Expr != "urlpath($url)" {
-		t.Errorf("pre[1] expr = %q, want urlpath($url)", step.Pre[1].Expr)
+	if step.Pre[1].Expr != "$site.host" {
+		t.Errorf("pre[1] expr = %q", step.Pre[1].Expr)
+	}
+	if step.Pre[2].Assign == nil || *step.Pre[2].Assign != "pathname" {
+		t.Errorf("pre[2] var = %v, want pathname", step.Pre[2].Assign)
+	}
+	if step.Pre[2].Expr != "$site.path" {
+		t.Errorf("pre[2] expr = %q, want $site.path", step.Pre[2].Expr)
 	}
 
 	if step.Method != "GET" {
@@ -122,7 +129,7 @@ func TestParseSharepoint(t *testing.T) {
 		t.Fatalf("get-list-next pre-statements = %v, want 1 bare assert", glnStep.Pre)
 	}
 	expr := glnStep.Pre[0].Expr
-	if !strings.Contains(expr, `host($next_link) == "graph.microsoft.com"`) || !strings.Contains(expr, `"Invalid nextLink"`) {
+	if !strings.Contains(expr, `url($next_link).host == "graph.microsoft.com"`) || !strings.Contains(expr, `"Invalid nextLink"`) {
 		t.Errorf("assert expr = %q", expr)
 	}
 
@@ -239,7 +246,7 @@ HTTP 200
 
 func TestParseMultiStep(t *testing.T) {
 	input := `[fetch-and-update] Fetch then update
-$hostname = host($url)
+$hostname = url($url).host
 GET https://api.example.com/data/$id
 Authorization: Bearer $token
 
@@ -335,8 +342,8 @@ HTTP 200
 // ── Line Classifier Tests ────────────────────────────────────────────
 
 func TestTryParseAssignment(t *testing.T) {
-	ok, name, expr := tryParseAssignment("$hostname = host($url)")
-	if !ok || name != "hostname" || expr != "host($url)" {
+	ok, name, expr := tryParseAssignment("$hostname = url($url).host")
+	if !ok || name != "hostname" || expr != "url($url).host" {
 		t.Errorf("got (%v, %q, %q)", ok, name, expr)
 	}
 
@@ -775,7 +782,7 @@ func TestExecuteVirtualToolAssertionFails(t *testing.T) {
 	tools, err := ParseVirtualFile([]byte(fmt.Sprintf(`[fetch]
 GET %s/api/page
 HTTP 200
-assert(host(.nextLink) == "graph.microsoft.com"; "Invalid nextLink host")
+assert(url(.nextLink).host == "graph.microsoft.com"; "Invalid nextLink host")
 `, srv.URL)))
 	if err != nil {
 		t.Fatal(err)
