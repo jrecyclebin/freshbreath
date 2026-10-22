@@ -73,3 +73,22 @@ func TestUnknownHostRefused(t *testing.T) {
 		}
 	}
 }
+
+// Fresh Breath's own pages refuse framing; hosted apps are left to decide.
+func TestServerPagesRefuseFraming(t *testing.T) {
+	srv := newTestServer(t)
+	for path, framed := range map[string]bool{
+		"/control":                  false,
+		"/service/ssh-auth?state=x": false,
+		"/api/me":                   false,
+		"/some-hosted-app/":         true,
+	} {
+		rr := testRequest(t, srv, "GET", path, nil, nil)
+		if got := rr.Header().Get("X-Frame-Options") == ""; got != framed {
+			t.Errorf("%s: frameable = %v, want %v", path, got, framed)
+		}
+		if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("%s: missing nosniff", path)
+		}
+	}
+}

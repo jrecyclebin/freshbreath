@@ -34,6 +34,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Fresh Breath does not answer to host %q. Add it to FRBR_ALLOWED_HOSTS (or set FRBR_BASE_URL to it) to allow it.", r.Host), http.StatusMisdirectedRequest)
 		return
 	}
+	h := w.Header()
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	if serverOwnedPath(r.URL.Path) {
+		// The panel, the sign-in pages and the API act on a click or carry
+		// a session; none of them is meant to sit in someone else's frame.
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+	}
+
 	if origin := r.Header.Get("Origin"); origin != "" {
 		allowed, withCookies := s.originAllowed(r, origin)
 		if !allowed {
@@ -71,6 +81,20 @@ func appRegisteredOrigin(app *db.App) string {
 		return ""
 	}
 	return appURL.Scheme + "://" + appURL.Host
+}
+
+// serverOwnedPath reports whether a path is served by Fresh Breath itself
+// rather than a hosted app, which may want to be embedded.
+func serverOwnedPath(p string) bool {
+	if p == "/control" || p == "/mcp" {
+		return true
+	}
+	for _, prefix := range []string{"/control/", "/service/", "/oauth/", "/api/", "/mcp/", "/.well-known/"} {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // hostAllowed reports whether a request's Host names this server. A web
@@ -1847,7 +1871,7 @@ func (s *Server) handleAppFile(w http.ResponseWriter, r *http.Request, nonce, ar
 		if area == "data" {
 			// Data files are untrusted uploads: never let one run script on
 			// this origin, whatever its sniffed type.
-			w.Header().Set("Content-Security-Policy", "sandbox")
+			w.Header().Set("Content-Security-Policy", "sandbox; frame-ancestors 'none'")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 		}
 		w.Write(data)

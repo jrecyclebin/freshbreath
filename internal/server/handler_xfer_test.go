@@ -360,7 +360,7 @@ func TestAppDataFileRoundTrip(t *testing.T) {
 	if rr.Code != http.StatusOK || rr.Body.String() != "<script>alert(1)</script>" {
 		t.Fatalf("GET = %d %q, want the stored bytes", rr.Code, rr.Body.String())
 	}
-	if csp := rr.Header().Get("Content-Security-Policy"); csp != "sandbox" {
+	if csp := rr.Header().Get("Content-Security-Policy"); !strings.HasPrefix(csp, "sandbox") {
 		t.Errorf("Content-Security-Policy = %q, want sandbox", csp)
 	}
 
