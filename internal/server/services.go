@@ -105,9 +105,25 @@ type OIDCClaims struct {
 	IssuedAt int64                  `json:"iat"`
 	Nonce    string                 `json:"nonce,omitempty"`
 	Email    string                 `json:"email,omitempty"`
+	Verified any                    `json:"email_verified,omitempty"` // bool, or "true"/"false" from some providers
 	Name     string                 `json:"name,omitempty"`
 	Picture  string                 `json:"picture,omitempty"`
 	Raw      map[string]interface{} `json:"-"`
+}
+
+// emailMarkedUnverified reports whether a provider said outright that an
+// email is unverified. Such an email must not name an account — anyone can
+// type someone else's address into a profile at some providers. A missing
+// claim is not a "no": many providers only issue verified addresses and
+// never send it.
+func emailMarkedUnverified(v any) bool {
+	switch v := v.(type) {
+	case bool:
+		return !v
+	case string:
+		return strings.EqualFold(v, "false")
+	}
+	return false
 }
 
 // authCodeOptions builds the authorize-request options shared by the OIDC
@@ -196,6 +212,9 @@ func (s *Server) oidcExchangeCode(ctx context.Context, rec *db.AuthRecord, code,
 	}
 	if claims.Nonce != oidcNonce {
 		return nil, "", "", fmt.Errorf("nonce mismatch")
+	}
+	if emailMarkedUnverified(claims.Verified) {
+		claims.Email = ""
 	}
 	if err := idToken.Claims(&claims.Raw); err != nil {
 		return nil, "", "", fmt.Errorf("id token raw claims: %w", err)
@@ -316,6 +335,9 @@ func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, p
 	if rec.Descriptor.UserInfoURL != "" {
 		if ui, ok := fetchUserInfoEndpoint(ctx, s.httpClient, rec.Descriptor.UserInfoURL, tok); ok {
 			email, name = ui.Email, ui.Name
+			if emailMarkedUnverified(ui.Verified) {
+				email = ""
+			}
 			// Provider-subject preference: a real sub, then a numeric id,
 			// then the login handle — the most stable identifier available.
 			sub = ui.Sub
@@ -364,18 +386,20 @@ func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, p
 // leg completes with no identity rather than dying on a provider that
 // exposes no usable userinfo.
 func fetchUserInfoEndpoint(ctx context.Context, c *http.Client, url string, tok *oauth2.Token) (struct {
-	Email string `json:"email"`
-	Name  string `json:"name"`
-	Login string `json:"login"`
-	Sub   string `json:"sub"`
-	ID    any    `json:"id"`
+	Email    string `json:"email"`
+	Verified any    `json:"email_verified"`
+	Name     string `json:"name"`
+	Login    string `json:"login"`
+	Sub      string `json:"sub"`
+	ID       any    `json:"id"`
 }, bool) {
 	var ui struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
-		Login string `json:"login"`
-		Sub   string `json:"sub"`
-		ID    any    `json:"id"`
+		Email    string `json:"email"`
+		Verified any    `json:"email_verified"`
+		Name     string `json:"name"`
+		Login    string `json:"login"`
+		Sub      string `json:"sub"`
+		ID       any    `json:"id"`
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -404,11 +428,15 @@ func fetchOIDCUserInfo(ctx context.Context, p *oidc.Provider, tok *oauth2.Token)
 		return "", "", "", false
 	}
 	var ui struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
+		Email    string `json:"email"`
+		Verified any    `json:"email_verified"`
+		Name     string `json:"name"`
 	}
 	if err := userInfo.Claims(&ui); err != nil {
 		return "", "", "", false
+	}
+	if emailMarkedUnverified(ui.Verified) {
+		ui.Email = ""
 	}
 	return ui.Email, ui.Name, userInfo.Subject, true
 }
