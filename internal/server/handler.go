@@ -898,6 +898,10 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := s.serviceDoProxy(svc, r, cred)
+	if errors.Is(err, errOutsideService) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Proxy error: %v", err), http.StatusBadGateway)
 		return

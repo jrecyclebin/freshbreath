@@ -1568,3 +1568,41 @@ func TestProxyMissingActsAsCredentialIs401(t *testing.T) {
 		t.Errorf("WWW-Authenticate = %q, want an invalid_token challenge", ch)
 	}
 }
+
+// The proxy keeps a call under the service's base path, and cookies stay
+// on this server's side in both directions.
+func TestServiceProxyStaysInsideService(t *testing.T) {
+	var gotPath, gotCookie string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotCookie = r.URL.Path, r.Header.Get("Cookie")
+		http.SetCookie(w, &http.Cookie{Name: "frbr_gate", Value: "upstream"})
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "proxy-bounds")
+	setAppGate(t, srv, nonce, builtinAuth(t, srv, db.AuthAnonymous).ID)
+	id := registerService(t, srv, "bounded", upstream.URL+"/v1/allowed", db.ServiceDescriptor{Type: "api", Proxied: true})
+	linkServiceToApp(t, srv, nonce, id)
+	hdr := map[string]string{"X-App-Nonce": nonce, "Cookie": "frbr_gate=mine"}
+
+	rr := testRequest(t, srv, "GET", "/service/"+id+"/items/1", nil, hdr)
+	if rr.Code != 200 || gotPath != "/v1/allowed/items/1" {
+		t.Fatalf("inside call: status %d, upstream path %q", rr.Code, gotPath)
+	}
+	if gotCookie != "" {
+		t.Errorf("browser cookies forwarded upstream: %q", gotCookie)
+	}
+	if rr.Header().Get("Set-Cookie") != "" {
+		t.Errorf("upstream Set-Cookie passed through: %q", rr.Header().Get("Set-Cookie"))
+	}
+
+	for _, p := range []string{"..%2F..%2Fsecret", "%2e%2e/%2e%2e/secret", "a/..%2F..%2F..%2Fsecret"} {
+		gotPath = ""
+		rr := testRequest(t, srv, "GET", "/service/"+id+"/"+p, nil, hdr)
+		if rr.Code != 400 || gotPath != "" {
+			t.Errorf("%s: status %d, upstream saw %q; want 400 and no upstream call", p, rr.Code, gotPath)
+		}
+	}
+}
