@@ -31,12 +31,15 @@ import (
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if origin := r.Header.Get("Origin"); origin != "" {
-		if !s.originAllowed(r, origin) {
+		allowed, withCookies := s.originAllowed(r, origin)
+		if !allowed {
 			http.Error(w, "Origin not allowed", http.StatusForbidden)
 			return
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		if withCookies {
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 		// A proxied MCP session lives in this header; the browser's MCP
 		// client must be able to read it back.
 		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
@@ -66,38 +69,62 @@ func appRegisteredOrigin(app *db.App) string {
 	return appURL.Scheme + "://" + appURL.Host
 }
 
-// originAllowed checks whether the request's Origin should be permitted.
-// Same-origin requests (Origin matches scheme://r.Host) are always allowed.
-// file:// pages (Origin: null) are always allowed.
-// Cross-origin requests are allowed if the origin is in the allowedOrigins map
-// (built from app URLs on startup and after app changes).
-func (s *Server) originAllowed(r *http.Request, origin string) bool {
+// appAllowsFilePages reports whether an app was registered for pages
+// opened from disk: its URL is a file: URL. Only such an app may be
+// called with cookies from the opaque "null" origin, and only its logins
+// are handed back to any opener — every sandboxed frame on the web also
+// sends Origin: null, so this has to be the admin's explicit choice.
+func appAllowsFilePages(app *db.App) bool {
+	return app != nil && len(app.URL) >= 5 && strings.EqualFold(app.URL[:5], "file:")
+}
+
+// requestAppNonce reads the app nonce a cross-origin request names: the
+// X-App-Nonce header, the app_nonce query parameter, or a bare query
+// nonce (/frbr.js?XXXX).
+func requestAppNonce(r *http.Request) string {
+	if n := r.Header.Get("X-App-Nonce"); n != "" {
+		return n
+	}
+	if n := r.URL.Query().Get("app_nonce"); n != "" {
+		return n
+	}
+	if rq := r.URL.RawQuery; rq != "" && !strings.Contains(rq, "=") {
+		return rq
+	}
+	return ""
+}
+
+// originAllowed checks whether the request's Origin should be permitted,
+// and whether the response may be read on a request that carried cookies.
+//
+//   - Same-origin requests (Origin matches scheme://r.Host): yes, with cookies.
+//   - Origin: null (file:// pages, but also any sandboxed frame): allowed,
+//     with cookies only for an app registered with a file: URL.
+//   - Any other origin: only the registered origin of the app the request
+//     names, with cookies.
+func (s *Server) originAllowed(r *http.Request, origin string) (allowed, withCookies bool) {
 	// Always allow the OPTIONS call to go through, we gate everything else
 	if r.Method == http.MethodOptions {
-		return true
+		return true, true
 	}
-	// Local file:/// always allowed
-	if origin == "null" {
-		return true
-	}
-	// Same-origin — always fine.
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
 	}
 	if scheme+"://"+r.Host == origin {
-		return true
+		return true, true
 	}
-	// For everything else, expect an app nonce and ensure only the
-	// app's registered URL is allowed.
-	appNonce := r.Header.Get("X-App-Nonce")
-	if appNonce == "" {
-		appNonce = r.URL.RawQuery
+	app, err := s.store.GetApp(requestAppNonce(r))
+	if err != nil {
+		app = nil
 	}
-	if app, err := s.store.GetApp(appNonce); err == nil {
-		return appRegisteredOrigin(app) == origin
+	if origin == "null" {
+		return true, appAllowsFilePages(app)
 	}
-	return false
+	if app != nil && appRegisteredOrigin(app) == origin {
+		return true, true
+	}
+	return false, false
 }
 
 func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {

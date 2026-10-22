@@ -246,9 +246,25 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	return "", nil
 }
 
+// loginOpenerOrigin is the only window origin a finished browser login may
+// be posted to: the app's registered origin, or this server's for hosted
+// apps and the control panel. "*" is reserved for apps registered with a
+// file: URL, whose pages have no origin to name — anyone could otherwise
+// open a login in a window of their own and receive what it posts.
+func loginOpenerOrigin(r *http.Request, app *db.App) string {
+	if appAllowsFilePages(app) {
+		return "*"
+	}
+	if o := appRegisteredOrigin(app); o != "" {
+		return o
+	}
+	return schemeOf(r) + "://" + r.Host
+}
+
 // writeCallbackPage hands a finished browser login back to the app.
 // entry is the frbr:auth:* store record; frbr.js stamps written_at and
-// persists it. Correlation is by state; the listener pins the origin.
+// persists it. Correlation is by state; the message only goes to
+// p.opener, and the listener pins the origin too.
 //
 // A popup flow has an opener to postMessage to. A top-level flow — the
 // auto-login redirect — does not, so the page writes the store itself
@@ -277,7 +293,7 @@ func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}
         type: "auth-complete",
         state: %s,
         entry: entry,
-      }, "*");
+      }, %s);
       return;
     }
     entry.written_at = new Date().toISOString();
@@ -290,7 +306,7 @@ func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}
     }
     %s
   })();
-</script>`, lead, string(entryJSON), scriptString(p.appState), redirect)))
+</script>`, lead, string(entryJSON), scriptString(p.appState), scriptString(p.opener), redirect)))
 }
 
 // withQuery adds params to a redirect URI, keeping any query it already
@@ -507,6 +523,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		appNonce:  appNonce,
 		appState:  utils.GenNonce(),
 		returnTo:  withSigninStamp(withoutSigninStamp(r.URL), time.Now()),
+		opener:    schemeOf(r) + "://" + r.Host, // a page on this origin asked
 		legs:      legs,
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
@@ -772,6 +789,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		appNonce:  nonce,
 		appState:  appState,
 		returnTo:  ret,
+		opener:    loginOpenerOrigin(r, app),
 		legs:      todo,
 		done:      done,
 		gateID:    legs[0].ID,

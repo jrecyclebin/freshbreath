@@ -101,6 +101,7 @@ type pendingAuth struct {
 	appNonce string // requesting app (or adminNonce); "" for MCP flows
 	appState string // opener's correlation state (browser flows)
 	returnTo string // same-origin path to bounce a top-level login back to
+	opener   string // origin the finished login is posted to (see loginOpenerOrigin)
 	mcpKey   string // key into mcpAuthPending; "" for browser flows
 
 	legs      []*db.AuthRecord // records still to clear, in order

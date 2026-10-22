@@ -20,9 +20,9 @@ let APP_NONCE = CFG.appNonce ?? null; // let: re-derived if the server couldn't 
 // behind the Anonymous record, or an instance still in setup.
 let GATE_ID = CFG.authRecordID ?? 0; // let: re-derived alongside APP_NONCE
 
-// The origin our callback page will post from. The page posts to "*"
-// because it cannot know its opener's origin; the listener is the half
-// that can be strict, so this is where strictness goes.
+// The origin our callback page will post from. The page posts only to the
+// app's own origin ("*" just for apps registered with a file: URL, which
+// have none); the listener checks the sender's origin as well.
 const FRBR_ORIGIN = new URL(API || window.location.href, window.location.href).origin;
 
 // resolveFromLocation: when the server couldn't derive our app from Referer

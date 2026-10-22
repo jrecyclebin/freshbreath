@@ -84,6 +84,13 @@ For `file://` apps use the full server URL with the nonce; the server can't
 infer the app from a `file://` page. For apps hosted on the server's own
 origin, `/frbr.js` is enough.
 
+A `file://` page also needs its app's **URL set to a `file:` URL** (for
+example `file:///home/me/myapp/index.html`) in the control panel. A page
+opened from disk has no origin of its own — the browser reports it as
+`null`, the same as any sandboxed frame on the web — so the server only
+hands logins and refresh cookies to such a page when the admin has said
+this app is one.
+
 ### The page gate
 
 If your app is hosted on the server and has a gate, the server enforces it
@@ -325,8 +332,8 @@ is, so a file's text arrives byte for byte.
 
 - **App nonce** comes from `/api/apps` — a 10-character random string.
 - **Service URL** must match a service registered *and linked to your app*.
-- **`file://` apps**: the server must be running, and assigned services must
-  be proxied.
+- **`file://` apps**: the server must be running, assigned services must
+  be proxied, and the app's URL must be a `file:` URL.
 - **Sharing the store**: apps served from the Fresh Breath origin share one
   store, which is what lets a second app skip the prompt. Apps served from their
   own origins don't, and will prompt separately.

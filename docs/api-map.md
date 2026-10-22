@@ -11,7 +11,8 @@ Routes are registered in `internal/server/server.go` → `SetupRoutes()`
 - All JSON request/response bodies unless noted. Errors are plain-text (`http.Error`)
   or bearer-challenge JSON on 401s (RFC 6750 / RFC 9470 fields, mirrored in body).
 - `X-App-Nonce` header (or `?app_nonce=`) identifies which app is calling; CORS is
-  origin-gated per app (registered app URL, same-origin, or `file://`'s `null`).
+  origin-gated per app (registered app URL, same-origin, or `file://`'s `null` —
+  readable with cookies only for apps whose URL is a `file:` URL).
 - Role gate: `anyRole` = Superuser/Admin/Member/Read-only · `admin+` = Superuser/Admin ·
   `superuser` = Superuser only. Writes on services/auth records are additionally
   gated by the resource's member list (`core*` functions).
