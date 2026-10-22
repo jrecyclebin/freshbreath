@@ -434,6 +434,15 @@ func (s *Server) coreDBQuery(actor *db.User, target string, req dbQueryRequest, 
 	if err := s.gateDBTarget(actor, target); err != nil {
 		return nil, err
 	}
+	// A Read-only account reads, whichever face it came through: the
+	// read-only pool refuses writes in the engine itself.
+	if denied := s.gateWrite(actor); denied != nil {
+		res, err := s.runDBQuery(target, req, true)
+		if isReadonlyWriteErr(err) {
+			return nil, denied
+		}
+		return res, err
+	}
 	return s.runDBQuery(target, req, ro)
 }
 
@@ -721,6 +730,9 @@ func (s *Server) coreDBList(actor *db.User, target string) ([]dbDBInfo, error) {
 }
 
 func (s *Server) coreDBDelete(actor *db.User, target, name string) error {
+	if err := s.gateWrite(actor); err != nil {
+		return err
+	}
 	if err := s.gateDBTarget(actor, target); err != nil {
 		return err
 	}

@@ -323,3 +323,39 @@ func TestServiceFileActURLNeedsMembership(t *testing.T) {
 		t.Errorf("file was written")
 	}
 }
+
+// A Read-only member of an app can read it but change nothing: not its
+// files, its deployments, its service definition or its database.
+func TestReadOnlyMemberCannotWrite(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	nonce, err := srv.store.CreateApp("Notes", "Development", "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.coreWriteAppFile(&db.User{ID: -1, Role: "Superuser"}, nonce, "web", "index.html", []byte("<p>hi</p>"), ""); err != nil {
+		t.Fatal(err)
+	}
+	viewer := mustUser(t, srv, "Vic", "Read-only", "Active")
+	if err := srv.store.SetUserApps(viewer.ID, []string{nonce}); err != nil {
+		t.Fatal(err)
+	}
+	base := "/api/apps/" + nonce
+
+	for _, c := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"GET", base + "/web?file=index.html", "", http.StatusOK},
+		{"PUT", base + "/web?file=index.html", "<script></script>", http.StatusForbidden},
+		{"DELETE", base + "/web?file=index.html", "", http.StatusForbidden},
+		{"DELETE", base + "/web", "", http.StatusForbidden},
+		{"POST", base + "/deploy", `{"target":"prod"}`, http.StatusForbidden},
+		{"PUT", "/api/apps/" + nonce + "/service/files", "[t] x\nGET https://x.example\n", http.StatusForbidden},
+		{"POST", base + "/db/query", `{"sql":"CREATE TABLE t (x)"}`, http.StatusForbidden},
+	} {
+		if rr := requestAs(t, srv, viewer, c.method, c.path, c.body); rr.Code != c.want {
+			t.Errorf("%s %s as Read-only member: got %d, want %d (%s)", c.method, c.path, rr.Code, c.want, rr.Body.String())
+		}
+	}
+}

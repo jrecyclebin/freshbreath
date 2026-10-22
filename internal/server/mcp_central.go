@@ -921,7 +921,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			}
 			// Gate at mint time so a non-member gets a clear error instead of a
 			// URL that 403s at dispatch. coreWriteAppFile gates on the mcp path.
-			if err := s.gateApp(user, nonce); err != nil {
+			if err := s.gateAppWrite(user, nonce); err != nil {
 				return mcpToolError("%v", err), nil
 			}
 			if _, err := s.appFileDir(nonce, area); err != nil {
@@ -1145,6 +1145,9 @@ func (s *Server) registerServiceTools(mcps *mcp.Server, role string) {
 			}
 			// Gate at mint time so a non-member gets a clear error instead of a
 			// URL that 403s at dispatch. coreWriteServiceFile gates on the PUT.
+			if err := s.gateWrite(user); err != nil {
+				return mcpToolError("%v", err), nil
+			}
 			if _, err := s.definitionService(user, svc.ID); err != nil {
 				return mcpToolError("%v", err), nil
 			}

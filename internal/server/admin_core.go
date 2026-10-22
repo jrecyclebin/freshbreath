@@ -137,6 +137,24 @@ func (s *Server) gateApp(actor *db.User, nonce string) error {
 	return nil
 }
 
+// gateWrite refuses Read-only accounts. Membership decides which apps and
+// services a user reaches; this decides whether they may change them.
+func (s *Server) gateWrite(actor *db.User) error {
+	if actor != nil && actor.Role == "Read-only" {
+		return cerr(http.StatusForbidden, "forbidden: read-only accounts can't make changes")
+	}
+	return nil
+}
+
+// gateAppWrite is gateApp for operations that change an app's files or
+// deployments: Read-only members can look but not touch.
+func (s *Server) gateAppWrite(actor *db.User, nonce string) error {
+	if err := s.gateWrite(actor); err != nil {
+		return err
+	}
+	return s.gateApp(actor, nonce)
+}
+
 // gateServiceFile returns a 403 *coreErr unless the actor is Admin+ or one
 // of the service's members — the users an admin has trusted with its
 // definition file. The service-file twin of gateApp.
@@ -1103,7 +1121,7 @@ type uploadFile struct {
 // and a dropped folder all publish the same way. Everything is validated
 // before the old files are cleared.
 func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFile) (string, error) {
-	if err := s.gateApp(actor, nonce); err != nil {
+	if err := s.gateAppWrite(actor, nonce); err != nil {
 		return "", err
 	}
 	app, err := s.store.GetApp(nonce)
@@ -1257,7 +1275,7 @@ func (s *Server) coreUploadAppData(actor *db.User, nonce string, files []uploadF
 // coreDeleteAppWeb removes an app's web directory (the Development slot).
 // Staging/production deploy records survive: what's live elsewhere stays live.
 func (s *Server) coreDeleteAppWeb(actor *db.User, nonce string) error {
-	if err := s.gateApp(actor, nonce); err != nil {
+	if err := s.gateAppWrite(actor, nonce); err != nil {
 		return err
 	}
 	app, err := s.store.GetApp(nonce)
@@ -1293,7 +1311,7 @@ var deploySlotDirs = map[string]string{
 // entirely. Source may be dev or staging (dev when empty); target staging or
 // prod. Returns the deployed slot's URL route.
 func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (string, error) {
-	if err := s.gateApp(actor, nonce); err != nil {
+	if err := s.gateAppWrite(actor, nonce); err != nil {
 		return "", err
 	}
 	if source == "" {
@@ -1510,7 +1528,7 @@ func replaceUniqueText(src, old, repl []byte) ([]byte, error) {
 // of oldText in the existing file is replaced with data. Only web writes count
 // as a publish (LastUploaded, hosted routes).
 func (s *Server) coreWriteAppFile(actor *db.User, nonce, area, filePath string, data []byte, oldText string) error {
-	if err := s.gateApp(actor, nonce); err != nil {
+	if err := s.gateAppWrite(actor, nonce); err != nil {
 		return err
 	}
 	app, err := s.store.GetApp(nonce)
@@ -1571,7 +1589,7 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, area, filePath string, 
 
 // coreDeleteAppFile removes a single file from an app's web or data area.
 func (s *Server) coreDeleteAppFile(actor *db.User, nonce, area, filePath string) error {
-	if err := s.gateApp(actor, nonce); err != nil {
+	if err := s.gateAppWrite(actor, nonce); err != nil {
 		return err
 	}
 	app, err := s.store.GetApp(nonce)
@@ -1758,6 +1776,9 @@ func (s *Server) coreDownloadServiceFiles(actor *db.User, id int64) ([]byte, str
 // Only tasks and virtual services support file publishing; they each accept a
 // single plain-text file stored in their existing definition directory.
 func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, filename string) (string, error) {
+	if err := s.gateWrite(actor); err != nil {
+		return "", err
+	}
 	svc, err := s.definitionService(actor, id)
 	if err != nil {
 		return "", err
@@ -1783,6 +1804,9 @@ func (s *Server) coreUploadServiceFiles(actor *db.User, id int64, data []byte, f
 // coreDeleteServiceFiles removes a service's published definition file.
 // Only tasks and virtual services support file publishing.
 func (s *Server) coreDeleteServiceFiles(actor *db.User, id int64) error {
+	if err := s.gateWrite(actor); err != nil {
+		return err
+	}
 	svc, err := s.definitionService(actor, id)
 	if err != nil {
 		return err
@@ -1845,6 +1869,9 @@ func (s *Server) coreStatServiceFile(actor *db.User, id int64) (int64, string, e
 // file. If oldText is empty the entire file is replaced. Otherwise the single
 // occurrence of oldText in the existing file is replaced with data.
 func (s *Server) coreWriteServiceFile(actor *db.User, id int64, data []byte, oldText string) error {
+	if err := s.gateWrite(actor); err != nil {
+		return err
+	}
 	svc, err := s.definitionService(actor, id)
 	if err != nil {
 		return err
