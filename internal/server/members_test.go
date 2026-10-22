@@ -359,3 +359,32 @@ func TestReadOnlyMemberCannotWrite(t *testing.T) {
 		}
 	}
 }
+
+// Reading an SSH key over HTTP returns its public half only.
+func TestSSHKeyReadOmitsPrivateKey(t *testing.T) {
+	srv := newTestServer(t)
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	user := mustUser(t, srv, "Ula", "Member", "Active")
+	if _, err := srv.coreGenerateSSHKey(admin, user, "passphrase-123"); err != nil {
+		t.Fatal(err)
+	}
+	user, _ = srv.store.GetUser(user.ID)
+	for _, c := range []struct {
+		as   *db.User
+		path string
+	}{
+		{user, "/api/me/ssh-key"},
+		{admin, "/api/users/" + strconv.FormatInt(user.ID, 10) + "/ssh-key"},
+	} {
+		rr := requestAs(t, srv, c.as, "GET", c.path, "")
+		body := rr.Body.String()
+		if rr.Code != 200 || !strings.Contains(body, "public_key") {
+			t.Fatalf("GET %s: %d %s", c.path, rr.Code, body)
+		}
+		for _, field := range []string{"encrypted_secret", "salt", "nonce"} {
+			if strings.Contains(body, `"`+field+`"`) {
+				t.Errorf("GET %s exposes %s", c.path, field)
+			}
+		}
+	}
+}

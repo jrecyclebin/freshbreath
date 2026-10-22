@@ -2408,9 +2408,11 @@ func (s *Server) handleUserSSHKey(w http.ResponseWriter, r *http.Request, userID
 
 	switch r.Method {
 	case http.MethodGet:
-		info := (*sshkit.SSHKeyInfo)(nil)
-		if user.Metadata != nil && user.Metadata.SSHKey != nil {
-			info = user.Metadata.SSHKey
+		// Public fields only: the sealed private key and its KDF salt
+		// never leave the server (the MCP tools answer the same way).
+		var info *sshkit.SSHKeyInfo
+		if user.Metadata != nil {
+			info = publicSSHInfo(user.Metadata.SSHKey)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"ssh_key": info})
