@@ -368,8 +368,8 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 		recIDs = append(recIDs, strconv.FormatInt(rec.ID, 10))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	page := strings.Replace(authorizeInterstitialHTML, "{{STATE}}", contState, 1)
-	page = strings.Replace(page, "{{RECORD_IDS}}", strings.Join(recIDs, ","), 1)
+	page := strings.Replace(authorizeInterstitialHTML, "{{STATE}}", scriptString(contState), 1)
+	page = strings.Replace(page, "{{RECORD_IDS}}", scriptString(strings.Join(recIDs, ",")), 1)
 	w.Write([]byte(page))
 }
 
@@ -456,8 +456,8 @@ var authorizeInterstitialHTML = authPage("Authorizing", `
 </div>
 <script>
 (function(){
-  var state = "{{STATE}}";
-  var ids = "{{RECORD_IDS}}".split(",").filter(Boolean);
+  var state = {{STATE}};
+  var ids = {{RECORD_IDS}}.split(",").filter(Boolean);
   var tokens = [];
   for (var i = 0; i < ids.length; i++) {
     try {

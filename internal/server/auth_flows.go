@@ -262,7 +262,7 @@ func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}
 	redirect := ""
 	if p.returnTo != "" {
 		lead = "Returning to the app…"
-		redirect = fmt.Sprintf("window.location.replace(%q);", p.returnTo)
+		redirect = fmt.Sprintf("window.location.replace(%s);", scriptString(p.returnTo))
 	}
 	io.WriteString(w, authPage("Signed in", fmt.Sprintf(`
 <div>
@@ -275,7 +275,7 @@ func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}
     if (window.opener && !window.opener.closed) {
       window.opener.postMessage({
         type: "auth-complete",
-        state: %q,
+        state: %s,
         entry: entry,
       }, "*");
       return;
@@ -290,8 +290,22 @@ func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}
     }
     %s
   })();
-</script>`, lead, string(entryJSON), p.appState, redirect)))
+</script>`, lead, string(entryJSON), scriptString(p.appState), redirect)))
 }
+
+// scriptString renders s as a JavaScript string literal that is safe inside
+// an inline <script>: JSON quotes and escapes it, and < and > become \u
+// escapes so no value can close the script element. & stays as it is —
+// harmless in a script, and return paths keep their query strings readable.
+func scriptString(s string) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.Encode(s)
+	return scriptUnsafe.Replace(strings.TrimSuffix(b.String(), "\n"))
+}
+
+var scriptUnsafe = strings.NewReplacer("<", `\u003c`, ">", `\u003e`, "\u2028", `\u2028`, "\u2029", `\u2029`)
 
 // returnAllowed judges a login's return target the way the CORS check
 // judges an Origin: a relative path is this origin's own, and an absolute
@@ -947,7 +961,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(strings.Replace(sshAuthFormHTML, "{{STATE}}", state, 1)))
+		w.Write([]byte(strings.Replace(sshAuthFormHTML, "{{STATE}}", scriptString(state), 1)))
 
 	case http.MethodPost:
 		var req struct {
@@ -1025,7 +1039,7 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(strings.Replace(apiKeyAuthFormHTML, "{{STATE}}", state, 1)))
+		w.Write([]byte(strings.Replace(apiKeyAuthFormHTML, "{{STATE}}", scriptString(state), 1)))
 
 	case http.MethodPost:
 		var req struct {
@@ -1154,7 +1168,7 @@ var sshAuthFormHTML = authPage("Sign in", `
 </form>
 <script>`+authFormScript+`
 (function(){
-  var state="{{STATE}}";
+  var state={{STATE}};
   document.getElementById('f').onsubmit=function(ev){
     ev.preventDefault();
     var btn=document.getElementById('btn'), errEl=document.getElementById('err');
@@ -1273,7 +1287,7 @@ var apiKeyAuthFormHTML = authPage("API key", `
 </form>
 <script>`+authFormScript+`
 (function(){
-  var state="{{STATE}}";
+  var state={{STATE}};
   document.getElementById('f').onsubmit=function(ev){
     ev.preventDefault();
     var btn=document.getElementById('btn'), errEl=document.getElementById('err');

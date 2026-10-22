@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -117,5 +118,29 @@ func TestMCPPendingExpiry(t *testing.T) {
 	}
 	if _, found := srv.mcpAuthPending.Load("mcp-key"); found {
 		t.Fatal("expired MCP entry should be deleted on lookup")
+	}
+}
+
+// Values a request supplies must not be able to end the inline script on a
+// login page: they render as JSON string literals, with < and > escaped.
+func TestLoginPagesEncodeRequestValues(t *testing.T) {
+	srv := newTestServer(t)
+	hostile := `"</script><b>x`
+
+	for _, path := range []string{"/service/ssh-auth", "/service/apikey-auth"} {
+		rec := testRequest(t, srv, "GET", path+"?state="+url.QueryEscape(hostile), nil, nil)
+		body := rec.Body.String()
+		if strings.Contains(body, "</script><b>") {
+			t.Fatalf("%s: request value reached the page unencoded", path)
+		}
+		if !strings.Contains(body, "var state=\"\\\"\\u003c/script\\u003e\\u003cb\\u003ex\";") {
+			t.Fatalf("%s: state not rendered as a JSON string literal: %s", path, body)
+		}
+	}
+
+	var page strings.Builder
+	writeCallbackPage(&page, &pendingAuth{appState: hostile, returnTo: "/app/" + hostile}, map[string]interface{}{"v": 1})
+	if strings.Contains(page.String(), "</script><b>") {
+		t.Fatal("callback page: state or return path reached the page unencoded")
 	}
 }
