@@ -673,8 +673,8 @@ func TestUpdateApplyPartialFailureOtherFeedsContinue(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "applypartial")
 	cleanupSlotApp(t, srv, nonce)
-	registerService(t, srv, "ptsvc", "tasks://ptsvc", db.ServiceDescriptor{Type: "tasks"})
-	t.Cleanup(func() { os.Remove(filepath.Join(srv.config.DataDir, "tasks", "ptsvc.txt")) })
+	registerService(t, srv, "ptsvc", "/mcp/ptsvc", db.ServiceDescriptor{Type: "virtual"})
+	t.Cleanup(func() { os.Remove(filepath.Join(srv.config.DataDir, "virtual", "ptsvc.txt")) })
 
 	// Feed A: op 0 lands, op 1 fails mid-execution — its source is a
 	// directory, which passes validation (stat ok) but fails at ReadFile.
@@ -718,7 +718,7 @@ func TestUpdateApplyPartialFailureOtherFeedsContinue(t *testing.T) {
 		t.Error("partial failure did not record last_error")
 	}
 	// Good feed applied fully.
-	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "tasks", "ptsvc.txt")); got != "good def" {
+	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "virtual", "ptsvc.txt")); got != "good def" {
 		t.Errorf("ptsvc.txt = %q, want the good feed's definition", got)
 	}
 	stGood := feedState(t, srv, idGood)
@@ -1014,5 +1014,28 @@ func TestUpdateCheckGhostFeedPreMigration(t *testing.T) {
 	ups = checkUpdates(t, srv)
 	if len(ups) != 0 {
 		t.Fatalf("post-heal check = %+v, want none", ups)
+	}
+}
+
+// A feed replaces task scripts only on a Superuser's authority: its owner
+// must still be one when the feed is applied.
+func TestUpdateTaskServiceNeedsSuperuserOwner(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	registerService(t, srv, "jobs", "tasks://jobs", db.ServiceDescriptor{Type: "tasks"})
+	archiveDir := t.TempDir()
+	os.MkdirAll(filepath.Join(archiveDir, "services"), 0o755)
+	os.WriteFile(filepath.Join(archiveDir, "services", "jobs.txt"), []byte("[run]\ntrue\n"), 0o644)
+	ops := []UpdateOp{{Action: "update_service_files", Target: "jobs"}}
+
+	for owner, ok := range map[*db.User]bool{
+		{ID: 1, Role: "Superuser"}: true,
+		{ID: 2, Role: "Admin"}:     false,
+		nil:                        false,
+	} {
+		err := srv.validateUpdateOps(ops, archiveDir, owner)
+		if (err == nil) != ok {
+			t.Errorf("owner %+v: validate = %v, want ok=%v", owner, err, ok)
+		}
 	}
 }

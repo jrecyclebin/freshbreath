@@ -64,7 +64,7 @@ func TestServiceMemberEditsDefinitionFile(t *testing.T) {
 	srv.config.DataDir = t.TempDir()
 	admin := mustUser(t, srv, "Ada", "Admin", "Active")
 	member := mustUser(t, srv, "Mel", "Member", "Active")
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create service: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestServiceMemberEditsDefinitionFile(t *testing.T) {
 		t.Fatalf("assigned member read: got %d %q", rr.Code, rr.Body.String())
 	}
 	// Membership covers the file only, not the service record.
-	if rr := requestAs(t, srv, member, "PUT", "/api/services/"+strconv.FormatInt(svc.ID, 10), `{"name":"renamed","descriptor":{"type":"tasks"}}`); rr.Code != http.StatusForbidden {
+	if rr := requestAs(t, srv, member, "PUT", "/api/services/"+strconv.FormatInt(svc.ID, 10), `{"name":"renamed","descriptor":{"type":"virtual"}}`); rr.Code != http.StatusForbidden {
 		t.Fatalf("assigned member updating service: got %d, want 403", rr.Code)
 	}
 
@@ -307,7 +307,7 @@ func TestServiceFileActURLNeedsMembership(t *testing.T) {
 	srv.config.DataDir = t.TempDir()
 	admin := mustUser(t, srv, "Ada", "Admin", "Active")
 	member := mustUser(t, srv, "Mel", "Member", "Active")
-	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

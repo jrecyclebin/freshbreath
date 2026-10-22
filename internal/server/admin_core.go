@@ -155,6 +155,17 @@ func (s *Server) gateAppWrite(actor *db.User, nonce string) error {
 	return s.gateApp(actor, nonce)
 }
 
+// gateTaskService refuses anyone but a Superuser when a service is a task
+// service. Task scripts run as the server's own OS account, so creating,
+// changing or reading one is as good as owning the machine — that power
+// stays with the top role rather than every Admin or service member.
+func (s *Server) gateTaskService(actor *db.User, types ...string) error {
+	if slices.Contains(types, "tasks") {
+		return s.gate(actor, rolesSuperuser)
+	}
+	return nil
+}
+
 // gateServiceFile returns a 403 *coreErr unless the actor is Admin+ or one
 // of the service's members — the users an admin has trusted with its
 // definition file. The service-file twin of gateApp.
@@ -410,6 +421,9 @@ func (s *Server) coreCreateService(actor *db.User, name, url string, d db.Servic
 	if !db.ValidServiceType(d.Type) {
 		return nil, cerr(http.StatusBadRequest, "unknown service type %q", d.Type)
 	}
+	if err := s.gateTaskService(actor, d.Type); err != nil {
+		return nil, err
+	}
 	url = defaultServiceURL(url, name, d)
 	if url == "" {
 		return nil, cerr(http.StatusBadRequest, "url required")
@@ -446,6 +460,9 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	existing, err := s.store.GetService(id)
 	if err != nil {
 		return cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if err := s.gateTaskService(actor, existing.Descriptor.Type, d.Type); err != nil {
+		return err
 	}
 	if name == "" {
 		return cerr(http.StatusBadRequest, "name required")
@@ -493,6 +510,9 @@ func (s *Server) coreSetServiceMembers(actor *db.User, id int64, members []int64
 	svc, err := s.store.GetService(id)
 	if err != nil {
 		return cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	if err := s.gateTaskService(actor, svc.Descriptor.Type); err != nil {
+		return err
 	}
 	for _, uid := range members {
 		if _, err := s.store.GetUser(uid); err != nil {
@@ -569,6 +589,9 @@ func (s *Server) coreDeleteService(actor *db.User, id int64) error {
 	}
 	if svc.Descriptor.Type == "ssh" {
 		return cerr(http.StatusForbidden, "cannot delete built-in SSH service")
+	}
+	if err := s.gateTaskService(actor, svc.Descriptor.Type); err != nil {
+		return err
 	}
 	if err := s.store.DeleteService(id); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
@@ -1735,6 +1758,10 @@ func (s *Server) definitionService(actor *db.User, id int64) (*db.Service, error
 	svc, err := s.store.GetService(id)
 	if err != nil {
 		return nil, cerr(http.StatusNotFound, "service not found: %v", err)
+	}
+	// Membership grants a virtual definition; a task script is Superuser's.
+	if err := s.gateTaskService(actor, svc.Descriptor.Type); err != nil {
+		return nil, err
 	}
 	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
 		return nil, cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)

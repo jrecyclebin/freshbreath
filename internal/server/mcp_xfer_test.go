@@ -902,7 +902,7 @@ func TestMCPWriteAppFilePatchStaysInline(t *testing.T) {
 
 func TestMCPReadServiceFileTransportHTTP(t *testing.T) {
 	srv := newTestServer(t)
-	idStr := registerService(t, srv, "rsvc", "http://rsvc", db.ServiceDescriptor{Type: "tasks"})
+	idStr := registerService(t, srv, "rsvc", "http://rsvc", db.ServiceDescriptor{Type: "virtual"})
 	id := parseServiceID(t, idStr)
 	content := []byte("task one\ntask two\n")
 	if err := srv.coreWriteServiceFile(&db.User{ID: 1, Role: "Superuser"}, id, content, ""); err != nil {
@@ -935,7 +935,7 @@ func TestMCPReadServiceFileTransportHTTP(t *testing.T) {
 
 func TestMCPReadServiceFileThresholdEscape(t *testing.T) {
 	srv := newTestServer(t)
-	idStr := registerService(t, srv, "tsvc", "http://tsvc", db.ServiceDescriptor{Type: "tasks"})
+	idStr := registerService(t, srv, "tsvc", "http://tsvc", db.ServiceDescriptor{Type: "virtual"})
 	id := parseServiceID(t, idStr)
 	body := bytes.Repeat([]byte("T"), 12000)
 	if err := srv.coreWriteServiceFile(&db.User{ID: 1, Role: "Superuser"}, id, body, ""); err != nil {
@@ -964,7 +964,7 @@ func TestMCPReadServiceFileThresholdEscape(t *testing.T) {
 
 func TestMCPReadServiceFileChunkedStaysInline(t *testing.T) {
 	srv := newTestServer(t)
-	idStr := registerService(t, srv, "csvc", "http://csvc", db.ServiceDescriptor{Type: "tasks"})
+	idStr := registerService(t, srv, "csvc", "http://csvc", db.ServiceDescriptor{Type: "virtual"})
 	id := parseServiceID(t, idStr)
 	if err := srv.coreWriteServiceFile(&db.User{ID: 1, Role: "Superuser"}, id, bytes.Repeat([]byte("T"), 12000), ""); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -983,7 +983,7 @@ func TestMCPReadServiceFileChunkedStaysInline(t *testing.T) {
 
 func TestMCPWriteServiceFileTransportHTTP(t *testing.T) {
 	srv := newTestServer(t)
-	idStr := registerService(t, srv, "wsvc", "http://wsvc", db.ServiceDescriptor{Type: "tasks"})
+	idStr := registerService(t, srv, "wsvc", "http://wsvc", db.ServiceDescriptor{Type: "virtual"})
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
 		"name": "wsvc", "new_text": "ignored", "transport": "http",
 	})
@@ -1013,7 +1013,7 @@ func TestMCPWriteServiceFileTransportHTTP(t *testing.T) {
 
 func TestMCPWriteServiceFileTransportHTTPRejectsPatch(t *testing.T) {
 	srv := newTestServer(t)
-	registerService(t, srv, "wpsvc", "http://wpsvc", db.ServiceDescriptor{Type: "tasks"})
+	registerService(t, srv, "wpsvc", "http://wpsvc", db.ServiceDescriptor{Type: "virtual"})
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{
 		"name": "wpsvc", "new_text": "new", "old_text": "old", "transport": "http",
 	})
@@ -1024,7 +1024,7 @@ func TestMCPWriteServiceFileTransportHTTPRejectsPatch(t *testing.T) {
 
 func TestMCPWriteServiceFileLargeNoThreshold(t *testing.T) {
 	srv := newTestServer(t)
-	idStr := registerService(t, srv, "bwsvc", "http://bwsvc", db.ServiceDescriptor{Type: "tasks"})
+	idStr := registerService(t, srv, "bwsvc", "http://bwsvc", db.ServiceDescriptor{Type: "virtual"})
 	id := parseServiceID(t, idStr)
 	big := bytes.Repeat([]byte("S"), 12000)
 	res := callCentralTool(t, srv, "write_service_file", map[string]interface{}{

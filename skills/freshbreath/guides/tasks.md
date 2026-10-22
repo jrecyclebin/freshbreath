@@ -8,9 +8,10 @@ Input to each of these tools happens through environment variables. Output from
 these scripts happens on stdout. (Or stderr in the case of errors.)
 
 The tool scripts for a task service are contained in a single text file which
-can be uploaded using the `write_service_file` MCP tool. Admins can write any
-service's file; anyone else needs an admin to add them to the service's
-members. A sample tool script looks like this:
+can be uploaded using the `write_service_file` MCP tool. Task scripts run as
+the server's own OS account, so only a **Superuser** can create a task
+service or read and write its file — Admins and service members can't.
+A sample tool script looks like this:
 
 ```
 [tool-name] Tool description here.

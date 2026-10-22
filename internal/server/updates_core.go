@@ -134,7 +134,7 @@ func (op UpdateOp) opSource() string {
 // archive before the first one executes: targets must exist, sources must be
 // in the tarball, slots default to staging. A validation failure touches
 // nothing — "feed refused before it started" beats "half-applied feed."
-func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string) error {
+func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.User) error {
 	for i, op := range ops {
 		switch op.Action {
 		case "update_app_files":
@@ -155,6 +155,11 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string) error {
 			}
 			if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
 				return fmt.Errorf("op %d: service type %q does not support file publishing", i, svc.Descriptor.Type)
+			}
+			// A feed replaces task scripts on its owner's authority, so the
+			// owner must still be someone allowed to write them.
+			if err := s.gateTaskService(owner, svc.Descriptor.Type); err != nil {
+				return fmt.Errorf("op %d: task service %s can only be updated by a feed a Superuser owns", i, op.Target)
 			}
 		default:
 			return fmt.Errorf("op %d: unknown action %q", i, op.Action)
@@ -674,7 +679,16 @@ func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, progress
 	}
 
 	// validate — every op, before the first one runs.
-	if err := s.validateUpdateOps(manifest.Ops, archiveDir); err != nil {
+	// The feed acts on its owner's authority, re-read now: a deleted or
+	// inactive owner has none. Setup mode has no users yet and is open to
+	// a synthetic Superuser everywhere, so it is here too.
+	var owner *db.User
+	if rec, err := s.adminAuthRecord(); err == nil && rec == nil {
+		owner = &db.User{ID: -1, Name: "Setup Account", Role: "Superuser", Status: "Active"}
+	} else if u, err := s.userFromSubject(subjectForUser(&db.User{ID: f.CreatedBy})); err == nil {
+		owner = u
+	}
+	if err := s.validateUpdateOps(manifest.Ops, archiveDir, owner); err != nil {
 		return fail("validate", err)
 	}
 	if err := emit(UpdateEvent{Event: "validate", Step: "validate", Ops: len(manifest.Ops), Status: "ok"}); err != nil {
@@ -809,6 +823,11 @@ func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []st
 			tw.Close()
 			gzw.Close()
 			return "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+		}
+		if err := s.gateTaskService(actor, svc.Descriptor.Type); err != nil {
+			tw.Close()
+			gzw.Close()
+			return "", err
 		}
 		data, err := os.ReadFile(serviceDefinitionPath(s.config.DataDir, svc))
 		if err != nil {

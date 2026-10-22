@@ -90,26 +90,46 @@ func TestCoreAuthoritySelfOrAdmin(t *testing.T) {
 	}
 }
 
-// TestCoreServiceFilesAuthority verifies that service file ops are Admin+ only.
+// TestCoreServiceFilesAuthority verifies that task service files are
+// Superuser only: neither a Member nor an Admin may read or change them.
 func TestCoreServiceFilesAuthority(t *testing.T) {
 	srv := newTestServer(t)
 	member := &db.User{ID: 1, Role: "Member"}
 	admin := &db.User{ID: 2, Role: "Admin"}
+	super := &db.User{ID: 3, Role: "Superuser"}
 
-	svc, err := srv.coreCreateService(admin, "tasksvc", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
+	if _, err := srv.coreCreateService(admin, "tasksvc", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil); !forbidden(err) {
+		t.Fatalf("create tasks service as Admin: got %v, want 403", err)
+	}
+	svc, err := srv.coreCreateService(super, "tasksvc", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
 		t.Fatalf("create tasks service: %v", err)
 	}
 
-	adminPlusOps := map[string]func() error{
-		"coreDownloadServiceFiles": func() error { _, _, e := srv.coreDownloadServiceFiles(member, svc.ID); return e },
-		"coreUploadServiceFiles":   func() error { _, e := srv.coreUploadServiceFiles(member, svc.ID, []byte("x"), "x.txt"); return e },
-		"coreDeleteServiceFiles":   func() error { return srv.coreDeleteServiceFiles(member, svc.ID) },
-	}
-	for name, op := range adminPlusOps {
-		if err := op(); !forbidden(err) {
-			t.Errorf("%s as Member: got %v, want 403 forbidden", name, err)
+	for _, actor := range []*db.User{member, admin} {
+		ops := map[string]func() error{
+			"coreDownloadServiceFiles": func() error { _, _, e := srv.coreDownloadServiceFiles(actor, svc.ID); return e },
+			"coreUploadServiceFiles":   func() error { _, e := srv.coreUploadServiceFiles(actor, svc.ID, []byte("x"), "x.txt"); return e },
+			"coreDeleteServiceFiles":   func() error { return srv.coreDeleteServiceFiles(actor, svc.ID) },
+			"coreUpdateService": func() error {
+				return srv.coreUpdateService(actor, svc.ID, svc.Name, svc.URL, svc.Descriptor, nil, nil)
+			},
+			"coreDeleteService": func() error { return srv.coreDeleteService(actor, svc.ID) },
 		}
+		for name, op := range ops {
+			if err := op(); !forbidden(err) {
+				t.Errorf("%s as %s: got %v, want 403 forbidden", name, actor.Role, err)
+			}
+		}
+	}
+
+	// An Admin can't turn a virtual service into a task service either.
+	v, err := srv.coreCreateService(admin, "virt", "", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
+	if err != nil {
+		t.Fatalf("create virtual service: %v", err)
+	}
+	if err := srv.coreUpdateService(admin, v.ID, v.Name, "", db.ServiceDescriptor{Type: "tasks"}, nil, nil); !forbidden(err) {
+		t.Errorf("virtual → tasks as Admin: got %v, want 403", err)
 	}
 }
 
@@ -118,7 +138,7 @@ func TestCoreServiceFilesAuthority(t *testing.T) {
 func TestServiceFileTasksCRUD(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &db.User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Superuser"} // task services are Superuser-only
 
 	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {
@@ -229,7 +249,7 @@ func TestServiceFileUnsupportedType(t *testing.T) {
 func TestServiceFileNoZip(t *testing.T) {
 	srv := newTestServer(t)
 	srv.config.DataDir = t.TempDir()
-	admin := &db.User{ID: 1, Role: "Admin"}
+	admin := &db.User{ID: 1, Role: "Superuser"} // task services are Superuser-only
 
 	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
 	if err != nil {

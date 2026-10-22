@@ -269,7 +269,7 @@ func TestActTokenAppFileDelete(t *testing.T) {
 
 func TestActTokenServiceFilePut(t *testing.T) {
 	srv := newTestServer(t)
-	id := registerService(t, srv, "act-tasks", "http://act-tasks", db.ServiceDescriptor{Type: "tasks"})
+	id := registerService(t, srv, "act-tasks", "http://act-tasks", db.ServiceDescriptor{Type: "virtual"})
 	ada := createActUser(t, srv)
 
 	tok, err := srv.mintActToken(ada, http.MethodPut, "/api/services/"+id+"/files", 5*time.Minute)

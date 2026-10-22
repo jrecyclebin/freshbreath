@@ -87,7 +87,8 @@ superuser so an agent can bootstrap the server.
 `set_service_members`, `list_service_files`, `read_service_file`,
 `write_service_file`, `delete_service_file` — services = OAuth/MCP/HTTP
 integrations with descriptors (`github`, `tasks`, `virtual`, …). Writes
-admin+ or service members.
+admin+ or service members — except task services, which only a Superuser
+may create, change, read or delete.
 
 **Auth-record tools** (`registerAuthTools`): `list_auth`, `create_auth`,
 `update_auth`, `delete_auth` — the login methods/credential records apps and

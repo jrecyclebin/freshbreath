@@ -47,7 +47,7 @@ not be exposed directly to the internet.
 |---|------|---------|-----|
 | 16 | Login return path | A return path starting `/\` is accepted; browsers treat it as another host. | Reject backslashes in return paths. |
 | 17 | CORS | The origin check uses the whole raw query string as the app nonce. | Read `app_nonce` from the query. (Folded into #3.) |
-| 18 | Admin boundary (**open**) | Admins can write task scripts, so Admin is effectively equal to Superuser and to the server's OS account. | Document this, or restrict task services to Superuser. |
+| 18 | Admin boundary | Admins could write task scripts, so Admin was effectively equal to Superuser and to the server's OS account. | Task services are Superuser-only: creating, changing, deleting, reading and writing them, and replacing them through update feeds (whose owner must be a Superuser when the feed is applied). |
 | 19 | Proxy headers (**open**) | `X-Forwarded-Proto` is trusted from any client. | Trust it only from configured proxies. |
 | 20 | `ssh_key` acts_as (**open**) | A stored private key is sent upstream as a bearer token when such a record backs an HTTP service. | Refuse `ssh_key` as acts_as for proxied HTTP services. |
 | 21 | Open registration (**open**) | Dynamic client registration has no rate limit. | Rate-limit registration and expire unused clients. |
