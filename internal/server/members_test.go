@@ -388,3 +388,19 @@ func TestSSHKeyReadOmitsPrivateKey(t *testing.T) {
 		}
 	}
 }
+
+// Only admins may forget a trusted SSH host key.
+func TestHostKeyDeleteIsAdminOnly(t *testing.T) {
+	srv := newTestServer(t)
+	member := mustUser(t, srv, "Mo", "Member", "Active")
+	if rr := requestAs(t, srv, member, "DELETE", "/api/ssh/known-hosts/example.com:22", ""); rr.Code == http.StatusNoContent {
+		t.Fatalf("Member deleted a host key: %d", rr.Code)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("DELETE", "/api/ssh/known-hosts/example.com:22", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userKey, member))
+	srv.handleSSHHostKeyDetail(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("Member past the app gate: got %d, want 403", rr.Code)
+	}
+}

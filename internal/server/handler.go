@@ -3024,6 +3024,12 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// The trusted host keys are shared by every user's sessions; forgetting
+	// one lets the next connection trust whatever answers. Admins only.
+	if err := s.gate(userFromContext(r.Context()), rolesAdminPlus); err != nil {
+		writeErr(w, err)
+		return
+	}
 
 	id := r.PathValue("id")
 	if id == "" {

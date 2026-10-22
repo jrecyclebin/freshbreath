@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/go-git/go-git/v5/plumbing/transport"
+
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
 )
@@ -63,8 +65,8 @@ func (s *Server) handleGitBranches(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, fmt.Errorf("%w: invalid JSON: %v", sshkit.ErrInvalidInput, err))
 		return
 	}
-	if req.URL == "" {
-		writeGitErr(w, fmt.Errorf("%w: url is required", sshkit.ErrInvalidInput))
+	if err := checkGitRemote(req.URL); err != nil {
+		writeGitErr(w, err)
 		return
 	}
 
@@ -96,8 +98,8 @@ func (s *Server) handleGitPull(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, fmt.Errorf("%w: invalid JSON: %v", sshkit.ErrInvalidInput, err))
 		return
 	}
-	if req.URL == "" {
-		writeGitErr(w, fmt.Errorf("%w: url is required", sshkit.ErrInvalidInput))
+	if err := checkGitRemote(req.URL); err != nil {
+		writeGitErr(w, err)
 		return
 	}
 
@@ -124,8 +126,8 @@ func (s *Server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, fmt.Errorf("%w: invalid JSON: %v", sshkit.ErrInvalidInput, err))
 		return
 	}
-	if req.URL == "" {
-		writeGitErr(w, fmt.Errorf("%w: url is required", sshkit.ErrInvalidInput))
+	if err := checkGitRemote(req.URL); err != nil {
+		writeGitErr(w, err)
 		return
 	}
 	if req.Message == "" {
@@ -151,6 +153,28 @@ func (s *Server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 		"status": "pushed",
 		"signed": true,
 	})
+}
+
+// gitRemoteSchemes are the transports the git endpoints will dial. file://
+// would read repositories on this machine and plain http:// any internal
+// web server, so only the two that reach a real git host are allowed.
+// Tests add "file" for their in-process repos.
+var gitRemoteSchemes = map[string]bool{"ssh": true, "https": true}
+
+// checkGitRemote validates a caller's git remote URL: present, parseable,
+// and over an allowed transport (scp-style git@host:path counts as ssh).
+func checkGitRemote(raw string) error {
+	if raw == "" {
+		return fmt.Errorf("%w: url is required", sshkit.ErrInvalidInput)
+	}
+	ep, err := transport.NewEndpoint(raw)
+	if err != nil {
+		return fmt.Errorf("%w: parse git url: %v", sshkit.ErrInvalidInput, err)
+	}
+	if !gitRemoteSchemes[ep.Protocol] {
+		return fmt.Errorf("%w: git url must use ssh or https, not %s", sshkit.ErrInvalidInput, ep.Protocol)
+	}
+	return nil
 }
 
 // resolveGitUser extracts the authenticated user from the request context and

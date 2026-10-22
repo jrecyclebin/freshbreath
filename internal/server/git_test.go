@@ -37,6 +37,7 @@ import (
 // without git on PATH.
 func TestMain(m *testing.M) {
 	client.InstallProtocol("file", server.NewClient(server.DefaultLoader))
+	gitRemoteSchemes["file"] = true // the in-process repos above
 	os.Exit(m.Run())
 }
 
@@ -640,5 +641,25 @@ func TestGitHTTP_Sign(t *testing.T) {
 	}
 	if sc.GitHub.Signature != sc.Signature {
 		t.Error("github.Signature != sc.Signature")
+	}
+}
+
+// The git endpoints dial only ssh and https remotes; file: (enabled for the
+// rest of this package's tests) and plain http are refused.
+func TestCheckGitRemote(t *testing.T) {
+	delete(gitRemoteSchemes, "file")
+	defer func() { gitRemoteSchemes["file"] = true }()
+	for raw, ok := range map[string]bool{
+		"git@github.com:me/repo.git":     true,
+		"ssh://git@host:2222/me/repo":    true,
+		"https://github.com/me/repo.git": true,
+		"file:///etc":                    false,
+		"/srv/repos/private.git":         false,
+		"http://10.0.0.5/repo.git":       false,
+		"":                               false,
+	} {
+		if err := checkGitRemote(raw); (err == nil) != ok {
+			t.Errorf("checkGitRemote(%q) = %v, want ok=%v", raw, err, ok)
+		}
 	}
 }
