@@ -160,6 +160,7 @@ func TestResolveNonceSubdomainFailsClosed(t *testing.T) {
 	srv := newTestServer(t)
 	nonce, slug := makeHostedApp(t, srv, "subapp")
 	_ = nonce
+	srv.knownHosts["blog.example.com"] = true
 	rr := envJSFor(t, srv, "/env.js", "blog.example.com", map[string]string{
 		"Referer": "https://blog.example.com/" + slug + "/",
 	})

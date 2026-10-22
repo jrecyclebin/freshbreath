@@ -52,6 +52,7 @@ func newTestServer(t *testing.T) *Server {
 			Dir:           baseDir,
 			DataDir:       baseDir,
 			PublicBaseURL: "http://localhost:9009",
+			AllowedHosts:  []string{"example.com"}, // httptest's default Host
 		},
 		store:          store,
 		pending:        make(map[string]*pendingAuth),

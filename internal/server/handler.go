@@ -30,6 +30,10 @@ import (
 )
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.hostAllowed(r.Host) {
+		http.Error(w, fmt.Sprintf("Fresh Breath does not answer to host %q. Add it to FRBR_ALLOWED_HOSTS (or set FRBR_BASE_URL to it) to allow it.", r.Host), http.StatusMisdirectedRequest)
+		return
+	}
 	if origin := r.Header.Get("Origin"); origin != "" {
 		allowed, withCookies := s.originAllowed(r, origin)
 		if !allowed {
@@ -67,6 +71,44 @@ func appRegisteredOrigin(app *db.App) string {
 		return ""
 	}
 	return appURL.Scheme + "://" + appURL.Host
+}
+
+// hostAllowed reports whether a request's Host names this server. A web
+// page can point a DNS name of its own at a local install (DNS rebinding)
+// and then call it as same-origin, so only names the operator controls
+// pass: IP literals and localhost (a page can't make those its origin),
+// the FRBR_BASE_URL host, this machine's hostname, and FRBR_ALLOWED_HOSTS.
+func (s *Server) hostAllowed(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if net.ParseIP(host) != nil || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	return s.knownHosts[host]
+}
+
+// knownHostSet collects the DNS names hostAllowed accepts.
+func knownHostSet(cfg Config) map[string]bool {
+	hosts := map[string]bool{}
+	add := func(h string) {
+		if h = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), ".")); h != "" {
+			hosts[h] = true
+		}
+	}
+	if u, err := url.Parse(cfg.PublicBaseURL); err == nil {
+		add(u.Hostname())
+	}
+	if name, err := os.Hostname(); err == nil {
+		add(name)
+		add(name + ".local")
+	}
+	for _, h := range cfg.AllowedHosts {
+		add(h)
+	}
+	return hosts
 }
 
 // appAllowsFilePages reports whether an app was registered for pages
@@ -138,6 +180,7 @@ func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) SetupRoutes() {
+	s.knownHosts = knownHostSet(s.config)
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/control", s.handleControl)

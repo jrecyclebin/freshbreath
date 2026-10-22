@@ -293,6 +293,7 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 | `FRBR_LISTEN_ADDR` | `:9009` | HTTP bind address |
 | `FRBR_TLS_CERT` | *(none)* | Path to TLS certificate (PEM) |
 | `FRBR_TLS_KEY` | *(none)* | Path to TLS private key (PEM) |
+| `FRBR_ALLOWED_HOSTS` | *(none)* | Extra host names the server answers to, comma-separated. IP addresses, `localhost`, the `FRBR_BASE_URL` host and the machine's own hostname are always accepted; any other `Host` gets a 421, which blocks DNS-rebinding attacks on a local install. |
 
 When both `FRBR_TLS_CERT` and `FRBR_TLS_KEY` are provided, the server uses TLS (`https:`). Otherwise it serves plain HTTP.
 

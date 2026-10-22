@@ -265,6 +265,7 @@ func main() {
 		TLSCertFile:   getEnv("FRBR_TLS_CERT", ""),
 		TLSKeyFile:    getEnv("FRBR_TLS_KEY", ""),
 		EnvFile:       envFile,
+		AllowedHosts:  strings.Split(getEnv("FRBR_ALLOWED_HOSTS", ""), ","),
 	}
 
 	// TLS cert/key paths resolve relative to ConfigDir; absolute paths are

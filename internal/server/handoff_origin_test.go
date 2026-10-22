@@ -51,3 +51,25 @@ func TestLoginPostedToAppOrigin(t *testing.T) {
 		t.Errorf("callback page does not target the app origin:\n%s", page.String())
 	}
 }
+
+// A request naming a host the operator never configured is refused before
+// anything runs — a page can point its own DNS name at a local install.
+func TestUnknownHostRefused(t *testing.T) {
+	srv := newTestServer(t)
+	for host, want := range map[string]int{
+		"rebind.attacker.test": 421,
+		"localhost:9009":       200,
+		"127.0.0.1:9009":       200,
+		"[::1]:9009":           200,
+		"192.168.1.20":         200,
+		"example.com":          200, // FRBR_ALLOWED_HOSTS in the test server
+	} {
+		req := httptest.NewRequest("GET", "/env.js", nil)
+		req.Host = host
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("Host %s: status %d, want %d", host, rr.Code, want)
+		}
+	}
+}

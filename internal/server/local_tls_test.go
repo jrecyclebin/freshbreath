@@ -141,6 +141,7 @@ func TestTLSSetupWritesConfig(t *testing.T) {
 	cfgDir := t.TempDir()
 	srv.config.EnvFile = filepath.Join(cfgDir, "config.env")
 	os.WriteFile(srv.config.EnvFile, []byte("FRBR_BASE_URL=http://fresh.local:9009\n"), 0o600)
+	srv.knownHosts["fresh.local"] = true
 
 	req := httptest.NewRequest("POST", "http://fresh.local:9009/api/tls", nil)
 	rr := httptest.NewRecorder()

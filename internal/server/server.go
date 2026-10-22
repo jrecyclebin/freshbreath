@@ -26,7 +26,8 @@ type Config struct {
 	ListenAddr    string
 	TLSCertFile   string
 	TLSKeyFile    string
-	EnvFile       string // the env file config loads from (or would); local TLS writes here
+	EnvFile       string   // the env file config loads from (or would); local TLS writes here
+	AllowedHosts  []string // extra Host names this server answers to (FRBR_ALLOWED_HOSTS)
 }
 
 // Server is the freshbreath application server hub. All HTTP handlers, MCP
@@ -51,6 +52,7 @@ type Server struct {
 	gitGw             *sshkit.GitGateway     // stateless git-over-SSH gateway
 	lastSeenAt        map[int64]time.Time
 	lastSeenMu        sync.Mutex
+	knownHosts        map[string]bool      // Host names answered besides IPs and localhost (see hostAllowed)
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedMu          sync.RWMutex
 	actTickets        actTickets                         // /api/act capability tickets (in-memory only)
