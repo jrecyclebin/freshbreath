@@ -69,6 +69,7 @@ type Server struct {
 	pendingArchives map[string]*pendingArchive // "feedID/ref" → built archive, one-shot
 	updateMu        sync.Mutex                 // guards pendingArchives + updateRate
 	updateRate      map[string]updateRateCount // per-IP limiter for anonymous check/apply
+	loginFailures   loginFailures              // per-IP failed sign-ins on the passphrase and API-key forms
 
 	// App databases (design/app-databases.md). The pool is lazy; the watch
 	// registry fans change events from the per-connection update hook.

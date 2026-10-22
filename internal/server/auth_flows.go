@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -977,6 +978,72 @@ func (h *htmlOnFirstWrite) Write(p []byte) (int, error) {
 	return h.w.Write(p)
 }
 
+// Failed sign-ins are counted per client IP in a fixed window; past the
+// limit the forms answer 429 until the window rolls over. Each passphrase
+// check costs 64 MiB of Argon2 memory, so checks also queue for one of a
+// few slots rather than running unbounded in parallel.
+const (
+	loginFailureLimit  = 10
+	loginFailureWindow = 15 * time.Minute
+	passphraseSlots    = 4
+)
+
+// loginFailures is the per-IP failed sign-in counter for the passphrase
+// and API-key forms.
+type loginFailures struct {
+	mu sync.Mutex
+	m  map[string]updateRateCount
+}
+
+// blocked reports whether ip has used up its failures for this window.
+func (f *loginFailures) blocked(ip string, now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.m[ip]
+	return ok && now.Sub(c.windowStart) < loginFailureWindow && c.count >= loginFailureLimit
+}
+
+// fail records one failed sign-in from ip, sweeping lapsed windows.
+func (f *loginFailures) fail(ip string, now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.m == nil {
+		f.m = make(map[string]updateRateCount)
+	}
+	for k, c := range f.m {
+		if now.Sub(c.windowStart) >= loginFailureWindow {
+			delete(f.m, k)
+		}
+	}
+	c, ok := f.m[ip]
+	if !ok {
+		c = updateRateCount{windowStart: now}
+	}
+	c.count++
+	f.m[ip] = c
+}
+
+// tooManyLogins answers a client that has used up its failed sign-ins.
+func tooManyLogins(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(loginFailureWindow.Seconds())))
+	http.Error(w, "Too many failed sign-in attempts — wait a few minutes and try again", http.StatusTooManyRequests)
+}
+
+// passphraseSlot bounds concurrent Argon2 passphrase checks.
+var passphraseSlot = make(chan struct{}, passphraseSlots)
+
+// verifyPassphraseBounded is sshkit.VerifyPassphrase run in one of the
+// passphrase slots.
+func verifyPassphraseBounded(r *http.Request, key *sshkit.SSHKeyInfo, passphrase string) bool {
+	select {
+	case passphraseSlot <- struct{}{}:
+	case <-r.Context().Done():
+		return false
+	}
+	defer func() { <-passphraseSlot }()
+	return sshkit.VerifyPassphrase(key, passphrase)
+}
+
 // sshAgentTTL is how long a passphrase login keeps the user's SSH key in
 // the agent. Anything that needs the key past it asks for a fresh login,
 // with this as the challenge's max_age.
@@ -1024,16 +1091,17 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		ip := requestIP(r)
+		if s.loginFailures.blocked(ip, time.Now()) {
+			tooManyLogins(w)
+			return
+		}
+		// One answer for every failure, so the form can't be used to
+		// learn which emails have accounts or keys.
 		user, err := s.store.GetUserByEmail(req.Email)
-		if err != nil {
-			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-			return
-		}
-		if user.Metadata == nil || user.Metadata.SSHKey == nil {
-			http.Error(w, "No SSH key configured for this user", http.StatusUnauthorized)
-			return
-		}
-		if !sshkit.VerifyPassphrase(user.Metadata.SSHKey, req.Passphrase) {
+		if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
+			!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
+			s.loginFailures.fail(ip, time.Now())
 			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 			return
 		}
@@ -1099,8 +1167,14 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		ip := requestIP(r)
+		if s.loginFailures.blocked(ip, time.Now()) {
+			tooManyLogins(w)
+			return
+		}
 		rec := p.current()
 		if rec.Descriptor.Key == "" || !keysEqual(req.APIKey, rec.Descriptor.Key) {
+			s.loginFailures.fail(ip, time.Now())
 			http.Error(w, "Invalid API key", http.StatusUnauthorized)
 			return
 		}

@@ -144,3 +144,21 @@ func TestLoginPagesEncodeRequestValues(t *testing.T) {
 		t.Fatal("callback page: state or return path reached the page unencoded")
 	}
 }
+
+// Failed sign-ins are capped per client; past the cap the form answers 429
+// even for a state that is still live, until the window rolls over.
+func TestSignInFailuresAreLimited(t *testing.T) {
+	srv := newTestServer(t)
+	state := "limit-state"
+	srv.putPending(state, sshPending(t, srv))
+	body := `{"state":"` + state + `","email":"nobody@example.com","passphrase":"wrong-guess"}`
+
+	for i := 0; i < loginFailureLimit; i++ {
+		if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), nil); rr.Code != 401 {
+			t.Fatalf("attempt %d: got %d, want 401", i+1, rr.Code)
+		}
+	}
+	if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), nil); rr.Code != 429 {
+		t.Fatalf("attempt past the limit: got %d, want 429", rr.Code)
+	}
+}
