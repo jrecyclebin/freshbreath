@@ -1663,6 +1663,8 @@ select.input {
 .auth-card .btn-primary { justify-content: center; padding: 10px 14px; margin-top: 4px; }
 .auth-card .btn:disabled { opacity: .5; cursor: not-allowed; }
 .auth-card a { color: var(--accent); }
+.auth-actions { display: flex; gap: 8px; }
+.auth-actions .btn { flex: 1; justify-content: center; padding: 10px 14px; }
 
 .auth-error, .auth-hint, .auth-ok {
   padding: 12px 14px;

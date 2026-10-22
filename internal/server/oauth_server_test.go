@@ -150,6 +150,44 @@ func TestOAuthRegister(t *testing.T) {
 	}
 }
 
+// Registration only accepts redirect targets a browser navigates to:
+// https, loopback http, and app schemes — never script or local schemes.
+func TestOAuthRegisterRedirectURIs(t *testing.T) {
+	srv := newTestServer(t)
+	for uri, want := range map[string]int{
+		"https://client.example/cb":       201,
+		"http://127.0.0.1:33418/callback": 201,
+		"http://localhost/cb":             201,
+		"com.example.app:/oauth":          201,
+		"http://client.example/cb":        400,
+		"javascript:alert(1)//":           400,
+		"data:text/html,hi":               400,
+		"file:///tmp/cb":                  400,
+		"https://client.example/cb#frag":  400,
+		"/relative/cb":                    400,
+	} {
+		body, _ := json.Marshal(map[string]any{"redirect_uris": []string{uri}})
+		rr := testRequest(t, srv, "POST", "/oauth/register", bytes.NewReader(body), nil)
+		if rr.Code != want {
+			t.Errorf("%s: status = %d, want %d (%s)", uri, rr.Code, want, rr.Body.String())
+		}
+	}
+}
+
+// A finished MCP login redirects with code and state encoded, keeping any
+// query the redirect URI already had.
+func TestWithQueryKeepsExistingQuery(t *testing.T) {
+	got, err := withQuery("https://client.example/cb?tenant=a", url.Values{"code": {"c1"}, "state": {"x&y=z"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(got)
+	q := u.Query()
+	if q.Get("tenant") != "a" || q.Get("code") != "c1" || q.Get("state") != "x&y=z" {
+		t.Fatalf("withQuery = %s", got)
+	}
+}
+
 func TestOAuthRegisterMethodNotAllowed(t *testing.T) {
 	srv := newTestServer(t)
 	rr := testRequest(t, srv, "GET", "/oauth/register", nil, nil)

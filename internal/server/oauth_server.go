@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -203,6 +204,12 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		oauthWriteError(w, http.StatusBadRequest, "invalid_request", "redirect_uris is required")
 		return
 	}
+	for _, u := range meta.RedirectURIs {
+		if err := checkRedirectURI(u); err != nil {
+			oauthWriteError(w, http.StatusBadRequest, "invalid_redirect_uri", err.Error())
+			return
+		}
+	}
 
 	clientID, clientSecret, err := os.clients.register(meta.RedirectURIs)
 	if err != nil {
@@ -279,7 +286,7 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 			break
 		}
 	}
-	if !validRedirect {
+	if !validRedirect || checkRedirectURI(redirectURI) != nil {
 		oauthWriteError(w, http.StatusBadRequest, "invalid_request", "invalid redirect_uri")
 		return
 	}
@@ -368,7 +375,12 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 		recIDs = append(recIDs, strconv.FormatInt(rec.ID, 10))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	page := strings.Replace(authorizeInterstitialHTML, "{{STATE}}", scriptString(contState), 1)
+	// The consent step is a click; a framed page could be clicked for the
+	// user, so this one refuses to be framed.
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	page := strings.Replace(authorizeInterstitialHTML, "{{CLIENT}}", html.EscapeString(redirectOrigin(redirectURI)), 1)
+	page = strings.Replace(page, "{{STATE}}", scriptString(contState), 1)
 	page = strings.Replace(page, "{{RECORD_IDS}}", scriptString(strings.Join(recIDs, ",")), 1)
 	w.Write([]byte(page))
 }
@@ -445,17 +457,29 @@ func (os *oauthServer) handleAuthorizeContinue(w http.ResponseWriter, r *http.Re
 	json.NewEncoder(w).Encode(map[string]string{"redirect": next})
 }
 
-// authorizeInterstitialHTML is the leg-skip page: same-origin, so it can
-// read the frbr:auth:* store that apps on this host share. It offers any
-// live tokens for the records this flow needs and follows the server's
-// verdict.
-var authorizeInterstitialHTML = authPage("Authorizing", `
+// authorizeInterstitialHTML is the consent and leg-skip page. It names
+// where the sign-in will be sent and waits for the user to allow it —
+// nothing is read or sent before that click, so a link alone can't hand a
+// session to whoever registered the client. Once allowed, it offers any
+// live tokens from the frbr:auth:* store (same-origin, so readable here)
+// for the records this flow needs and follows the server's verdict.
+var authorizeInterstitialHTML = authPage("Authorize", `
 <div>
-  <h1>Authorizing</h1>
-  <p class="lead" id="lead">Checking your session…</p>
+  <h1>Allow access?</h1>
+  <p class="lead" id="lead">An application at <b class="mono">{{CLIENT}}</b> wants to sign in with your Fresh Breath account. Only allow it if you just started this sign-in from that application.</p>
+</div>
+<div class="auth-actions">
+  <button type="button" id="allow" class="btn btn-primary">Allow</button>
+  <button type="button" id="deny" class="btn">Cancel</button>
 </div>
 <script>
-(function(){
+document.getElementById("deny").onclick = function(){
+  document.querySelector(".auth-actions").hidden = true;
+  document.getElementById("lead").textContent = "Cancelled. You can close this window.";
+};
+document.getElementById("allow").onclick = function(){
+  document.querySelector(".auth-actions").hidden = true;
+  document.getElementById("lead").textContent = "Checking your session…";
   var state = {{STATE}};
   var ids = {{RECORD_IDS}}.split(",").filter(Boolean);
   var tokens = [];
@@ -481,8 +505,52 @@ var authorizeInterstitialHTML = authPage("Authorizing", `
   }).catch(function(){
     document.getElementById("lead").textContent = "Network error";
   });
-})();
+};
 </script>`)
+
+// checkRedirectURI accepts the redirect targets a real OAuth client uses:
+// https anywhere, http only to a loopback host (native and CLI clients),
+// and private-use app schemes (RFC 8252). Schemes a browser would run or
+// read locally instead of navigating (javascript:, data:, file:, …) are
+// refused, as are fragments, which RFC 6749 forbids in redirect URIs.
+func checkRedirectURI(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return fmt.Errorf("redirect_uri %q is not an absolute URI", raw)
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("redirect_uri %q must not contain a fragment", raw)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		if u.Host == "" {
+			return fmt.Errorf("redirect_uri %q has no host", raw)
+		}
+		return nil
+	case "http":
+		switch u.Hostname() {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+		return fmt.Errorf("redirect_uri %q: http is only allowed to a loopback host", raw)
+	case "javascript", "data", "vbscript", "file", "blob", "about", "filesystem", "view-source", "ws", "wss", "ftp":
+		return fmt.Errorf("redirect_uri %q uses a scheme that cannot be a redirect target", raw)
+	}
+	return nil
+}
+
+// redirectOrigin is what the consent page shows the user: scheme and host
+// for web redirects, the scheme alone (plus host, if any) for app schemes.
+func redirectOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if u.Host == "" {
+		return u.Scheme + ":"
+	}
+	return u.Scheme + "://" + u.Host
+}
 
 func (os *oauthServer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

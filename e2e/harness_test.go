@@ -397,7 +397,9 @@ func connectMCP(t *testing.T, browser context.Context, endpoint string) *mcp.Cli
 		AuthorizationCodeFetcher: func(ctx context.Context, args *auth.AuthorizationArgs) (*auth.AuthorizationResult, error) {
 			tab, closeTab := chromedp.NewContext(browser)
 			defer closeTab()
-			if err := chromedp.Run(tab, chromedp.Navigate(args.URL)); err != nil {
+			// The authorize page asks before it signs anyone in; the
+			// user here is the test, so it allows.
+			if err := chromedp.Run(tab, chromedp.Navigate(args.URL), chromedp.Click("#allow", chromedp.ByQuery)); err != nil {
 				return nil, fmt.Errorf("open authorize page: %w", err)
 			}
 			select {

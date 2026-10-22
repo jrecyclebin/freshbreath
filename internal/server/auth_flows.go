@@ -205,7 +205,7 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 		mcp.fbToken = token
 		mcp.refreshData = rd
 		code := s.oauthSrv.issueCode(mcp)
-		return fmt.Sprintf("%s?code=%s&state=%s", mcp.redirectURI, code, mcp.state), nil
+		return withQuery(mcp.redirectURI, url.Values{"code": {code}, "state": {mcp.state}})
 	}
 
 	// Browser flow: refresh family + HttpOnly cookie, then the store entry
@@ -291,6 +291,21 @@ func writeCallbackPage(w io.Writer, p *pendingAuth, entry map[string]interface{}
     %s
   })();
 </script>`, lead, string(entryJSON), scriptString(p.appState), redirect)))
+}
+
+// withQuery adds params to a redirect URI, keeping any query it already
+// carries and encoding the values.
+func withQuery(raw string, params url.Values) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("redirect uri: %w", err)
+	}
+	q := u.Query()
+	for k, vs := range params {
+		q[k] = vs
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // scriptString renders s as a JavaScript string literal that is safe inside
