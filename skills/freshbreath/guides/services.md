@@ -80,20 +80,22 @@ Either way puts everything on `window.FreshBreath` (aliased `window.FrBr`):
 const { api, login, currentSession, signOut } = window.FreshBreath;
 ```
 
-For apps that run off the server (`file://`, or any `https://` origin)
-use the full server URL with the nonce — `/frbr.js` is only served to a
-page that names its app, and a script tag can only do that in the URL:
-`<script type="module" src="https://server/frbr.js?NONCE">`. For apps hosted
-on the server's own origin, `/frbr.js` is enough.
+For apps that run off the server — a page opened from disk (any app with
+no deployment yet: nothing to configure), or a page at an `https://`
+origin — use the full server URL with the nonce — `/frbr.js` is only served
+to a page that names its app, and a script tag can only do that in the URL:
+`<script type="module" src="https://server/frbr.js?NONCE">`. For apps
+hosted on the server's own origin, `/frbr.js` is enough.
 
-An app that runs off the server also needs its **URL set to that location**
-(a `file:` URL like `file:///home/me/myapp/index.html`, or the `https:`
-origin it lives at) in the control panel. Such a page has no origin of ours
-to speak from — the browser reports a `file://` page as `null`, the same as
-any sandboxed frame on the web, and a registered web origin is only a
-declaration — so the app's nonce is its credential: the server only hands
-logins and credentialed responses to a request that names the app by
-nonce, and never tells that nonce to anyone who doesn't already have it.
+An app whose URL names a web origin gets the same off-server treatment by
+declaration. Any other app is hosted exactly while it has a deployment
+slot — so a blank URL that isn't hosted is simply a page opened from disk,
+with no URL to set. Such a page has no origin of ours to speak from — the
+browser reports a `file://` page as `null`, the same as any sandboxed
+frame on the web, and a registered web origin is only a declaration — so
+the app's nonce is its credential: the server only hands logins and
+credentialed responses to a request that names the app by nonce, and
+never tells that nonce to anyone who doesn't already have it.
 
 ### The page gate
 
@@ -336,9 +338,10 @@ is, so a file's text arrives byte for byte.
 
 - **App nonce** comes from `/api/apps` — a 10-character random string.
 - **Service URL** must match a service registered *and linked to your app*.
-- **`file://` apps**: the server must be running, assigned services must
-  be proxied, and the app's URL must be its `file:` URL (any app whose
-  URL names another location gets the same off-server treatment).
+- **`file://` apps**: the server must be running and assigned services must
+  be proxied. No URL to set — an app with no deployment is treated as
+  running from disk (an app whose URL names a web origin gets the same
+  off-server treatment).
 - **Sharing the store**: apps served from the Fresh Breath origin share one
   store, which is what lets a second app skip the prompt. Apps served from their
   own origins don't, and will prompt separately.

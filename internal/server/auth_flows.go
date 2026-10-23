@@ -253,8 +253,8 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 // nonce that started the login is the credential, and the server never
 // tells it to anyone (frbr.js answers only to a URL that already carries
 // it). Hosted apps and the control panel get this server's origin.
-func loginOpenerOrigin(r *http.Request, app *db.App) string {
-	if appRunsElsewhere(app) {
+func (s *Server) loginOpenerOrigin(r *http.Request, app *db.App) string {
+	if s.appRunsElsewhere(app) {
 		return "*"
 	}
 	return schemeOf(r) + "://" + r.Host
@@ -682,10 +682,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	nonce := r.Header.Get("X-App-Nonce")
 	if nonce == "" {
-		nonce = r.URL.Query().Get("app_nonce")
-	}
-	if nonce == "" {
-		http.Error(w, "Missing X-App-Nonce", http.StatusBadRequest)
+		// The login flow is a fetch (frbr.js always sends the header); a
+		// navigation can't be one, and its query always carries state=,
+		// so there is no nonce-in-the-URL form to fall back to.
+		http.Error(w, "Missing X-App-Nonce header", http.StatusBadRequest)
 		return
 	}
 
@@ -788,7 +788,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		appNonce:  nonce,
 		appState:  appState,
 		returnTo:  ret,
-		opener:    loginOpenerOrigin(r, app),
+		opener:    s.loginOpenerOrigin(r, app),
 		legs:      todo,
 		done:      done,
 		gateID:    legs[0].ID,

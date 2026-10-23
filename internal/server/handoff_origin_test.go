@@ -11,10 +11,22 @@ import (
 // are on this one), and "null" — which every sandboxed frame on the web
 // also sends — is refused outright without a nonce, so no unnamed frame
 // can read anything, env.js's ?loc= resolution included.
+//
+// An app runs elsewhere when its URL names a location (https://…) or when
+// it has no routable slot — a blank URL that isn't hosted is a page opened
+// from disk, which no one has to declare.
 func TestCrossOriginOnlyForAppsThatRunElsewhere(t *testing.T) {
 	srv := newTestServer(t)
+
+	// A hosted app: a deployment slot exists, so it's in the route map.
 	hosted, _ := srv.store.CreateApp("Hosted", "Development", "", nil, nil)
-	local, _ := srv.store.CreateApp("Local", "Development", "file:///home/me/app/index.html", nil, nil)
+	cleanupSlotApp(t, srv, hosted)
+	createSlotFile(t, srv, hosted, "web", "index.html", []byte("<h1>dev</h1>"))
+	srv.rebuildHostedRoutes()
+
+	// Blank URL, no slot: running from disk, like a file:// page.
+	local, _ := srv.store.CreateApp("Local", "Development", "", nil, nil)
+	// A URL that names a web origin: running off the server by declaration.
 	remote, _ := srv.store.CreateApp("Remote", "Development", "https://app.example/start", nil, nil)
 
 	// Origin: null, with and without an app named.
@@ -45,7 +57,7 @@ func TestCrossOriginOnlyForAppsThatRunElsewhere(t *testing.T) {
 
 	// ?loc= used to be readable from any "null" frame, handing out a hosted
 	// app's nonce. Now even that needs the app's own nonce to pass the gate.
-	rr = testRequest(t, srv, "GET", "/env.js?loc=/"+strings.ToLower(hosted)+"/", nil, map[string]string{"Origin": "null"})
+	rr = testRequest(t, srv, "GET", "/env.js?loc=/hosted/", nil, map[string]string{"Origin": "null"})
 	if rr.Code != 403 {
 		t.Errorf("null frame reading ?loc= for a hosted app: status %d, want 403", rr.Code)
 	}
@@ -80,14 +92,24 @@ func TestFrbrJSNeedsNonceToLeaveHome(t *testing.T) {
 // A finished browser login is posted only to the origin that may hold it.
 func TestLoginPostedToAppOrigin(t *testing.T) {
 	srv := newTestServer(t)
+
+	// A hosted app: routed from its own slot, so logins stay on this origin.
 	hosted, _ := srv.store.CreateApp("Hosted", "Development", "", nil, nil)
+	cleanupSlotApp(t, srv, hosted)
+	createSlotFile(t, srv, hosted, "web", "index.html", []byte("<h1>dev</h1>"))
+	srv.rebuildHostedRoutes()
+
+	// Blank URL with no slot (a page from disk) and a declared web origin
+	// both run off the server.
+	local, _ := srv.store.CreateApp("Local", "Development", "", nil, nil)
 	remote, _ := srv.store.CreateApp("Remote", "Development", "https://app.example/start", nil, nil)
-	local, _ := srv.store.CreateApp("Local", "Development", "file:///home/me/app/index.html", nil, nil)
 
 	r := httptest.NewRequest("GET", "/service/login", nil) // Host: example.com
-	for nonce, want := range map[string]string{hosted: "http://example.com", remote: "*", local: "*", "": "http://example.com"} {
+	for nonce, want := range map[string]string{
+		hosted: "http://example.com", local: "*", remote: "*", "": "http://example.com",
+	} {
 		a, _ := srv.store.GetApp(nonce)
-		if got := loginOpenerOrigin(r, a); got != want {
+		if got := srv.loginOpenerOrigin(r, a); got != want {
 			t.Errorf("app nonce %q: opener origin = %q, want %q", nonce, got, want)
 		}
 	}

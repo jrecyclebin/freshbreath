@@ -10,11 +10,13 @@ Routes are registered in `internal/server/server.go` → `SetupRoutes()`
 
 - All JSON request/response bodies unless noted. Errors are plain-text (`http.Error`)
   or bearer-challenge JSON on 401s (RFC 6750 / RFC 9470 fields, mirrored in body).
-- `X-App-Nonce` header (or `?app_nonce=`) identifies which app is calling; CORS
+- `X-App-Nonce` header (or a bare `?NONCE` query — the form a script tag
+  can carry) identifies which app is calling; CORS
   is origin-gated: same-origin always, and any other origin — `null`
-  (file://) included — only for an app whose URL names another location
-  (a `file:`/`https:` URL), named by nonce. Hosted apps get no cross-origin
-  allowance at all.
+  (file://) included — only for an app that runs off this server (its URL
+  names a location, or it has no routable slot — a blank URL that isn't
+  hosted is a page opened from disk), named by nonce. Hosted apps get no
+  cross-origin allowance at all.
 - Role gate: `anyRole` = Superuser/Admin/Member/Read-only · `admin+` = Superuser/Admin ·
   `superuser` = Superuser only. Writes on services/auth records are additionally
   gated by the resource's member list (`core*` functions).
@@ -41,7 +43,7 @@ provider redirect → provider calls `callback` → "legs" are completed in sequ
 
 | Route | Method | Description |
 |---|---|---|
-| `/service/login` | GET | Start/resolve a login. Query: `state` (app state), `app_nonce` or `X-App-Nonce`, optional `url` (act-as-service), `resolve` (dry run → legs), `return` (redirect back into app). Bearer may satisfy legs (`type: ok`). Returns JSON `{type: anonymous\|ok\|legs\|redirect, url, legs, service}` |
+| `/service/login` | GET | Start/resolve a login. Query: `state` (app state), optional `url` (act-as-service), `resolve` (dry run → legs), `return` (redirect back into app); the app is named by `X-App-Nonce` (a fetch — the query always carries `state`, so there is no nonce-in-the-URL form). Bearer may satisfy legs (`type: ok`). Returns JSON `{type: anonymous\|ok\|legs\|redirect, url, legs, service}` |
 | `/service/callback` | GET | Provider redirect target; exchanges code, advances/finishes the pending login |
 | `/service/ssh-auth` | GET/POST | Passphrase-SSH login form (GET HTML form) & POST `{state, email, passphrase}`. Adds key to in-process SSH agent for `sshAgentTTL` |
 | `/service/apikey-auth` | GET/POST | API-key gate form & POST `{state, api_key}` |

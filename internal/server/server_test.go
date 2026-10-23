@@ -697,8 +697,9 @@ func TestLoginViaQueryParam(t *testing.T) {
 	id := registerService(t, srv, "slack", "https://slack.example/mcp", db.ServiceDescriptor{Type: "mcp"})
 	linkServiceToApp(t, srv, nonce, id)
 
-	// No X-App-Nonce header — nonce comes from query param
-	rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x&app_nonce="+nonce, nil, nil)
+	// The login flow is a fetch; frbr.js names the app with the header.
+	rr := testRequest(t, srv, "GET", "/service/login?url=https://slack.example/mcp&state=x", nil,
+		map[string]string{"X-App-Nonce": nonce})
 	if rr.Code != 200 {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}

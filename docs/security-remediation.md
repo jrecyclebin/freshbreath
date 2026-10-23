@@ -46,7 +46,7 @@ not be exposed directly to the internet.
 | # | Area | Problem | Fix |
 |---|------|---------|-----|
 | 16 | Login return path | A return path starting `/\` is accepted; browsers treat it as another host. | Reject backslashes in return paths. |
-| 17 | CORS | The origin check uses the whole raw query string as the app nonce. | Read `app_nonce` from the query. (Folded into #3.) |
+| 17 | CORS | The origin check uses the whole raw query string as the app nonce. | Only a bare nonce query (`/frbr.js?XXXX`, no `=` in it) or the header names an app. (Folded into #3.) |
 | 18 | Admin boundary | Admins could write task scripts, so Admin was effectively equal to Superuser and to the server's OS account. | Task services are Superuser-only: creating, changing, deleting, reading and writing them, and replacing them through update feeds (whose owner must be a Superuser when the feed is applied). |
 | 19 | Proxy headers (**open**) | `X-Forwarded-Proto` is trusted from any client. | Trust it only from configured proxies. |
 | 20 | `ssh_key` acts_as (**open**) | A stored private key is sent upstream as a bearer token when such a record backs an HTTP service. | Refuse `ssh_key` as acts_as for proxied HTTP services. |

@@ -135,24 +135,39 @@ func knownHostSet(cfg Config) map[string]bool {
 }
 
 // appRunsElsewhere reports whether an app's pages are served from anywhere
-// but this server: its URL names a location (https://…, file://…) instead
-// of a slug here. Only such an app may be called cross-origin — its pages
-// have no origin of ours to speak from (file:// shares the opaque "null"
-// with every sandboxed frame on the web, and a registered web origin is
-// only a declaration), so the app nonce is the credential, and the page
-// must name it: /frbr.js?NONCE is the only way to get its config.
-func appRunsElsewhere(app *db.App) bool {
-	return app != nil && strings.Contains(app.URL, "://")
+// but this server. An app whose URL names a location (https://…) declares
+// itself off-server outright. Every other app is hosted exactly while it
+// has a routable deployment slot — so a blank URL that isn't hosted is
+// simply a page opened from disk (file://), which is what an app in
+// development is; nothing has to be set for that. Only such an app may
+// be called cross-origin: its pages have no origin of ours to speak from
+// (file:// shares the opaque "null" with every sandboxed frame on the
+// web, and a registered web origin is only a declaration), so the app
+// nonce is the credential, and the page must name it — /frbr.js?NONCE is
+// the only way to get its config.
+func (s *Server) appRunsElsewhere(app *db.App) bool {
+	if app == nil {
+		return false
+	}
+	if strings.Contains(app.URL, "://") {
+		return true
+	}
+	s.hostedMu.RLock()
+	defer s.hostedMu.RUnlock()
+	for _, ha := range s.hostedRoutes {
+		if ha.nonce == app.Nonce {
+			return false
+		}
+	}
+	return true
 }
 
 // requestAppNonce reads the app nonce a cross-origin request names: the
-// X-App-Nonce header, the app_nonce query parameter, or a bare query
-// nonce (/frbr.js?XXXX).
+// X-App-Nonce header, or a bare nonce query (/frbr.js?XXXX) — the one form
+// a script tag can carry. A bare nonce only parses when the whole query is
+// the nonce (no "=" in it); anything with named params names no app.
 func requestAppNonce(r *http.Request) string {
 	if n := r.Header.Get("X-App-Nonce"); n != "" {
-		return n
-	}
-	if n := r.URL.Query().Get("app_nonce"); n != "" {
 		return n
 	}
 	if rq := r.URL.RawQuery; rq != "" && !strings.Contains(rq, "=") {
@@ -183,7 +198,7 @@ func (s *Server) originAllowed(r *http.Request, origin string) (allowed, withCoo
 		return true, true
 	}
 	app, err := s.store.GetApp(requestAppNonce(r))
-	if err == nil && appRunsElsewhere(app) {
+	if err == nil && s.appRunsElsewhere(app) {
 		return true, true
 	}
 	return false, false
