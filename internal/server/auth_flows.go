@@ -342,7 +342,14 @@ var scriptUnsafe = strings.NewReplacer("<", `\u003c`, ">", `\u003e`, "\u2028", `
 // URL only the app's registered one. Anything else — another scheme,
 // another host, a protocol-relative trick — stays out, so a login URL
 // can't be aimed at some origin that has nothing to do with the app.
+// Backslashes are refused outright: browsers treat them as path
+// separators, so a return starting "/\" reads as protocol-relative to
+// another host — and a server-relative return path never legitimately
+// contains one anyway.
 func returnAllowed(app *db.App, ret string) bool {
+	if strings.Contains(ret, `\`) {
+		return false
+	}
 	if strings.HasPrefix(ret, "/") && !strings.HasPrefix(ret, "//") {
 		return true
 	}

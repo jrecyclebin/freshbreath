@@ -162,3 +162,22 @@ func TestSignInFailuresAreLimited(t *testing.T) {
 		t.Fatalf("attempt past the limit: got %d, want 429", rr.Code)
 	}
 }
+
+// A return path with a backslash is refused outright: browsers treat "\"
+// as a path separator, so "/\evil.example" is protocol-relative to another
+// host, and a server-relative return never legitimately contains one.
+func TestReturnPathBackslashesRefused(t *testing.T) {
+	srv := newTestServer(t)
+	app, _ := srv.store.CreateApp("Ext", "Development", "https://app.example/start", nil, nil)
+	other, _ := srv.store.GetApp(app)
+
+	for ret, want := range map[string]bool{
+		"/app/page": true, "https://app.example/next": true,
+		"/\\evil.example": false, "\\evil.example": false, "/a\\b": false,
+		"//evil.example": false, "https://evil.example/next": false,
+	} {
+		if got := returnAllowed(other, ret); got != want {
+			t.Errorf("returnAllowed(%q) = %v, want %v", ret, got, want)
+		}
+	}
+}
