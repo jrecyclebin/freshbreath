@@ -248,16 +248,14 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 }
 
 // loginOpenerOrigin is the only window origin a finished browser login may
-// be posted to: the app's registered origin, or this server's for hosted
-// apps and the control panel. "*" is reserved for apps registered with a
-// file: URL, whose pages have no origin to name — anyone could otherwise
-// open a login in a window of their own and receive what it posts.
+// be posted to. An app that runs elsewhere gets "*": file:// pages have no
+// origin to name, and a registered web origin is only a declaration — the
+// nonce that started the login is the credential, and the server never
+// tells it to anyone (frbr.js answers only to a URL that already carries
+// it). Hosted apps and the control panel get this server's origin.
 func loginOpenerOrigin(r *http.Request, app *db.App) string {
-	if appAllowsFilePages(app) {
+	if appRunsElsewhere(app) {
 		return "*"
-	}
-	if o := appRegisteredOrigin(app); o != "" {
-		return o
 	}
 	return schemeOf(r) + "://" + r.Host
 }

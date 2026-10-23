@@ -69,9 +69,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // appRegisteredOrigin returns the origin an app is registered at — "" for
 // hosted apps (their URL is a slug on this server's own origin) and for
-// anything unparseable. This is the one origin besides our own that a
-// request or redirect for the app may name; both the CORS check below
-// and the login return-path check read it.
+// anything unparseable. The login return-path check reads it; cross-origin
+// requests no longer do (see originAllowed).
 func appRegisteredOrigin(app *db.App) string {
 	if app == nil || app.URL == "" {
 		return ""
@@ -135,13 +134,15 @@ func knownHostSet(cfg Config) map[string]bool {
 	return hosts
 }
 
-// appAllowsFilePages reports whether an app was registered for pages
-// opened from disk: its URL is a file: URL. Only such an app may be
-// called with cookies from the opaque "null" origin, and only its logins
-// are handed back to any opener — every sandboxed frame on the web also
-// sends Origin: null, so this has to be the admin's explicit choice.
-func appAllowsFilePages(app *db.App) bool {
-	return app != nil && len(app.URL) >= 5 && strings.EqualFold(app.URL[:5], "file:")
+// appRunsElsewhere reports whether an app's pages are served from anywhere
+// but this server: its URL names a location (https://…, file://…) instead
+// of a slug here. Only such an app may be called cross-origin — its pages
+// have no origin of ours to speak from (file:// shares the opaque "null"
+// with every sandboxed frame on the web, and a registered web origin is
+// only a declaration), so the app nonce is the credential, and the page
+// must name it: /frbr.js?NONCE is the only way to get its config.
+func appRunsElsewhere(app *db.App) bool {
+	return app != nil && strings.Contains(app.URL, "://")
 }
 
 // requestAppNonce reads the app nonce a cross-origin request names: the
@@ -163,31 +164,26 @@ func requestAppNonce(r *http.Request) string {
 // originAllowed checks whether the request's Origin should be permitted,
 // and whether the response may be read on a request that carried cookies.
 //
-//   - Same-origin requests (Origin matches scheme://r.Host): yes, with cookies.
-//   - Origin: null (file:// pages, but also any sandboxed frame): allowed,
-//     with cookies only for an app registered with a file: URL.
-//   - Any other origin: only the registered origin of the app the request
-//     names, with cookies.
+//   - Same-origin requests (Origin matches scheme://r.Host): yes, with
+//     cookies — hosted apps and the control panel need nothing else, and
+//     CORS is pointless for them: their pages are on this origin and
+//     already reach everything here without it.
+//   - Anything else — a foreign origin, or "null", which every file://
+//     page shares with every sandboxed frame on the web: only for an app
+//     that runs elsewhere, named by nonce. Its nonce is the credential,
+//     so a hosted app's nonce never opens a cross-origin door, and an
+//     unnamed request ("null" included) is refused outright — no config,
+//     no nonce, nothing readable.
 func (s *Server) originAllowed(r *http.Request, origin string) (allowed, withCookies bool) {
 	// Always allow the OPTIONS call to go through, we gate everything else
 	if r.Method == http.MethodOptions {
 		return true, true
 	}
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	if scheme+"://"+r.Host == origin {
+	if schemeOf(r)+"://"+r.Host == origin {
 		return true, true
 	}
 	app, err := s.store.GetApp(requestAppNonce(r))
-	if err != nil {
-		app = nil
-	}
-	if origin == "null" {
-		return true, appAllowsFilePages(app)
-	}
-	if app != nil && appRegisteredOrigin(app) == origin {
+	if err == nil && appRunsElsewhere(app) {
 		return true, true
 	}
 	return false, false
@@ -599,8 +595,8 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 
 // schemeOf returns the request's scheme — "https" when the connection is
 // TLS or arrived behind a TLS-terminating proxy (X-Forwarded-Proto), else
-// "http". Shared by the nonce-resolution path and renderEnvJS so they agree
-// on what "same-origin" means; originAllowed computes the same thing inline.
+// "http". Shared by the nonce-resolution path, renderEnvJS and originAllowed
+// so they agree on what "same-origin" means.
 func schemeOf(r *http.Request) string {
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		return "https"

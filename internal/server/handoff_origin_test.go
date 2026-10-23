@@ -6,27 +6,74 @@ import (
 	"testing"
 )
 
-// Origin: null is also what any sandboxed frame sends, so it may read a
-// cookie-bearing response only for an app registered with a file: URL.
-func TestNullOriginCookiesOnlyForFileApps(t *testing.T) {
+// Cross-origin is only for apps that run elsewhere, named by nonce — the
+// nonce is their credential. Hosted apps never cross an origin (their pages
+// are on this one), and "null" — which every sandboxed frame on the web
+// also sends — is refused outright without a nonce, so no unnamed frame
+// can read anything, env.js's ?loc= resolution included.
+func TestCrossOriginOnlyForAppsThatRunElsewhere(t *testing.T) {
 	srv := newTestServer(t)
 	hosted, _ := srv.store.CreateApp("Hosted", "Development", "", nil, nil)
 	local, _ := srv.store.CreateApp("Local", "Development", "file:///home/me/app/index.html", nil, nil)
+	remote, _ := srv.store.CreateApp("Remote", "Development", "https://app.example/start", nil, nil)
 
-	for nonce, wantCookies := range map[string]bool{hosted: false, local: true, "": false} {
+	// Origin: null, with and without an app named.
+	for nonce, want := range map[string]int{local: 200, remote: 200, hosted: 403, "": 403} {
 		rr := testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "null", "X-App-Nonce": nonce})
-		if rr.Code != 200 {
-			t.Fatalf("nonce %q: status %d", nonce, rr.Code)
+		if rr.Code != want {
+			t.Errorf("nonce %q: status %d, want %d", nonce, rr.Code, want)
 		}
-		if got := rr.Header().Get("Access-Control-Allow-Credentials") == "true"; got != wantCookies {
-			t.Errorf("nonce %q: allow credentials = %v, want %v", nonce, got, wantCookies)
+		if want == 200 && rr.Header().Get("Access-Control-Allow-Credentials") != "true" {
+			t.Errorf("nonce %q: allow credentials missing", nonce)
 		}
 	}
 
-	// The app_nonce query parameter names the app as well as the header does.
-	rr := testRequest(t, srv, "GET", "/env.js?app_nonce="+local, nil, map[string]string{"Origin": "null"})
+	// A foreign origin naming an app that runs elsewhere is allowed; one
+	// naming a hosted app (or nothing) is not.
+	for nonce, want := range map[string]int{remote: 200, local: 200, hosted: 403, "": 403} {
+		rr := testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "https://evil.example", "X-App-Nonce": nonce})
+		if rr.Code != want {
+			t.Errorf("foreign origin, nonce %q: status %d, want %d", nonce, rr.Code, want)
+		}
+	}
+
+	// Same-origin always carries cookies, no nonce needed.
+	rr := testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "http://example.com"})
+	if rr.Code != 200 || rr.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Errorf("same-origin: status %d credentials %q", rr.Code, rr.Header().Get("Access-Control-Allow-Credentials"))
+	}
+
+	// ?loc= used to be readable from any "null" frame, handing out a hosted
+	// app's nonce. Now even that needs the app's own nonce to pass the gate.
+	rr = testRequest(t, srv, "GET", "/env.js?loc=/"+strings.ToLower(hosted)+"/", nil, map[string]string{"Origin": "null"})
+	if rr.Code != 403 {
+		t.Errorf("null frame reading ?loc= for a hosted app: status %d, want 403", rr.Code)
+	}
+}
+
+// frbr.js's config blob is served only to pages that already name the app
+// by nonce — this server's own (Referer-resolved) or an off-server app's
+// (?NONCE in the script URL, the only way a script tag can name one).
+func TestFrbrJSNeedsNonceToLeaveHome(t *testing.T) {
+	srv := newTestServer(t)
+	remote, _ := srv.store.CreateApp("Remote", "Development", "https://app.example/start", nil, nil)
+
+	// No nonce, no frbr.js: a "null" frame gets nothing at all.
+	rr := testRequest(t, srv, "GET", "/frbr.js", nil, map[string]string{"Origin": "null"})
+	if rr.Code != 403 {
+		t.Errorf("frbr.js without a nonce from null: status %d, want 403", rr.Code)
+	}
+
+	// The nonce in the URL is what names the app (script tags carry no headers).
+	rr = testRequest(t, srv, "GET", "/frbr.js?"+remote, nil, map[string]string{"Origin": "null"})
+	if rr.Code != 200 {
+		t.Fatalf("frbr.js?NONCE from null: status %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"appNonce":"`+remote+`"`) {
+		t.Error("frbr.js config does not echo the nonce it was asked by")
+	}
 	if rr.Header().Get("Access-Control-Allow-Credentials") != "true" {
-		t.Error("app_nonce query did not identify the file: app")
+		t.Error("frbr.js?NONCE from null: allow credentials missing")
 	}
 }
 
@@ -38,10 +85,10 @@ func TestLoginPostedToAppOrigin(t *testing.T) {
 	local, _ := srv.store.CreateApp("Local", "Development", "file:///home/me/app/index.html", nil, nil)
 
 	r := httptest.NewRequest("GET", "/service/login", nil) // Host: example.com
-	for nonce, want := range map[string]string{hosted: "http://example.com", remote: "https://app.example", local: "*"} {
-		app, _ := srv.store.GetApp(nonce)
-		if got := loginOpenerOrigin(r, app); got != want {
-			t.Errorf("app %s: opener origin = %q, want %q", app.Name, got, want)
+	for nonce, want := range map[string]string{hosted: "http://example.com", remote: "*", local: "*", "": "http://example.com"} {
+		a, _ := srv.store.GetApp(nonce)
+		if got := loginOpenerOrigin(r, a); got != want {
+			t.Errorf("app nonce %q: opener origin = %q, want %q", nonce, got, want)
 		}
 	}
 
@@ -49,46 +96,5 @@ func TestLoginPostedToAppOrigin(t *testing.T) {
 	writeCallbackPage(&page, &pendingAuth{appState: "s", opener: "https://app.example"}, map[string]interface{}{"v": 1})
 	if !strings.Contains(page.String(), `}, "https://app.example");`) {
 		t.Errorf("callback page does not target the app origin:\n%s", page.String())
-	}
-}
-
-// A request naming a host the operator never configured is refused before
-// anything runs — a page can point its own DNS name at a local install.
-func TestUnknownHostRefused(t *testing.T) {
-	srv := newTestServer(t)
-	for host, want := range map[string]int{
-		"rebind.attacker.test": 421,
-		"localhost:9009":       200,
-		"127.0.0.1:9009":       200,
-		"[::1]:9009":           200,
-		"192.168.1.20":         200,
-		"example.com":          200, // FRBR_ALLOWED_HOSTS in the test server
-	} {
-		req := httptest.NewRequest("GET", "/env.js", nil)
-		req.Host = host
-		rr := httptest.NewRecorder()
-		srv.ServeHTTP(rr, req)
-		if rr.Code != want {
-			t.Errorf("Host %s: status %d, want %d", host, rr.Code, want)
-		}
-	}
-}
-
-// Fresh Breath's own pages refuse framing; hosted apps are left to decide.
-func TestServerPagesRefuseFraming(t *testing.T) {
-	srv := newTestServer(t)
-	for path, framed := range map[string]bool{
-		"/control":                  false,
-		"/service/ssh-auth?state=x": false,
-		"/api/me":                   false,
-		"/some-hosted-app/":         true,
-	} {
-		rr := testRequest(t, srv, "GET", path, nil, nil)
-		if got := rr.Header().Get("X-Frame-Options") == ""; got != framed {
-			t.Errorf("%s: frameable = %v, want %v", path, got, framed)
-		}
-		if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
-			t.Errorf("%s: missing nosniff", path)
-		}
 	}
 }

@@ -71,8 +71,10 @@ creds are kept in their browser - no sessions are kept in Fresh Breath's databas
   to host them. (Will automatically proxy these apps. Oh and you don't strictly
   NEED to do this - Fresh Breath will work with static HTML files you're just
   running from the `file://` URL!! Great way to test your apps before
-  publishing. Set the app's URL to its `file:` URL so the server knows to
-  trust a page opened from disk.)
+  publishing. Set the app's URL to its `file:` URL in the control panel:
+  any app whose URL names another location (a `file:` or `https:` URL)
+  runs off this server, and its nonce — in the frbr.js script URL —
+  becomes its credential with the server.)
 
 - Fresh Breath itself can be used as a local MCP - to publish work from a
   harness directly. The MCP has built-in guides to help guide the code writer
