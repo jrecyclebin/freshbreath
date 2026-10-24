@@ -39,7 +39,7 @@ not be exposed directly to the internet.
 | 12 | SSH / git | Any user with SSH access can delete the shared trusted host-key list. The git gateway accepts `file:` and plain `http:` URLs. | Host-key deletion is Admin+; git URLs must be `ssh` or `https`. |
 | 13 | Update feeds | An archive op's `source` path is not traversal-checked. Upload extraction has no total-size cap. | Op sources are cleaned and refused outside the archive (both validation and execution); the tar and zip extraction totals are capped by the app-wide `uploadExtractMaxBytes` (512MB) — an error, never a silent truncation. |
 | 14 | Update feeds (**open**) | Applying feeds is anonymous, service-file updates take effect immediately, and there is no rollback protection. | Decide whether apply should need an admin, and require increasing versions. |
-| 15 | Virtual tools (**open**) | Path variables in URL templates are substituted unescaped. | Escape path variables by default with an opt-out for templates that pass whole paths. Changes template behavior, so it needs a decision. |
+| 15 | Virtual tools | Path variables in URL templates were substituted unescaped, so a value could walk the URL path or smuggle a query. | URL path values are percent-escaped as single segments by default; `$name is path` declares a whole-path variable that substitutes raw (the only opt-out). |
 
 ## Low
 

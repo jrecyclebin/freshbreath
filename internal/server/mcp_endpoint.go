@@ -361,6 +361,11 @@ func virtualToolInputSchema(vt formats.VirtualTool, dbTarget string) map[string]
 			// Plaintext on the wire; the executor seals it on arrival.
 			prop["type"] = "string"
 		}
+		if p.Type == formats.ParamPath {
+			// A whole-path variable is a string on the wire; the raw
+			// substitution opt-out is a template concern, not a schema one.
+			prop["type"] = "string"
+		}
 		if p.Format != "" {
 			// Format-typed strings (email/uri/date/date-time): JSON Schema
 			// type string + format — the type word itself isn't a schema type.

@@ -42,6 +42,14 @@ const (
 	ParamURI      ParamType = "uri"
 	ParamDate     ParamType = "date"
 	ParamDateTime ParamType = "date-time"
+
+	// ParamPath is a string that resolves raw in a URL *path*: its slashes
+	// are structure, not content. It is the opt-out for URL path escaping —
+	// by default a substituted value is percent-escaped as a single path
+	// segment (url.PathEscape), so a $var can't walk the path or smuggle a
+	// `?` into the query. Declare `$route is path` for a variable that
+	// intentionally carries whole segments.
+	ParamPath ParamType = "path"
 )
 
 // stringFormats maps the format-typed ParamTypes to their JSON Schema
@@ -216,7 +224,7 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 //   - Explicit type annotations (e.g. "$fields is object") override inference.
 //   - All other parameters default to "string".
 var typeAnnotationRe = regexp.MustCompile(
-	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array|encrypted|email|uri|date-time|date)(\?)?$`)
+	`^\$([a-zA-Z_]\w*(?:\s*,\s*\$[a-zA-Z_]\w*)*)\s+is\s+(string|object|number|boolean|array|encrypted|email|uri|date-time|date|path)(\?)?$`)
 
 // enumAnnotationRe matches an enum declaration: "$name is "a" | 'b' | ..." with
 // an optional trailing `?`. The values are quote-delimited (double or single,
@@ -760,7 +768,7 @@ func parseFormField(line string) (FormField, error) {
 	if len(ann.names) != 1 {
 		return FormField{}, fmt.Errorf("FORM fields are declared one per line: %q", line)
 	}
-	if ann.typ == ParamObject || ann.typ == ParamArray || ann.typ == ParamEncrypted {
+	if ann.typ == ParamObject || ann.typ == ParamArray || ann.typ == ParamEncrypted || ann.typ == ParamPath {
 		return FormField{}, fmt.Errorf("FORM field $%s: %s fields are not supported (forms take string, number, boolean, enum, or a formatted string)", ann.names[0], ann.typ)
 	}
 	return FormField{Name: ann.names[0], Type: ann.typ, Format: ann.format, Optional: ann.optional, Values: ann.values}, nil
@@ -908,11 +916,12 @@ func collectJQ(lines []string, start int) (string, int) {
 type ResolveMode int
 
 const (
-	ResolveURL    ResolveMode = iota // Split path/query; query values escaped
+	ResolveURL    ResolveMode = iota // Split path/query; query values escaped, path values escaped as segments unless declared `path`
 	ResolveHeader                    // Raw string substitution
 
-	resolvePath  // Internal: raw substitution, $$ → $
-	resolveQuery // Internal: QueryEscape values, $$ → $
+	resolvePath        // Internal: raw substitution, $$ → $
+	resolvePathEscaped // Internal: per-value url.PathEscape, $$ → $ — a name declared `path` falls back to raw
+	resolveQuery       // Internal: QueryEscape values, $$ → $
 )
 
 // buildLookup assembles the $-variable map URL/header templates resolve
@@ -945,24 +954,27 @@ func buildLookup(args map[string]interface{}, vars map[string]interface{}, auth 
 }
 
 // resolveTemplate replaces $variable references in a template string.
-func resolveTemplate(tmpl string, lookup map[string]interface{}, mode ResolveMode) (string, error) {
-	// For URL mode, split path and query so query values get escaped.
+// rawPathNames lists variables declared `is path` — the ones whose values
+// substitute raw even in a URL's path (their slashes are structure); every
+// other URL path value is percent-escaped as a single segment.
+func resolveTemplate(tmpl string, lookup map[string]interface{}, mode ResolveMode, rawPathNames map[string]bool) (string, error) {
+	// For URL mode, split path and query so each half gets its own escaping.
 	if mode == ResolveURL {
 		qIdx := strings.Index(tmpl, "?")
 		if qIdx == -1 {
-			return resolveTemplateInner(tmpl, lookup, resolvePath)
+			return resolveTemplateInner(tmpl, lookup, resolvePathEscaped, rawPathNames)
 		}
-		path, err := resolveTemplateInner(tmpl[:qIdx], lookup, resolvePath)
+		path, err := resolveTemplateInner(tmpl[:qIdx], lookup, resolvePathEscaped, rawPathNames)
 		if err != nil {
 			return "", err
 		}
-		query, err := resolveTemplateInner(tmpl[qIdx+1:], lookup, resolveQuery)
+		query, err := resolveTemplateInner(tmpl[qIdx+1:], lookup, resolveQuery, nil)
 		if err != nil {
 			return "", err
 		}
 		return path + "?" + query, nil
 	}
-	return resolveTemplateInner(tmpl, lookup, mode)
+	return resolveTemplateInner(tmpl, lookup, mode, nil)
 }
 
 // dropEmptyOptionalPairs removes `name=` pairs (empty value) for the
@@ -994,7 +1006,7 @@ func dropEmptyOptionalPairs(rawURL string, optional map[string]bool) string {
 // resolveTemplateInner does the actual variable replacement. $name is
 // looked up in the map; $$ → $ in path/query modes (a literal dollar in a
 // URL). There is no body mode: request bodies and shaping are jq.
-func resolveTemplateInner(tmpl string, lookup map[string]interface{}, mode ResolveMode) (string, error) {
+func resolveTemplateInner(tmpl string, lookup map[string]interface{}, mode ResolveMode, rawPathNames map[string]bool) (string, error) {
 	var b strings.Builder
 	i := 0
 	for i < len(tmpl) {
@@ -1005,37 +1017,38 @@ func resolveTemplateInner(tmpl string, lookup map[string]interface{}, mode Resol
 			continue
 		}
 		// $$ → literal $ (path and query modes)
-		if (mode == resolvePath || mode == resolveQuery) && i+1 < len(tmpl) && tmpl[i+1] == '$' {
+		if (mode == resolvePath || mode == resolvePathEscaped || mode == resolveQuery) && i+1 < len(tmpl) && tmpl[i+1] == '$' {
 			b.WriteByte('$')
 			i += 2
 			continue
 		}
-		val, consumed, err := resolveVarRef(tmpl[i:], lookup)
+		val, name, consumed, err := resolveVarRef(tmpl[i:], lookup)
 		if err != nil {
 			return "", fmt.Errorf("position %d: %w", i, err)
 		}
-		b.WriteString(encodeValue(val, mode))
+		b.WriteString(encodeValue(val, mode, name, rawPathNames))
 		i += consumed
 	}
 	return b.String(), nil
 }
 
-// resolveVarRef parses a $name reference and returns its value plus the
-// number of characters consumed. $name is looked up in the merged variable
-// map; an absent name is an error (so $token without a logged-in caller
-// fails, the same gate the old resolver enforced).
-func resolveVarRef(s string, lookup map[string]interface{}) (interface{}, int, error) {
+// resolveVarRef parses a $name reference and returns its value, the bare
+// name (for the `path` opt-out in encodeValue), and the number of characters
+// consumed. $name is looked up in the merged variable map; an absent name
+// is an error (so $token without a logged-in caller fails, the same gate the
+// old resolver enforced).
+func resolveVarRef(s string, lookup map[string]interface{}) (interface{}, string, int, error) {
 	if len(s) < 2 {
-		return nil, 0, fmt.Errorf("lonely $ at end of string")
+		return nil, "", 0, fmt.Errorf("lonely $ at end of string")
 	}
 	name, consumed := parseIdent(s[1:])
 	if name == "" {
-		return nil, 0, fmt.Errorf("invalid variable reference after $")
+		return nil, "", 0, fmt.Errorf("invalid variable reference after $")
 	}
 	if val, ok := lookup[name]; ok {
-		return val, consumed + 1, nil
+		return val, name, consumed + 1, nil
 	}
-	return nil, 0, fmt.Errorf("undefined variable: $%s", name)
+	return nil, "", 0, fmt.Errorf("undefined variable: $%s", name)
 }
 
 func parseIdent(s string) (string, int) {
@@ -1047,15 +1060,24 @@ func parseIdent(s string) (string, int) {
 	return s, len(s)
 }
 
-func encodeValue(val interface{}, mode ResolveMode) string {
+func encodeValue(val interface{}, mode ResolveMode, name string, rawPathNames map[string]bool) string {
 	// A JSON null (or an unset $token_id) renders as nothing in URLs and
 	// headers — "<nil>" is never what anyone wants.
 	if val == nil {
 		return ""
 	}
+	// A variable declared `is path` carries whole path segments: its
+	// slashes are structure, so it substitutes raw even in an escaped path.
+	if mode == resolvePathEscaped && rawPathNames[name] {
+		mode = resolvePath
+	}
 	switch mode {
 	case resolveQuery:
 		return url.QueryEscape(fmt.Sprintf("%v", val))
+	case resolvePathEscaped:
+		// One value, one segment: slashes, question marks and friends are
+		// percent-escaped, so a $var can't walk the path or fake a query.
+		return url.PathEscape(fmt.Sprintf("%v", val))
 	default: // resolvePath, ResolveURL, ResolveHeader
 		return fmt.Sprintf("%v", val)
 	}
@@ -1391,6 +1413,14 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		omitted: omittedOptionals,
 		hooks:   hooks,
 	}
+	// Variables declared `is path` are the whole-path opt-out: URL path
+	// values are percent-escaped as single segments unless declared here.
+	rawPathNames := make(map[string]bool)
+	for _, p := range tool.Params {
+		if p.Type == ParamPath {
+			rawPathNames[p.Name] = true
+		}
+	}
 	lookup := func() map[string]interface{} {
 		// URL/header $-interpolation reaches the $-variable set (caller args,
 		// assigned vars, token built-ins) AND the current scope (the
@@ -1447,7 +1477,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			// wait for it would hang. The elicitation UI is for steps that
 			// gate further work.)
 			if step.Elicit.Form == nil && stepIdx == len(tool.Steps)-1 && shapingOf(&step) == "" {
-				el, err := buildElicitRequest(step.Elicit, lookup())
+				el, err := buildElicitRequest(step.Elicit, lookup(), rawPathNames)
 				if err != nil {
 					return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
 				}
@@ -1469,7 +1499,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 				// a later step gets a fresh ID.
 				vars["elicitation_url"] = hooks.ElicitationURL(elicitationID)
 			}
-			el, err := buildElicitRequest(step.Elicit, lookup())
+			el, err := buildElicitRequest(step.Elicit, lookup(), rawPathNames)
 			if err != nil {
 				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
 			}
@@ -1583,7 +1613,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		}
 
 		// Resolve URL and headers (string $-interpolation; not jq).
-		resolvedURL, err := resolveTemplate(step.URL, lookup(), ResolveURL)
+		resolvedURL, err := resolveTemplate(step.URL, lookup(), ResolveURL, rawPathNames)
 		if err != nil {
 			return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
 		}
@@ -1591,7 +1621,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 
 		resolvedHeaders := make(map[string]string)
 		for k, v := range step.Headers {
-			resolved, err := resolveTemplate(v, lookup(), ResolveHeader)
+			resolved, err := resolveTemplate(v, lookup(), ResolveHeader, nil)
 			if err != nil {
 				return nil, fmt.Errorf("step %d, header %s: %w", stepIdx, k, err)
 			}
@@ -1700,8 +1730,9 @@ func elicitationID() string {
 // buildElicitRequest resolves an elicitation directive's templates into the
 // neutral request the server adapter sends. lookup already merges scope
 // (see runVirtualTool), so a URL step's $verification_url reads the field of
-// the last response just as a GET URL reads $id.
-func buildElicitRequest(ev *VirtualElicit, lookup map[string]interface{}) (*ElicitRequest, error) {
+// the last response just as a GET URL reads $id. rawPathNames is the tool's
+// `is path` opt-out set, applied to the URL template like any step URL.
+func buildElicitRequest(ev *VirtualElicit, lookup map[string]interface{}, rawPathNames map[string]bool) (*ElicitRequest, error) {
 	el := &ElicitRequest{}
 	msgTmpl := ev.Message
 	if ev.Form != nil {
@@ -1712,14 +1743,14 @@ func buildElicitRequest(ev *VirtualElicit, lookup map[string]interface{}) (*Elic
 		el.Mode = "url"
 	}
 	if msgTmpl != "" {
-		msg, err := resolveTemplate(msgTmpl, lookup, ResolveHeader)
+		msg, err := resolveTemplate(msgTmpl, lookup, ResolveHeader, nil)
 		if err != nil {
 			return nil, fmt.Errorf("message: %w", err)
 		}
 		el.Message = msg
 	}
 	if ev.Form == nil {
-		u, err := resolveTemplate(ev.URL, lookup, ResolveURL)
+		u, err := resolveTemplate(ev.URL, lookup, ResolveURL, rawPathNames)
 		if err != nil {
 			return nil, fmt.Errorf("url: %w", err)
 		}

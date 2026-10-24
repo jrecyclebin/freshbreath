@@ -442,7 +442,7 @@ func TestResolveURLSimple(t *testing.T) {
 	lookup := map[string]interface{}{"site_id": "abc-123"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/lists",
-		lookup, ResolveURL,
+		lookup, ResolveURL, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ func TestResolveURLSimple(t *testing.T) {
 func TestResolveDollarDollar(t *testing.T) {
 	result, err := resolveTemplate(
 		"https://example.com?$$select=id,name&$$top=10",
-		map[string]interface{}{}, ResolveURL,
+		map[string]interface{}{}, ResolveURL, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -469,7 +469,7 @@ func TestResolveDollarDollarWithVars(t *testing.T) {
 	lookup := map[string]interface{}{"site_id": "abc"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/lists?$$select=id,name",
-		lookup, ResolveURL,
+		lookup, ResolveURL, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -484,7 +484,7 @@ func TestResolveURLQueryEscape(t *testing.T) {
 	lookup := map[string]interface{}{"folder": "My Documents", "site_id": "abc-123"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/drive/root/children?path=$folder",
-		lookup, ResolveURL,
+		lookup, ResolveURL, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -499,7 +499,7 @@ func TestResolveURLQueryEscapeSpecialChars(t *testing.T) {
 	lookup := map[string]interface{}{"q": "hello & goodbye", "site_id": "abc"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/search?query=$q",
-		lookup, ResolveURL,
+		lookup, ResolveURL, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -509,12 +509,33 @@ func TestResolveURLQueryEscapeSpecialChars(t *testing.T) {
 	}
 }
 
-func TestResolveURLQueryNoEscapePath(t *testing.T) {
-	// Path variables stay raw even when the URL also has a query string.
+func TestResolveURLPathEscapeDefault(t *testing.T) {
+	// A path value is one segment by default: slashes, question marks,
+	// colons and spaces are percent-escaped, so a $var can't walk the
+	// path or smuggle a query in. (Variables that carry whole paths opt
+	// out with `$name is path` — see the next test.)
+	lookup := map[string]interface{}{"file": "reports/2026 q1?x=1", "top": "10"}
+	result, err := resolveTemplate(
+		"https://api.example/files/$file?$$top=$top",
+		lookup, ResolveURL, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "https://api.example/files/reports%2F2026%20q1%3Fx=1?$top=10" {
+		t.Errorf("result = %q", result)
+	}
+}
+
+func TestResolveURLPathDeclaredWholePathStaysRaw(t *testing.T) {
+	// A variable declared `is path` carries whole segments — its slashes
+	// are structure — so it substitutes raw even when the URL also has a
+	// query string. This is the opt-out; everything else is escaped.
 	lookup := map[string]interface{}{"site_id": "contoso.sharepoint.com:/sites/My Site", "top": "10"}
+	rawPath := map[string]bool{"site_id": true}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id/lists?$$top=$top",
-		lookup, ResolveURL,
+		lookup, ResolveURL, rawPath,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -529,7 +550,7 @@ func TestResolveURLNoQuery(t *testing.T) {
 	lookup := map[string]interface{}{"site_id": "abc-123"}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$site_id",
-		lookup, ResolveURL,
+		lookup, ResolveURL, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -543,7 +564,7 @@ func TestResolveHeaderToken(t *testing.T) {
 	lookup := map[string]interface{}{"token": "my-secret-token"}
 	result, err := resolveTemplate(
 		"Bearer $token",
-		lookup, ResolveHeader,
+		lookup, ResolveHeader, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -554,26 +575,41 @@ func TestResolveHeaderToken(t *testing.T) {
 }
 
 func TestResolveUndefinedVariable(t *testing.T) {
-	_, err := resolveTemplate("Hello $unknown", map[string]interface{}{}, ResolveURL)
+	_, err := resolveTemplate("Hello $unknown", map[string]interface{}{}, ResolveURL, nil)
 	if err == nil {
 		t.Error("expected error for undefined variable")
 	}
 }
 
 func TestResolveMultipleVarsInURL(t *testing.T) {
+	// $pathname carries whole segments (the `is path` opt-out); $hostname
+	// is an ordinary value, escaped as a segment (nothing to escape here).
 	lookup := map[string]interface{}{
 		"hostname": "contoso.sharepoint.com",
 		"pathname": "/sites/my-site",
 	}
 	result, err := resolveTemplate(
 		"https://graph.microsoft.com/v1.0/sites/$hostname:$pathname",
-		lookup, ResolveURL,
+		lookup, ResolveURL, map[string]bool{"pathname": true},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result != "https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:/sites/my-site" {
 		t.Errorf("result = %q", result)
+	}
+
+	// Undeclared, the same $pathname is a single segment: its slashes are
+	// percent-escaped, not structural.
+	result, err = resolveTemplate(
+		"https://graph.microsoft.com/v1.0/sites/$hostname:$pathname",
+		lookup, ResolveURL, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != "https://graph.microsoft.com/v1.0/sites/contoso.sharepoint.com:%2Fsites%2Fmy-site" {
+		t.Errorf("default-escaped result = %q", result)
 	}
 }
 
@@ -2371,6 +2407,7 @@ Authorization: Bearer $token
 
 HTTP 200
 
+$verification_url is path
 URL $verification_url "Open this link, then approve"
 
 GET https://example.com/status/$id
@@ -2427,6 +2464,7 @@ HTTP 200
 func TestExecuteURLHandoff(t *testing.T) {
 	file := `[go] Hand the link to the user and finish.
 
+$verification_url is path
 GET https://example.com/device
 
 HTTP 200
@@ -2585,5 +2623,26 @@ FORM "Key?"
 `))
 	if err == nil || !strings.Contains(err.Error(), "not supported") {
 		t.Errorf("want unsupported-field error, got %v", err)
+	}
+}
+
+// `$name is path` declares a whole-path variable: it stays string on the
+// wire (schema-wise) but substitutes raw in a URL path, opting out of the
+// default segment escaping.
+func TestPathAnnotation(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[fetch] Fetch a path.
+$route is path
+
+GET https://api.example.com/root/$route
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 || len(tools[0].Params) != 1 {
+		t.Fatalf("tools = %+v", tools)
+	}
+	p := tools[0].Params[0]
+	if p.Type != ParamPath {
+		t.Errorf("route type = %v, want path", p.Type)
 	}
 }

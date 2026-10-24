@@ -57,7 +57,7 @@ Aside from the request and response layouts, tool scripts can also include:
 - Comments: Lines starting with `#` are comments and are ignored by the parser.
 - Type annotations: Lines starting with `$arg is type` indicate that the argument
   is expected to be of a certain type (string, object, number, boolean, array,
-  encrypted)
+  encrypted, or path — a string that substitutes whole into a URL path)
   and whether it is optional with a question mark (`number?`).
 - Assignments: Lines starting with `$var = <jq>` assign a jq expression's
   result to a `$var` (visible to the rest of the tool). The expression is jq:
@@ -195,8 +195,23 @@ object goes on the wire as JSON. `update-list-item`'s body is also just
 extra keys, use jq's `+`: `$fields + {title: $new}`. See Request Bodies below.
 
 Possible types for tool arguments are: 'string', 'object', 'number', 'boolean',
-'array' and 'encrypted' (see Encrypted Parameters below). The default type is
-'string' if no type is specified.
+'array', 'encrypted' (see Encrypted Parameters below), and 'path'. The default
+type is 'string' if no type is specified.
+
+**'path' matters in URL templates**: a substituted value is percent-escaped as
+a *single path segment* — its slashes, `?`s and spaces become `%2F`, `%3F`,
+`%20` — so one variable can never walk out of its spot in the URL or smuggle
+a query in. A variable declared `is path` carries whole segments instead
+(slashes are structure, not content) and substitutes raw. The classic case is
+a device-flow hand-off reading a whole URL from the response:
+
+```
+$verification_url is path
+URL $verification_url "Visit to authorize"
+```
+
+Query-string values are always escaped (`is path` changes nothing there —
+paths are the only whole-value position), and headers are never escaped.
 
 If multiple variables share a type, they can also share a definition:
 
@@ -470,7 +485,10 @@ signal.
 
 ### Variables are bindings, not splices
 
-`$title` in a URL template is a string splice. `$title` in a SQL step is a
+`$title` in a URL template is a string splice — escaped as a single path
+segment in the path, query-escaped in the query (declare `$title is path`
+to carry whole segments; see tool argument types above). `$title` in a SQL
+step is a
 **bound parameter** — compiled to a named SQLite binding at load time, so
 there is no injection surface. Pretty nice - and the syntax is familiar from
 the HTTP calls.
