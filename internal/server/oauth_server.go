@@ -72,6 +72,22 @@ func newOAuthClientStore(s *db.Store) *oauthClientStore {
 	return &oauthClientStore{store: s}
 }
 
+// sweepIdle expires dynamically-registered clients that have gone unused
+// past oauthClientIdleTTL: registration is open, so without a sweeper the
+// table only grows. A client that keeps using its cached client_id keeps
+// its last_use stamp fresh and survives.
+func (cs *oauthClientStore) sweepIdle() {
+	cutoff := time.Now().Add(-oauthClientIdleTTL)
+	n, err := cs.store.DeleteOAuthClientsIdleBefore(cutoff)
+	if err != nil {
+		log.Printf("oauth client sweep: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("oauth: expired %d client(s) unused since before %s", n, cutoff.Format(time.RFC3339))
+	}
+}
+
 func (cs *oauthClientStore) register(redirectURIs []string) (string, string, error) {
 	id := rand.Text()
 	secret := rand.Text()
@@ -84,8 +100,14 @@ func (cs *oauthClientStore) register(redirectURIs []string) (string, string, err
 // get reports an unreadable client as unknown, so the MCP client gets
 // invalid_client and re-registers instead of being stuck on a 500. It
 // logs loudly: a run of these usually means the signing key changed.
+// A found client counts as used — its last_use stamp is refreshed.
 func (cs *oauthClientStore) get(id string) (string, []string, bool, error) {
 	secret, uris, ok, err := cs.store.GetOAuthClient(id)
+	if ok {
+		if terr := cs.store.TouchOAuthClient(id); terr != nil {
+			log.Printf("oauth client touch %q: %v", id, terr)
+		}
+	}
 	if errors.Is(err, db.ErrUnreadableOAuthClient) {
 		log.Printf("WARNING: treating client as unknown: %v (signing key changed?)", err)
 		return "", nil, false, nil
@@ -189,9 +211,18 @@ func (os *oauthServer) handleMetadata(w http.ResponseWriter, r *http.Request) {
 
 // ── DCR: Dynamic Client Registration ────────────────────────────────
 
+// oauthRegisterRate caps client registrations per IP per minute — the
+// endpoint is open to anyone, so it needs the same brake the anonymous
+// update endpoints have.
+const oauthRegisterRate = 5
+
 func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		oauthWriteError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
+		return
+	}
+	if !os.server.allowRate("oauth/register", requestIP(r), oauthRegisterRate) {
+		oauthWriteError(w, http.StatusTooManyRequests, "invalid_request", "too many registrations from this address — wait a minute")
 		return
 	}
 
@@ -216,6 +247,10 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", "client registration failed")
 		return
 	}
+	// The register rate limits this sweep's cost: registration is the one
+	// open door that keeps minting rows, so it is also the door that takes
+	// out the ones nobody has used.
+	os.clients.sweepIdle()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

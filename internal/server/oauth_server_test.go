@@ -166,6 +166,12 @@ func TestOAuthRegisterRedirectURIs(t *testing.T) {
 		"https://client.example/cb#frag":  400,
 		"/relative/cb":                    400,
 	} {
+		// Each registration attempt is a fresh caller as far as the rate
+		// limit is concerned — this test exercises URI validation, not the
+		// limiter (TestRegisterRateLimit does).
+		srv.updateMu.Lock()
+		srv.updateRate = nil
+		srv.updateMu.Unlock()
 		body, _ := json.Marshal(map[string]any{"redirect_uris": []string{uri}})
 		rr := testRequest(t, srv, "POST", "/oauth/register", bytes.NewReader(body), nil)
 		if rr.Code != want {
@@ -1899,5 +1905,56 @@ func TestOAuthRefreshUpstreamFailureKeepsFamily(t *testing.T) {
 	}
 	if fam, _, _ := srv.store.GetRefreshFamily(famID); fam.Revoked {
 		t.Error("retry revoked the family")
+	}
+}
+
+// Registration is open to anyone, so it is rate-limited per IP like the
+// anonymous update endpoints (its own limiter bucket, so a flood on one
+// endpoint cannot lock out the other).
+func TestRegisterRateLimit(t *testing.T) {
+	srv := newTestServer(t)
+	body := `{"redirect_uris":["http://127.0.0.1:1/cb"]}`
+	for i := 0; i < oauthRegisterRate; i++ {
+		if rr := testRequest(t, srv, "POST", "/oauth/register", strings.NewReader(body), nil); rr.Code != 201 {
+			t.Fatalf("registration %d: status %d, want 201", i+1, rr.Code)
+		}
+	}
+	rr := testRequest(t, srv, "POST", "/oauth/register", strings.NewReader(body), nil)
+	if rr.Code != 429 {
+		t.Fatalf("registration past the limit: status %d, want 429", rr.Code)
+	}
+}
+
+// Unused OAuth clients are swept after oauthClientIdleTTL; a client that
+// keeps getting looked up — the token endpoints do, and a use is a use —
+// keeps its last_use stamp fresh and survives.
+func TestIdleOAuthClientsSwept(t *testing.T) {
+	srv := newTestServer(t)
+	stale, fresh := "staleclient1", "freshclient1"
+	if err := srv.store.RegisterOAuthClient(stale, "s1", []string{"http://127.0.0.1:1/cb"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := srv.store.RegisterOAuthClient(fresh, "s2", []string{"http://127.0.0.1:1/cb"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	old := time.Now().Add(-oauthClientIdleTTL - time.Hour).UTC().Format(time.RFC3339)
+	if _, err := srv.store.DB().Exec("UPDATE oauth_clients SET last_used_at = ? WHERE client_id = ?", old, stale); err != nil {
+		t.Fatalf("age client: %v", err)
+	}
+
+	// A use refreshes the stamp, so a looked-up client is never swept.
+	if _, _, ok, err := srv.oauthSrv.clients.get(stale); !ok || err != nil {
+		t.Fatalf("lookup: ok=%v err=%v", ok, err)
+	}
+	if _, err := srv.store.DB().Exec("UPDATE oauth_clients SET last_used_at = ? WHERE client_id = ?", old, stale); err != nil {
+		t.Fatalf("re-age client: %v", err)
+	}
+
+	srv.oauthSrv.clients.sweepIdle()
+	if _, _, ok, _ := srv.store.GetOAuthClient(stale); ok {
+		t.Error("stale client survived the sweep")
+	}
+	if _, _, ok, _ := srv.store.GetOAuthClient(fresh); !ok {
+		t.Error("fresh client was swept")
 	}
 }

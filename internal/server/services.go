@@ -678,6 +678,12 @@ const (
 	// archive — regardless of how small it was compressed. Extraction
 	// must refuse past the cap, never silently truncate.
 	uploadExtractMaxBytes = 512 << 20
+
+	// oauthClientIdleTTL is how long a dynamically-registered OAuth client
+	// survives without a use; unused ones are swept (registration is open,
+	// so the table needs an expiry, and clients that keep their cached
+	// client_id keep it alive by using it).
+	oauthClientIdleTTL = 30 * 24 * time.Hour
 )
 
 // sealedUpstreamData is one provider's upstream credential inside a token.

@@ -84,8 +84,9 @@ type Server struct {
 }
 
 // updateRateCount is one per-IP fixed-window counter for the anonymous
-// update endpoints. Blunt, but enough to stop an anonymous hammer turning
-// apply into a download DoS.
+// endpoints (bucketed by name — see allowRate). Blunt, but enough to stop
+// an anonymous hammer turning apply into a download DoS or registration
+// into a table-filler.
 type updateRateCount struct {
 	windowStart time.Time
 	count       int
@@ -216,6 +217,10 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		actTickets:     actTickets{tix: make(map[string]actTicketPayload)},
 	}
 	s.oauthSrv = newOAuthServer(s)
+	// Expire OAuth clients nobody has used since the last boot too —
+	// the register endpoint sweeps on every call, but a server that never
+	// sees a registration should still clean up.
+	s.oauthSrv.clients.sweepIdle()
 	s.SetupRoutes()
 
 	// Periodically expire stale SSH agent keys and sessions.

@@ -17,29 +17,32 @@ import (
 	"poggers.institute/freshbreath/internal/db"
 )
 
-// Per-IP fixed-window limits for the anonymous update endpoints. Check is a
+// Per-IP fixed-window limits for the anonymous endpoints. Check is a
 // cheap probe (a hosted app may poll it); apply fans out into real downloads,
-// so it's much tighter.
+// so it's much tighter. OAuth client registration (open to anyone too)
+// lives in oauth_server.go and shares the same limiter plumbing.
 const (
 	updateCheckRate = 30 // per minute
 	updateApplyRate = 6  // per minute
 )
 
-// allowUpdateRequest enforces the per-IP window for the anonymous endpoints.
-// Unknown IPs (proxies, tests) share the "" bucket.
-func (s *Server) allowUpdateRequest(ip string, limit int) bool {
+// allowRate enforces a per-IP window for one named bucket — each endpoint
+// that admits anonymous callers gets its own, so a flood on one cannot
+// lock out another. Unknown IPs (proxies, tests) share the "" address.
+func (s *Server) allowRate(bucket, ip string, limit int) bool {
 	now := time.Now()
 	s.updateMu.Lock()
 	defer s.updateMu.Unlock()
 	if s.updateRate == nil {
 		s.updateRate = make(map[string]updateRateCount)
 	}
-	c := s.updateRate[ip]
+	key := bucket + ":" + ip
+	c := s.updateRate[key]
 	if now.Sub(c.windowStart) >= time.Minute {
 		c = updateRateCount{windowStart: now}
 	}
 	c.count++
-	s.updateRate[ip] = c
+	s.updateRate[key] = c
 	return c.count <= limit
 }
 
@@ -246,7 +249,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.allowUpdateRequest(requestIP(r), updateCheckRate) {
+	if !s.allowRate("updates/check", requestIP(r), updateCheckRate) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
 		return
 	}
@@ -265,7 +268,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.allowUpdateRequest(requestIP(r), updateApplyRate) {
+	if !s.allowRate("updates/apply", requestIP(r), updateApplyRate) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
 		return
 	}

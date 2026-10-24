@@ -120,7 +120,8 @@ func (s *Store) Migrate() error {
       client_id      TEXT NOT NULL PRIMARY KEY,
       client_secret  TEXT NOT NULL,
       redirect_uris  TEXT NOT NULL DEFAULT '[]',
-      created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      last_used_at   TEXT NOT NULL DEFAULT ''
     );
 
     CREATE INDEX IF NOT EXISTS idx_services_url ON services(url);
@@ -225,6 +226,21 @@ func (s *Store) Migrate() error {
 			return err
 		}
 		if _, err = s.db.Exec("UPDATE update_feeds SET last_etag = '', last_modified = ''"); err != nil {
+			return err
+		}
+	}
+
+	// last_used_at on oauth_clients: dynamically-registered clients are
+	// open to anyone, so unused ones are swept after oauthClientIdleTTL;
+	// the timestamp is what decides. Backfilled from created_at so rows that
+	// predate the column don't start out expired.
+	var hasClientLastUsed bool
+	s.db.QueryRow("SELECT COUNT(*) > 0 FROM pragma_table_info('oauth_clients') WHERE name='last_used_at'").Scan(&hasClientLastUsed)
+	if !hasClientLastUsed {
+		if _, err := s.db.Exec("ALTER TABLE oauth_clients ADD COLUMN last_used_at TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+		if _, err := s.db.Exec("UPDATE oauth_clients SET last_used_at = created_at WHERE last_used_at = ''"); err != nil {
 			return err
 		}
 	}
@@ -1314,16 +1330,40 @@ func (s *Store) DeleteSSHHostKey(host string, port int) error {
 // ── OAuth Clients (DCR persistence) ──
 
 // RegisterOAuthClient persists a dynamically-registered OAuth client.
+// last_used_at starts at now: a fresh registration is in use by definition.
 func (s *Store) RegisterOAuthClient(clientID, clientSecret string, redirectURIs []string) error {
 	urisJSON, err := json.Marshal(redirectURIs)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(
-		"INSERT INTO oauth_clients (client_id, client_secret, redirect_uris) VALUES (?, ?, ?)",
-		clientID, s.sealField(clientSecret), string(urisJSON),
+		"INSERT INTO oauth_clients (client_id, client_secret, redirect_uris, last_used_at) VALUES (?, ?, ?, ?)",
+		clientID, s.sealField(clientSecret), string(urisJSON), time.Now().UTC().Format(time.RFC3339),
 	)
 	return err
+}
+
+// TouchOAuthClient stamps a client's last use — a successful lookup on
+// the token endpoints is a use.
+func (s *Store) TouchOAuthClient(clientID string) error {
+	_, err := s.db.Exec(
+		"UPDATE oauth_clients SET last_used_at = ? WHERE client_id = ?",
+		time.Now().UTC().Format(time.RFC3339), clientID,
+	)
+	return err
+}
+
+// DeleteOAuthClientsIdleBefore removes clients whose last use predates the
+// cutoff, returning how many went.
+func (s *Store) DeleteOAuthClientsIdleBefore(cutoff time.Time) (int64, error) {
+	res, err := s.db.Exec(
+		"DELETE FROM oauth_clients WHERE last_used_at != '' AND last_used_at < ?",
+		cutoff.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ErrUnreadableOAuthClient marks a client row that exists but can't be
