@@ -672,6 +672,12 @@ const (
 	refreshTokenTTL    = 14 * 24 * time.Hour
 	refreshGraceWindow = 30 * time.Second
 	pendingAuthTTL     = 30 * time.Minute // login link stays usable this long; retries allowed
+
+	// uploadExtractMaxBytes caps anything this server extracts to disk —
+	// the zip inside an app web upload, and the tarball inside an update
+	// archive — regardless of how small it was compressed. Extraction
+	// must refuse past the cap, never silently truncate.
+	uploadExtractMaxBytes = 512 << 20
 )
 
 // sealedUpstreamData is one provider's upstream credential inside a token.

@@ -130,6 +130,19 @@ func (op UpdateOp) opSource() string {
 	return ""
 }
 
+// archiveSourcePath resolves an op's in-archive source path against the
+// extracted archive, refusing any path that leaves it — a manifest is
+// remote input (it arrives encrypted, but encrypted by whoever holds the
+// feed's key), so its paths get the same rule the tar entries get:
+// cleaned, relative, inside archiveDir.
+func archiveSourcePath(archiveDir string, op UpdateOp) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(op.opSource()))
+	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("source %q escapes the archive", op.opSource())
+	}
+	return filepath.Join(archiveDir, clean), nil
+}
+
 // validateUpdateOps pre-flights every op against the store and the extracted
 // archive before the first one executes: targets must exist, sources must be
 // in the tarball, slots default to staging. A validation failure touches
@@ -164,7 +177,10 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.
 		default:
 			return fmt.Errorf("op %d: unknown action %q", i, op.Action)
 		}
-		src := filepath.Join(archiveDir, filepath.FromSlash(op.opSource()))
+		src, err := archiveSourcePath(archiveDir, op)
+		if err != nil {
+			return fmt.Errorf("op %d: %w", i, err)
+		}
 		if _, err := os.Stat(src); err != nil {
 			return fmt.Errorf("op %d: source %q not found in archive", i, op.opSource())
 		}
@@ -175,9 +191,12 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.
 // executeUpdateOp runs one op against the extracted archive. Both actions
 // overwrite, never delete — updates don't tear down.
 func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
+	src, err := archiveSourcePath(archiveDir, op)
+	if err != nil {
+		return err
+	}
 	switch op.Action {
 	case "update_app_files":
-		src := filepath.Join(archiveDir, filepath.FromSlash(op.opSource()))
 		dst := filepath.Join(s.config.DataDir, "apps", op.Target, "staging")
 		if err := os.RemoveAll(dst); err != nil {
 			return fmt.Errorf("failed to clear staging slot: %w", err)
@@ -192,7 +211,6 @@ func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
 		if err != nil {
 			return err
 		}
-		src := filepath.Join(archiveDir, filepath.FromSlash(op.opSource()))
 		data, err := os.ReadFile(src)
 		if err != nil {
 			return fmt.Errorf("read source: %w", err)
@@ -249,14 +267,22 @@ func tarWriteFile(tw *tar.Writer, arcName string, data []byte) error {
 }
 
 // extractArchive unpacks an in-memory tar.gz into destDir. Entry names are
-// cleaned and traversal-checked — an archive is remote input.
+// cleaned and traversal-checked, and the total bytes written are capped:
+// gzip can turn a 256MB archive into far more than that on disk, so the
+// running total is checked from the headers before each file is written
+// and anything past the cap is refused, never silently truncated.
 func extractArchive(data []byte, destDir string) error {
+	return extractArchiveBounded(data, destDir, uploadExtractMaxBytes)
+}
+
+func extractArchiveBounded(data []byte, destDir string, cap int64) error {
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("gzip: %w", err)
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	var total int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -279,6 +305,10 @@ func extractArchive(data []byte, destDir string) error {
 			}
 			continue
 		}
+		if total+hdr.Size > cap {
+			return fmt.Errorf("archive extracts past the %dMB cap", cap>>20)
+		}
+		total += hdr.Size
 		if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
 			return err
 		}
@@ -286,7 +316,7 @@ func extractArchive(data []byte, destDir string) error {
 		if err != nil {
 			return err
 		}
-		_, copyErr := io.Copy(f, io.LimitReader(tr, maxArchiveSize))
+		_, copyErr := io.Copy(f, tr)
 		closeErr := f.Close()
 		if copyErr != nil {
 			return copyErr

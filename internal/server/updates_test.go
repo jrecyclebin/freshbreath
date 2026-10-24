@@ -1039,3 +1039,89 @@ func TestUpdateTaskServiceNeedsSuperuserOwner(t *testing.T) {
 		}
 	}
 }
+
+// plainTarGZ builds an unencrypted tar.gz (extractArchive's input — the
+// encrypted form only exists on the wire).
+func plainTarGZ(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	for name, data := range files {
+		if err := tarWriteFile(tw, name, data); err != nil {
+			t.Fatalf("tar %s: %v", name, err)
+		}
+	}
+	tw.Close()
+	gzw.Close()
+	return buf.Bytes()
+}
+
+// An op's source must stay inside the extracted archive: a manifest is
+// remote input, and "../" in its source used to walk straight out of the
+// temp dir when the op ran.
+func TestUpdateOpSourceCannotEscapeArchive(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "escapesrc")
+	cleanupSlotApp(t, srv, nonce)
+
+	key := strings.Repeat("ab", 32)
+	manifest := &UpdateManifest{
+		Version: "v1",
+		Ops:     []UpdateOp{{Action: "update_app_files", Target: nonce, Source: "../../../etc"}},
+	}
+	archive := makeUpdateArchive(t, key, manifest, map[string][]byte{
+		"apps/" + nonce + "/index.html": []byte("<h1>updated</h1>"),
+	})
+	ts := archiveServer(t, archive, `"v1"`, "")
+	id, _ := createUpdateFeed(t, srv, ts.URL, "receive", "escape", key)
+
+	events := applyUpdates(t, srv, `{"ids":["`+id+`"]}`)
+	var verr string
+	for _, e := range events {
+		if e.Event == "feed_error" && e.Data["step"] == "validate" {
+			verr, _ = e.Data["message"].(string)
+		}
+	}
+	if verr == "" {
+		t.Fatalf("no validate feed_error in %v", events)
+	}
+	if !strings.Contains(verr, "escapes the archive") {
+		t.Errorf("validate error = %q, want the escape refusal", verr)
+	}
+	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", nonce, "staging")); !os.IsNotExist(err) {
+		t.Errorf("staging slot was written: %v", err)
+	}
+}
+
+// The tarball's total extraction is capped — gzip can turn a bounded
+// download into an unbounded write — and a past-cap file is refused with
+// an error, not silently truncated the way the old per-file LimitReader
+// did.
+func TestExtractArchiveTotalCap(t *testing.T) {
+	dir := t.TempDir()
+	// Fits: both files land whole.
+	if err := extractArchiveBounded(plainTarGZ(t, map[string][]byte{
+		"a.bin": bytes.Repeat([]byte("a"), 4<<20),
+		"b.bin": bytes.Repeat([]byte("b"), 4<<20),
+	}), dir, 8<<20); err != nil {
+		t.Fatalf("under-cap extract: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "b.bin")); err != nil || len(got) != 4<<20 {
+		t.Errorf("b.bin = %d bytes (err %v), want the full 4MB", len(got), err)
+	}
+
+	// Over the cap: refused before the second file is written.
+	archive := plainTarGZ(t, map[string][]byte{
+		"a.bin": bytes.Repeat([]byte("a"), 4<<20),
+		"b.bin": bytes.Repeat([]byte("b"), 4<<20),
+	})
+	dir2 := t.TempDir()
+	err := extractArchiveBounded(archive, dir2, 6<<20)
+	if err == nil || !strings.Contains(err.Error(), "cap") {
+		t.Fatalf("over-cap extract err = %v, want the cap refusal", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir2, "b.bin")); !os.IsNotExist(err) {
+		t.Errorf("past-cap file was written: %v", err)
+	}
+}

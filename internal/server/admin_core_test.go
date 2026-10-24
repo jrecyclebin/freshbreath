@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"errors"
 	"net/http"
@@ -326,5 +327,47 @@ func TestGateApp(t *testing.T) {
 				t.Errorf("got %v, want 403 forbidden", err)
 			}
 		})
+	}
+}
+
+// A zip inside an app upload is capped on its uncompressed total — the
+// 100MB request body says nothing about what lands on disk. The cap is
+// checked against the central directory before the old web dir is
+// cleared, so a refused upload leaves the app as it was.
+func TestUploadZipExtractCap(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	nonce := createApp(t, srv, "zipcap")
+	cleanupSlotApp(t, srv, nonce)
+
+	// Establish the current web dir.
+	if _, err := srv.coreUploadAppWeb(su, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>old</h1>")}}); err != nil {
+		t.Fatalf("initial upload: %v", err)
+	}
+
+	// A zip whose central directory declares past-cap sizes (raw entries,
+	// so no bomb has to actually be built to prove the check).
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	fh := &zip.FileHeader{Name: "huge.bin", Method: zip.Store}
+	fh.SetMode(0644)
+	fh.UncompressedSize64 = uploadExtractMaxBytes + 1
+	fh.CompressedSize64 = fh.UncompressedSize64
+	fh.CRC32 = 0
+	if w, err := zw.CreateRaw(fh); err != nil {
+		t.Fatalf("CreateRaw: %v", err)
+	} else if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatalf("raw write: %v", err)
+	}
+	zw.Close()
+
+	_, err := srv.coreUploadAppWeb(su, nonce, []uploadFile{{Name: "bomb.zip", Data: buf.Bytes()}})
+	if err == nil || !strings.Contains(err.Error(), "cap") {
+		t.Fatalf("bomb upload err = %v, want the cap refusal", err)
+	}
+
+	// Refused before the clear: the old files are still there.
+	if got, err := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); err != nil || string(got) != "<h1>old</h1>" {
+		t.Errorf("old web dir disturbed: %q (err %v)", got, err)
 	}
 }

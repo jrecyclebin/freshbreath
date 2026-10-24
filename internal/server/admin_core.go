@@ -1136,6 +1136,61 @@ type uploadFile struct {
 	Data []byte
 }
 
+// uploadEntry is one file of an uploaded bundle: a slash path plus an
+// opener, so zip entries stream straight to disk instead of being
+// decompressed into memory.
+type uploadEntry struct {
+	path string
+	open func() (io.ReadCloser, error)
+}
+
+// gatherUploadEntries turns an uploaded bundle (any .zip expanded in place)
+// into flat entries, refusing a bundle whose uncompressed total runs past
+// uploadExtractMaxBytes before anything is written: a 100MB upload can
+// carry a zip that expands to far more than that on disk.
+func gatherUploadEntries(files []uploadFile) ([]uploadEntry, error) {
+	var entries []uploadEntry
+	var total int64
+	for _, f := range files {
+		rel, err := cleanAppFilePath(f.Name)
+		if err != nil {
+			return nil, cerr(http.StatusBadRequest, "%s: %v", f.Name, err)
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.HasSuffix(strings.ToLower(rel), ".zip") {
+			data := f.Data
+			total += int64(len(data))
+			entries = append(entries, uploadEntry{rel, func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(data)), nil
+			}})
+			continue
+		}
+		zr, err := zip.NewReader(bytes.NewReader(f.Data), int64(len(f.Data)))
+		if err != nil {
+			return nil, cerr(http.StatusBadRequest, "zip error: %s: %v", f.Name, err)
+		}
+		zipDir := path.Dir(rel) // a zip expands where it was uploaded
+		for _, zf := range zr.File {
+			if zf.FileInfo().IsDir() {
+				continue
+			}
+			clean := path.Clean(path.Join(zipDir, filepath.ToSlash(zf.Name)))
+			if clean == "." || path.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+				continue // unsafe entry
+			}
+			total += int64(zf.UncompressedSize64)
+			entries = append(entries, uploadEntry{clean, zf.Open})
+		}
+		if total > uploadExtractMaxBytes {
+			return nil, cerr(http.StatusBadRequest, "%s expands past the %dMB cap", f.Name, uploadExtractMaxBytes>>20)
+		}
+	}
+	if total > uploadExtractMaxBytes {
+		return nil, cerr(http.StatusBadRequest, "upload extracts past the %dMB cap", uploadExtractMaxBytes>>20)
+	}
+	return entries, nil
+}
+
 // coreUploadAppWeb replaces an app's web directory (the Development slot)
 // with an uploaded bundle: one or more files, where any .zip is expanded in
 // place. The whole set is treated like one zip — a single top-level folder
@@ -1155,41 +1210,9 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 		return "", cerr(http.StatusBadRequest, "no files uploaded")
 	}
 
-	// Gather every entry as a slash path plus an opener, so zip entries stream
-	// straight to disk instead of being decompressed into memory.
-	type entry struct {
-		path string
-		open func() (io.ReadCloser, error)
-	}
-	var entries []entry
-	for _, f := range files {
-		rel, err := cleanAppFilePath(f.Name)
-		if err != nil {
-			return "", cerr(http.StatusBadRequest, "%s: %v", f.Name, err)
-		}
-		rel = filepath.ToSlash(rel)
-		if !strings.HasSuffix(strings.ToLower(rel), ".zip") {
-			data := f.Data
-			entries = append(entries, entry{rel, func() (io.ReadCloser, error) {
-				return io.NopCloser(bytes.NewReader(data)), nil
-			}})
-			continue
-		}
-		zr, err := zip.NewReader(bytes.NewReader(f.Data), int64(len(f.Data)))
-		if err != nil {
-			return "", cerr(http.StatusBadRequest, "zip error: %s: %v", f.Name, err)
-		}
-		zipDir := path.Dir(rel) // a zip expands where it was uploaded
-		for _, zf := range zr.File {
-			if zf.FileInfo().IsDir() {
-				continue
-			}
-			clean := path.Clean(path.Join(zipDir, filepath.ToSlash(zf.Name)))
-			if clean == "." || path.IsAbs(clean) || strings.HasPrefix(clean, "..") {
-				continue // unsafe entry
-			}
-			entries = append(entries, entry{clean, zf.Open})
-		}
+	entries, err := gatherUploadEntries(files)
+	if err != nil {
+		return "", err
 	}
 
 	// Unwrap a single top-level folder shared by every entry.
@@ -1235,6 +1258,7 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 	if err := os.RemoveAll(webDir); err != nil {
 		return "", cerr(http.StatusInternalServerError, "failed to clear web dir")
 	}
+	var written int64
 	for _, e := range entries {
 		dest := filepath.Join(webDir, filepath.FromSlash(e.path))
 		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
@@ -1249,7 +1273,14 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 			rc.Close()
 			return "", cerr(http.StatusInternalServerError, "create: %v", err)
 		}
-		_, copyErr := io.Copy(out, rc)
+		// The metadata total was pre-checked in gatherUploadEntries; this
+		// copy-time bound is the backstop for a zip whose central directory
+		// lies about its sizes.
+		n, copyErr := io.Copy(out, io.LimitReader(rc, uploadExtractMaxBytes-written+1))
+		written += n
+		if copyErr == nil && written > uploadExtractMaxBytes {
+			copyErr = fmt.Errorf("extracts past the %dMB cap", uploadExtractMaxBytes>>20)
+		}
 		out.Close()
 		rc.Close()
 		if copyErr != nil {
