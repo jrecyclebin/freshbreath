@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1033,7 +1034,7 @@ func TestUpdateTaskServiceNeedsSuperuserOwner(t *testing.T) {
 		{ID: 2, Role: "Admin"}:     false,
 		nil:                        false,
 	} {
-		err := srv.validateUpdateOps(ops, archiveDir, owner)
+		err := srv.validateUpdateOps(ops, archiveDir, owner, nil)
 		if (err == nil) != ok {
 			t.Errorf("owner %+v: validate = %v, want ok=%v", owner, err, ok)
 		}
@@ -1047,8 +1048,15 @@ func plainTarGZ(t *testing.T, files map[string][]byte) []byte {
 	var buf bytes.Buffer
 	gzw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gzw)
-	for name, data := range files {
-		if err := tarWriteFile(tw, name, data); err != nil {
+	// Sorted names, so entry order (and which entry a mid-stream cap refusal
+	// lands on) is deterministic.
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := tarWriteFile(tw, name, files[name]); err != nil {
 			t.Fatalf("tar %s: %v", name, err)
 		}
 	}
@@ -1123,5 +1131,195 @@ func TestExtractArchiveTotalCap(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir2, "b.bin")); !os.IsNotExist(err) {
 		t.Errorf("past-cap file was written: %v", err)
+	}
+}
+
+// ── Apply is gated by the target's door (#14) ────────────────────────
+
+func TestVersionGreaterThan(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"1.2", "1.1", true},
+		{"1.2", "1.2", false},
+		{"1.10", "1.9", true},  // digit runs compare numerically
+		{"1.9", "1.10", false}, //
+		{"v2", "v10", false},   // a v prefix is just a byte
+		{"2026.08.24-10", "2026.08.24-2", true},
+		{"2026.08.24-2", "2026.08.24-10", false},
+		{"1.2.1", "1.2", true},  // a suffix extension is newer
+		{"1.2", "1.2.1", false}, //
+		{"b", "1.2", true},      // non-numeric falls to bytes
+		{"anything", "", true},  // the first stamp applies
+		{"", "1", false},
+	}
+	for _, tc := range cases {
+		if got := versionGreaterThan(tc.a, tc.b); got != tc.want {
+			t.Errorf("versionGreaterThan(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// Anyone who can access the target can apply its updates: a protected gate
+// wants the caller's token bound to it, an open one needs no proof.
+func TestUpdateApplyGatedByTargetDoor(t *testing.T) {
+	srv := newTestServer(t)
+	door := newAuthRecord(t, srv, "Member Door", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "door"})
+	anon := builtinAuth(t, srv, db.AuthAnonymous)
+	gated, _ := srv.store.CreateApp("Gated", "Development", "", nil, &door.ID)
+	open, _ := srv.store.CreateApp("Open", "Development", "", nil, &anon.ID)
+	cleanupSlotApp(t, srv, gated)
+	cleanupSlotApp(t, srv, open)
+
+	key := strings.Repeat("77", 32)
+	mkFeed := func(target, name string) string {
+		m := &UpdateManifest{Version: "v1", Ops: []UpdateOp{{Action: "update_app_files", Target: target}}}
+		a := makeUpdateArchive(t, key, m, map[string][]byte{
+			"apps/" + target + "/index.html": []byte("<h1>v1</h1>"),
+		})
+		ts := archiveServer(t, a, `"v1"`, "")
+		id, _ := createUpdateFeed(t, srv, ts.URL, "receive", name, key)
+		return id
+	}
+	idGated := mkFeed(gated, "gated")
+	mkFeed(open, "open")
+
+	// Anonymous: the open target applies, the gated one is refused at
+	// validate with a pointer at the door.
+	events := applyUpdates(t, srv, `{}`)
+	var gatedErr string
+	for _, e := range events {
+		if e.Event == "feed_error" && fmt.Sprint(e.Data["id"]) == idGated {
+			gatedErr, _ = e.Data["message"].(string)
+		}
+	}
+	if gatedErr == "" || !strings.Contains(gatedErr, "log in through it") {
+		t.Errorf("gated feed_error = %q, want the log-in refusal", gatedErr)
+	}
+	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", gated, "staging")); !os.IsNotExist(err) {
+		t.Errorf("gated staging was written: %v", err)
+	}
+	summary := events[len(events)-1]
+	if summary.Data["applied"] != float64(1) || summary.Data["failed"] != float64(1) {
+		t.Errorf("summary = %v, want applied=1 failed=1", summary.Data)
+	}
+
+	// A token minted through the door applies the gated feed. (The feed is
+	// still on v1 and unstamped, so it counts as available.)
+	tok, err := srv.mintFreshbreathToken("frbr:7", "u@example.com", "Member", "U", door.ID, nil, nil)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	rr := testRequest(t, srv, http.MethodPost, "/api/updates/apply", strings.NewReader(`{"ids":["`+idGated+`"]}`),
+		map[string]string{"Authorization": "Bearer " + tok})
+	if rr.Code != 200 {
+		t.Fatalf("gated apply with door token: status %d body=%q", rr.Code, rr.Body.String())
+	}
+	events = parseSSE(rr.Body.String())
+	if events[len(events)-1].Data["applied"] != float64(1) {
+		t.Errorf("door-token apply summary = %v, want applied=1", events[len(events)-1].Data)
+	}
+}
+
+// The stamp is a floor: a publisher rollback (or a replay of an old
+// archive) reads up-to-date, not as an update.
+func TestUpdateApplyRefusesDowngrade(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "downgrade")
+	cleanupSlotApp(t, srv, nonce)
+
+	key := strings.Repeat("88", 32)
+	mk := func(v string) []byte {
+		m := &UpdateManifest{Version: v, Ops: []UpdateOp{{Action: "update_app_files", Target: nonce}}}
+		return makeUpdateArchive(t, key, m, map[string][]byte{
+			"apps/" + nonce + "/index.html": []byte("v:" + v),
+		})
+	}
+	var current []byte
+	var etag string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		w.Write(current)
+	}))
+	defer ts.Close()
+	id, _ := createUpdateFeed(t, srv, ts.URL, "receive", "downgrade", key)
+
+	current, etag = mk("2"), `"v2"`
+	if events := applyUpdates(t, srv, `{"ids":["`+id+`"]}`); events[len(events)-1].Data["applied"] != float64(1) {
+		t.Fatalf("v2 apply: %v", events)
+	}
+	if st := feedState(t, srv, id); st.LastAppliedVersion != "2" {
+		t.Fatalf("stamped %q, want 2", st.LastAppliedVersion)
+	}
+
+	// The publisher ships v1 (a lower number): not an update.
+	current, etag = mk("1"), `"v1"`
+	events := applyUpdates(t, srv, `{"ids":["`+id+`"]}`)
+	if events[0].Event != "skip" {
+		t.Fatalf("downgrade events = %+v, want a skip", events)
+	}
+	if st := feedState(t, srv, id); st.LastAppliedVersion != "2" {
+		t.Errorf("stamp moved to %q on a downgrade", st.LastAppliedVersion)
+	}
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v:2" {
+		t.Errorf("staging = %q, want v:2 (the v1 files must not land)", got)
+	}
+	// /check agrees: nothing actionable.
+	if ups := checkUpdates(t, srv); len(ups) != 0 {
+		t.Errorf("/check after downgrade = %v, want none", ups)
+	}
+}
+
+// An op that replaces files keeps the old ones one rename away.
+func TestUpdateApplyBacksUpReplacedFiles(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "backup")
+	cleanupSlotApp(t, srv, nonce)
+	createSlotFile(t, srv, nonce, "staging", "index.html", []byte("<h1>old</h1>"))
+
+	registerService(t, srv, "vsvc", "/mcp/vsvc", db.ServiceDescriptor{Type: "virtual"})
+	svcPath := filepath.Join(srv.config.DataDir, "virtual", "vsvc.txt")
+	t.Cleanup(func() { os.Remove(svcPath); os.Remove(svcPath + ".bak") })
+	if err := os.MkdirAll(filepath.Dir(svcPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(svcPath, []byte("old def"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	key := strings.Repeat("99", 32)
+	m := &UpdateManifest{
+		Version: "v1",
+		Ops: []UpdateOp{
+			{Action: "update_app_files", Target: nonce},
+			{Action: "update_service_files", Target: "vsvc"},
+		},
+	}
+	a := makeUpdateArchive(t, key, m, map[string][]byte{
+		"apps/" + nonce + "/index.html": []byte("<h1>new</h1>"),
+		"services/vsvc.txt":             []byte("new def"),
+	})
+	ts := archiveServer(t, a, `"v1"`, "")
+	id, _ := createUpdateFeed(t, srv, ts.URL, "receive", "backup", key)
+	if events := applyUpdates(t, srv, `{"ids":["`+id+`"]}`); events[len(events)-1].Data["applied"] != float64(1) {
+		t.Fatalf("apply: %v", events)
+	}
+
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "<h1>new</h1>" {
+		t.Errorf("staging = %q, want the new file", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging.bak", "index.html")); err != nil || string(got) != "<h1>old</h1>" {
+		t.Errorf("staging.bak = %q (err %v), want the old file", got, err)
+	}
+	if got, _ := os.ReadFile(svcPath); string(got) != "new def" {
+		t.Errorf("service file = %q, want the new def", got)
+	}
+	if got, err := os.ReadFile(svcPath + ".bak"); err != nil || string(got) != "old def" {
+		t.Errorf("service file backup = %q (err %v), want the old def", got, err)
 	}
 }

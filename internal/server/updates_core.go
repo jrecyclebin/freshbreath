@@ -143,16 +143,72 @@ func archiveSourcePath(archiveDir string, op UpdateOp) (string, error) {
 	return filepath.Join(archiveDir, clean), nil
 }
 
-// validateUpdateOps pre-flights every op against the store and the extracted
-// archive before the first one executes: targets must exist, sources must be
-// in the tarball, slots default to staging. A validation failure touches
-// nothing — "feed refused before it started" beats "half-applied feed."
-func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.User) error {
+// versionGreaterThan orders two manifest versions with "only move
+// forward": runs of digits compare numerically, everything else byte by
+// byte ("1.10" > "1.9", "2026.08.24-10" > "2026.08.24-2", "b" > "1.2").
+// Equal versions — or a prior of "" against anything — never count as
+// greater. The stamp is what a downgrade has to beat; this is the referee.
+func versionGreaterThan(a, b string) bool {
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		ca, cb := a[i], b[j]
+		if isDigitByte(ca) && isDigitByte(cb) {
+			si, sj := i, j
+			for i < len(a) && isDigitByte(a[i]) {
+				i++
+			}
+			for j < len(b) && isDigitByte(b[j]) {
+				j++
+			}
+			na, nb := strings.TrimLeft(a[si:i], "0"), strings.TrimLeft(b[sj:j], "0")
+			if len(na) != len(nb) {
+				return len(na) > len(nb)
+			}
+			if na != nb {
+				return na > nb
+			}
+			continue
+		}
+		if ca != cb {
+			return ca > cb
+		}
+		i++
+		j++
+	}
+	// A prefix loses to its extension ("1.2" < "1.2.1"); equal is equal.
+	return len(a) > len(b)
+}
+
+func isDigitByte(c byte) bool { return c >= '0' && c <= '9' }
+
+// gateAllowsApply reports whether this caller may apply an op that targets
+// this gate: anyone who can access the target can update it, so an open
+// gate needs no proof and a protected one wants the caller's token bound
+// to it — minted under the record, or carrying it as a leg, the same
+// boundTo the doors use. claims nil is the anonymous caller.
+func gateAllowsApply(gate *db.AuthRecord, claims *freshbreathClaims) bool {
+	if gateIsOpen(gate) {
+		return true
+	}
+	return claims != nil && claims.boundTo(gate.ID)
+}
+
+// validateUpdateOps pre-flights every op against the store, the extracted
+// archive and the caller's reach before the first one executes: targets
+// must exist, sources must be in the tarball, slots default to staging,
+// and the caller must clear each target's gate (an open one needs no
+// proof). A validation failure touches nothing — "feed refused before it
+// started" beats "half-applied feed."
+func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.User, claims *freshbreathClaims) error {
 	for i, op := range ops {
 		switch op.Action {
 		case "update_app_files":
-			if _, err := s.store.GetApp(op.Target); err != nil {
+			app, err := s.store.GetApp(op.Target)
+			if err != nil {
 				return fmt.Errorf("op %d: app not found: %s", i, op.Target)
+			}
+			if gate, err := s.resolveAppGate(app); err == nil && !gateAllowsApply(gate, claims) {
+				return fmt.Errorf("op %d: app %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
 			}
 			slot := op.Slot
 			if slot == "" {
@@ -173,6 +229,9 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.
 			// owner must still be someone allowed to write them.
 			if err := s.gateTaskService(owner, svc.Descriptor.Type); err != nil {
 				return fmt.Errorf("op %d: task service %s can only be updated by a feed a Superuser owns", i, op.Target)
+			}
+			if gate, gerr := s.resolveServiceGate(svc); gerr == nil && !gateAllowsApply(gate, claims) {
+				return fmt.Errorf("op %d: service %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
 			}
 		default:
 			return fmt.Errorf("op %d: unknown action %q", i, op.Action)
@@ -198,8 +257,13 @@ func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
 	switch op.Action {
 	case "update_app_files":
 		dst := filepath.Join(s.config.DataDir, "apps", op.Target, "staging")
-		if err := os.RemoveAll(dst); err != nil {
-			return fmt.Errorf("failed to clear staging slot: %w", err)
+		// Rollback protection: the replaced slot stays one rename away at
+		// staging.bak — recovery is a manual copy back, nothing fancier. It
+		// fails the op rather than losing the only copy of the old files.
+		if _, err := os.Stat(dst); err == nil {
+			if err := os.Rename(dst, dst+".bak"); err != nil {
+				return fmt.Errorf("failed to back up staging slot: %w", err)
+			}
 		}
 		if err := copyDir(src, dst); err != nil {
 			return fmt.Errorf("copy failed: %w", err)
@@ -218,6 +282,13 @@ func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
 		path := serviceDefinitionPath(s.config.DataDir, svc)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return fmt.Errorf("failed to create service dir: %w", err)
+		}
+		// Same rollback story as app slots: the old definition waits at
+		// service.txt.bak.
+		if _, err := os.Stat(path); err == nil {
+			if err := os.Rename(path, path+".bak"); err != nil {
+				return fmt.Errorf("failed to back up service file: %w", err)
+			}
 		}
 		if err := os.WriteFile(path, data, 0644); err != nil {
 			return fmt.Errorf("write failed: %w", err)
@@ -501,8 +572,9 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 		// pending or current is seen-vs-applied, not applied-vs-empty: a
 		// version that was discovered but never applied must stay
 		// available, or /check goes quiet about it until the publisher
-		// ships again.
-		if f.LastSeenVersion != f.LastAppliedVersion {
+		// ships again. Only a genuinely newer one does — a downgrade the
+		// publisher shipped later reads as up-to-date, not as an update.
+		if versionGreaterThan(f.LastSeenVersion, f.LastAppliedVersion) {
 			return "update_available", f.LastSeenVersion, nil
 		}
 		return "up_to_date", f.LastAppliedVersion, nil
@@ -540,8 +612,11 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 		return fail(err)
 	}
 	f.LastSeenVersion = manifest.Version
-	if manifest.Version == f.LastAppliedVersion {
-		return "up_to_date", manifest.Version, nil
+	// Only a newer version applies — equal reads up-to-date, and an older
+	// one (a publisher rollback, or a replay of an old archive) reads
+	// up-to-date too: the stamp is a floor, and apply can't go under it.
+	if !versionGreaterThan(manifest.Version, f.LastAppliedVersion) {
+		return "up_to_date", f.LastAppliedVersion, nil
 	}
 	return "update_available", manifest.Version, nil
 }
@@ -579,7 +654,12 @@ func (s *Server) coreCheckAllUpdateFeeds() []UpdateAvailable {
 // guards against forcing a version that was already applied between /check
 // and this call. Events stream per feed; a feed_error on one feed never stops
 // the others. The returned counts feed the summary event.
-func (s *Server) coreApplyUpdateFeeds(ctx context.Context, ids []string, progress chan<- UpdateEvent) error {
+//
+// claims is the caller's verified token (nil = anonymous), checked against
+// each op's target gate in the validation: anyone who can access the
+// target can apply its updates, and an open gate needs no proof — so an
+// anonymous caller still gets feeds whose every target is open.
+func (s *Server) coreApplyUpdateFeeds(ctx context.Context, claims *freshbreathClaims, ids []string, progress chan<- UpdateEvent) error {
 	emit := func(e UpdateEvent) error {
 		select {
 		case progress <- e:
@@ -621,7 +701,7 @@ func (s *Server) coreApplyUpdateFeeds(ctx context.Context, ids []string, progres
 			}
 			continue
 		}
-		if err := s.applyUpdateFeed(ctx, f, progress); err != nil {
+		if err := s.applyUpdateFeed(ctx, f, claims, progress); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -634,10 +714,11 @@ func (s *Server) coreApplyUpdateFeeds(ctx context.Context, ids []string, progres
 }
 
 // applyUpdateFeed runs the full fetch→decrypt→validate→ops→stamp flow for one
-// feed, streaming step events. The version stamps only on full success: the
-// stamp is the only thing keeping an anonymous caller from re-running a feed
-// forever, and stamping early would silently strand a half-applied feed.
-func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, progress chan<- UpdateEvent) error {
+// feed, streaming step events. The version stamps only on full success, and
+// only moves forward: the stamp is a floor — re-runs and publisher
+// downgrades read up-to-date — and stamping early would silently strand a
+// half-applied feed.
+func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, claims *freshbreathClaims, progress chan<- UpdateEvent) error {
 	emit := func(e UpdateEvent) error {
 		e.ID = f.ID
 		select {
@@ -718,7 +799,7 @@ func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, progress
 	} else if u, err := s.userFromSubject(subjectForUser(&db.User{ID: f.CreatedBy})); err == nil {
 		owner = u
 	}
-	if err := s.validateUpdateOps(manifest.Ops, archiveDir, owner); err != nil {
+	if err := s.validateUpdateOps(manifest.Ops, archiveDir, owner, claims); err != nil {
 		return fail("validate", err)
 	}
 	if err := emit(UpdateEvent{Event: "validate", Step: "validate", Ops: len(manifest.Ops), Status: "ok"}); err != nil {

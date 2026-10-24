@@ -2,10 +2,12 @@ package server
 
 // HTTP surface for remote update feeds — thin adapters over the core
 // functions in updates_core.go (parse input → call core → format output).
-// Split by auth: management endpoints are admin-only via authWrap; the flat
-// /check and /apply endpoints are mounted BARE — anonymous by design, the
-// whole point being that a hosted app can pull its own updates. They get the
-// per-IP rate limiter instead of a login.
+// Split by auth: management endpoints are admin-only via authWrap. The flat
+// /check endpoint is mounted BARE — a hosted app may poll it anonymously —
+// and /apply asks for what the targets ask: each op's gate is checked against
+// the caller's token, and an open gate needs no proof, so an open app can
+// still pull its own updates with no login at all. Both get the per-IP rate
+// limiter.
 
 import (
 	"encoding/json"
@@ -261,8 +263,9 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"updates": updates})
 }
 
-// handleUpdateApply serves POST /api/updates/apply — anonymous,
-// rate-limited, SSE progress. Body {ids?}: named feeds or all receive feeds.
+// handleUpdateApply serves POST /api/updates/apply — rate-limited, SSE
+// progress, gated by the targets' doors. Body {ids?}: named feeds or all
+// receive feeds.
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -271,6 +274,19 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	if !s.allowRate("updates/apply", requestIP(r), updateApplyRate) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
 		return
+	}
+	// Anyone who can access the targets may apply their updates: the
+	// caller's token is checked against each op's gate (an open gate needs
+	// no proof, so anonymous callers still reach open feeds). The hosted
+	// app's own frbr.js session rides in as a Bearer automatically.
+	var claims *freshbreathClaims
+	if ah := r.Header.Get("Authorization"); strings.HasPrefix(ah, "Bearer ") {
+		var err error
+		claims, err = s.verifyFreshbreathToken(strings.TrimPrefix(ah, "Bearer "))
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
 	}
 	var body struct {
 		IDs []string `json:"ids"`
@@ -283,6 +299,6 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
-		return s.coreApplyUpdateFeeds(r.Context(), body.IDs, ch)
+		return s.coreApplyUpdateFeeds(r.Context(), claims, body.IDs, ch)
 	})
 }
