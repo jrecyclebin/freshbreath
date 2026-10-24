@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type Config struct {
 	TLSKeyFile    string
 	EnvFile       string   // the env file config loads from (or would); local TLS writes here
 	AllowedHosts  []string // extra Host names this server answers to (FRBR_ALLOWED_HOSTS)
+	TrustedProxies []string // IPs/CIDRs whose X-Forwarded-Proto is honored (FRBR_TRUSTED_PROXIES)
 }
 
 // Server is the freshbreath application server hub. All HTTP handlers, MCP
@@ -53,6 +55,7 @@ type Server struct {
 	lastSeenAt        map[int64]time.Time
 	lastSeenMu        sync.Mutex
 	knownHosts        map[string]bool      // Host names answered besides IPs and localhost (see hostAllowed)
+	trustedProxies    []netip.Prefix        // peers whose X-Forwarded-Proto is honored (see schemeOf)
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedMu          sync.RWMutex
 	actTickets        actTickets                         // /api/act capability tickets (in-memory only)

@@ -296,6 +296,7 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 | `FRBR_TLS_CERT` | *(none)* | Path to TLS certificate (PEM) |
 | `FRBR_TLS_KEY` | *(none)* | Path to TLS private key (PEM) |
 | `FRBR_ALLOWED_HOSTS` | *(none)* | Extra host names the server answers to, comma-separated. IP addresses, `localhost`, the `FRBR_BASE_URL` host and the machine's own hostname are always accepted; any other `Host` gets a 421, which blocks DNS-rebinding attacks on a local install. |
+| `FRBR_TRUSTED_PROXIES` | *(loopback only)* | IPs or CIDRs whose `X-Forwarded-Proto` is honored, comma-separated — set this when TLS terminates on another box (or in a non-loopback local proxy). Loopback is always trusted, since a TCP peer cannot spoof it; a client that sets the header itself is ignored. |
 
 When both `FRBR_TLS_CERT` and `FRBR_TLS_KEY` are provided, the server uses TLS (`https:`). Otherwise it serves plain HTTP.
 

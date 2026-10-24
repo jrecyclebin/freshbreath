@@ -1485,16 +1485,18 @@ func TestRefreshCookieSecureFlag(t *testing.T) {
 	cases := []struct {
 		name       string
 		nativeTLS  bool   // r.TLS != nil
+		fromProxy  bool   // peer is a trusted (loopback) proxy
 		forwarded  string // X-Forwarded-Proto header
 		certFile   string // s.config.TLSCertFile
 		wantSecure bool
 	}{
-		{"default localhost http", false, "", "", false},
-		{"proxy terminates TLS (X-Forwarded-Proto: https)", false, "https", "", true},
-		{"proxy forwards http (misconfigured/not TLS)", false, "http", "", false},
-		{"native TLS", true, "", "", true},
-		{"native TLS plus forwarded https", true, "https", "", true},
-		{"TLSCertFile set, plain direct (no r.TLS, no proxy)", false, "", "/srv/cert.pem", true},
+		{"default localhost http", false, false, "", "", false},
+		{"proxy terminates TLS (loopback, X-Forwarded-Proto: https)", false, true, "https", "", true},
+		{"forwarded https from a non-proxy peer — ignored", false, false, "https", "", false},
+		{"proxy forwards http (misconfigured/not TLS)", false, true, "http", "", false},
+		{"native TLS", true, false, "", "", true},
+		{"native TLS plus forwarded https", true, false, "https", "", true},
+		{"TLSCertFile set, plain direct (no r.TLS, no proxy)", false, false, "", "/srv/cert.pem", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1506,6 +1508,9 @@ func TestRefreshCookieSecureFlag(t *testing.T) {
 			}
 			if tc.forwarded != "" {
 				req.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			}
+			if tc.fromProxy {
+				req.RemoteAddr = "127.0.0.1:3128" // loopback is trusted by default
 			}
 
 			if _, err := srv.makeRefreshCookie(rr, req, data); err != nil {

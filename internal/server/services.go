@@ -1036,7 +1036,7 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, r *http.Request, data 
 	// same-origin pages (the control panel, hosted apps) still refresh, and
 	// only the file:// and foreign-origin consumers, which need TLS anyway,
 	// go without.
-	secure := schemeOf(r) == "https" || s.config.TLSCertFile != ""
+	secure := s.schemeOf(r) == "https" || s.config.TLSCertFile != ""
 	sameSite := http.SameSiteLaxMode
 	if secure {
 		sameSite = http.SameSiteNoneMode

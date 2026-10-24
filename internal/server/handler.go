@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -194,7 +195,7 @@ func (s *Server) originAllowed(r *http.Request, origin string) (allowed, withCoo
 	if r.Method == http.MethodOptions {
 		return true, true
 	}
-	if schemeOf(r)+"://"+r.Host == origin {
+	if s.schemeOf(r)+"://"+r.Host == origin {
 		return true, true
 	}
 	app, err := s.store.GetApp(requestAppNonce(r))
@@ -216,6 +217,7 @@ func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) SetupRoutes() {
 	s.knownHosts = knownHostSet(s.config)
+	s.trustedProxies = trustedProxySet(s.config)
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/control", s.handleControl)
@@ -608,15 +610,66 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// schemeOf returns the request's scheme — "https" when the connection is
-// TLS or arrived behind a TLS-terminating proxy (X-Forwarded-Proto), else
-// "http". Shared by the nonce-resolution path, renderEnvJS and originAllowed
-// so they agree on what "same-origin" means.
-func schemeOf(r *http.Request) string {
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+// schemeOf returns the request's scheme — "https" when the connection
+// is TLS, or when a trusted proxy says the hop it saw was TLS. The nonce
+// resolution path, renderEnvJS and originAllowed share it so they agree
+// on what "same-origin" means.
+//
+// X-Forwarded-Proto is honored only from a peer in FRBR_TRUSTED_PROXIES
+// (loopback by default, and always): the header is client-settable, so
+// honoring it from anyone would let a plain-HTTP caller pick "https" for
+// cookie Secure flags and origin checks. A TCP peer cannot spoof loopback.
+func (s *Server) schemeOf(r *http.Request) string {
+	if r.TLS != nil || (r.Header.Get("X-Forwarded-Proto") == "https" && s.proxyTrusted(r)) {
 		return "https"
 	}
 	return "http"
+}
+
+// proxyTrusted reports whether the connection's peer is a configured
+// proxy — the only places X-Forwarded-* is read from.
+func (s *Server) proxyTrusted(r *http.Request) bool {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return false
+	}
+	for _, p := range s.trustedProxies {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedProxySet collects the CIDRs X-Forwarded-Proto is honored from:
+// FRBR_TRUSTED_PROXIES plus loopback, which a TCP peer cannot spoof.
+func trustedProxySet(cfg Config) []netip.Prefix {
+	prefixes := []netip.Prefix{
+		netip.MustParsePrefix("127.0.0.0/8"),
+		netip.MustParsePrefix("::1/128"),
+	}
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if !strings.Contains(v, "/") {
+			if a, err := netip.ParseAddr(v); err == nil {
+				v = a.String() + "/" + strconv.Itoa(a.BitLen())
+			}
+		}
+		if p, err := netip.ParsePrefix(v); err == nil {
+			prefixes = append(prefixes, p)
+		}
+	}
+	for _, v := range cfg.TrustedProxies {
+		add(v)
+	}
+	return prefixes
 }
 
 // isSubdomainHost reports whether host is a subdomain-shaped hostname — one
@@ -714,9 +767,9 @@ func (s *Server) nonceForLocation(locURL string, r *http.Request) (string, bool)
 	if u.Host == "" {
 		// Path-only report (?loc=/myapp/). Anchor to the request's own origin
 		// — same-origin by construction, so the checks below pass through.
-		u.Scheme = schemeOf(r)
+		u.Scheme = s.schemeOf(r)
 		u.Host = r.Host
-	} else if u.Scheme != schemeOf(r) || u.Host != r.Host {
+	} else if u.Scheme != s.schemeOf(r) || u.Host != r.Host {
 		// Cross-origin location (also catches alternate ports). Not ours.
 		return "", false
 	}
@@ -766,7 +819,7 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 // for both the script-tag JS form (renderEnvJS) and the JSON form frbr.js
 // fetches when Referer is suppressed (handleEnv with ?loc=).
 func (s *Server) envConfig(r *http.Request) envConfig {
-	apiBase := schemeOf(r) + "://" + r.Host
+	apiBase := s.schemeOf(r) + "://" + r.Host
 
 	// Resolve the app nonce from the request. See resolveAppNonce for the
 	// full order; the headline is that the admin nonce is reachable ONLY via

@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/tls"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -118,5 +120,51 @@ func TestLoginPostedToAppOrigin(t *testing.T) {
 	writeCallbackPage(&page, &pendingAuth{appState: "s", opener: "https://app.example"}, map[string]interface{}{"v": 1})
 	if !strings.Contains(page.String(), `}, "https://app.example");`) {
 		t.Errorf("callback page does not target the app origin:\n%s", page.String())
+	}
+}
+
+// X-Forwarded-Proto is client-settable, so it only counts from a trusted
+// proxy peer: loopback by default, FRBR_TRUSTED_PROXIES on top of it.
+func TestSchemeOfTrustsForwardedProtoOnlyFromProxies(t *testing.T) {
+	srv := newTestServer(t) // default: loopback only
+
+	mk := func(remote, proto string) *http.Request {
+		r := httptest.NewRequest("GET", "/env.js", nil)
+		r.RemoteAddr = remote
+		if proto != "" {
+			r.Header.Set("X-Forwarded-Proto", proto)
+		}
+		return r
+	}
+	if got := srv.schemeOf(mk("203.0.113.9:4444", "https")); got != "http" {
+		t.Errorf("foreign peer claiming https: scheme = %q, want http", got)
+	}
+	if got := srv.schemeOf(mk("127.0.0.1:4444", "https")); got != "https" {
+		t.Errorf("loopback proxy: scheme = %q, want https", got)
+	}
+	if got := srv.schemeOf(mk("[::1]:4444", "https")); got != "https" {
+		t.Errorf("IPv6 loopback proxy: scheme = %q, want https", got)
+	}
+	if got := srv.schemeOf(mk("127.0.0.1:4444", "")); got != "http" {
+		t.Errorf("loopback without a header: scheme = %q, want http", got)
+	}
+
+	// A configured proxy joins; a same-CIDR neighbor still does not.
+	srv.trustedProxies = trustedProxySet(Config{TrustedProxies: []string{"10.1.2.3", "fd00::/8"}})
+	if got := srv.schemeOf(mk("10.1.2.3:9", "https")); got != "https" {
+		t.Errorf("configured proxy: scheme = %q, want https", got)
+	}
+	if got := srv.schemeOf(mk("10.9.9.9:9", "https")); got != "http" {
+		t.Errorf("unconfigured neighbor: scheme = %q, want http", got)
+	}
+	if got := srv.schemeOf(mk("[fd00::5]:9", "https")); got != "https" {
+		t.Errorf("configured v6 prefix: scheme = %q, want https", got)
+	}
+
+	// TLS on the connection itself needs no proxy.
+	r := httptest.NewRequest("GET", "/env.js", nil)
+	r.TLS = &tls.ConnectionState{}
+	if got := srv.schemeOf(r); got != "https" {
+		t.Errorf("direct TLS: scheme = %q, want https", got)
 	}
 }

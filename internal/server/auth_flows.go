@@ -257,7 +257,7 @@ func (s *Server) loginOpenerOrigin(r *http.Request, app *db.App) string {
 	if s.appRunsElsewhere(app) {
 		return "*"
 	}
-	return schemeOf(r) + "://" + r.Host
+	return s.schemeOf(r) + "://" + r.Host
 }
 
 // writeCallbackPage hands a finished browser login back to the app.
@@ -426,7 +426,7 @@ func (s *Server) writeGatePass(w http.ResponseWriter, r *http.Request, pass *gat
 		Name:     gatePassCookie,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   schemeOf(r) == "https" || s.config.TLSCertFile != "",
+		Secure:   s.schemeOf(r) == "https" || s.config.TLSCertFile != "",
 		SameSite: http.SameSiteLaxMode,
 	}
 	if pass == nil || len(pass.Grants) == 0 {
@@ -529,7 +529,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		appNonce:  appNonce,
 		appState:  utils.GenNonce(),
 		returnTo:  withSigninStamp(withoutSigninStamp(r.URL), time.Now()),
-		opener:    schemeOf(r) + "://" + r.Host, // a page on this origin asked
+		opener:    s.schemeOf(r) + "://" + r.Host, // a page on this origin asked
 		legs:      legs,
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,

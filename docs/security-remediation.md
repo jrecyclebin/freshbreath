@@ -37,7 +37,7 @@ not be exposed directly to the internet.
 | 10 | Service proxy | Encoded `..` segments step outside the service's configured base path while the service credential is attached. Browser cookies are forwarded upstream and upstream `Set-Cookie` lands on this origin. | Refuse paths that leave the base path; strip `Cookie` on the way out and `Set-Cookie` on the way back. |
 | 11 | Response headers | No framing protection or content-type hardening on the control panel, login pages or API. | `X-Frame-Options: DENY`, `frame-ancestors 'none'`, `nosniff`, `Referrer-Policy` on server-owned pages and API responses. |
 | 12 | SSH / git | Any user with SSH access can delete the shared trusted host-key list. The git gateway accepts `file:` and plain `http:` URLs. | Host-key deletion is Admin+; git URLs must be `ssh` or `https`. |
-| 13 | Update feeds | An archive op's `source` path is not traversal-checked. Upload extraction has no total-size cap. | Validate op sources inside the archive; cap extracted upload size. |
+| 13 | Update feeds | An archive op's `source` path is not traversal-checked. Upload extraction has no total-size cap. | Op sources are cleaned and refused outside the archive (both validation and execution); the tar and zip extraction totals are capped by the app-wide `uploadExtractMaxBytes` (512MB) — an error, never a silent truncation. |
 | 14 | Update feeds (**open**) | Applying feeds is anonymous, service-file updates take effect immediately, and there is no rollback protection. | Decide whether apply should need an admin, and require increasing versions. |
 | 15 | Virtual tools (**open**) | Path variables in URL templates are substituted unescaped. | Escape path variables by default with an opt-out for templates that pass whole paths. Changes template behavior, so it needs a decision. |
 
@@ -45,9 +45,9 @@ not be exposed directly to the internet.
 
 | # | Area | Problem | Fix |
 |---|------|---------|-----|
-| 16 | Login return path | A return path starting `/\` is accepted; browsers treat it as another host. | Reject backslashes in return paths. |
+| 16 | Login return path | A return path starting `/\` is accepted; browsers treat it as another host. | Any return containing a backslash is refused outright. |
 | 17 | CORS | The origin check uses the whole raw query string as the app nonce. | Only a bare nonce query (`/frbr.js?XXXX`, no `=` in it) or the header names an app. (Folded into #3.) |
 | 18 | Admin boundary | Admins could write task scripts, so Admin was effectively equal to Superuser and to the server's OS account. | Task services are Superuser-only: creating, changing, deleting, reading and writing them, and replacing them through update feeds (whose owner must be a Superuser when the feed is applied). |
-| 19 | Proxy headers (**open**) | `X-Forwarded-Proto` is trusted from any client. | Trust it only from configured proxies. |
+| 19 | Proxy headers | `X-Forwarded-Proto` is trusted from any client. | It is honored only from a trusted proxy peer — `FRBR_TRUSTED_PROXIES`, with loopback always trusted (a TCP peer cannot spoof it). `schemeOf` is now a server method that checks the peer. |
 | 20 | `ssh_key` acts_as (**open**) | A stored private key is sent upstream as a bearer token when such a record backs an HTTP service. | Refuse `ssh_key` as acts_as for proxied HTTP services. |
 | 21 | Open registration (**open**) | Dynamic client registration has no rate limit. | Rate-limit registration and expire unused clients. |
