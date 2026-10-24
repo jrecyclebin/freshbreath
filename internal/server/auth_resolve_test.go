@@ -48,11 +48,12 @@ func TestSlotEligibilityMatrix(t *testing.T) {
 				t.Fatalf("protected_by=%s: gate = %d, want %d", protectedBy.Kind, gate.ID, protectedBy.ID)
 			}
 
-			// Build claims a caller of this gate could plausibly present,
-			// so resolveOutboundCred sees a realistic (not nil) input for
-			// interactive gates.
+			// Build claims (and the presented token they came from) a caller of
+			// this gate could plausibly present, so resolveOutboundCred sees a
+			// realistic (not nil) input for interactive and ssh_key gates.
 			var claims *freshbreathClaims
-			if authInteractive(protectedBy) {
+			var presentedToken string
+			if authInteractive(protectedBy) || protectedBy.Kind == db.AuthSSHKey {
 				tok, err := srv.mintFreshbreathToken(extSubject(authProvider(protectedBy), "u1"), "", "", "",
 					protectedBy.ID, nil, sealedCreds{authProvider(protectedBy): {UpstreamToken: "gate-cred"}})
 				if err != nil {
@@ -62,14 +63,16 @@ func TestSlotEligibilityMatrix(t *testing.T) {
 				if err != nil {
 					t.Fatalf("verify: %v", err)
 				}
+				presentedToken = tok
 			}
 
 			// acts_as always resolves to a verdict, never an error, for any
-			// combination — even when the interactive acts_as record has no
-			// matching credential on the gate's token (that's a caller error
-			// surfaced as a verdict-time err, exercised separately below).
-			_, err = srv.resolveOutboundCred(svc, gate, claims, "s3cret")
-			if err != nil && !authInteractive(actsAs) {
+			// combination — except the two kinds whose credential is a login
+			// the caller may not have done (interactive, and ssh_key whose
+			// session token is the credential): those surface as verdict-time
+			// errors, exercised separately below.
+			_, err = srv.resolveOutboundCred(svc, gate, claims, "s3cret", presentedToken)
+			if err != nil && !(authInteractive(actsAs) || actsAs.Kind == db.AuthSSHKey) {
 				t.Errorf("protected_by=%s acts_as=%s: unexpected error: %v", protectedBy.Kind, actsAs.Kind, err)
 			}
 		}
@@ -497,7 +500,7 @@ func TestOutboundVerdictStoredAPIKey(t *testing.T) {
 	rec := newAuthRecord(t, srv, "Key", db.AuthAPIKey, db.AuthDescriptor{Key: "stored-key", Header: "X-Key"})
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}, ActsAs: &rec.ID}
 
-	cred, err := srv.resolveOutboundCred(svc, nil, nil, "")
+	cred, err := srv.resolveOutboundCred(svc, nil, nil, "", "")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
@@ -506,17 +509,44 @@ func TestOutboundVerdictStoredAPIKey(t *testing.T) {
 	}
 }
 
-func TestOutboundVerdictStoredSSHKey(t *testing.T) {
+func TestOutboundVerdictSSHKeyActsAsIsTheSessionToken(t *testing.T) {
 	srv := newTestServer(t)
 	rec := newAuthRecord(t, srv, "Deploy Key", db.AuthSSHKey, db.AuthDescriptor{Key: "ssh-priv"})
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}, ActsAs: &rec.ID}
 
-	cred, err := srv.resolveOutboundCred(svc, nil, nil, "")
+	// A caller whose login cleared that record: the session token goes
+	// upstream as a bearer — never the stored private key.
+	tok, err := srv.mintFreshbreathToken("frbr:1", "u@example.com", "Member", "U", rec.ID, nil, nil)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	claims, err := srv.verifyFreshbreathToken(tok)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	cred, err := srv.resolveOutboundCred(svc, nil, claims, "", tok)
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
-	if cred.Token != "ssh-priv" || cred.Header != "" {
-		t.Errorf("verdict = %+v, want the stored ssh key under Authorization", cred)
+	if cred.Token != tok || cred.Header != "" || cred.Verbatim || cred.Strip {
+		t.Errorf("verdict = %+v, want the caller's session token under Authorization", cred)
+	}
+
+	// No login for that record → the door must ask for one, not leak the key.
+	if _, err := srv.resolveOutboundCred(svc, nil, nil, "", ""); !errors.Is(err, errNeedsLogin) {
+		t.Errorf("no-claims verdict err = %v, want errNeedsLogin", err)
+	}
+	// A token that never cleared the record's leg → same.
+	other, err := srv.mintFreshbreathToken("frbr:2", "v@example.com", "Member", "V", rec.ID+1000, nil, nil)
+	if err != nil {
+		t.Fatalf("mint other: %v", err)
+	}
+	otherClaims, err := srv.verifyFreshbreathToken(other)
+	if err != nil {
+		t.Fatalf("verify other: %v", err)
+	}
+	if _, err := srv.resolveOutboundCred(svc, nil, otherClaims, "", other); !errors.Is(err, errNeedsLogin) {
+		t.Errorf("unbound verdict err = %v, want errNeedsLogin", err)
 	}
 }
 
@@ -525,7 +555,7 @@ func TestOutboundVerdictAnonymousActsAsStrips(t *testing.T) {
 	anon := builtinAuth(t, srv, db.AuthAnonymous)
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}, ActsAs: &anon.ID}
 
-	cred, err := srv.resolveOutboundCred(svc, nil, nil, "")
+	cred, err := srv.resolveOutboundCred(svc, nil, nil, "", "")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
@@ -541,7 +571,7 @@ func TestOutboundVerdictInteractiveActsAsUsesCallerCred(t *testing.T) {
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}, ActsAs: &acts.ID}
 
 	claims := &freshbreathClaims{Creds: sealedCreds{"github": {UpstreamToken: "gh-cred"}}}
-	cred, err := srv.resolveOutboundCred(svc, nil, claims, "")
+	cred, err := srv.resolveOutboundCred(svc, nil, claims, "", "")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
@@ -551,13 +581,13 @@ func TestOutboundVerdictInteractiveActsAsUsesCallerCred(t *testing.T) {
 
 	// No claims at all → the caller never logged in to that leg: an error,
 	// not a silent empty credential.
-	if _, err := srv.resolveOutboundCred(svc, nil, nil, ""); !errors.Is(err, errNeedsLogin) {
+	if _, err := srv.resolveOutboundCred(svc, nil, nil, "", ""); !errors.Is(err, errNeedsLogin) {
 		t.Error("expected error when acts_as is interactive but the caller has no token")
 	}
 
 	// A token that never cleared this provider's leg → an error naming it.
 	otherClaims := &freshbreathClaims{Creds: sealedCreds{"other": {UpstreamToken: "x"}}}
-	if _, err := srv.resolveOutboundCred(svc, nil, otherClaims, ""); !errors.Is(err, errNeedsLogin) {
+	if _, err := srv.resolveOutboundCred(svc, nil, otherClaims, "", ""); !errors.Is(err, errNeedsLogin) {
 		t.Error("expected error when the caller's token carries no github credential")
 	}
 }
@@ -567,7 +597,7 @@ func TestOutboundVerdictEmptySlotOpenGateIsVerbatim(t *testing.T) {
 	anon := builtinAuth(t, srv, db.AuthAnonymous)
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}}
 
-	cred, err := srv.resolveOutboundCred(svc, anon, nil, "")
+	cred, err := srv.resolveOutboundCred(svc, anon, nil, "", "")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
@@ -581,7 +611,7 @@ func TestOutboundVerdictEmptySlotAPIKeyGateIsPassthrough(t *testing.T) {
 	gate := newAuthRecord(t, srv, "Gate Key", db.AuthAPIKey, db.AuthDescriptor{Key: "gate-key", Header: "X-Gate"})
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}}
 
-	cred, err := srv.resolveOutboundCred(svc, gate, nil, "presented-key")
+	cred, err := srv.resolveOutboundCred(svc, gate, nil, "presented-key", "")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
@@ -596,7 +626,7 @@ func TestOutboundVerdictEmptySlotInteractiveGateIsPassthrough(t *testing.T) {
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}}
 
 	claims := &freshbreathClaims{Creds: sealedCreds{"idp": {UpstreamToken: "gate-cred"}}}
-	cred, err := srv.resolveOutboundCred(svc, gate, claims, "")
+	cred, err := srv.resolveOutboundCred(svc, gate, claims, "", "")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
@@ -606,7 +636,7 @@ func TestOutboundVerdictEmptySlotInteractiveGateIsPassthrough(t *testing.T) {
 
 	// No claims at all (gate accepted anonymously — shouldn't happen for an
 	// interactive gate, but the resolver must not panic): empty verdict.
-	empty, err := srv.resolveOutboundCred(svc, gate, nil, "")
+	empty, err := srv.resolveOutboundCred(svc, gate, nil, "", "")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
@@ -615,17 +645,31 @@ func TestOutboundVerdictEmptySlotInteractiveGateIsPassthrough(t *testing.T) {
 	}
 }
 
-func TestOutboundVerdictEmptySlotSSHGateYieldsNothing(t *testing.T) {
+func TestOutboundVerdictEmptySlotSSHGateIsTheSessionToken(t *testing.T) {
 	srv := newTestServer(t)
 	gate := builtinAuth(t, srv, db.AuthSSHKey)
 	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}}
 
-	cred, err := srv.resolveOutboundCred(svc, gate, nil, "")
+	// The passphrase login produced the caller's token; that token is the
+	// credential the door has to offer upstream (a bearer this server's own
+	// API accepts — /api/sync, for one).
+	claims := &freshbreathClaims{AuthID: gate.ID}
+	cred, err := srv.resolveOutboundCred(svc, gate, claims, "", "sess-tok")
 	if err != nil {
 		t.Fatalf("resolveOutboundCred: %v", err)
 	}
-	if cred.Token != "" || cred.Verbatim || cred.Strip {
-		t.Errorf("verdict = %+v, want a no-op verdict (a passphrase yields no upstream credential)", cred)
+	if cred.Token != "sess-tok" || cred.Header != "" || cred.Verbatim || cred.Strip {
+		t.Errorf("verdict = %+v, want the session token under Authorization", cred)
+	}
+
+	// No token presented (shouldn't happen past a verified ssh gate, but the
+	// resolver must not panic or guess): a no-op verdict — never the stored key.
+	empty, err := srv.resolveOutboundCred(svc, gate, nil, "", "")
+	if err != nil {
+		t.Fatalf("resolveOutboundCred: %v", err)
+	}
+	if empty.Token != "" || empty.Verbatim || empty.Strip {
+		t.Errorf("verdict with no claims = %+v, want an empty no-op verdict", empty)
 	}
 }
 
@@ -697,5 +741,27 @@ func TestRefreshKeepsUpstreamWithoutRefreshToken(t *testing.T) {
 	}
 	if got := claims.Creds["kantata-ox"].UpstreamToken; got != "k-token" {
 		t.Errorf("refreshed kantata-ox credential = %q, want k-token", got)
+	}
+}
+
+// An ssh_key acts_as adds a leg like an interactive one does: its
+// credential is the login, so the door asks for it too.
+func TestSSHKeyActsAsAddsALeg(t *testing.T) {
+	srv := newTestServer(t)
+	gate := newAuthRecord(t, srv, "Gate Key", db.AuthAPIKey, db.AuthDescriptor{Key: "g"})
+	acts := newAuthRecord(t, srv, "Deploy Key", db.AuthSSHKey, db.AuthDescriptor{Key: "ssh-priv"})
+	svc := &db.Service{ID: 1, Descriptor: db.ServiceDescriptor{Type: "api"}, ActsAs: &acts.ID}
+
+	legs, err := srv.legsForLogin(context.Background(), gate, svc)
+	if err != nil {
+		t.Fatalf("legsForLogin: %v", err)
+	}
+	if len(legs) != 2 || legs[0].ID != gate.ID || legs[1].ID != acts.ID {
+		t.Errorf("legs = %v, want [gate, ssh acts_as]", legs)
+	}
+	// The same record as the gate doesn't double up.
+	same := &db.Service{ID: 2, Descriptor: db.ServiceDescriptor{Type: "api"}, ActsAs: &gate.ID}
+	if legs, _ := srv.legsForLogin(context.Background(), gate, same); len(legs) != 1 {
+		t.Errorf("legs with acts_as == gate = %v, want just the gate", legs)
 	}
 }

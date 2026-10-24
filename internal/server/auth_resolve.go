@@ -169,8 +169,15 @@ var errNeedsLogin = errors.New("login required")
 // resolveOutboundCred decides what goes upstream for a request that already
 // cleared its gate. presentedKey is the raw key a caller presented at an
 // api_key gate (claims are nil there); it becomes the passthrough value.
+// presentedToken is the caller's own Fresh Breath bearer ("" when none) —
+// the credential an ssh_key door or acts_as hands upstream.
 //
-//   - acts_as stored (api_key/ssh_key): that credential, same for everyone
+//   - acts_as stored api_key: that key, same for everyone
+//   - acts_as ssh_key: the caller's active token for that record — the
+//     second leg of a two-leg login. A stored private key never goes
+//     upstream: a bearer is not an SSH handshake, and the key is worth
+//     protecting; the token, though, is a valid bearer on this server's
+//     own HTTP surface (the /api/sync routes, for one)
 //   - acts_as interactive (oidc/oauth2): the caller's sealed credential for
 //     that record's provider — the second leg of a two-leg login
 //   - acts_as Anonymous: explicitly credential-free; strip what the caller sent
@@ -178,14 +185,15 @@ var errNeedsLogin = errors.New("login required")
 //     upstream credential
 //   - acts_as empty, gate api_key: passthrough of the presented key, or the
 //     gate's stored key when the caller cleared it by token instead
+//   - acts_as empty, gate ssh_key: the caller's token — the passphrase login
+//     produced it, and it is the credential such a door has to offer
 //   - acts_as empty, gate open: leave the caller's Authorization alone
-//   - acts_as empty, gate ssh_key: nothing — a passphrase yields no upstream
 //
 // An mcp service skips all of that: its MCP server decides. The caller's
 // token for that server when the login got one; otherwise, behind an open
 // gate, a caller's own non-Fresh-Breath bearer rides through; otherwise
 // nothing, and the server answers for itself.
-func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claims *freshbreathClaims, presentedKey string) (outboundCred, error) {
+func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claims *freshbreathClaims, presentedKey, presentedToken string) (outboundCred, error) {
 	if svc.Descriptor.Type == "mcp" {
 		if claims != nil {
 			if cred, ok := claims.Creds[mcpProvider(svc.ID)]; ok {
@@ -210,7 +218,13 @@ func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claim
 		case db.AuthAPIKey:
 			return outboundCred{Token: rec.Descriptor.Key, Header: rec.Descriptor.Header}, nil
 		case db.AuthSSHKey:
-			return outboundCred{Token: rec.Descriptor.Key}, nil
+			// An ssh_key record yields a login, never its stored private key:
+			// what goes upstream is the caller's active token for that
+			// record — a second leg the door asks for (see legsForLogin).
+			if claims == nil || !claims.boundTo(rec.ID) || presentedToken == "" {
+				return outboundCred{}, fmt.Errorf("%w: log in to %q — an ssh_key credential is the session token", errNeedsLogin, rec.Name)
+			}
+			return outboundCred{Token: presentedToken}, nil
 		default: // oidc, oauth2
 			if claims == nil {
 				return outboundCred{}, fmt.Errorf("%w: service acts as %q but the caller has no token", errNeedsLogin, rec.Name)
@@ -243,7 +257,11 @@ func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claim
 			return outboundCred{Token: cred.UpstreamToken}, nil
 		}
 		return outboundCred{}, nil
-	default: // ssh_key gate — no upstream credential exists
+	default: // ssh_key gate — its login produced the caller's token,
+		// and that is the credential the door has to offer upstream
+		if claims != nil && presentedToken != "" {
+			return outboundCred{Token: presentedToken}, nil
+		}
 		return outboundCred{}, nil
 	}
 }

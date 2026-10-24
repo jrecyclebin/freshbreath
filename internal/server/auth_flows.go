@@ -60,7 +60,10 @@ func (s *Server) legsForLogin(ctx context.Context, gate *db.AuthRecord, svc *db.
 		if err != nil {
 			return nil, err
 		}
-		if authInteractive(rec) && (gate == nil || rec.ID != gate.ID) {
+		// Interactive acts_as and ssh_key acts_as both yield their credential
+		// only through a login, so both add a leg: the door asks for the
+		// caller's session token for that record.
+		if (authInteractive(rec) || rec.Kind == db.AuthSSHKey) && (gate == nil || rec.ID != gate.ID) {
 			legs = append(legs, rec)
 		}
 	}

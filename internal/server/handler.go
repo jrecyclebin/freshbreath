@@ -968,7 +968,11 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	if gate != nil && gate.Kind == db.AuthAPIKey && claims == nil {
 		presentedKey = presentedGateKey(gate, r)
 	}
-	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
+	var presentedToken string
+	if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); isFreshbreathToken(raw) {
+		presentedToken = raw
+	}
+	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey, presentedToken)
 	if err != nil {
 		httpOutboundCredError(w, err)
 		return
@@ -1159,7 +1163,11 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	if gate != nil && gate.Kind == db.AuthAPIKey && claims == nil {
 		presentedKey = presentedGateKey(gate, r)
 	}
-	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
+	var presentedToken string
+	if raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); isFreshbreathToken(raw) {
+		presentedToken = raw
+	}
+	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey, presentedToken)
 	if err != nil {
 		httpOutboundCredError(w, err)
 		return

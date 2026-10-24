@@ -300,7 +300,11 @@ func (s *Server) mcpCallerCred(svc *db.Service, req *mcp.CallToolRequest) (token
 		}
 	}
 
-	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey)
+	presentedToken := ""
+	if isFreshbreathToken(raw) {
+		presentedToken = raw // for an api_key gate the Authorization value is a key, not this
+	}
+	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey, presentedToken)
 	if err != nil {
 		return "", nil, mcpAuthError("%v", err)
 	}
