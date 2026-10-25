@@ -411,16 +411,16 @@ func TestMCPServiceOAuthBehindOpenGate(t *testing.T) {
 	if login.Type != "redirect" || len(login.Legs) != 1 || login.Legs[0].AuthID != mcpAuthID(svcID) || login.Legs[0].Kind != db.AuthMCP {
 		t.Fatalf("login = %+v, want one mcp leg", login)
 	}
-	authURL, _ := url.Parse(login.URL)
+	authURL, browser := beginInBrowser(t, srv, login.URL)
 	q := authURL.Query()
 	if authURL.Path != "/authorize" || q.Get("client_id") != "dcr-client" || q.Get("resource") != up.URL+"/mcp" {
-		t.Fatalf("authorize url = %s", login.URL)
+		t.Fatalf("authorize url = %s", authURL)
 	}
 	if q.Get("scope") != "offline_access" {
 		t.Errorf("scope = %q, want offline_access", q.Get("scope"))
 	}
 
-	rr = testRequest(t, srv, "GET", "/service/callback?code=c1&state="+q.Get("state"), nil, nil)
+	rr = testRequest(t, srv, "GET", "/service/callback?code=c1&state="+q.Get("state"), nil, browser)
 	if rr.Code != 200 {
 		t.Fatalf("callback status = %d, body = %s", rr.Code, rr.Body.String())
 	}

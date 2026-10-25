@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -112,10 +113,12 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 	switch rec.Kind {
 	case db.AuthSSHKey:
 		state := utils.GenNonce()
+		p.legState, p.legURL = state, ""
 		s.putPending(state, p)
 		return fmt.Sprintf("%s/service/ssh-auth?state=%s", s.config.PublicBaseURL, state), nil
 	case db.AuthAPIKey:
 		state := utils.GenNonce()
+		p.legState, p.legURL = state, ""
 		s.putPending(state, p)
 		return fmt.Sprintf("%s/service/apikey-auth?state=%s", s.config.PublicBaseURL, state), nil
 	case db.AuthOIDC:
@@ -125,6 +128,7 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 		}
 		p.verifier, p.oidcNonce, p.tokenEndpoint = verifier, oidcNonce, tokenURL
 		p.clientID, p.clientSecret = rec.Descriptor.ClientID, rec.Descriptor.ClientSecret
+		p.legState, p.legURL = state, authURL
 		s.putPending(state, p)
 		return authURL, nil
 	case db.AuthOAuth2, db.AuthMCP:
@@ -133,6 +137,7 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 			return "", err
 		}
 		p.verifier, p.clientID, p.clientSecret, p.tokenEndpoint = verifier, clientID, clientSecret, tokenURL
+		p.legState, p.legURL = state, authURL
 		s.putPending(state, p)
 		return authURL, nil
 	}
@@ -575,6 +580,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		http.Error(w, fmt.Sprintf("Failed to begin auth: %v", err), http.StatusInternalServerError)
 		return false
 	}
+	s.bindBrowser(w, r, p) // a navigation on this origin: the cookie sticks
 	http.Redirect(w, r, next, http.StatusFound)
 	return false
 }
@@ -843,6 +849,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to begin auth: %v", err), http.StatusInternalServerError)
 		return
 	}
+	// This is a fetch, maybe from another site, so it can't set the
+	// browser-binding cookie. A provider leg's popup stops at
+	// /service/begin to set it; a form leg's page sets it itself.
+	if p.legURL != "" {
+		url = s.config.PublicBaseURL + "/service/begin?state=" + p.legState
+	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"type":    "redirect",
@@ -851,6 +863,61 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		"service": serviceInfo(svc),
 	})
 }
+
+// ── /service/begin ──────────────────────────────────────────────────
+
+// handleBegin is a browser login's first stop on this origin before a
+// provider leg: it binds the flow to this browser, then forwards to the
+// provider. (/service/login is a fetch, maybe cross-site, so it can't set
+// the cookie itself.)
+func (s *Server) handleBegin(w http.ResponseWriter, r *http.Request) {
+	p, ok, _ := s.getPending(r.URL.Query().Get("state"))
+	if !ok || p.mcpKey != "" || p.legURL == "" {
+		http.Error(w, "Unknown or expired sign-in — start it again from the app", http.StatusBadRequest)
+		return
+	}
+	s.bindBrowser(w, r, p)
+	http.Redirect(w, r, p.legURL, http.StatusFound)
+}
+
+// bindBrowser ties a browser login to the browser on this request: a
+// per-flow cookie the callback checks (browserBound), so someone else's
+// callback URL can't finish a login in it. Lax, because the provider's
+// redirect back is a cross-site navigation. Every leg of the flow shares
+// the one binding.
+func (s *Server) bindBrowser(w http.ResponseWriter, r *http.Request, p *pendingAuth) {
+	if p.bindID == "" {
+		p.bindID, p.bindSecret = utils.GenNonce(), utils.GenNonce()+utils.GenNonce()
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     loginBindCookie + p.bindID,
+		Value:    p.bindSecret,
+		Path:     "/service/callback",
+		MaxAge:   int(pendingAuthTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   s.schemeOf(r) == "https" || s.config.TLSCertFile != "",
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// bindPendingBrowser binds the browser flow pending under state, if any.
+func (s *Server) bindPendingBrowser(w http.ResponseWriter, r *http.Request, state string) {
+	if p, ok, _ := s.getPending(state); ok && p.mcpKey == "" {
+		s.bindBrowser(w, r, p)
+	}
+}
+
+// browserBound reports whether r comes from the browser bindBrowser bound
+// p to.
+func browserBound(r *http.Request, p *pendingAuth) bool {
+	if p.bindID == "" {
+		return false
+	}
+	c, err := r.Cookie(loginBindCookie + p.bindID)
+	return err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(p.bindSecret)) == 1
+}
+
+const loginBindCookie = "frbr_login_"
 
 // ── /service/callback ───────────────────────────────────────────────
 
@@ -871,6 +938,11 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		http.Error(w, "Unknown auth state", http.StatusBadRequest)
+		return
+	}
+	if p.mcpKey == "" && !browserBound(r, p) {
+		gatePageError(w, http.StatusForbidden, "Sign-in started elsewhere",
+			"This sign-in was started in a different browser (or its cookie was blocked). Start it again from the app.")
 		return
 	}
 	rec := p.current()
@@ -1102,6 +1174,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Missing state parameter", http.StatusBadRequest)
 			return
 		}
+		s.bindPendingBrowser(w, r, state)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := strings.Replace(sshAuthFormHTML, "{{ASKER}}", s.loginAsker(state), 1)
 		w.Write([]byte(strings.Replace(page, "{{STATE}}", scriptString(state), 1)))
@@ -1182,6 +1255,7 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Missing state parameter", http.StatusBadRequest)
 			return
 		}
+		s.bindPendingBrowser(w, r, state)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := strings.Replace(apiKeyAuthFormHTML, "{{ASKER}}", s.loginAsker(state), 1)
 		w.Write([]byte(strings.Replace(page, "{{STATE}}", scriptString(state), 1)))

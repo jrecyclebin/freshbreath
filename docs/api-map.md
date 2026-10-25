@@ -44,7 +44,8 @@ provider redirect → provider calls `callback` → "legs" are completed in sequ
 | Route | Method | Description |
 |---|---|---|
 | `/service/login` | GET | Start/resolve a login. Query: `state` (app state), optional `url` (act-as-service), `resolve` (dry run → legs), `return` (redirect back into app); the app is named by `X-App-Nonce` (a fetch — the query always carries `state`, so there is no nonce-in-the-URL form). Bearer may satisfy legs (`type: ok`). Returns JSON `{type: anonymous\|ok\|legs\|redirect, url, legs, service}` |
-| `/service/callback` | GET | Provider redirect target; exchanges code, advances/finishes the pending login |
+| `/service/begin` | GET | A browser login's first stop before a provider leg (`/service/login` hands its URL out as `url`): sets the per-flow `frbr_login_*` cookie, then 302s to the provider |
+| `/service/callback` | GET | Provider redirect target; refuses a browser without the flow's `frbr_login_*` cookie (set by `/service/begin`, the page gate or a form page), then exchanges code, advances/finishes the pending login |
 | `/service/ssh-auth` | GET/POST | Passphrase-SSH login form (GET HTML form) & POST `{state, email, passphrase}`. Adds key to in-process SSH agent for `sshAgentTTL` |
 | `/service/apikey-auth` | GET/POST | API-key gate form & POST `{state, api_key}` |
 | `/service/logout` | GET/POST | Clears browser login state |

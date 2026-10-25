@@ -97,7 +97,7 @@ func requestBodyLimit(path string) int64 {
 		// The sign-in endpoints take small JSON; everything else under
 		// /service/ is a task call or the service proxy.
 		switch path {
-		case "/service/login", "/service/callback", "/service/ssh-auth", "/service/apikey-auth",
+		case "/service/login", "/service/begin", "/service/callback", "/service/ssh-auth", "/service/apikey-auth",
 			"/service/logout", "/service/passphrase":
 			return jsonBodyMaxBytes
 		}
@@ -302,6 +302,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/env.js", s.handleEnv)
 	s.mux.HandleFunc("/frbr.js", s.handleFrbr)
 	s.mux.HandleFunc("/service/login", s.handleLogin)
+	s.mux.HandleFunc("/service/begin", s.handleBegin)
 	s.mux.HandleFunc("/service/callback", s.handleCallback)
 	s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
 	s.mux.HandleFunc("/service/apikey-auth", s.handleAPIKeyAuth)

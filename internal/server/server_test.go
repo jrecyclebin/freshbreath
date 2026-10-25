@@ -580,7 +580,7 @@ func TestLoginWithMetadataFallback(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=fallback-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -634,7 +634,7 @@ func TestLoginByServiceURL(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=mock-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -708,7 +708,7 @@ func TestLoginViaQueryParam(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=mock-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -756,7 +756,7 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=gh-pre-registered-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -1007,7 +1007,7 @@ func TestLoginAdminNonceAllowed(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	if loc, _ := body["url"].(string); !strings.Contains(loc, "client_id=admin-client") {
+	if loc := providerURL(t, srv, body["url"].(string)); !strings.Contains(loc, "client_id=admin-client") {
 		t.Errorf("redirect missing client_id: %v", body["url"])
 	}
 }

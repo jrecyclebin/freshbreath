@@ -111,13 +111,22 @@ type pendingAuth struct {
 	opener   string // origin the finished login is posted to (see loginOpenerOrigin)
 	mcpKey   string // key into mcpAuthPending; "" for browser flows
 
+	// Browser flows: the frbr_login_<bindID> cookie (value bindSecret) the
+	// callback must see, so a callback URL only works in the browser that
+	// started the login (see bindBrowser).
+	bindID     string
+	bindSecret string
+
 	legs      []*db.AuthRecord // records still to clear, in order
 	at        int              // cursor into legs
 	done      []*completedLeg  // cleared legs (including any pre-covered by a presented token)
 	gateID    int64            // first record of the login; the token's identity comes from it
 	primaryID int64            // record the finished token is minted under
 
-	// Active-leg OAuth state (interactive kinds only).
+	// Active leg: the state it's stored under, and for interactive kinds
+	// the provider URL /service/begin forwards to plus the OAuth state.
+	legState      string
+	legURL        string
 	verifier      string
 	clientID      string
 	clientSecret  string

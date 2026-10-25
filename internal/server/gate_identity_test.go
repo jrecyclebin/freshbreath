@@ -94,12 +94,41 @@ func appLoginStart(t *testing.T, srv *Server, nonce string) string {
 	return login.URL
 }
 
+// beginInBrowser plays the popup's first stop: it opens a login's
+// /service/begin URL and returns the provider URL it forwards to, plus the
+// Cookie header that binds the flow to this "browser".
+func beginInBrowser(t *testing.T, srv *Server, beginURL string) (*url.URL, map[string]string) {
+	t.Helper()
+	u, _ := url.Parse(beginURL)
+	if u.Path != "/service/begin" {
+		t.Fatalf("login url = %s, want /service/begin", beginURL)
+	}
+	rr := testRequest(t, srv, "GET", u.RequestURI(), nil, nil)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("begin status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var cookies []string
+	for _, c := range rr.Result().Cookies() {
+		cookies = append(cookies, c.Name+"="+c.Value)
+	}
+	leg, _ := url.Parse(rr.Header().Get("Location"))
+	return leg, map[string]string{"Cookie": strings.Join(cookies, "; ")}
+}
+
+// providerURL follows a login's /service/begin hop to the provider URL
+// the popup ends up at.
+func providerURL(t *testing.T, srv *Server, beginURL string) string {
+	t.Helper()
+	leg, _ := beginInBrowser(t, srv, beginURL)
+	return leg.String()
+}
+
 // appOAuthLogin runs an app door login through its OAuth gate and returns
 // the minted subject.
 func appOAuthLogin(t *testing.T, srv *Server, nonce string) string {
 	t.Helper()
-	leg, _ := url.Parse(appLoginStart(t, srv, nonce))
-	rr := testRequest(t, srv, "GET", "/service/callback?code=c1&state="+leg.Query().Get("state"), nil, nil)
+	leg, browser := beginInBrowser(t, srv, appLoginStart(t, srv, nonce))
+	rr := testRequest(t, srv, "GET", "/service/callback?code=c1&state="+leg.Query().Get("state"), nil, browser)
 	if rr.Code != 200 {
 		t.Fatalf("callback status = %d, body = %s", rr.Code, rr.Body.String())
 	}
@@ -282,5 +311,33 @@ func TestControlPassSurvivesOtherGateSignIn(t *testing.T) {
 	}
 	if rr := pageRequest(srv, "/"+slug+"/", "navigate", []*http.Cookie{pass}, nil); rr.Code != http.StatusOK {
 		t.Errorf("app: status = %d, want 200", rr.Code)
+	}
+}
+
+// F14 (audit 202610): an upstream login's state wasn't tied to the browser
+// that started it, so a callback URL from someone else's login could sign a
+// victim's browser in as them. The popup now stops at /service/begin, which
+// sets a cookie for this flow, and the callback refuses a browser without it.
+func TestCallbackNeedsTheBrowserThatStartedTheLogin(t *testing.T) {
+	srv := newTestServer(t)
+	rec := fakeGitHubIdP(t, srv)
+	nonce := appBehind(t, srv, "Notes", &rec.ID)
+
+	leg, browser := beginInBrowser(t, srv, appLoginStart(t, srv, nonce))
+	if !strings.HasSuffix(leg.Path, "/authorize") {
+		t.Fatalf("begin forwarded to %s, want the provider", leg)
+	}
+	callback := "/service/callback?code=c1&state=" + leg.Query().Get("state")
+
+	for name, headers := range map[string]map[string]string{
+		"no cookie":    nil,
+		"wrong cookie": {"Cookie": strings.Replace(browser["Cookie"], "=", "=x", 1)},
+	} {
+		if rr := testRequest(t, srv, "GET", callback, nil, headers); rr.Code != http.StatusForbidden {
+			t.Errorf("%s: callback status %d, want 403", name, rr.Code)
+		}
+	}
+	if rr := testRequest(t, srv, "GET", callback, nil, browser); rr.Code != 200 {
+		t.Errorf("starting browser: callback status %d, body %s", rr.Code, rr.Body.String())
 	}
 }
