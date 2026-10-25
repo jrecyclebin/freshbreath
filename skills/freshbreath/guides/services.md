@@ -90,12 +90,19 @@ hosted on the server's own origin, `/frbr.js` is enough.
 An app whose URL names a web origin gets the same off-server treatment by
 declaration. Any other app is hosted exactly while it has a deployment
 slot — so a blank URL that isn't hosted is simply a page opened from disk,
-with no URL to set. Such a page has no origin of ours to speak from — the
-browser reports a `file://` page as `null`, the same as any sandboxed
-frame on the web, and a registered web origin is only a declaration — so
-the app's nonce is its credential: the server only hands logins and
-credentialed responses to a request that names the app by nonce, and
-never tells that nonce to anyone who doesn't already have it.
+with no URL to set. The app's nonce is its credential: the server only
+hands logins and credentialed responses to a request that names the app
+by nonce, and never tells that nonce to anyone who doesn't already have
+it.
+
+Each off-server app may also call from just one origin. An app with a URL
+answers only to that URL's origin (`https://app.example/start` →
+`https://app.example`), and a finished login is posted only there — so
+when you develop such an app on `http://localhost:5173`, set its URL to
+match. An app with no URL answers only to `null`, the origin a browser
+reports for a `file://` page. Sandboxed frames on the web report `null`
+too, so for these apps the nonce really is the whole lock, and the
+sign-in form names the app it's signing in for.
 
 ### The page gate
 

@@ -68,19 +68,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// appRegisteredOrigin returns the origin an app is registered at — "" for
-// hosted apps (their URL is a slug on this server's own origin) and for
-// anything unparseable. The login return-path check reads it; cross-origin
-// requests no longer do (see originAllowed).
+// appRegisteredOrigin returns the origin an app is registered at, in the
+// form a browser sends it (lowercase, no default port) — "" for hosted
+// apps (their URL is a slug on this server's own origin), file: URLs and
+// anything unparseable.
 func appRegisteredOrigin(app *db.App) string {
 	if app == nil || app.URL == "" {
 		return ""
 	}
 	appURL, err := url.Parse(app.URL)
-	if err != nil || appURL.Scheme == "" || appURL.Host == "" {
+	if err != nil || appURL.Host == "" {
 		return ""
 	}
-	return appURL.Scheme + "://" + appURL.Host
+	scheme := strings.ToLower(appURL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	host := strings.ToLower(appURL.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := appURL.Port(); port != "" && !(scheme == "https" && port == "443") && !(scheme == "http" && port == "80") {
+		host += ":" + port
+	}
+	return scheme + "://" + host
 }
 
 // serverOwnedPath reports whether a path is served by Fresh Breath itself
@@ -199,10 +210,20 @@ func (s *Server) originAllowed(r *http.Request, origin string) (allowed, withCoo
 		return true, true
 	}
 	app, err := s.store.GetApp(requestAppNonce(r))
-	if err == nil && s.appRunsElsewhere(app) {
+	if err == nil && s.appRunsElsewhere(app) && strings.EqualFold(origin, appOffServerOrigin(app)) {
 		return true, true
 	}
 	return false, false
+}
+
+// appOffServerOrigin is the one origin an app that runs elsewhere may call
+// from: its registered URL's origin, or "null" (a page opened from disk)
+// when it has none.
+func appOffServerOrigin(app *db.App) string {
+	if o := appRegisteredOrigin(app); o != "" {
+		return o
+	}
+	return "null"
 }
 
 func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {

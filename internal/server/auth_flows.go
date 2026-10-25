@@ -251,16 +251,38 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 }
 
 // loginOpenerOrigin is the only window origin a finished browser login may
-// be posted to. An app that runs elsewhere gets "*": file:// pages have no
-// origin to name, and a registered web origin is only a declaration — the
-// nonce that started the login is the credential, and the server never
-// tells it to anyone (frbr.js answers only to a URL that already carries
-// it). Hosted apps and the control panel get this server's origin.
+// be posted to. An app that runs elsewhere gets its registered origin —
+// the only origin originAllowed let start the login — or "*" when it runs
+// from disk, since file:// pages have no origin to name (there the nonce
+// is the whole credential). Hosted apps and the control panel get this
+// server's origin.
 func (s *Server) loginOpenerOrigin(r *http.Request, app *db.App) string {
 	if s.appRunsElsewhere(app) {
+		if o := appRegisteredOrigin(app); o != "" {
+			return o
+		}
 		return "*"
 	}
 	return s.schemeOf(r) + "://" + r.Host
+}
+
+// loginAsker is the line a sign-in form shows when an app that runs
+// elsewhere started the login, so the user can tell which page will get
+// the result. "" for hosted apps and the panel.
+func (s *Server) loginAsker(state string) string {
+	p, ok, _ := s.getPending(state)
+	if !ok || p.appNonce == "" || p.appNonce == s.adminNonce {
+		return ""
+	}
+	app, err := s.store.GetApp(p.appNonce)
+	if err != nil || !s.appRunsElsewhere(app) {
+		return ""
+	}
+	where := " at " + html.EscapeString(p.opener)
+	if p.opener == "*" {
+		where = ", a page opened from disk"
+	}
+	return `<p class="lead">For <b>` + html.EscapeString(app.Name) + `</b>` + where + `. Only sign in if you opened it.</p>`
 }
 
 // writeCallbackPage hands a finished browser login back to the app.
@@ -1069,7 +1091,8 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(strings.Replace(sshAuthFormHTML, "{{STATE}}", scriptString(state), 1)))
+		page := strings.Replace(sshAuthFormHTML, "{{ASKER}}", s.loginAsker(state), 1)
+		w.Write([]byte(strings.Replace(page, "{{STATE}}", scriptString(state), 1)))
 
 	case http.MethodPost:
 		var req struct {
@@ -1148,7 +1171,8 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(strings.Replace(apiKeyAuthFormHTML, "{{STATE}}", scriptString(state), 1)))
+		page := strings.Replace(apiKeyAuthFormHTML, "{{ASKER}}", s.loginAsker(state), 1)
+		w.Write([]byte(strings.Replace(page, "{{STATE}}", scriptString(state), 1)))
 
 	case http.MethodPost:
 		var req struct {
@@ -1268,6 +1292,7 @@ var sshAuthFormHTML = authPage("Sign in", `
 <div>
   <h1>Sign in</h1>
   <p class="lead">Use your email and SSH key passphrase.</p>
+  {{ASKER}}
 </div>
 <div class="auth-error" id="err" hidden></div>
 <form id="f">
@@ -1391,6 +1416,7 @@ var apiKeyAuthFormHTML = authPage("API key", `
 <div>
   <h1>API key</h1>
   <p class="lead">Enter the API key for this service.</p>
+  {{ASKER}}
 </div>
 <div class="auth-error" id="err" hidden></div>
 <form id="f">
