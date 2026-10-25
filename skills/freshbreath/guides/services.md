@@ -36,7 +36,13 @@ A service has two auth slots that point at an **auth record** — a credential o
 login method standing on its own, shared by everything that names it:
 
 - **Protected by** — who may call in. Empty means *inherit the admin record*,
-  not *open*; only an explicit Anonymous record means open.
+  not *open*; only an explicit Anonymous record means open. Inheriting lets in
+  everyone the admin record's provider vouches for, Fresh Breath user or not —
+  just right for a company SSO, where that's your people. A generic GitHub or
+  Google login as the admin record vouches for *anyone* with such an account,
+  so every inheriting app and service (task services included) opens to the
+  world. Keep that setup to a LAN, or give those apps and services a gate of
+  their own.
 - **Acts as** — what credential goes upstream. Empty means *the caller's own*.
   **mcp** services have no acts-as: the MCP server decides. An open server
   needs nothing; an OAuth one (Notion, say) is signed in to as a step of
@@ -90,12 +96,19 @@ hosted on the server's own origin, `/frbr.js` is enough.
 An app whose URL names a web origin gets the same off-server treatment by
 declaration. Any other app is hosted exactly while it has a deployment
 slot — so a blank URL that isn't hosted is simply a page opened from disk,
-with no URL to set. Such a page has no origin of ours to speak from — the
-browser reports a `file://` page as `null`, the same as any sandboxed
-frame on the web, and a registered web origin is only a declaration — so
-the app's nonce is its credential: the server only hands logins and
-credentialed responses to a request that names the app by nonce, and
-never tells that nonce to anyone who doesn't already have it.
+with no URL to set. The app's nonce is its credential: the server only
+hands logins and credentialed responses to a request that names the app
+by nonce, and never tells that nonce to anyone who doesn't already have
+it.
+
+Each off-server app may also call from just one origin. An app with a URL
+answers only to that URL's origin (`https://app.example/start` →
+`https://app.example`), and a finished login is posted only there — so
+when you develop such an app on `http://localhost:5173`, set its URL to
+match. An app with no URL answers only to `null`, the origin a browser
+reports for a `file://` page. Sandboxed frames on the web report `null`
+too, so for these apps the nonce really is the whole lock, and the
+sign-in form names the app it's signing in for.
 
 ### The page gate
 
@@ -346,4 +359,9 @@ is, so a file's text arrives byte for byte.
   store, which is what lets a second app skip the prompt. Apps served from their
   own origins don't, and will prompt separately.
 - **Client secrets** never reach the browser. Token exchange and refresh run on
-  the server, and refresh tokens live in HttpOnly cookies your code can't read.
+  the server. For apps on the Fresh Breath origin, refresh tokens live in
+  HttpOnly cookies your code can't read. An app that runs elsewhere can't use
+  that cookie (it only rides same-origin requests), so frbr.js keeps that
+  app's refresh token in its store entry, rotating it on every refresh. For a
+  `file://` app that store is readable by any local HTML file the browser
+  opens, so only open pages from disk that you trust.

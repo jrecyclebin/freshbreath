@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,6 +40,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	if s.schemeOf(r) == "https" && !s.isLocalHost(r.Host) {
+		h.Set("Strict-Transport-Security", "max-age=15552000")
+	}
 	if serverOwnedPath(r.URL.Path) {
 		// The panel, the sign-in pages and the API act on a click or carry
 		// a session; none of them is meant to sit in someone else's frame.
@@ -65,22 +70,71 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit := requestBodyLimit(r.URL.Path)
+	if r.ContentLength > limit {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+
 	s.mux.ServeHTTP(w, r)
 }
 
-// appRegisteredOrigin returns the origin an app is registered at — "" for
-// hosted apps (their URL is a slug on this server's own origin) and for
-// anything unparseable. The login return-path check reads it; cross-origin
-// requests no longer do (see originAllowed).
+// Request body caps (requestBodyLimit). uploadMaxBytes is the largest.
+const (
+	oauthBodyMaxBytes = 64 << 10
+	jsonBodyMaxBytes  = 4 << 20
+)
+
+// requestBodyLimit is the most a request body on path may hold: upload
+// size for routes that carry files or proxy them (app and service files,
+// sync, task calls, the service proxy, MCP), a little for OAuth's forms,
+// and enough for any JSON body everywhere else.
+func requestBodyLimit(path string) int64 {
+	switch {
+	case strings.HasPrefix(path, "/oauth/"):
+		return oauthBodyMaxBytes
+	case path == "/mcp", strings.HasPrefix(path, "/mcp/"),
+		strings.HasPrefix(path, "/api/apps/"), strings.HasPrefix(path, "/api/services/"),
+		strings.HasPrefix(path, "/api/sync/files"):
+		return uploadMaxBytes
+	case strings.HasPrefix(path, "/service/"):
+		// The sign-in endpoints take small JSON; everything else under
+		// /service/ is a task call or the service proxy.
+		switch path {
+		case "/service/login", "/service/begin", "/service/callback", "/service/ssh-auth", "/service/apikey-auth",
+			"/service/logout", "/service/passphrase":
+			return jsonBodyMaxBytes
+		}
+		return uploadMaxBytes
+	}
+	return jsonBodyMaxBytes
+}
+
+// appRegisteredOrigin returns the origin an app is registered at, in the
+// form a browser sends it (lowercase, no default port) — "" for hosted
+// apps (their URL is a slug on this server's own origin), file: URLs and
+// anything unparseable.
 func appRegisteredOrigin(app *db.App) string {
 	if app == nil || app.URL == "" {
 		return ""
 	}
 	appURL, err := url.Parse(app.URL)
-	if err != nil || appURL.Scheme == "" || appURL.Host == "" {
+	if err != nil || appURL.Host == "" {
 		return ""
 	}
-	return appURL.Scheme + "://" + appURL.Host
+	scheme := strings.ToLower(appURL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	host := strings.ToLower(appURL.Hostname())
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port := appURL.Port(); port != "" && !(scheme == "https" && port == "443") && !(scheme == "http" && port == "80") {
+		host += ":" + port
+	}
+	return scheme + "://" + host
 }
 
 // serverOwnedPath reports whether a path is served by Fresh Breath itself
@@ -112,6 +166,17 @@ func (s *Server) hostAllowed(hostport string) bool {
 		return true
 	}
 	return s.knownHosts[host]
+}
+
+// isLocalHost reports whether a Host names this machine by loopback name or
+// IP literal — where HSTS would pin HTTPS for every other local server too.
+func (s *Server) isLocalHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	return net.ParseIP(host) != nil || host == "localhost" || strings.HasSuffix(host, ".localhost")
 }
 
 // knownHostSet collects the DNS names hostAllowed accepts.
@@ -199,10 +264,20 @@ func (s *Server) originAllowed(r *http.Request, origin string) (allowed, withCoo
 		return true, true
 	}
 	app, err := s.store.GetApp(requestAppNonce(r))
-	if err == nil && s.appRunsElsewhere(app) {
+	if err == nil && s.appRunsElsewhere(app) && strings.EqualFold(origin, appOffServerOrigin(app)) {
 		return true, true
 	}
 	return false, false
+}
+
+// appOffServerOrigin is the one origin an app that runs elsewhere may call
+// from: its registered URL's origin, or "null" (a page opened from disk)
+// when it has none.
+func appOffServerOrigin(app *db.App) string {
+	if o := appRegisteredOrigin(app); o != "" {
+		return o
+	}
+	return "null"
 }
 
 func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {
@@ -243,6 +318,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/env.js", s.handleEnv)
 	s.mux.HandleFunc("/frbr.js", s.handleFrbr)
 	s.mux.HandleFunc("/service/login", s.handleLogin)
+	s.mux.HandleFunc("/service/begin", s.handleBegin)
 	s.mux.HandleFunc("/service/callback", s.handleCallback)
 	s.mux.HandleFunc("/service/ssh-auth", s.handleSSHAuth)
 	s.mux.HandleFunc("/service/apikey-auth", s.handleAPIKeyAuth)
@@ -607,7 +683,32 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Security-Policy", controlCSP(data))
 	w.Write(data)
+}
+
+var inlineScriptRe = regexp.MustCompile(`(?s)<script([^>]*)>(.*?)</script>`)
+
+// controlCSP is the control panel's policy. The built panel may run its own
+// files and exactly the inline scripts on the page (by hash), so injected
+// markup can't run script. It keeps 'unsafe-eval' because the bundled MCP
+// SDK compiles JSON Schema validators (Ajv) with new Function. The dev
+// panel compiles JSX in the browser with Babel, which runs inline code, so
+// there scripts are only kept to this origin.
+func controlCSP(page []byte) string {
+	const rest = "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+	if bytes.Contains(page, []byte("babel-standalone")) {
+		return "script-src 'self' 'unsafe-inline' 'unsafe-eval'" + rest
+	}
+	src := "script-src 'self' 'unsafe-eval'"
+	for _, m := range inlineScriptRe.FindAllSubmatch(page, -1) {
+		if bytes.Contains(m[1], []byte("src=")) {
+			continue
+		}
+		sum := sha256.Sum256(m[2])
+		src += " 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	}
+	return src + rest
 }
 
 // schemeOf returns the request's scheme — "https" when the connection
@@ -1062,7 +1163,7 @@ func (s *Server) serviceBySlug(slug string) (*db.Service, error) {
 
 // loadTasksForService reads and parses the tasks file for a service.
 func (s *Server) loadTasksForService(svc *db.Service) ([]formats.Task, error) {
-	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
+	path := serviceDefinitionPath(s.config.DataDir, svc)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("tasks file not found: %s: %w", path, err)
@@ -3139,29 +3240,25 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil, "mcp_database_mode": "read-only"}
-		if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
-			result["admin_auth_service"] = v
-		}
-		if v, err := s.store.GetSetting("default_app"); err == nil && v != "" {
-			result["default_app"] = v
-		}
-		if v, err := s.store.GetSetting("mcp_database_mode"); err == nil && v == "full-access" {
-			result["mcp_database_mode"] = v
+		view, err := s.coreGetSettings(userFromContext(r.Context()))
+		if err != nil {
+			writeErr(w, err)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(result)
+		json.NewEncoder(w).Encode(view)
 	case http.MethodPut:
 		var body struct {
-			AdminAuthService *string `json:"admin_auth_service"`
-			DefaultApp       *string `json:"default_app"`
-			McpDatabaseMode  *string `json:"mcp_database_mode"`
+			AdminAuthService     *string `json:"admin_auth_service"`
+			DefaultApp           *string `json:"default_app"`
+			McpDatabaseMode      *string `json:"mcp_database_mode"`
+			RequireVerifiedEmail *bool   `json:"admin_require_verified_email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := s.coreUpdateSettings(userFromContext(r.Context()), body.AdminAuthService, body.DefaultApp, body.McpDatabaseMode); err != nil {
+		if err := s.coreUpdateSettings(userFromContext(r.Context()), body.AdminAuthService, body.DefaultApp, body.McpDatabaseMode, body.RequireVerifiedEmail); err != nil {
 			writeErr(w, err)
 			return
 		}

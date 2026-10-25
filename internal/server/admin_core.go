@@ -408,12 +408,31 @@ func (s *Server) coreSetAppServices(actor *db.User, nonce string, services []int
 
 // ── Service operations ──────────────────────────────────────────────
 
+// checkServiceName refuses a name that can't serve as a file name: tasks
+// and virtual definitions live at <dir>/<name>.txt, and a service's type
+// can change after it's named, so every service is held to this.
+func checkServiceName(name string) error {
+	if name == "" {
+		return cerr(http.StatusBadRequest, "name required")
+	}
+	if !safeFileName(name) {
+		return cerr(http.StatusBadRequest, "service names can't contain slashes or NUL, or start with a dot")
+	}
+	return nil
+}
+
+// safeFileName reports whether name names a file directly inside a
+// directory on every platform we run on.
+func safeFileName(name string) bool {
+	return name != "" && name[0] != '.' && !strings.ContainsAny(name, "/\\\x00")
+}
+
 func (s *Server) coreCreateService(actor *db.User, name, url string, d db.ServiceDescriptor, protectedBy, actsAs *int64) (*db.Service, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return nil, err
 	}
-	if name == "" {
-		return nil, cerr(http.StatusBadRequest, "name required")
+	if err := checkServiceName(name); err != nil {
+		return nil, err
 	}
 	if strings.HasPrefix(name, appServicePrefix) {
 		return nil, cerr(http.StatusBadRequest, "service names starting with %q are reserved for app services", appServicePrefix)
@@ -464,8 +483,8 @@ func (s *Server) coreUpdateService(actor *db.User, id int64, name, url string, d
 	if err := s.gateTaskService(actor, existing.Descriptor.Type, d.Type); err != nil {
 		return err
 	}
-	if name == "" {
-		return cerr(http.StatusBadRequest, "name required")
+	if err := checkServiceName(name); err != nil {
+		return err
 	}
 	if strings.HasPrefix(name, appServicePrefix) && name != existing.Name {
 		return cerr(http.StatusBadRequest, "service names starting with %q are reserved for app services", appServicePrefix)
@@ -847,7 +866,7 @@ func (s *Server) coreSetPassphraseByLink(token, passphrase string) (*db.User, er
 // ── Settings operations ─────────────────────────────────────────────
 
 // coreUpdateSettings applies the non-nil settings fields, validating each.
-func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp, mcpDBMode *string) error {
+func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp, mcpDBMode *string, requireVerifiedEmail *bool) error {
 	if err := s.gate(actor, rolesSuperuser); err != nil {
 		return err
 	}
@@ -890,7 +909,48 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 		}
 		s.audit(actor, "updated settings", "mcp_database_mode")
 	}
+	if requireVerifiedEmail != nil {
+		if err := s.store.SetSetting("admin_require_verified_email", strconv.FormatBool(*requireVerifiedEmail)); err != nil {
+			return cerr(http.StatusInternalServerError, "%v", err)
+		}
+		s.audit(actor, "updated settings", "admin_require_verified_email")
+	}
 	return nil
+}
+
+// coreGetSettings returns the settings to a Superuser. It checks the role
+// itself rather than trusting that only a Superuser's MCP server lists
+// get_settings.
+func (s *Server) coreGetSettings(actor *db.User) (map[string]interface{}, error) {
+	if err := s.gate(actor, rolesSuperuser); err != nil {
+		return nil, err
+	}
+	return s.settingsView(), nil
+}
+
+// settingsView is the settings as the panel and get_settings show them.
+func (s *Server) settingsView() map[string]interface{} {
+	result := map[string]interface{}{
+		"admin_auth_service": nil, "default_app": nil, "mcp_database_mode": "read-only",
+		"admin_require_verified_email": s.adminRequiresVerifiedEmail(),
+	}
+	if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
+		result["admin_auth_service"] = v
+	}
+	if v, err := s.store.GetSetting("default_app"); err == nil && v != "" {
+		result["default_app"] = v
+	}
+	if v, err := s.store.GetSetting("mcp_database_mode"); err == nil && v == "full-access" {
+		result["mcp_database_mode"] = v
+	}
+	return result
+}
+
+// adminRequiresVerifiedEmail reports whether the admin gate links a login
+// to a user only by an email the provider explicitly marked verified.
+func (s *Server) adminRequiresVerifiedEmail() bool {
+	v, err := s.store.GetSetting("admin_require_verified_email")
+	return err == nil && v == "true"
 }
 
 // ── App Web operations ─────────────────────────────────────────────
@@ -1754,10 +1814,14 @@ func (s *Server) loadVirtualTools(svc *db.Service) ([]formats.VirtualTool, error
 // ── Service File operations ─────────────────────────────────────────
 
 // serviceDefinitionPath returns the on-disk definition path for tasks and
-// virtual services, or "" for other service types.
+// virtual services, or "" for other service types — and for a name that
+// would leave its directory (rows that predate checkServiceName).
 func serviceDefinitionPath(dataDir string, svc *db.Service) string {
 	if svc.AppNonce != "" {
 		return filepath.Join(dataDir, "apps", svc.AppNonce, "service.txt")
+	}
+	if !safeFileName(svc.Name) {
+		return ""
 	}
 	switch svc.Descriptor.Type {
 	case "tasks":
@@ -1796,6 +1860,9 @@ func (s *Server) definitionService(actor *db.User, id int64) (*db.Service, error
 	}
 	if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
 		return nil, cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+	}
+	if err := checkServiceName(svc.Name); err != nil {
+		return nil, cerr(http.StatusBadRequest, "rename this service first: %s", err)
 	}
 	return svc, nil
 }

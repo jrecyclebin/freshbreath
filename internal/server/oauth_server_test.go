@@ -1163,17 +1163,46 @@ func TestRefreshGrantFormKeepsBodyToken(t *testing.T) {
 	if resp["refresh_token"] == nil || resp["refresh_token"] == "" {
 		t.Error("form-based (CLI) refresh must include refresh_token in the body")
 	}
+	// One holder per family: a cookie copy would rotate behind the body
+	// holder's back and trip reuse detection.
+	if findRefreshCookie(rr) != nil {
+		t.Error("form-based refresh must not also set the refresh cookie")
+	}
+}
+
+// F2 (audit 202610): the refresh cookie used to be SameSite=None, so any
+// page that named a linked app could mint the visitor's token from it.
+// Now only a same-origin request may spend the cookie, even from an app
+// that may otherwise call cross-origin.
+func TestRefreshGrantCookieSameOriginOnly(t *testing.T) {
+	srv := newTestServer(t)
+	rec := oidcRecord(t, srv, "IdP")
+	u, _ := srv.store.CreateUser("Disk User", "disk@example.com", "Member", "Active")
+	disk, _ := srv.store.CreateApp("Disk", "Development", "", nil, &rec.ID)
+
+	for origin, want := range map[string]int{"null": http.StatusForbidden, "http://example.com": 200} {
+		req := httptest.NewRequest("POST", "/oauth/token/"+strconv.FormatInt(rec.ID, 10),
+			strings.NewReader(url.Values{"grant_type": {"refresh_token"}}.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("X-App-Nonce", disk)
+		req.Header.Set("Origin", origin)
+		req.AddCookie(&http.Cookie{Name: "refresh_token", Value: mintIdentityRefresh(t, srv, u, rec.ID)})
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Errorf("origin %s: status %d, want %d; body %s", origin, rr.Code, want, rr.Body.String())
+		}
+	}
 }
 
 // ── Cookie-path app/record authorization ────────────────────────────
 //
-// The cookie is SameSite=None (file:// and foreign-origin apps need it), so
-// it attaches cross-site. The CORS origin allowlist gates which origins may
-// call at all, but a registered app is still allowed — so on its own the
-// allowlist can't stop one app's page from refreshing another app's cookie.
-// On the cookie path we therefore bind the request's app (X-App-Nonce) to
-// the token's auth record: the app's own gate, or a slot of a service it is
-// allowed to use. The form path (CLI/MCP) is authorized by possession and
+// The cookie is SameSite=Strict and refreshes only same-origin requests:
+// the panel and hosted apps. Apps that run elsewhere hold their own
+// refresh token and use the form path. SameSite is per site, not origin,
+// so the request's app (X-App-Nonce) is still bound to the token's auth
+// record: the app's own gate, or a slot of a service it is allowed to use.
+// The form path (CLI/MCP, off-server apps) is authorized by possession and
 // is exempt.
 
 // cookieRefresh simulates a browser POSTing to the path-scoped token
@@ -1472,18 +1501,11 @@ func findRefreshCookie(rr *httptest.ResponseRecorder) *http.Cookie {
 	return nil
 }
 
-// R10 (FRBR-12): the refresh cookie is SameSite=None, and a spec-compliant
-// browser refuses to store a SameSite=None cookie that lacks Secure. The old
-// Secure guard was s.config.TLSCertFile != "", which left Secure false in the
-// recommended TLS-terminating-proxy deployment (app speaks plain HTTP to the
-// proxy; TLS terminates upstream) — there the request truly arrived over https,
-// signalled by X-Forwarded-Proto, but the cookie's Secure flag stayed false and
-// the browser silently dropped the refresh cookie on every login. The fix lets
-// the request's own scheme (schemeOf) decide, with TLSCertFile as a fallback.
-//
-// This pins the server side of the contract across the deployment shapes in
-// the ticket's impact matrix: default localhost (byte-identical to before the
-// fix), native TLS, and TLS-terminating proxy (the repair).
+// R10 (FRBR-12): the refresh cookie's Secure flag follows the request's own
+// scheme (schemeOf), with TLSCertFile as a fallback, so the recommended
+// TLS-terminating-proxy deployment (plain HTTP to the proxy, signalled by
+// X-Forwarded-Proto) still gets a Secure cookie. SameSite is Strict in
+// every shape (audit 202610 F2): only same-origin pages spend it.
 func TestRefreshCookieSecureFlag(t *testing.T) {
 	srv := newTestServer(t)
 	data := freshbreathRefreshData{Subject: "frbr:1", UserEmail: "r10@example.com", AuthID: 1}
@@ -1526,14 +1548,8 @@ func TestRefreshCookieSecureFlag(t *testing.T) {
 			if c == nil {
 				t.Fatal("no refresh_token cookie set")
 			}
-			// SameSite=None needs Secure or the browser drops the cookie, so
-			// plain HTTP falls back to Lax: same-origin refresh still works.
-			wantSameSite := http.SameSiteLaxMode
-			if tc.wantSecure {
-				wantSameSite = http.SameSiteNoneMode
-			}
-			if c.SameSite != wantSameSite {
-				t.Errorf("SameSite = %v, want %v", c.SameSite, wantSameSite)
+			if c.SameSite != http.SameSiteStrictMode {
+				t.Errorf("SameSite = %v, want Strict", c.SameSite)
 			}
 			if c.Secure != tc.wantSecure {
 				t.Errorf("Secure = %v, want %v", c.Secure, tc.wantSecure)
@@ -1956,5 +1972,50 @@ func TestIdleOAuthClientsSwept(t *testing.T) {
 	}
 	if _, _, ok, _ := srv.store.GetOAuthClient(fresh); !ok {
 		t.Error("fresh client was swept")
+	}
+}
+
+// F13 (audit 202610): the code exchange never compared redirect_uri with
+// the one the authorize request named. A client that sends it must send
+// the same one; one that omits it (OAuth 2.1 / PKCE-only clients) is still
+// served, PKCE having bound the code already.
+func TestOAuthAuthCodeGrantChecksRedirectURI(t *testing.T) {
+	srv := newTestServer(t)
+	clientID, secret := registerOAuthClient(t, srv)
+	gate := oidcRecord(t, srv, "Up IdP")
+	subject := extSubject("up-idp", "u-77")
+	fbToken, err := srv.mintFreshbreathToken(subject, "user@example.com", "", "", gate.ID, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exchange := func(redirect string) int {
+		verifier, challenge := pkcePair()
+		code := utils.GenNonce()
+		srv.oauthSrv.codesMu.Lock()
+		srv.oauthSrv.codes[code] = &mcpAuthCode{issued: time.Now(), pending: &mcpPendingAuth{
+			clientID: clientID, redirectURI: "http://127.0.0.1:7777/cb",
+			codeChallenge: challenge, codeChallengeMethod: "S256", fbToken: fbToken,
+			refreshData: freshbreathRefreshData{Subject: subject, AuthID: gate.ID},
+		}}
+		srv.oauthSrv.codesMu.Unlock()
+		form := url.Values{
+			"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier},
+			"client_id": {clientID}, "client_secret": {secret},
+		}
+		if redirect != "" {
+			form.Set("redirect_uri", redirect)
+		}
+		return postForm(t, srv, "/oauth/token", form).Code
+	}
+	for redirect, want := range map[string]int{
+		"http://127.0.0.1:7777/cb":    200,
+		"":                            200,
+		"http://127.0.0.1:7777/other": 400,
+		"https://evil.example/cb":     400,
+	} {
+		if got := exchange(redirect); got != want {
+			t.Errorf("redirect_uri %q: status %d, want %d", redirect, got, want)
+		}
 	}
 }

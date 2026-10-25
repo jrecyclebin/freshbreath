@@ -7,9 +7,12 @@
  *
  * What the browser holds is always a Fresh Breath token — an identity with
  * any upstream credentials sealed inside it, unreadable here and unsealed
- * by the proxy on the way out. Refresh tokens live in HttpOnly cookies and
- * the OAuth client_secret never leaves the server, so the worst a page can
- * read out of localStorage is a token that expires.
+ * by the proxy on the way out. On the server's own origin, refresh tokens
+ * live in HttpOnly cookies and the OAuth client_secret never leaves the
+ * server, so the worst a page can read out of localStorage is a token that
+ * expires. An app that runs elsewhere can't spend that cookie (it's
+ * SameSite=Strict), so it keeps its own rotating refresh token in its
+ * entry instead.
  */
 import { McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.29.0.js";
 
@@ -21,9 +24,9 @@ let APP_NONCE = CFG.appNonce ?? null; // let: re-derived if the server couldn't 
 let GATE_ID = CFG.authRecordID ?? 0; // let: re-derived alongside APP_NONCE
 
 // The origin our callback page will post from. The page posts only to
-// the app's own origin ("*" for apps that run off the server — file://
-// pages have none, and a registered web origin is only a declaration);
-// the listener checks the sender's origin as well.
+// the app's own origin (its registered one for an app that runs off the
+// server, or "*" for a file:// page, which has none); the listener checks
+// the sender's origin as well.
 const FRBR_ORIGIN = new URL(API || window.location.href, window.location.href).origin;
 
 // resolveFromLocation: when the server couldn't derive our app from Referer
@@ -144,7 +147,10 @@ async function authedFetch(session, url, init) {
 // ── The store ───────────────────────────────────────────────────────
 //
 // One entry per cleared auth record at localStorage["frbr:auth:<id>"].
-// frbr.js is the sole writer; apps never touch these keys. Because apps
+// frbr.js is the sole writer; apps never touch these keys. An app that runs
+// elsewhere also keeps its refresh token here (refresh_token), since the
+// cookie stays on the server's origin. Chrome gives every file:// page one
+// shared storage origin, so any local HTML file can read a disk app's. Because apps
 // share an origin they also share the store — deliberate, and the reason
 // two apps behind one gate prompt once between them. Spending is still
 // bounded by X-App-Nonce and the app's service links, not by who can read
@@ -299,17 +305,21 @@ export class AuthSession {
     const e = this.#entry;
     if (!e.access_token) return; // nothing to rotate
 
-    // The refresh token rides an HttpOnly cookie scoped to this exact path,
-    // which is why the route carries the record id: a browser holding
-    // several records' refresh tokens keeps them in distinct cookie slots.
+    // On the server's origin the refresh token rides an HttpOnly cookie
+    // scoped to this exact path, which is why the route carries the record
+    // id: a browser holding several records' refresh tokens keeps them in
+    // distinct cookie slots. An app that runs elsewhere sends the one its
+    // entry holds, and gets the rotated one back in the body.
+    const body = new URLSearchParams({ grant_type: "refresh_token" });
+    if (e.refresh_token) body.set("refresh_token", e.refresh_token);
     const r = await fetch(`${API}/oauth/token/${e.auth_id}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         "X-App-Nonce": APP_NONCE,
       },
-      credentials: "include",
-      body: new URLSearchParams({ grant_type: "refresh_token" }),
+      credentials: e.refresh_token ? "omit" : "include",
+      body,
     });
     if (!r.ok) {
       if (r.status === 400 || r.status === 401) {
@@ -326,13 +336,16 @@ export class AuthSession {
       throw new Error(`Token refresh failed (${r.status})`);
     }
     const t = await r.json();
-    delete t.refresh_token; // browser flows ride the cookie; never store one
-    this.#entry = writeEntry({
+    const next = {
       ...e,
       access_token: t.access_token,
       token_type: t.token_type || e.token_type || "Bearer",
       expires_at: expiryFrom(t),
-    });
+    };
+    // Only an entry that came with a refresh token keeps one; a cookie
+    // session never stores it.
+    if (e.refresh_token && t.refresh_token) next.refresh_token = t.refresh_token;
+    this.#entry = writeEntry(next);
   }
 
   // Drop this session's credential and its stored entry. The server keeps

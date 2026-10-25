@@ -443,3 +443,20 @@ func TestAppDBWatch(t *testing.T) {
 		t.Fatalf("no change event arrived")
 	}
 }
+
+// F12 (audit 202610): the nonce in an app:<nonce> target went into the
+// path raw, so an Admin could name app:../../x and create a database file
+// outside the data directory. Only a nonce-shaped value resolves now.
+func TestDBPathRefusesNonNonceTargets(t *testing.T) {
+	srv := newTestServer(t)
+	for _, target := range []string{"app:../../etc", "app:a/b", `app:a\b`, "app:", "app:..", "app:no spaces"} {
+		if p, err := srv.dbPath(target, "app"); err == nil {
+			t.Errorf("dbPath(%q) = %q, want an error", target, p)
+		}
+	}
+	for _, target := range []string{"app:nonce1", "app:Ab9-_xYz01"} {
+		if _, err := srv.dbPath(target, "app"); err != nil {
+			t.Errorf("dbPath(%q): %v", target, err)
+		}
+	}
+}

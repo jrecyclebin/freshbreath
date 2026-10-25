@@ -3,7 +3,10 @@ package server
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -580,7 +583,7 @@ func TestLoginWithMetadataFallback(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=fallback-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -634,7 +637,7 @@ func TestLoginByServiceURL(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=mock-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -708,7 +711,7 @@ func TestLoginViaQueryParam(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=mock-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -756,7 +759,7 @@ func TestLoginWithPreRegisteredClient(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	loc := body["url"].(string)
+	loc := providerURL(t, srv, body["url"].(string))
 	if !strings.Contains(loc, "client_id=gh-pre-registered-client") {
 		t.Errorf("redirect missing client_id: %s", loc)
 	}
@@ -1007,7 +1010,7 @@ func TestLoginAdminNonceAllowed(t *testing.T) {
 	if body["type"] != "redirect" {
 		t.Fatalf("expected redirect type, got %v", body["type"])
 	}
-	if loc, _ := body["url"].(string); !strings.Contains(loc, "client_id=admin-client") {
+	if loc := providerURL(t, srv, body["url"].(string)); !strings.Contains(loc, "client_id=admin-client") {
 		t.Errorf("redirect missing client_id: %v", body["url"])
 	}
 }
@@ -1604,6 +1607,134 @@ func TestServiceProxyStaysInsideService(t *testing.T) {
 		rr := testRequest(t, srv, "GET", "/service/"+id+"/"+p, nil, hdr)
 		if rr.Code != 400 || gotPath != "" {
 			t.Errorf("%s: status %d, upstream saw %q; want 400 and no upstream call", p, rr.Code, gotPath)
+		}
+	}
+}
+
+// F10 (audit 202610): no request could be too slow or too big. The server
+// now bounds header reads and idle connections, and every body has a cap
+// by route: small for OAuth, roomy for JSON, upload-sized for routes that
+// carry files or proxy them.
+func TestHTTPServerTimeouts(t *testing.T) {
+	srv := newTestServer(t)
+	hs := srv.httpServer()
+	if hs.Handler != srv || hs.ReadHeaderTimeout <= 0 || hs.IdleTimeout <= 0 {
+		t.Errorf("server = handler %v, read-header %v, idle %v", hs.Handler == srv, hs.ReadHeaderTimeout, hs.IdleTimeout)
+	}
+	// A ReadTimeout would cancel streaming responses (MCP, SSE) once it
+	// passed, so it stays off; bodies are bounded by size instead.
+	if hs.ReadTimeout != 0 || hs.WriteTimeout != 0 {
+		t.Errorf("read %v write %v, want 0 for streams", hs.ReadTimeout, hs.WriteTimeout)
+	}
+}
+
+func TestRequestBodyLimits(t *testing.T) {
+	for path, want := range map[string]int64{
+		"/oauth/register":       oauthBodyMaxBytes,
+		"/oauth/token/3":        oauthBodyMaxBytes,
+		"/api/users":            jsonBodyMaxBytes,
+		"/service/ssh-auth":     jsonBodyMaxBytes,
+		"/service/login":        jsonBodyMaxBytes,
+		"/api/apps/abc/upload":  uploadMaxBytes,
+		"/api/services/4/files": uploadMaxBytes,
+		"/api/sync/files/a.txt": uploadMaxBytes,
+		"/service/call/deploy":  uploadMaxBytes,
+		"/service/7/v1/things":  uploadMaxBytes,
+		"/mcp":                  uploadMaxBytes,
+		"/mcp/tix":              uploadMaxBytes,
+	} {
+		if got := requestBodyLimit(path); got != want {
+			t.Errorf("%s: limit %d, want %d", path, got, want)
+		}
+	}
+
+	srv := newTestServer(t)
+	// A declared length over the cap is refused before any handler runs.
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader("{}"))
+	req.ContentLength = oauthBodyMaxBytes + 1
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("declared oversize: status %d, want 413", rr.Code)
+	}
+	// An undeclared (chunked) one is cut off mid-read.
+	big := `{"redirect_uris":["https://x.example/cb"],"client_name":"` + strings.Repeat("a", oauthBodyMaxBytes) + `"}`
+	req = httptest.NewRequest("POST", "/oauth/register", strings.NewReader(big))
+	req.ContentLength = -1
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code < 400 {
+		t.Errorf("chunked oversize: status %d, want refused", rr.Code)
+	}
+}
+
+// F15 (audit 202610): hardening. HSTS goes out over HTTPS to a real host
+// name — never to localhost or an IP, where pinning HTTPS would break
+// every other local server on that name.
+func TestHSTSOnlyForHTTPSHostNames(t *testing.T) {
+	srv := newTestServer(t)
+	srv.knownHosts["frbr.example"] = true
+	for _, c := range []struct {
+		host string
+		tls  bool
+		want bool
+	}{
+		{"frbr.example", true, true},
+		{"frbr.example", false, false},
+		{"localhost:9009", true, false},
+		{"127.0.0.1:9009", true, false},
+	} {
+		req := httptest.NewRequest("GET", "/control/styles.css", nil)
+		req.Host = c.host
+		if c.tls {
+			req.TLS = &tls.ConnectionState{}
+		}
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+		if got := rr.Header().Get("Strict-Transport-Security") != ""; got != c.want {
+			t.Errorf("%s tls=%v: HSTS %v, want %v", c.host, c.tls, got, c.want)
+		}
+	}
+}
+
+// The panel's scripts are pinned: the built panel allows its own files and
+// exactly its inline scripts (by hash), plus eval for the MCP SDK's schema
+// validators. The dev panel compiles JSX in the browser, which needs inline
+// script, so it only keeps scripts to this origin.
+func TestControlScriptPolicy(t *testing.T) {
+	built := `<script>
+    theme();
+  </script><script type="module" src="/frbr.js"></script><script type="module">
+    import x from "/control/x.js";
+  </script><script type="module" src="/control/app.compiled.js"></script>`
+	policy := controlCSP([]byte(built))
+	sum := func(s string) string {
+		h := sha256.Sum256([]byte(s))
+		return "'sha256-" + base64.StdEncoding.EncodeToString(h[:]) + "'"
+	}
+	for _, want := range []string{"script-src 'self' 'unsafe-eval' ", sum("\n    theme();\n  "), sum("\n    import x from \"/control/x.js\";\n  "), "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("built policy %q lacks %q", policy, want)
+		}
+	}
+	if strings.Contains(policy, "unsafe-inline") {
+		t.Errorf("built policy allows inline script: %q", policy)
+	}
+
+	dev := controlCSP([]byte(`<script src="/control/vendor/babel-standalone-7.29.0.min.js"></script>`))
+	if !strings.Contains(dev, "script-src 'self' 'unsafe-inline' 'unsafe-eval'") || !strings.Contains(dev, "frame-ancestors 'none'") {
+		t.Errorf("dev policy = %q", dev)
+	}
+}
+
+// get_settings checks the caller's role itself, not only by which tools a
+// role's MCP server lists.
+func TestGetSettingsChecksRole(t *testing.T) {
+	srv := newTestServer(t)
+	for role, wantErr := range map[string]bool{"Member": true, "Admin": true, "Superuser": false} {
+		_, err := srv.coreGetSettings(&db.User{ID: 5, Role: role})
+		if (err != nil) != wantErr {
+			t.Errorf("%s: err = %v", role, err)
 		}
 	}
 }

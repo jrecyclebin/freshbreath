@@ -166,12 +166,19 @@ func (s *Server) dbPath(target, name string) (string, error) {
 	switch {
 	case strings.HasPrefix(target, "app:"):
 		nonce := strings.TrimPrefix(target, "app:")
+		if !nonceRe.MatchString(nonce) {
+			return "", cerr(http.StatusBadRequest, "database target %q: not an app nonce", target)
+		}
 		return filepath.Join(s.config.DataDir, "apps", nonce, "db", name+".db"), nil
 	case target == "global":
 		return filepath.Join(s.config.DataDir, "db", name+".db"), nil
 	}
 	return "", cerr(http.StatusBadRequest, "unknown database target %q", target)
 }
+
+// nonceRe matches an app nonce: the nonce alphabet (utils.GenNonce), at any
+// length older nonces were minted at — and never a path.
+var nonceRe = regexp.MustCompile(`^[0-9A-Za-z_-]{1,64}$`)
 
 // gateDBTarget is the single place data access is decided. Every face —
 // both HTTP mounts, the central MCP tools, and virtual-service SQL steps —

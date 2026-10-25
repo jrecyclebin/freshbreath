@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -175,5 +176,64 @@ func TestAuthStrictnessSerialized(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"strictness":1`) {
 		t.Errorf("expected strictness in serialization: %s", b)
+	}
+}
+
+// F9 (audit 202610): a masked secret used to survive any edit, so an Admin
+// who can't read it could repoint the record's token endpoint at a host of
+// their own and receive it. Moving any endpoint (or changing the kind) now
+// needs the secret entered again; other edits keep it.
+func TestAuthRecordSecretStaysWithItsEndpoints(t *testing.T) {
+	store := newTestStore(t)
+	rec, err := store.CreateAuthRecord("Corp", AuthOAuth2, AuthDescriptor{
+		AuthorizeURL: "https://idp.example/authorize", TokenURL: "https://idp.example/token",
+		ClientID: "cid", ClientSecret: "shh",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := rec.Descriptor
+	base.ClientSecret = ""
+
+	for name, edit := range map[string]func(d *AuthDescriptor){
+		"token url":     func(d *AuthDescriptor) { d.TokenURL = "https://evil.example/token" },
+		"authorize url": func(d *AuthDescriptor) { d.AuthorizeURL = "https://evil.example/authorize" },
+		"userinfo url":  func(d *AuthDescriptor) { d.UserInfoURL = "https://evil.example/me" },
+		"emails url":    func(d *AuthDescriptor) { d.UserEmailsURL = "https://evil.example/emails" },
+		"issuer":        func(d *AuthDescriptor) { d.Issuer = "https://evil.example" },
+		"resource":      func(d *AuthDescriptor) { d.Resource = "https://evil.example/mcp" },
+	} {
+		d := base
+		edit(&d)
+		if err := store.UpdateAuthRecord(rec.ID, "Corp", AuthOAuth2, d); !errors.Is(err, ErrSecretNeeded) {
+			t.Errorf("%s moved without the secret: err = %v", name, err)
+		}
+	}
+	if err := store.UpdateAuthRecord(rec.ID, "Corp", AuthOIDC, base); !errors.Is(err, ErrSecretNeeded) {
+		t.Errorf("kind changed without the secret: err = %v", err)
+	}
+
+	// Re-entering the secret lets the move through.
+	moved := base
+	moved.TokenURL, moved.ClientSecret = "https://idp2.example/token", "new-shh"
+	if err := store.UpdateAuthRecord(rec.ID, "Corp", AuthOAuth2, moved); err != nil {
+		t.Fatalf("move with secret: %v", err)
+	}
+
+	// Edits that don't move it keep the stored secret, as before.
+	kept := moved
+	kept.ClientSecret, kept.Scopes = "", "read"
+	if err := store.UpdateAuthRecord(rec.ID, "Corp Renamed", AuthOAuth2, kept); err != nil {
+		t.Fatalf("plain edit: %v", err)
+	}
+	got, _ := store.GetAuthRecord(rec.ID)
+	if got.Descriptor.ClientSecret != "new-shh" || got.Descriptor.TokenURL != "https://idp2.example/token" {
+		t.Errorf("got secret %q token %q", got.Descriptor.ClientSecret, got.Descriptor.TokenURL)
+	}
+
+	// A record with no secret on file moves freely.
+	open, _ := store.CreateAuthRecord("Public", AuthOIDC, AuthDescriptor{Issuer: "https://a.example", ClientID: "c"})
+	if err := store.UpdateAuthRecord(open.ID, "Public", AuthOIDC, AuthDescriptor{Issuer: "https://b.example", ClientID: "c"}); err != nil {
+		t.Errorf("secretless move: %v", err)
 	}
 }

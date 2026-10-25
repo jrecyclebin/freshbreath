@@ -1623,7 +1623,11 @@ func (s *Server) registerAuthTools(mcps *mcp.Server, role string) {
 		if kind == "" {
 			kind = existing.Kind
 		}
+		// Patch onto the stored descriptor minus its secrets: a secret the
+		// caller didn't send is left for UpdateAuthRecord to keep (or to
+		// refuse to carry somewhere new).
 		desc := existing.Descriptor
+		desc.ClientSecret, desc.Key = "", ""
 		if raw, ok := args["descriptor"].(map[string]interface{}); ok {
 			descBytes, _ := json.Marshal(raw)
 			json.Unmarshal(descBytes, &desc)
@@ -2310,22 +2314,15 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		_, err := s.mcpUser(req)
+		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-
-		result := map[string]interface{}{"admin_auth_service": nil, "default_app": nil, "mcp_database_mode": "read-only"}
-		if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
-			result["admin_auth_service"] = v
+		view, err := s.coreGetSettings(user)
+		if err != nil {
+			return mcpToolError("%v", err), nil
 		}
-		if v, err := s.store.GetSetting("default_app"); err == nil && v != "" {
-			result["default_app"] = v
-		}
-		if v, err := s.store.GetSetting("mcp_database_mode"); err == nil && v == "full-access" {
-			result["mcp_database_mode"] = v
-		}
-		return mcpToolResult(result)
+		return mcpToolResult(view)
 	})
 
 	// update_settings
@@ -2335,9 +2332,10 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"admin_auth_service": map[string]interface{}{"type": "string", "description": "Admin auth service ID (numeric, or empty to disable)"},
-				"default_app":        map[string]interface{}{"type": "string", "description": "Default app nonce or 'control'"},
-				"mcp_database_mode":  map[string]interface{}{"type": "string", "description": "Central MCP database writes: \"read-only\" (default) or \"full-access\"", "enum": []string{"read-only", "full-access"}},
+				"admin_auth_service":           map[string]interface{}{"type": "string", "description": "Admin auth service ID (numeric, or empty to disable)"},
+				"default_app":                  map[string]interface{}{"type": "string", "description": "Default app nonce or 'control'"},
+				"mcp_database_mode":            map[string]interface{}{"type": "string", "description": "Central MCP database writes: \"read-only\" (default) or \"full-access\"", "enum": []string{"read-only", "full-access"}},
+				"admin_require_verified_email": map[string]interface{}{"type": "boolean", "description": "Link admin-gate logins to users only by an email the provider marks verified (off by default; not used by the built-in SSH key gate)"},
 			},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -2359,7 +2357,11 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 		if v, ok := args["mcp_database_mode"].(string); ok {
 			mcpDBMode = &v
 		}
-		if err := s.coreUpdateSettings(user, adminAuthService, defaultApp, mcpDBMode); err != nil {
+		var requireVerified *bool
+		if v, ok := args["admin_require_verified_email"].(bool); ok {
+			requireVerified = &v
+		}
+		if err := s.coreUpdateSettings(user, adminAuthService, defaultApp, mcpDBMode, requireVerified); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "updated"})

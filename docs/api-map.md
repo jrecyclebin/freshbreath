@@ -12,11 +12,11 @@ Routes are registered in `internal/server/server.go` → `SetupRoutes()`
   or bearer-challenge JSON on 401s (RFC 6750 / RFC 9470 fields, mirrored in body).
 - `X-App-Nonce` header (or a bare `?NONCE` query — the form a script tag
   can carry) identifies which app is calling; CORS
-  is origin-gated: same-origin always, and any other origin — `null`
-  (file://) included — only for an app that runs off this server (its URL
-  names a location, or it has no routable slot — a blank URL that isn't
-  hosted is a page opened from disk), named by nonce. Hosted apps get no
-  cross-origin allowance at all.
+  is origin-gated: same-origin always, and otherwise only for an app that
+  runs off this server, named by nonce, from that app's one origin — its
+  URL's origin when the URL names a location, or `null` (file://) when it
+  has no routable slot (a blank URL that isn't hosted is a page opened
+  from disk). Hosted apps get no cross-origin allowance at all.
 - Role gate: `anyRole` = Superuser/Admin/Member/Read-only · `admin+` = Superuser/Admin ·
   `superuser` = Superuser only. Writes on services/auth records are additionally
   gated by the resource's member list (`core*` functions).
@@ -44,7 +44,8 @@ provider redirect → provider calls `callback` → "legs" are completed in sequ
 | Route | Method | Description |
 |---|---|---|
 | `/service/login` | GET | Start/resolve a login. Query: `state` (app state), optional `url` (act-as-service), `resolve` (dry run → legs), `return` (redirect back into app); the app is named by `X-App-Nonce` (a fetch — the query always carries `state`, so there is no nonce-in-the-URL form). Bearer may satisfy legs (`type: ok`). Returns JSON `{type: anonymous\|ok\|legs\|redirect, url, legs, service}` |
-| `/service/callback` | GET | Provider redirect target; exchanges code, advances/finishes the pending login |
+| `/service/begin` | GET | A browser login's first stop before a provider leg (`/service/login` hands its URL out as `url`): sets the per-flow `frbr_login_*` cookie, then 302s to the provider |
+| `/service/callback` | GET | Provider redirect target; refuses a browser without the flow's `frbr_login_*` cookie (set by `/service/begin`, the page gate or a form page), then exchanges code, advances/finishes the pending login |
 | `/service/ssh-auth` | GET/POST | Passphrase-SSH login form (GET HTML form) & POST `{state, email, passphrase}`. Adds key to in-process SSH agent for `sshAgentTTL` |
 | `/service/apikey-auth` | GET/POST | API-key gate form & POST `{state, api_key}` |
 | `/service/logout` | GET/POST | Clears browser login state |
