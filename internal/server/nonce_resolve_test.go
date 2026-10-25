@@ -88,15 +88,35 @@ func TestResolveNonceRefererHostedApp(t *testing.T) {
 	}
 }
 
-func TestResolveNonceRefererControlIsAdmin(t *testing.T) {
+// Audit 202610-r3 #8: a Referer is the caller's word — curl sends any
+// Referer, and a page picks its own with fetch's referrer option — so a
+// /control Referer used to hand the admin nonce to anyone who asked. The
+// panel now gets its nonce in the page served behind the admin gate.
+func TestResolveNonceRefererControlIsNotAdmin(t *testing.T) {
 	srv := newTestServer(t)
 	srv.adminNonce = utils.GenNonce()
-	rr := envJSFor(t, srv, "/env.js", "localhost:9009", map[string]string{
-		"Referer": "http://localhost:9009/control",
-	})
-	cfg := parseEnvJS(t, rr.Body.String())
-	if cfg["appNonce"] != srv.adminNonce {
-		t.Fatalf("appNonce = %v, want admin nonce %q (Referer /control)", cfg["appNonce"], srv.adminNonce)
+	for _, ref := range []string{"http://localhost:9009/control", "http://localhost:9009/control/"} {
+		rr := envJSFor(t, srv, "/env.js", "localhost:9009", map[string]string{"Referer": ref})
+		if cfg := parseEnvJS(t, rr.Body.String()); cfg["appNonce"] == srv.adminNonce {
+			t.Errorf("Referer %s resolved to the admin nonce", ref)
+		}
+	}
+}
+
+func TestControlPageCarriesItsNonce(t *testing.T) {
+	srv := newTestServer(t)
+	srv.adminNonce = utils.GenNonce()
+	rr := testRequest(t, srv, "GET", "/control", nil, nil) // setup mode: the gate is open
+	if rr.Code != 200 {
+		t.Fatalf("control: %d", rr.Code)
+	}
+	tag := `src="/frbr.js?` + srv.adminNonce + `"`
+	if !strings.Contains(rr.Body.String(), tag) {
+		t.Fatalf("control page lacks %s", tag)
+	}
+	rr = envJSFor(t, srv, "/env.js?"+srv.adminNonce, "localhost:9009", nil) // frbr.js prepends the same config
+	if cfg := parseEnvJS(t, rr.Body.String()); cfg["appNonce"] != srv.adminNonce {
+		t.Errorf("?<admin nonce> resolved to %v", cfg["appNonce"])
 	}
 }
 

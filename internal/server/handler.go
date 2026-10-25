@@ -681,6 +681,10 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "control.html not found", http.StatusInternalServerError)
 		return
 	}
+	// The panel names its nonce the way any app can: in its frbr.js tag.
+	// Only a browser through the admin gate gets this page, so only it
+	// learns the nonce — no location or Referer resolves to it.
+	data = bytes.ReplaceAll(data, []byte(`src="/frbr.js"`), []byte(`src="/frbr.js?`+s.adminNonce+`"`))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Security-Policy", controlCSP(data))
@@ -827,17 +831,17 @@ func isSubdomainHost(host string) bool {
 // the old admin fallback. Resolution order:
 //
 //  1. X-App-Nonce header (API calls, file:// dev override, the control panel).
-//     The admin nonce is secret (60-bit, minted on first boot), so holding it is
-//     the proof the caller is the control panel — no path check needed.
-//  2. bare query nonce (/frbr.js?XXXX with no key=value) — back-compat for
-//     script tags that embed the nonce directly.
-//  3. location-based, via Referer (browser-set, same-origin, trustworthy) or
-//     frbr.js's ?loc= report (client-supplied, honored for app resolution but
-//     never trusted to claim the admin door). See nonceForLocation for the
-//     subdomain / alternate-port fail-closed rules.
+//  2. bare query nonce (/frbr.js?XXXX with no key=value) — script tags that
+//     embed the nonce directly, the control panel's among them (handleControl
+//     writes it into the page it serves behind the admin gate).
+//  3. location-based, via Referer or frbr.js's ?loc= report — both
+//     client-supplied (curl sets any Referer, and a page can pick its own
+//     with fetch's referrer option), so they resolve hosted apps, whose
+//     nonces their pages carry anyway, and never the admin door. See
+//     nonceForLocation for the subdomain / alternate-port fail-closed rules.
 //
-// Unknown locations fail closed (return ""); admin is reachable only via the
-// explicit header or a /control path in a trusted Referer. FRBR-15 will fold
+// Unknown locations fail closed (return ""); the admin nonce comes only from
+// a caller that already holds it. FRBR-15 will fold
 // subdomain and per-app-port maps into nonceForLocation; until then those
 // host shapes fail closed here on purpose.
 func (s *Server) resolveAppNonce(r *http.Request) string {
@@ -852,24 +856,24 @@ func (s *Server) resolveAppNonce(r *http.Request) string {
 	// Back-compat bare query nonce: /frbr.js?XXXX (no key=value). A named
 	// query like ?loc=... has '=', so it can't be mistaken for a nonce here.
 	if rq := r.URL.RawQuery; rq != "" && !strings.Contains(rq, "=") {
+		if rq == s.adminNonce {
+			return rq
+		}
 		if _, err := s.store.GetApp(rq); err == nil {
 			return rq
 		}
 	}
-	// Referer is the trustworthy location signal: same-origin script fetches
-	// carry the page's real URL, and a page cannot fake Referer to a false
-	// value (only suppress it). A /control Referer may resolve to admin.
+	// Referer: a same-origin script fetch carries the page's URL, which is
+	// how a hosted page that includes a bare /frbr.js finds its app.
 	if ref := r.Header.Get("Referer"); ref != "" {
 		if nonce, ok := s.nonceForLocation(ref, r); ok {
 			return nonce
 		}
 	}
-	// ?loc= is frbr.js's report of window.location — client-supplied, so it
-	// resolves hosted apps but never the admin door (a hostile same-origin
-	// page could otherwise grab admin with ?loc=/control/). When Referer is
+	// ?loc= is frbr.js's report of window.location. When Referer is
 	// suppressed (referrerpolicy="no-referrer"), this is the only signal.
 	if loc := r.URL.Query().Get("loc"); loc != "" {
-		if nonce, ok := s.nonceForLocation(loc, r); ok && nonce != s.adminNonce {
+		if nonce, ok := s.nonceForLocation(loc, r); ok {
 			return nonce
 		}
 	}
@@ -879,7 +883,8 @@ func (s *Server) resolveAppNonce(r *http.Request) string {
 // nonceForLocation resolves a page location (a full URL from Referer, or a
 // path from frbr.js's ?loc= report) to an app nonce via the hosted-routes
 // slug map. It mirrors handleHostedApp's slug extraction, including the
-// @slot suffix strip. "control" resolves to the admin nonce.
+// @slot suffix strip. "control" resolves to nothing: a location is the
+// caller's word, and the admin nonce isn't handed out on anyone's word.
 //
 // Two explicit fail-closed rules, both FRBR-15 territory:
 //
@@ -924,7 +929,7 @@ func (s *Server) nonceForLocation(locURL string, r *http.Request) (string, bool)
 		return "", false
 	}
 	if slug == "control" {
-		return s.adminNonce, true
+		return "", false
 	}
 	s.hostedMu.RLock()
 	ha, ok := s.hostedRoutes[slug]
