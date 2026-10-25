@@ -65,7 +65,45 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limit := requestBodyLimit(r.URL.Path)
+	if r.ContentLength > limit {
+		http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+
 	s.mux.ServeHTTP(w, r)
+}
+
+// Request body caps (requestBodyLimit). uploadMaxBytes is the largest.
+const (
+	oauthBodyMaxBytes = 64 << 10
+	jsonBodyMaxBytes  = 4 << 20
+)
+
+// requestBodyLimit is the most a request body on path may hold: upload
+// size for routes that carry files or proxy them (app and service files,
+// sync, task calls, the service proxy, MCP), a little for OAuth's forms,
+// and enough for any JSON body everywhere else.
+func requestBodyLimit(path string) int64 {
+	switch {
+	case strings.HasPrefix(path, "/oauth/"):
+		return oauthBodyMaxBytes
+	case path == "/mcp", strings.HasPrefix(path, "/mcp/"),
+		strings.HasPrefix(path, "/api/apps/"), strings.HasPrefix(path, "/api/services/"),
+		strings.HasPrefix(path, "/api/sync/files"):
+		return uploadMaxBytes
+	case strings.HasPrefix(path, "/service/"):
+		// The sign-in endpoints take small JSON; everything else under
+		// /service/ is a task call or the service proxy.
+		switch path {
+		case "/service/login", "/service/callback", "/service/ssh-auth", "/service/apikey-auth",
+			"/service/logout", "/service/passphrase":
+			return jsonBodyMaxBytes
+		}
+		return uploadMaxBytes
+	}
+	return jsonBodyMaxBytes
 }
 
 // appRegisteredOrigin returns the origin an app is registered at, in the

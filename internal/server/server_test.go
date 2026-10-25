@@ -1607,3 +1607,60 @@ func TestServiceProxyStaysInsideService(t *testing.T) {
 		}
 	}
 }
+
+// F10 (audit 202610): no request could be too slow or too big. The server
+// now bounds header reads and idle connections, and every body has a cap
+// by route: small for OAuth, roomy for JSON, upload-sized for routes that
+// carry files or proxy them.
+func TestHTTPServerTimeouts(t *testing.T) {
+	srv := newTestServer(t)
+	hs := srv.httpServer()
+	if hs.Handler != srv || hs.ReadHeaderTimeout <= 0 || hs.IdleTimeout <= 0 {
+		t.Errorf("server = handler %v, read-header %v, idle %v", hs.Handler == srv, hs.ReadHeaderTimeout, hs.IdleTimeout)
+	}
+	// A ReadTimeout would cancel streaming responses (MCP, SSE) once it
+	// passed, so it stays off; bodies are bounded by size instead.
+	if hs.ReadTimeout != 0 || hs.WriteTimeout != 0 {
+		t.Errorf("read %v write %v, want 0 for streams", hs.ReadTimeout, hs.WriteTimeout)
+	}
+}
+
+func TestRequestBodyLimits(t *testing.T) {
+	for path, want := range map[string]int64{
+		"/oauth/register":       oauthBodyMaxBytes,
+		"/oauth/token/3":        oauthBodyMaxBytes,
+		"/api/users":            jsonBodyMaxBytes,
+		"/service/ssh-auth":     jsonBodyMaxBytes,
+		"/service/login":        jsonBodyMaxBytes,
+		"/api/apps/abc/upload":  uploadMaxBytes,
+		"/api/services/4/files": uploadMaxBytes,
+		"/api/sync/files/a.txt": uploadMaxBytes,
+		"/service/call/deploy":  uploadMaxBytes,
+		"/service/7/v1/things":  uploadMaxBytes,
+		"/mcp":                  uploadMaxBytes,
+		"/mcp/tix":              uploadMaxBytes,
+	} {
+		if got := requestBodyLimit(path); got != want {
+			t.Errorf("%s: limit %d, want %d", path, got, want)
+		}
+	}
+
+	srv := newTestServer(t)
+	// A declared length over the cap is refused before any handler runs.
+	req := httptest.NewRequest("POST", "/oauth/register", strings.NewReader("{}"))
+	req.ContentLength = oauthBodyMaxBytes + 1
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("declared oversize: status %d, want 413", rr.Code)
+	}
+	// An undeclared (chunked) one is cut off mid-read.
+	big := `{"redirect_uris":["https://x.example/cb"],"client_name":"` + strings.Repeat("a", oauthBodyMaxBytes) + `"}`
+	req = httptest.NewRequest("POST", "/oauth/register", strings.NewReader(big))
+	req.ContentLength = -1
+	rr = httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code < 400 {
+		t.Errorf("chunked oversize: status %d, want refused", rr.Code)
+	}
+}

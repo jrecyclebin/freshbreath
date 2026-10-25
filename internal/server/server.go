@@ -244,10 +244,25 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 // on the TLS config. When both TLSCertFile and TLSKeyFile are set it serves
 // TLS; otherwise plain HTTP. The *Server itself is the http.Handler.
 func (s *Server) ListenAndServe() error {
+	hs := s.httpServer()
 	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
-		return http.ListenAndServeTLS(s.config.ListenAddr, s.config.TLSCertFile, s.config.TLSKeyFile, s)
+		return hs.ListenAndServeTLS(s.config.TLSCertFile, s.config.TLSKeyFile)
 	}
-	return http.ListenAndServe(s.config.ListenAddr, s)
+	return hs.ListenAndServe()
+}
+
+// httpServer bounds how long a client may take to send its headers and how
+// long an idle connection stays open. There's no ReadTimeout or
+// WriteTimeout: once a ReadTimeout passes, net/http cancels the request's
+// context, which would cut off MCP and other streaming responses. Bodies
+// are bounded by size instead (requestBodyLimit).
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
+		Addr:              s.config.ListenAddr,
+		Handler:           s,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 }
 
 // adminNonceFrom returns the control panel's nonce, minting it on first boot.
