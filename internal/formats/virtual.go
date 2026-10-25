@@ -1163,6 +1163,14 @@ type VirtualAuth struct {
 	Email  string
 	Sub    string
 	UserID interface{} // int64 when the caller maps to a Fresh Breath user; nil otherwise
+
+	// Session is the caller's own Fresh Breath token, whatever record
+	// minted it: a bearer on this server's API. A tool that never leaves
+	// the server — every HTTP step a relative URL, no URL elicitation —
+	// gets it as $token, since that API is all it talks to. Any other tool
+	// gets Token, which never holds a Fresh Breath token, so no step, body
+	// or assignment can carry one somewhere else.
+	Session string
 }
 
 // ── Elicitation (FORM / URL steps) ───────────────────────────────────
@@ -1239,6 +1247,11 @@ type VirtualHooks struct {
 	// templates. Nil when the server has no public completion route.
 	ElicitationURL func(elicitationID string) string
 
+	// BaseURL is this server's own origin; a step URL written as a
+	// relative path ("/api/...") resolves against it. Empty means relative
+	// step URLs fail.
+	BaseURL string
+
 	// Seal and Open back the encrypted parameter type and decrypt(), under a
 	// key scoped to the service — ciphertext one service seals, no other
 	// service opens. Nil means neither is available and both fail the tool.
@@ -1280,6 +1293,28 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 		return nil, fmt.Errorf("resume state is for tool %q, not %q", rs.ToolName, toolName)
 	}
 	return runVirtualTool(tool, httpClient, args, auth, sqlRunner, hooks, rs)
+}
+
+// relativeURL reports whether a step's URL template is a path on this
+// server: it starts with one slash. "//host" is protocol-relative — some
+// other server — and a backslash reads as a slash to some URL parsers.
+func relativeURL(tmpl string) bool {
+	return strings.HasPrefix(tmpl, "/") && !strings.HasPrefix(tmpl, "//") && !strings.HasPrefix(tmpl, `/\`)
+}
+
+// toolLeavesServer reports whether any step can send data off this server:
+// an HTTP step to an absolute URL, or a URL elicitation, whose link goes
+// to the user and whatever site it names.
+func toolLeavesServer(tool *VirtualTool) bool {
+	for _, st := range tool.Steps {
+		if st.Method != "" && !relativeURL(st.URL) {
+			return true
+		}
+		if st.Elicit != nil && st.Elicit.URL != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // runVirtualTool is the executor core.
@@ -1333,6 +1368,14 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		// scope (jq's ".") is empty, since no response has arrived yet. A
 		// shaping-only first step with "." is empty by design.
 		scope = map[string]interface{}{}
+	}
+
+	// A tool that stays on this server talks only to its API, so $token is
+	// the caller's Fresh Breath session there. Decided per tool, not per
+	// step: an assignment can copy $token into a variable a later step
+	// sends anywhere.
+	if auth.Session != "" && !toolLeavesServer(tool) {
+		auth.Token = auth.Session
 	}
 
 	// Identity built-ins are server-injected claims, not inputs: namesake
@@ -1618,6 +1661,14 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			return nil, fmt.Errorf("step %d, url: %w", stepIdx, err)
 		}
 		resolvedURL = dropEmptyOptionalPairs(resolvedURL, optionalNames)
+		if relativeURL(step.URL) {
+			if hooks == nil || hooks.BaseURL == "" {
+				return nil, fmt.Errorf("step %d: relative URL %q needs the server's base URL", stepIdx, step.URL)
+			}
+			// Plain concatenation keeps the host the server's own, whatever
+			// the resolved path holds.
+			resolvedURL = strings.TrimSuffix(hooks.BaseURL, "/") + resolvedURL
+		}
 
 		resolvedHeaders := make(map[string]string)
 		for k, v := range step.Headers {

@@ -417,7 +417,7 @@ func TestVirtualAuthFromClaims(t *testing.T) {
 	srv := newAppDBServer(t)
 
 	// No claims (raw upstream token): identity built-ins all empty.
-	auth := srv.virtualAuth("tok", nil)
+	auth := srv.virtualAuth("tok", "", nil)
 	if auth.Token != "tok" || auth.Email != "" || auth.Sub != "" || auth.UserID != nil {
 		t.Errorf("no-claims auth = %+v", auth)
 	}
@@ -425,7 +425,7 @@ func TestVirtualAuthFromClaims(t *testing.T) {
 	// Claims for an ext: subject (no Fresh Breath account): email/sub
 	// carried, no numerical ID.
 	claims := &freshbreathClaims{Claims: josejwt.Claims{Subject: extSubject("idp", "ghost")}, UserEmail: "ghost@example.com"}
-	auth = srv.virtualAuth("tok", claims)
+	auth = srv.virtualAuth("tok", "", claims)
 	if auth.Email != "ghost@example.com" || auth.UserID != nil {
 		t.Errorf("unknown-user auth = %+v", auth)
 	}
@@ -436,7 +436,7 @@ func TestVirtualAuthFromClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	claims = &freshbreathClaims{Claims: josejwt.Claims{Subject: subjectForUser(kay)}, UserEmail: "kay@example.com"}
-	auth = srv.virtualAuth("tok", claims)
+	auth = srv.virtualAuth("tok", "", claims)
 	if auth.UserID != kay.ID {
 		t.Errorf("UserID = %v (%T), want %d", auth.UserID, auth.UserID, kay.ID)
 	}
@@ -678,5 +678,21 @@ INSERT INTO keys (secret) VALUES ($api_key)
 	prop := props["api_key"].(map[string]interface{})
 	if prop["type"] != "string" {
 		t.Errorf("api_key schema = %v, want type string", prop)
+	}
+}
+
+// A Fresh Breath token rides a virtual tool only as the session — never as
+// the upstream token an absolute-URL step would send (audit 202610-r3 #2).
+func TestVirtualAuthKeepsFreshBreathTokenAsSession(t *testing.T) {
+	srv := newAppDBServer(t)
+	fb, err := srv.mintFreshbreathToken("frbr:1", "", "", "", 1, nil, nil)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if auth := srv.virtualAuth(fb, fb, nil); auth.Token != "" || auth.Session != fb {
+		t.Errorf("virtualAuth(fb, fb) = Token %.20q Session %.20q, want no Token and the session", auth.Token, auth.Session)
+	}
+	if auth := srv.virtualAuth("graph-token", fb, nil); auth.Token != "graph-token" {
+		t.Errorf("provider token dropped: %+v", auth)
 	}
 }

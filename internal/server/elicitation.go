@@ -196,6 +196,7 @@ func (s *Server) virtualHooks(svc *db.Service) *formats.VirtualHooks {
 		ElicitationURL: func(elicitationID string) string {
 			return s.config.PublicBaseURL + "/api/elicitation/" + elicitationID
 		},
+		BaseURL: s.config.PublicBaseURL,
 		Seal: func(plain string) (string, error) {
 			return seal(key, []byte(plain))
 		},

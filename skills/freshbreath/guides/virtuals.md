@@ -104,8 +104,23 @@ the service's **acts as** slot:
   logged in to that record.
 * **Empty** — the caller's own credential, whatever their gate yielded. Behind
   an open gate the caller's `Authorization` simply rides through untouched;
-  behind a passphrase gate there is no upstream credential at all, so `$token`
-  is empty.
+  behind a passphrase gate it is the caller's Fresh Breath session itself.
+
+**Calling Fresh Breath itself.** Write a step's URL as a path — `GET /api/me`
+— and it resolves against Fresh Breath's own address. Fresh Breath's API takes
+Fresh Breath tokens, so a tool whose *every* HTTP step is a relative path (and
+that has no URL elicitation) gets the caller's Fresh Breath token as `$token`,
+whatever the gate — passphrase or SSO. Any other tool gets the upstream
+credential described above, and never a Fresh Breath token: behind an SSO gate
+that is the provider's token (Microsoft's, say, for Graph); behind a
+passphrase gate there is none, so `$token` is undefined and a step using it
+fails. Since an assignment could carry `$token` from a relative step to an
+absolute one, the choice is made for the whole tool, not per step — split a
+tool that needs both into two.
+
+The HTTP proxy follows the same rule: a service with a relative URL gets the
+caller's Fresh Breath token, and a service elsewhere never does (not even
+passed through an open gate).
 
 (Technically the browser holds a Fresh Breath token with upstream credentials
 sealed inside it, unreadable there; the server unseals the right one on the way

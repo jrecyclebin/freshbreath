@@ -2646,3 +2646,76 @@ GET https://api.example.com/root/$route
 		t.Errorf("route type = %v, want path", p.Type)
 	}
 }
+
+// Audit 202610-r3 #2: the caller's Fresh Breath token is a bearer on this
+// server's API, whatever record minted it, so it only rides tools that stay
+// on this server — and those get it as $token, since that API is all they
+// talk to. A tool with any absolute-URL step gets the upstream token (an
+// SSO login's provider token, say) instead, never the session.
+func TestSessionTokenStaysOnServer(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.RequestURI()+" "+r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tools, err := ParseVirtualFile([]byte(`[mine] Ask this server
+GET /api/me
+Authorization: Bearer $token
+
+HTTP 200
+---
+[outside] Ask somewhere else
+GET ` + srv.URL + `/collect
+Authorization: Bearer $token
+
+HTTP 200
+---
+[laundered] Copy the token, then send it elsewhere
+$t = $token
+GET /api/me
+
+HTTP 200
+GET ` + srv.URL + `/collect?t=$t
+
+HTTP 200
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ctx := &ExecContext{Hooks: &VirtualHooks{BaseURL: srv.URL}}
+	run := func(tool string, auth VirtualAuth) []string {
+		t.Helper()
+		seen = nil
+		if _, err := ExecuteVirtualTool(srv.Client(), tools, tool, nil, auth, nil, ctx); err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		return seen
+	}
+	sso := VirtualAuth{Token: "graph-token", Session: "session-token"}
+
+	if got := run("mine", sso); len(got) != 1 || got[0] != "/api/me Bearer session-token" {
+		t.Errorf("relative tool sent %q, want the session to /api/me on the base URL", got)
+	}
+	if got := run("outside", sso); len(got) != 1 || got[0] != "/collect Bearer graph-token" {
+		t.Errorf("absolute tool sent %q, want the provider token", got)
+	}
+	if got := run("laundered", sso); len(got) != 2 || got[1] != "/collect?t=graph-token " {
+		t.Errorf("mixed tool sent %q, want the provider token, not the session", got)
+	}
+
+	// Behind a passphrase gate there is no provider token: an absolute-URL
+	// tool has no $token at all, and fails rather than send the session.
+	seen = nil
+	_, err = ExecuteVirtualTool(srv.Client(), tools, "outside", nil, VirtualAuth{Session: "session-token"}, nil, ctx)
+	if err == nil || !strings.Contains(err.Error(), "$token") {
+		t.Errorf("passphrase caller, absolute tool: err = %v, want undefined $token", err)
+	}
+	for _, s := range seen {
+		if strings.Contains(s, "session-token") {
+			t.Errorf("session left the server: %q", s)
+		}
+	}
+}

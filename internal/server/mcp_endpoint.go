@@ -173,7 +173,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 		svcSlug := mcpSlug(svc.URL)
 		hooks := s.virtualHooks(svc)
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			token, claims, denied := s.mcpCallerCred(svc, req)
+			cred, session, claims, denied := s.mcpCallerCred(svc, req)
 			if denied != nil {
 				return denied, nil
 			}
@@ -195,7 +195,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 				return s.resumeVirtualTool(tools, req)
 			}
 
-			auth := s.virtualAuth(token, claims)
+			auth := s.virtualAuth(cred.Token, session, claims)
 			sqlRunner := s.mcpSQLRunner(svc, claims, args)
 			result, err := formats.ExecuteVirtualTool(s.httpClient, tools, capturedName, args, auth, sqlRunner,
 				&formats.ExecContext{Hooks: hooks})
@@ -249,7 +249,7 @@ func (s *Server) newTaskMCPServer(svc *db.Service) (*mcp.Server, error) {
 			InputSchema: map[string]interface{}{"type": "object", "properties": properties},
 		}
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			token, _, denied := s.mcpCallerCred(svc, req)
+			cred, _, _, denied := s.mcpCallerCred(svc, req)
 			if denied != nil {
 				return denied, nil
 			}
@@ -259,7 +259,7 @@ func (s *Server) newTaskMCPServer(svc *db.Service) (*mcp.Server, error) {
 					return mcpAuthError("arguments must be an object: %v", err), nil
 				}
 			}
-			result, err := s.runTask(ctx, task, "", args, nil, token)
+			result, err := s.runTask(ctx, task, "", args, nil, cred.Token)
 			if err != nil {
 				return mcpAuthError("%v", err), nil
 			}
@@ -272,12 +272,14 @@ func (s *Server) newTaskMCPServer(svc *db.Service) (*mcp.Server, error) {
 // mcpCallerCred re-resolves, per tool call, the caller's claims and the
 // credential that goes upstream for a mounted service. The gate middleware
 // already admitted the request; the tools need the claims (identity
-// built-ins) and the resolver's verdict ($token, TASK_TOKEN). A non-nil
+// built-ins) and the resolver's verdict ($token, TASK_TOKEN), whose Token
+// is final — a verbatim caller bearer already stands in it — plus session,
+// the caller's own Fresh Breath token when they presented one. A non-nil
 // denied is the error result to hand back instead.
-func (s *Server) mcpCallerCred(svc *db.Service, req *mcp.CallToolRequest) (token string, claims *freshbreathClaims, denied *mcp.CallToolResult) {
+func (s *Server) mcpCallerCred(svc *db.Service, req *mcp.CallToolRequest) (cred outboundCred, session string, claims *freshbreathClaims, denied *mcp.CallToolResult) {
 	gate, err := s.resolveServiceGate(svc)
 	if err != nil {
-		return "", nil, mcpAuthError("gate resolution: %v", err)
+		return outboundCred{}, "", nil, mcpAuthError("gate resolution: %v", err)
 	}
 
 	raw := ""
@@ -293,7 +295,7 @@ func (s *Server) mcpCallerCred(svc *db.Service, req *mcp.CallToolRequest) (token
 	if !gateIsOpen(gate) {
 		claims, _, err = s.verifyGateHeader(gate, header)
 		if err != nil {
-			return "", nil, mcpAuthError("auth error: %v", err)
+			return outboundCred{}, "", nil, mcpAuthError("auth error: %v", err)
 		}
 		if gate.Kind == db.AuthAPIKey && header != nil {
 			presentedKey = headerGateKey(gate, header)
@@ -304,17 +306,16 @@ func (s *Server) mcpCallerCred(svc *db.Service, req *mcp.CallToolRequest) (token
 	if isFreshbreathToken(raw) {
 		presentedToken = raw // for an api_key gate the Authorization value is a key, not this
 	}
-	cred, err := s.resolveOutboundCred(svc, gate, claims, presentedKey, presentedToken)
+	cred, err = s.resolveOutboundCred(svc, gate, claims, presentedKey, presentedToken)
 	if err != nil {
-		return "", nil, mcpAuthError("%v", err)
+		return outboundCred{}, "", nil, mcpAuthError("%v", err)
 	}
-	token = cred.Token
 	if cred.Verbatim && !isFreshbreathToken(raw) {
 		// An open gate passes a caller's own upstream bearer through
 		// verbatim; a Fresh Breath token is not one.
-		token = raw
+		cred.Token = raw
 	}
-	return token, claims, nil
+	return cred, presentedToken, claims, nil
 }
 
 func mcpAuthError(format string, a ...interface{}) *mcp.CallToolResult {
@@ -325,11 +326,17 @@ func mcpAuthError(format string, a ...interface{}) *mcp.CallToolResult {
 }
 
 // virtualAuth builds the caller identity for a virtual tool execution from
-// the verified gate claims. UserID is the numerical Fresh Breath user when
-// the subject is a frbr: one; an ext: caller leaves it nil (and $token_id
-// resolves to null).
-func (s *Server) virtualAuth(token string, claims *freshbreathClaims) formats.VirtualAuth {
-	auth := formats.VirtualAuth{Token: token}
+// the resolved upstream token, the caller's own Fresh Breath token
+// (session), and the verified gate claims. A Fresh Breath token never
+// stands as the upstream token: it rides only as the session, which only a
+// tool that stays on this server sees (formats.VirtualAuth.Session). UserID
+// is the numerical Fresh Breath user when the subject is a frbr: one; an
+// ext: caller leaves it nil (and $token_id resolves to null).
+func (s *Server) virtualAuth(token, session string, claims *freshbreathClaims) formats.VirtualAuth {
+	if isFreshbreathToken(token) {
+		token = ""
+	}
+	auth := formats.VirtualAuth{Token: token, Session: session}
 	if claims == nil {
 		return auth
 	}

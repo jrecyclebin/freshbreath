@@ -162,6 +162,15 @@ type outboundCred struct {
 	Strip    bool   // drop the caller's Authorization (explicit Anonymous acts_as)
 }
 
+// localTarget reports whether a service URL is a path on this server.
+// A Fresh Breath token — whatever record minted it — is a bearer on this
+// server's API, so it goes only to such a target; and a relative path is
+// this server's API, so a Fresh Breath token is what it gets. Provider
+// tokens (an SSO login's Microsoft token, say) go anywhere they're asked.
+func localTarget(rawURL string) bool {
+	return strings.HasPrefix(rawURL, "/") && !strings.HasPrefix(rawURL, "//") && !strings.HasPrefix(rawURL, `/\`)
+}
+
 // errNeedsLogin marks an outbound credential only a login can supply: the
 // caller should log in at the service's door, not change the request.
 var errNeedsLogin = errors.New("login required")
@@ -187,6 +196,7 @@ var errNeedsLogin = errors.New("login required")
 //     gate's stored key when the caller cleared it by token instead
 //   - acts_as empty, gate ssh_key: the caller's token — the passphrase login
 //     produced it, and it is the credential such a door has to offer
+//     (a Fresh Breath token, so the sinks keep it on this server)
 //   - acts_as empty, gate open: leave the caller's Authorization alone
 //
 // An mcp service skips all of that: its MCP server decides. The caller's

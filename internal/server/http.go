@@ -18,7 +18,12 @@ var errOutsideService = errors.New("path is outside this service")
 // Verbatim verdict — anything else at the door was the gate credential,
 // which is never valid upstream.
 func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request, cred outboundCred) (*http.Response, error) {
-	target, err := url.Parse(svc.URL)
+	// A relative service URL is a path on this server.
+	raw := svc.URL
+	if localTarget(raw) {
+		raw = strings.TrimSuffix(s.config.PublicBaseURL, "/") + raw
+	}
+	target, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +55,12 @@ func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request, cred outboundC
 
 	// Forward headers, stripping hop-by-hop and internal ones. The gate
 	// credential (Authorization or X-API-Key) is consumed at the door.
+	// An open gate passes the caller's own Authorization through — but
+	// never a Fresh Breath token to an upstream elsewhere.
+	passAuth := cred.Verbatim
+	if passAuth && !localTarget(svc.URL) && isFreshbreathToken(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) {
+		passAuth = false
+	}
 	for k, v := range r.Header {
 		kl := strings.ToLower(k)
 		// Cookie is this server's (the gate pass among them), never the
@@ -57,7 +68,7 @@ func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request, cred outboundC
 		if kl == "host" || kl == "connection" || kl == "x-app-nonce" || kl == "content-length" || kl == "origin" || kl == "access-control-request-method" || kl == "access-control-request-headers" || kl == "user-agent" || kl == "x-api-key" || kl == "cookie" {
 			continue
 		}
-		if kl == "authorization" && !cred.Verbatim {
+		if kl == "authorization" && !passAuth {
 			continue
 		}
 		proxyReq.Header[k] = v

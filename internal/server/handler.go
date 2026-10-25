@@ -1079,6 +1079,18 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A relative service URL is this server's own API, which takes Fresh
+	// Breath tokens: it gets the caller's, whatever record minted it. An
+	// upstream elsewhere never gets one — it could replay it here — though
+	// a provider token (an SSO login's) still goes wherever it's resolved to.
+	if localTarget(svc.URL) {
+		if presentedToken != "" {
+			cred = outboundCred{Token: presentedToken}
+		}
+	} else if isFreshbreathToken(cred.Token) {
+		cred.Token = ""
+	}
+
 	// X-API-Key is meaningful only against an api_key acts_as record,
 	// where it overrides the stored key; anywhere else it's a caller error.
 	if xkey := r.Header.Get("X-API-Key"); xkey != "" {
@@ -1284,7 +1296,7 @@ func (s *Server) handleServiceCall(w http.ResponseWriter, r *http.Request) {
 	// user (email + numerical ID) and the token subject. An anonymous gate
 	// leaves them empty — tools referencing $token_email and friends then
 	// fail, because they require a logged-in caller.
-	auth := formats.VirtualAuth{Token: token}
+	auth := s.virtualAuth(token, presentedToken, nil)
 	if claims != nil {
 		auth.Email = claims.UserEmail
 		auth.Sub = claims.Subject

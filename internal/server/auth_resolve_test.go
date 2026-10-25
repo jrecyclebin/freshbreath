@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -763,5 +764,58 @@ func TestSSHKeyActsAsAddsALeg(t *testing.T) {
 	same := &db.Service{ID: 2, Descriptor: db.ServiceDescriptor{Type: "api"}, ActsAs: &gate.ID}
 	if legs, _ := srv.legsForLogin(context.Background(), gate, same); len(legs) != 1 {
 		t.Errorf("legs with acts_as == gate = %v, want just the gate", legs)
+	}
+}
+
+// Audit 202610-r3 #2: a Fresh Breath token is a bearer on this server's
+// API whatever record minted it, so the proxy sends one only to a relative
+// service URL — this server — and that is what a relative URL gets. An
+// upstream elsewhere gets provider tokens (an SSO login's), never ours.
+func TestProxyKeepsSessionTokenOnServer(t *testing.T) {
+	var seen string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Authorization")
+	}))
+	defer up.Close()
+
+	srv := newTestServer(t)
+	srv.config.PublicBaseURL = up.URL // so a relative service URL lands on the recorder
+	ssh := builtinAuth(t, srv, db.AuthSSHKey)
+	anon := builtinAuth(t, srv, db.AuthAnonymous)
+	sso := newAuthRecord(t, srv, "Microsoft", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://login.example", Provider: "ms"})
+	elsewhere := registerService(t, srv, "elsewhere", up.URL, db.ServiceDescriptor{Type: "api", Proxied: true})
+	self := registerService(t, srv, "self", "/api/me", db.ServiceDescriptor{Type: "api", Proxied: true})
+	apps := map[string]string{}
+	for name, gate := range map[string]int64{"ssh": ssh.ID, "open": anon.ID, "sso": sso.ID} {
+		apps[name] = appBehind(t, srv, name+" app", &gate)
+		linkServiceToApp(t, srv, apps[name], elsewhere)
+		linkServiceToApp(t, srv, apps[name], self)
+	}
+	makeAdminAuth(t, srv, ssh) // after setup: the helpers above use the open API
+	u := knownUser(t, srv)
+	sshTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, "", ssh.ID, nil, nil)
+	ssoTok, _ := srv.mintFreshbreathToken("ext:ms:u1", u.Email, "", "", sso.ID, nil,
+		sealedCreds{"ms": {UpstreamToken: "graph-token"}})
+
+	for _, c := range []struct {
+		name, app, service, bearer, want string
+	}{
+		{"ssh gate, elsewhere", "ssh", elsewhere, sshTok, ""},
+		{"ssh gate, this server", "ssh", self, sshTok, "Bearer " + sshTok},
+		{"sso gate, elsewhere", "sso", elsewhere, ssoTok, "Bearer graph-token"},
+		{"sso gate, this server", "sso", self, ssoTok, "Bearer " + ssoTok},
+		{"open gate, our token, elsewhere", "open", elsewhere, sshTok, ""},
+		{"open gate, caller's own bearer", "open", elsewhere, "their-own-key", "Bearer their-own-key"},
+	} {
+		seen = "unset"
+		rr := testRequest(t, srv, "GET", "/service/"+c.service+"/x", nil,
+			map[string]string{"X-App-Nonce": apps[c.app], "Authorization": "Bearer " + c.bearer})
+		if rr.Code != 200 {
+			t.Errorf("%s: proxy status = %d, body = %s", c.name, rr.Code, rr.Body.String())
+			continue
+		}
+		if seen != c.want {
+			t.Errorf("%s: upstream got Authorization %.40q, want %.40q", c.name, seen, c.want)
+		}
 	}
 }
