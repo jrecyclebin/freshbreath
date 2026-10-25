@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,6 +40,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	if s.schemeOf(r) == "https" && !s.isLocalHost(r.Host) {
+		h.Set("Strict-Transport-Security", "max-age=15552000")
+	}
 	if serverOwnedPath(r.URL.Path) {
 		// The panel, the sign-in pages and the API act on a click or carry
 		// a session; none of them is meant to sit in someone else's frame.
@@ -161,6 +166,17 @@ func (s *Server) hostAllowed(hostport string) bool {
 		return true
 	}
 	return s.knownHosts[host]
+}
+
+// isLocalHost reports whether a Host names this machine by loopback name or
+// IP literal — where HSTS would pin HTTPS for every other local server too.
+func (s *Server) isLocalHost(hostport string) bool {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	return net.ParseIP(host) != nil || host == "localhost" || strings.HasSuffix(host, ".localhost")
 }
 
 // knownHostSet collects the DNS names hostAllowed accepts.
@@ -667,7 +683,32 @@ func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Security-Policy", controlCSP(data))
 	w.Write(data)
+}
+
+var inlineScriptRe = regexp.MustCompile(`(?s)<script([^>]*)>(.*?)</script>`)
+
+// controlCSP is the control panel's policy. The built panel may run its own
+// files and exactly the inline scripts on the page (by hash), so injected
+// markup can't run script. It keeps 'unsafe-eval' because the bundled MCP
+// SDK compiles JSON Schema validators (Ajv) with new Function. The dev
+// panel compiles JSX in the browser with Babel, which runs inline code, so
+// there scripts are only kept to this origin.
+func controlCSP(page []byte) string {
+	const rest = "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+	if bytes.Contains(page, []byte("babel-standalone")) {
+		return "script-src 'self' 'unsafe-inline' 'unsafe-eval'" + rest
+	}
+	src := "script-src 'self' 'unsafe-eval'"
+	for _, m := range inlineScriptRe.FindAllSubmatch(page, -1) {
+		if bytes.Contains(m[1], []byte("src=")) {
+			continue
+		}
+		sum := sha256.Sum256(m[2])
+		src += " 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	}
+	return src + rest
 }
 
 // schemeOf returns the request's scheme — "https" when the connection
@@ -3199,8 +3240,13 @@ func (s *Server) handleSSHHostKeyDetail(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		view, err := s.coreGetSettings(userFromContext(r.Context()))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.settingsView())
+		json.NewEncoder(w).Encode(view)
 	case http.MethodPut:
 		var body struct {
 			AdminAuthService     *string `json:"admin_auth_service"`

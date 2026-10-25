@@ -3,7 +3,10 @@ package server
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -1662,5 +1665,76 @@ func TestRequestBodyLimits(t *testing.T) {
 	srv.ServeHTTP(rr, req)
 	if rr.Code < 400 {
 		t.Errorf("chunked oversize: status %d, want refused", rr.Code)
+	}
+}
+
+// F15 (audit 202610): hardening. HSTS goes out over HTTPS to a real host
+// name — never to localhost or an IP, where pinning HTTPS would break
+// every other local server on that name.
+func TestHSTSOnlyForHTTPSHostNames(t *testing.T) {
+	srv := newTestServer(t)
+	srv.knownHosts["frbr.example"] = true
+	for _, c := range []struct {
+		host string
+		tls  bool
+		want bool
+	}{
+		{"frbr.example", true, true},
+		{"frbr.example", false, false},
+		{"localhost:9009", true, false},
+		{"127.0.0.1:9009", true, false},
+	} {
+		req := httptest.NewRequest("GET", "/control/styles.css", nil)
+		req.Host = c.host
+		if c.tls {
+			req.TLS = &tls.ConnectionState{}
+		}
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+		if got := rr.Header().Get("Strict-Transport-Security") != ""; got != c.want {
+			t.Errorf("%s tls=%v: HSTS %v, want %v", c.host, c.tls, got, c.want)
+		}
+	}
+}
+
+// The panel's scripts are pinned: the built panel allows its own files and
+// exactly its inline scripts (by hash), plus eval for the MCP SDK's schema
+// validators. The dev panel compiles JSX in the browser, which needs inline
+// script, so it only keeps scripts to this origin.
+func TestControlScriptPolicy(t *testing.T) {
+	built := `<script>
+    theme();
+  </script><script type="module" src="/frbr.js"></script><script type="module">
+    import x from "/control/x.js";
+  </script><script type="module" src="/control/app.compiled.js"></script>`
+	policy := controlCSP([]byte(built))
+	sum := func(s string) string {
+		h := sha256.Sum256([]byte(s))
+		return "'sha256-" + base64.StdEncoding.EncodeToString(h[:]) + "'"
+	}
+	for _, want := range []string{"script-src 'self' 'unsafe-eval' ", sum("\n    theme();\n  "), sum("\n    import x from \"/control/x.js\";\n  "), "object-src 'none'", "base-uri 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(policy, want) {
+			t.Errorf("built policy %q lacks %q", policy, want)
+		}
+	}
+	if strings.Contains(policy, "unsafe-inline") {
+		t.Errorf("built policy allows inline script: %q", policy)
+	}
+
+	dev := controlCSP([]byte(`<script src="/control/vendor/babel-standalone-7.29.0.min.js"></script>`))
+	if !strings.Contains(dev, "script-src 'self' 'unsafe-inline' 'unsafe-eval'") || !strings.Contains(dev, "frame-ancestors 'none'") {
+		t.Errorf("dev policy = %q", dev)
+	}
+}
+
+// get_settings checks the caller's role itself, not only by which tools a
+// role's MCP server lists.
+func TestGetSettingsChecksRole(t *testing.T) {
+	srv := newTestServer(t)
+	for role, wantErr := range map[string]bool{"Member": true, "Admin": true, "Superuser": false} {
+		_, err := srv.coreGetSettings(&db.User{ID: 5, Role: role})
+		if (err != nil) != wantErr {
+			t.Errorf("%s: err = %v", role, err)
+		}
 	}
 }

@@ -918,6 +918,16 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 	return nil
 }
 
+// coreGetSettings returns the settings to a Superuser. It checks the role
+// itself rather than trusting that only a Superuser's MCP server lists
+// get_settings.
+func (s *Server) coreGetSettings(actor *db.User) (map[string]interface{}, error) {
+	if err := s.gate(actor, rolesSuperuser); err != nil {
+		return nil, err
+	}
+	return s.settingsView(), nil
+}
+
 // settingsView is the settings as the panel and get_settings show them.
 func (s *Server) settingsView() map[string]interface{} {
 	result := map[string]interface{}{

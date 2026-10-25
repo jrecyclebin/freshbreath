@@ -2314,12 +2314,15 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 			"properties": map[string]interface{}{},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		_, err := s.mcpUser(req)
+		user, err := s.mcpUser(req)
 		if err != nil {
 			return mcpToolError("auth: %v", err), nil
 		}
-
-		return mcpToolResult(s.settingsView())
+		view, err := s.coreGetSettings(user)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		return mcpToolResult(view)
 	})
 
 	// update_settings
