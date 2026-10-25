@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -58,7 +59,7 @@ func (s *Store) Migrate() error {
     );
 
     CREATE TABLE IF NOT EXISTS users (
-      id         INTEGER PRIMARY KEY,
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
       name       TEXT NOT NULL UNIQUE,
       email      TEXT NOT NULL UNIQUE,
       role       TEXT NOT NULL DEFAULT 'Member',
@@ -279,6 +280,25 @@ func (s *Store) Migrate() error {
 		}
 	}
 
+	// Ids that sessions and tokens name (frbr:<user id>) must never come
+	// back: SQLite hands a deleted top id to the next insert unless the
+	// table is AUTOINCREMENT, and then a deleted user's sessions resolve
+	// to whoever is created next.
+	for _, tbl := range []string{"users"} {
+		if err := s.ensureAutoincrement(tbl); err != nil {
+			return fmt.Errorf("make %s ids non-reusable: %w", tbl, err)
+		}
+	}
+	// The rebuild only stops reuse from here on: an id deleted before it
+	// can still come round once. End sessions whose user is already gone
+	// (deletion didn't always revoke them) so the next user can't adopt them.
+	if _, err := s.db.Exec(`
+    UPDATE refresh_families SET revoked = 1
+    WHERE revoked = 0 AND subject LIKE 'frbr:%'
+      AND CAST(substr(subject, 6) AS INTEGER) NOT IN (SELECT id FROM users)`); err != nil {
+		return fmt.Errorf("revoke orphaned sessions: %w", err)
+	}
+
 	// Seed the built-in auth records: the passphrase login and the explicit
 	// "open to anyone on the LAN" record. Undeletable; name/kind frozen.
 	for _, rec := range []struct{ name, kind string }{
@@ -320,6 +340,65 @@ func (s *Store) Migrate() error {
 	}
 
 	return nil
+}
+
+var (
+	createTableRe = regexp.MustCompile(`(?i)^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?"?(\w+)"?`)
+	rowidKeyRe    = regexp.MustCompile(`(?i)\bid\s+INTEGER\s+PRIMARY\s+KEY\b`)
+)
+
+// ensureAutoincrement rebuilds a table whose id is a plain INTEGER PRIMARY
+// KEY as AUTOINCREMENT, which SQLite can't ALTER in. The new table is the
+// old one's own definition — columns added by later migrations included —
+// with its rows and indexes carried over, all in one transaction. A table
+// already AUTOINCREMENT is left alone.
+func (s *Store) ensureAutoincrement(table string) error {
+	var def string
+	if err := s.db.QueryRow("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&def); err != nil {
+		return err
+	}
+	if strings.Contains(strings.ToUpper(def), "AUTOINCREMENT") {
+		return nil
+	}
+	if !rowidKeyRe.MatchString(def) || !createTableRe.MatchString(def) {
+		return fmt.Errorf("unexpected definition: %s", def)
+	}
+	rebuilt := table + "_rebuild"
+	def = rowidKeyRe.ReplaceAllString(def, "id INTEGER PRIMARY KEY AUTOINCREMENT")
+	def = createTableRe.ReplaceAllString(def, "CREATE TABLE "+rebuilt)
+
+	var indexes []string
+	rows, err := s.db.Query("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", table)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ix string
+		if err := rows.Scan(&ix); err != nil {
+			rows.Close()
+			return err
+		}
+		indexes = append(indexes, ix)
+	}
+	rows.Close()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		def,
+		"INSERT INTO " + rebuilt + " SELECT * FROM " + table,
+		"DROP TABLE " + table,
+		"ALTER TABLE " + rebuilt + " RENAME TO " + table,
+	}
+	for _, stmt := range append(stmts, indexes...) {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // CreateApp registers an app. A nil protectedBy defaults to the builtin

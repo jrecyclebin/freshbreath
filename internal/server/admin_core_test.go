@@ -425,3 +425,36 @@ func TestServiceNameStaysInDefinitionDir(t *testing.T) {
 		t.Fatalf("task script changed: %q, %v", got, err)
 	}
 }
+
+// Audit 202610-r3 #3: deleting a user revoked nothing, and its id went to
+// the next user created — so the deleted user's token and refresh family
+// came back as the newcomer, role and all.
+func TestDeletedUserSessionsDieWithIt(t *testing.T) {
+	srv := newTestServer(t)
+	gate := builtinAuth(t, srv, db.AuthSSHKey)
+	makeAdminAuth(t, srv, gate)
+	root, _ := srv.store.CreateUser("Root", "root@x.com", "Superuser", "Active")
+	leaver, _ := srv.store.CreateUser("Leaver", "leaver@x.com", "Member", "Active")
+	tok, err := srv.mintFreshbreathToken(subjectForUser(leaver), leaver.Email, "Member", "", gate.ID, nil, nil)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	fam, _, err := srv.newRefreshFamily(subjectForUser(leaver), gate.ID, "")
+	if err != nil {
+		t.Fatalf("family: %v", err)
+	}
+
+	if err := srv.coreDeleteUser(root, leaver); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	newcomer, _ := srv.store.CreateUser("Newcomer", "new@x.com", "Admin", "Active")
+	if newcomer.ID == leaver.ID {
+		t.Errorf("newcomer reused the deleted user's id %d", leaver.ID)
+	}
+	if rr := testRequest(t, srv, "GET", "/api/me", nil, map[string]string{"Authorization": "Bearer " + tok}); rr.Code != http.StatusUnauthorized {
+		t.Errorf("deleted user's token: status %d, want 401", rr.Code)
+	}
+	if f, ok, _ := srv.store.GetRefreshFamily(fam); !ok || !f.Revoked {
+		t.Errorf("deleted user's refresh family survived: %+v", f)
+	}
+}

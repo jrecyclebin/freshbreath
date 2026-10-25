@@ -668,6 +668,15 @@ func (s *Server) coreDeleteUser(actor, target *db.User) error {
 	if err := s.store.DeleteUser(target.ID); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
+	// The account is gone, so is everything it was signed in with: its
+	// refresh families (and the gate grants riding them) and the SSH key a
+	// passphrase login unlocked in the agent.
+	if err := s.store.RevokeUserRefreshFamilies(subjectForUser(target)); err != nil {
+		return cerr(http.StatusInternalServerError, "revoke sessions: %v", err)
+	}
+	if s.agentMgr != nil {
+		s.agentMgr.RemoveKey(target.ID)
+	}
 	s.audit(actor, "deleted user", target.Name)
 	return nil
 }
@@ -857,6 +866,11 @@ func (s *Server) coreSetPassphraseByLink(token, passphrase string) (*db.User, er
 	// The agent may still hold the old key, decrypted at the last login.
 	if s.agentMgr != nil {
 		s.agentMgr.RemoveKey(u.ID)
+	}
+	// A reset is how a user recovers from a leaked passphrase; sessions
+	// signed in with the old one end here too.
+	if err := s.store.RevokeUserRefreshFamilies(subjectForUser(u)); err != nil {
+		return nil, cerr(http.StatusInternalServerError, "revoke sessions: %v", err)
 	}
 	u.Status, u.Metadata = status, &meta
 	s.audit(u, "set passphrase from link", u.Email)

@@ -615,3 +615,71 @@ func TestUserEmailCaseInsensitive(t *testing.T) {
 		t.Errorf("legacy lookup returned %q, want the stored mixed-case row", got.Email)
 	}
 }
+
+// Audit 202610-r3 #3: a deleted user's id went to the next user created,
+// and every session naming frbr:<id> with it. Migrate rebuilds a table
+// that predates AUTOINCREMENT in place — rows, later columns and indexes
+// kept — and ids stop coming back.
+func TestMigrateMakesUserIDsNonReusable(t *testing.T) {
+	raw, err := sql.Open("sqlite3", "file:"+t.Name()+"?mode=memory&cache=shared")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	// The users table as an older install created it.
+	for _, stmt := range []string{
+		`CREATE TABLE users (
+      id         INTEGER PRIMARY KEY,
+      name       TEXT NOT NULL UNIQUE,
+      email      TEXT NOT NULL UNIQUE,
+      role       TEXT NOT NULL DEFAULT 'Member',
+      status     TEXT NOT NULL DEFAULT 'Active',
+      last_seen  TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )`,
+		`ALTER TABLE users ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'`,
+		`CREATE INDEX idx_users_email ON users(email)`,
+		`INSERT INTO users (name, email, role, metadata) VALUES ('Ada', 'ada@x.com', 'Superuser', '{"k":1}'), ('Bob', 'bob@x.com', 'Member', '{}')`,
+	} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("legacy schema: %v", err)
+		}
+	}
+	store := &Store{db: raw}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// A session left behind by a user deleted before the upgrade.
+	orphan := &RefreshFamily{ID: "orphan", Subject: "frbr:3", AuthID: 1, CurrentJTI: "j", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := store.CreateRefreshFamily(orphan); err != nil {
+		t.Fatalf("family: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	if f, _, _ := store.GetRefreshFamily("orphan"); !f.Revoked {
+		t.Error("session of an already-deleted user survived the upgrade")
+	}
+
+	ada, err := store.GetUserByEmail("ada@x.com")
+	if err != nil || ada.ID != 1 || ada.Role != "Superuser" {
+		t.Fatalf("existing row after rebuild = %+v, %v", ada, err)
+	}
+	var ix int
+	raw.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_users_email'").Scan(&ix)
+	if ix != 1 {
+		t.Error("idx_users_email lost in the rebuild")
+	}
+
+	bob, _ := store.GetUserByEmail("bob@x.com")
+	if err := store.DeleteUser(bob.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	next, err := store.CreateUser("Cy", "cy@x.com", "Admin", "Active")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if next.ID == bob.ID {
+		t.Errorf("new user got deleted user's id %d", bob.ID)
+	}
+}
