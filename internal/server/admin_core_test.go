@@ -458,3 +458,32 @@ func TestDeletedUserSessionsDieWithIt(t *testing.T) {
 		t.Errorf("deleted user's refresh family survived: %+v", f)
 	}
 }
+
+// Audit 202610-r3 #5: an Admin could point the admin gate record at a
+// provider they control, which then vouches for a Superuser's email — or
+// delete it and lock everyone out.
+func TestAdminGateRecordIsSuperusers(t *testing.T) {
+	srv := newTestServer(t)
+	rec := newAuthRecord(t, srv, "Corp SSO", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://login.corp.example", ClientID: "c", ClientSecret: "s"})
+	other := newAuthRecord(t, srv, "Partner SSO", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://partner.example", ClientID: "c", ClientSecret: "s"})
+	makeAdminAuth(t, srv, rec)
+	admin, _ := srv.store.CreateUser("Adm", "adm@x.com", "Admin", "Active")
+	root, _ := srv.store.CreateUser("Root", "root@x.com", "Superuser", "Active")
+	moved := db.AuthDescriptor{Issuer: "https://attacker-idp.example", ClientID: "mine", ClientSecret: "mine"}
+
+	if err := srv.coreUpdateAuth(admin, rec.ID, rec.Name, db.AuthOIDC, moved); err == nil {
+		t.Error("Admin re-pointed the admin gate record")
+	}
+	if err := srv.coreDeleteAuth(admin, rec.ID); err == nil {
+		t.Error("Admin deleted the admin gate record")
+	}
+	if err := srv.coreDeleteAuth(root, rec.ID); err == nil {
+		t.Error("Superuser deleted the admin gate record while it is in use")
+	}
+	if err := srv.coreUpdateAuth(root, rec.ID, rec.Name, db.AuthOIDC, moved); err != nil {
+		t.Errorf("Superuser editing the admin gate: %v", err)
+	}
+	if err := srv.coreUpdateAuth(admin, other.ID, other.Name, db.AuthOIDC, db.AuthDescriptor{Issuer: "https://partner.example", ClientID: "c2"}); err != nil {
+		t.Errorf("Admin editing another record: %v", err)
+	}
+}

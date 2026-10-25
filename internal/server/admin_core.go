@@ -566,9 +566,25 @@ func (s *Server) coreCreateAuth(actor *db.User, name, kind string, d db.AuthDesc
 	return rec, nil
 }
 
+// gateAdminRecord refuses anyone but a Superuser when rec is the admin
+// gate. Whoever edits that record picks the provider that vouches for
+// every Fresh Breath user — the Superusers' emails included — so changing
+// it is as good as holding the top role.
+func (s *Server) gateAdminRecord(actor *db.User, rec *db.AuthRecord) error {
+	if s.isAdminAuthRecord(rec) {
+		return s.gate(actor, rolesSuperuser)
+	}
+	return nil
+}
+
 func (s *Server) coreUpdateAuth(actor *db.User, id int64, name, kind string, d db.AuthDescriptor) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
+	}
+	if existing, err := s.store.GetAuthRecord(id); err == nil {
+		if err := s.gateAdminRecord(actor, existing); err != nil {
+			return err
+		}
 	}
 	if name == "" {
 		return cerr(http.StatusBadRequest, "name required")
@@ -590,6 +606,11 @@ func (s *Server) coreDeleteAuth(actor *db.User, id int64) error {
 	rec, err := s.store.GetAuthRecord(id)
 	if err != nil {
 		return cerr(http.StatusNotFound, "%v", err)
+	}
+	// Deleting the admin gate would lock everyone out — the setting would
+	// name a record that isn't there.
+	if s.isAdminAuthRecord(rec) {
+		return cerr(http.StatusConflict, "auth record %q is the admin gate; choose another in Settings first", rec.Name)
 	}
 	if err := s.store.DeleteAuthRecord(id); err != nil {
 		return cerr(http.StatusConflict, "%v", err)
