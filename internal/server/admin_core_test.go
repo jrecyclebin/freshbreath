@@ -487,3 +487,36 @@ func TestAdminGateRecordIsSuperusers(t *testing.T) {
 		t.Errorf("Admin editing another record: %v", err)
 	}
 }
+
+// Audit 202610-r3 #6: service and auth record ids were reused too. A new
+// service inherited the deleted one's app approvals, and a token bound to
+// a deleted auth record cleared the record that took its id.
+func TestDeletedServiceAndRecordIDsStayDead(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: -1, Role: "Superuser", Status: "Active"}
+
+	nonce, _ := srv.coreCreateApp(su, "Old App", "", "", nil, nil)
+	weather, err := srv.coreCreateService(su, "weather", "https://weather.example", db.ServiceDescriptor{Type: "api"}, nil, nil)
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	srv.coreSetAppServices(su, nonce, []int64{weather.ID})
+	srv.coreDeleteService(su, weather.ID)
+	payroll, err := srv.coreCreateService(su, "payroll", "https://payroll.internal", db.ServiceDescriptor{Type: "api"}, nil, nil)
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	if ok, _ := srv.store.IsServiceAllowedForApp(nonce, payroll.ID); ok {
+		t.Errorf("app approved for a deleted service is approved for new service %d", payroll.ID)
+	}
+
+	old := newAuthRecord(t, srv, "Contractor SSO", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://a.example"})
+	tok, _ := srv.mintFreshbreathToken("ext:contractor:bob", "bob@contractor.example", "", "", old.ID, nil, nil)
+	if err := srv.coreDeleteAuth(su, old.ID); err != nil {
+		t.Fatalf("delete record: %v", err)
+	}
+	fresh := newAuthRecord(t, srv, "Finance SSO", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://b.example"})
+	if _, _, err := srv.verifyGateToken(fresh, tok); err == nil {
+		t.Errorf("token bound to deleted record %d clears new record %d", old.ID, fresh.ID)
+	}
+}

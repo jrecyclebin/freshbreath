@@ -51,7 +51,7 @@ func (s *Store) Migrate() error {
     );
 
     CREATE TABLE IF NOT EXISTS services (
-      id             INTEGER PRIMARY KEY,
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
       name           TEXT NOT NULL UNIQUE,
       url            TEXT NOT NULL UNIQUE,
       descriptor     TEXT NOT NULL DEFAULT '{}',
@@ -137,7 +137,7 @@ func (s *Store) Migrate() error {
     CREATE INDEX IF NOT EXISTS idx_oauth_clients_id ON oauth_clients(client_id);
 
     CREATE TABLE IF NOT EXISTS auth_records (
-      id         INTEGER PRIMARY KEY,
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
       name       TEXT NOT NULL UNIQUE,
       kind       TEXT NOT NULL,
       descriptor TEXT NOT NULL DEFAULT '{}',
@@ -280,11 +280,12 @@ func (s *Store) Migrate() error {
 		}
 	}
 
-	// Ids that sessions and tokens name (frbr:<user id>) must never come
-	// back: SQLite hands a deleted top id to the next insert unless the
-	// table is AUTOINCREMENT, and then a deleted user's sessions resolve
-	// to whoever is created next.
-	for _, tbl := range []string{"users"} {
+	// Ids that sessions, tokens and links name must never come back:
+	// SQLite hands a deleted top id to the next insert unless the table is
+	// AUTOINCREMENT, and then a deleted user's sessions (frbr:<id>) resolve
+	// to whoever is created next, a token bound to a deleted auth record
+	// clears the record that takes its id, and so on.
+	for _, tbl := range []string{"users", "services", "auth_records"} {
 		if err := s.ensureAutoincrement(tbl); err != nil {
 			return fmt.Errorf("make %s ids non-reusable: %w", tbl, err)
 		}
@@ -297,6 +298,20 @@ func (s *Store) Migrate() error {
     WHERE revoked = 0 AND subject LIKE 'frbr:%'
       AND CAST(substr(subject, 6) AS INTEGER) NOT IN (SELECT id FROM users)`); err != nil {
 		return fmt.Errorf("revoke orphaned sessions: %w", err)
+	}
+	// Likewise for services and auth records: approvals and memberships
+	// still naming a deleted service, and sessions bound to a deleted
+	// record (an mcp service's in-memory record is its negated id).
+	for _, stmt := range []string{
+		"DELETE FROM app_service_links WHERE service_id NOT IN (SELECT id FROM services)",
+		"DELETE FROM service_members WHERE service_id NOT IN (SELECT id FROM services)",
+		`UPDATE refresh_families SET revoked = 1
+     WHERE revoked = 0 AND ((auth_id > 0 AND auth_id NOT IN (SELECT id FROM auth_records))
+                         OR (auth_id < 0 AND -auth_id NOT IN (SELECT id FROM services)))`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("clear references to deleted rows: %w", err)
+		}
 	}
 
 	// Seed the built-in auth records: the passphrase login and the explicit
@@ -993,6 +1008,10 @@ func (s *Store) TouchService(id int64) error {
 
 func (s *Store) DeleteService(id int64) error {
 	if _, err := s.db.Exec("DELETE FROM service_members WHERE service_id = ?", id); err != nil {
+		return err
+	}
+	// An app's approval was for this service, not for whatever comes next.
+	if _, err := s.db.Exec("DELETE FROM app_service_links WHERE service_id = ?", id); err != nil {
 		return err
 	}
 	_, err := s.db.Exec("DELETE FROM services WHERE id = ?", id)

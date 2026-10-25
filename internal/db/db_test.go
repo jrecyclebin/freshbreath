@@ -683,3 +683,37 @@ func TestMigrateMakesUserIDsNonReusable(t *testing.T) {
 		t.Errorf("new user got deleted user's id %d", bob.ID)
 	}
 }
+
+// Audit 202610-r3 #6: references a deleted service or auth record left
+// behind before the upgrade are cleared, so the next row can't adopt them.
+func TestMigrateClearsReferencesToDeletedRows(t *testing.T) {
+	store := newTestStore(t)
+	for _, stmt := range []string{
+		"INSERT INTO app_service_links (app_nonce, service_id, allowed) VALUES ('app1', 999, 1)",
+		"INSERT INTO service_members (service_id, user_id) VALUES (999, 1)",
+	} {
+		if _, err := store.db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	for id, authID := range map[string]int64{"gone-record": 999, "gone-mcp": -999} {
+		f := &RefreshFamily{ID: id, Subject: "ext:x:y", AuthID: authID, CurrentJTI: "j", ExpiresAt: time.Now().Add(time.Hour)}
+		if err := store.CreateRefreshFamily(f); err != nil {
+			t.Fatalf("family: %v", err)
+		}
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var links, members int
+	store.db.QueryRow("SELECT COUNT(*) FROM app_service_links WHERE service_id = 999").Scan(&links)
+	store.db.QueryRow("SELECT COUNT(*) FROM service_members WHERE service_id = 999").Scan(&members)
+	if links != 0 || members != 0 {
+		t.Errorf("deleted service still referenced: %d links, %d members", links, members)
+	}
+	for _, id := range []string{"gone-record", "gone-mcp"} {
+		if f, _, _ := store.GetRefreshFamily(id); !f.Revoked {
+			t.Errorf("session %s bound to a deleted record survived", id)
+		}
+	}
+}
