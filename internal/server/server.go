@@ -55,6 +55,8 @@ type Server struct {
 	lastSeenAt        map[int64]time.Time
 	lastSeenMu        sync.Mutex
 	knownHosts        map[string]bool      // Host names answered besides IPs and localhost (see hostAllowed)
+	publicScheme      string                // FRBR_BASE_URL's scheme, authoritative for its host (see schemeOf)
+	publicHost        string                // FRBR_BASE_URL's host name (lowercased, no port)
 	trustedProxies    []netip.Prefix        // peers whose X-Forwarded-Proto is honored (see schemeOf)
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedMu          sync.RWMutex

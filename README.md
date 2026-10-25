@@ -291,12 +291,12 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 | `FRBR_DIR` | auto-detected | Install directory containing `web/` control panel |
 | `FRBR_DATA_DIR` | auto-detected | Data directory for `apps/`, `virtual/`, `tasks/` and database |
 | `FRBR_DB_PATH` | `./freshbreath.db` | SQLite database file |
-| `FRBR_BASE_URL` | auto-detected | Defaults to `http://localhost:9009` or `https://localhost:9009` depending on TLS |
+| `FRBR_BASE_URL` | auto-detected | Defaults to `http://localhost:9009` or `https://localhost:9009` depending on TLS. Set this when the public URL differs — behind a reverse proxy or a cloud load balancer that terminates TLS. Its scheme is authoritative for its own host: requests arriving with that `Host` are treated as its scheme, even when the TLS ends at a front-end the server cannot name (so no `FRBR_TRUSTED_PROXIES` list is needed for it). |
 | `FRBR_LISTEN_ADDR` | `:9009` | HTTP bind address |
 | `FRBR_TLS_CERT` | *(none)* | Path to TLS certificate (PEM) |
 | `FRBR_TLS_KEY` | *(none)* | Path to TLS private key (PEM) |
 | `FRBR_ALLOWED_HOSTS` | *(none)* | Extra host names the server answers to, comma-separated. IP addresses, `localhost`, the `FRBR_BASE_URL` host and the machine's own hostname are always accepted; any other `Host` gets a 421, which blocks DNS-rebinding attacks on a local install. |
-| `FRBR_TRUSTED_PROXIES` | *(loopback only)* | IPs or CIDRs whose `X-Forwarded-Proto` is honored, comma-separated — set this when TLS terminates on another box (or in a non-loopback local proxy). Loopback is always trusted, since a TCP peer cannot spoof it; a client that sets the header itself is ignored. |
+IPs or CIDRs whose `X-Forwarded-Proto` is honored, comma-separated — set this when TLS terminates on another box (or in a non-loopback local proxy) whose addresses you can name. Loopback is always trusted, since a TCP peer cannot spoof it; a client that sets the header itself is ignored. If TLS ends at a load balancer you cannot name (Azure App Service, most managed hosting), don't list it: set `FRBR_BASE_URL` instead, whose scheme is trusted for its own host. |
 
 When both `FRBR_TLS_CERT` and `FRBR_TLS_KEY` are provided, the server uses TLS (`https:`). Otherwise it serves plain HTTP.
 

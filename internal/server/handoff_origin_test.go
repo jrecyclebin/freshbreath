@@ -184,6 +184,45 @@ func TestSchemeOfTrustsForwardedProtoOnlyFromProxies(t *testing.T) {
 	}
 }
 
+// A declared FRBR_BASE_URL makes its scheme authoritative for its own
+// host: TLS may terminate at a front-end whose addresses the server
+// cannot name (a cloud load balancer), and there is no trusted-proxy
+// list of those. The declared scheme only applies when the Host is the
+// declared one — a caller reaching a different host gains nothing.
+func TestSchemeOfTrustsDeclaredPublicBaseURL(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.PublicBaseURL = "https://fresh.example.com"
+	srv.publicScheme = "https"
+	srv.publicHost = "fresh.example.com"
+
+	mk := func(host, proto string) *http.Request {
+		r := httptest.NewRequest("GET", "/env.js", nil)
+		r.Host = host
+		if proto != "" {
+			r.Header.Set("X-Forwarded-Proto", proto)
+		}
+		return r
+	}
+	if got := srv.schemeOf(mk("fresh.example.com", "")); got != "https" {
+		t.Errorf("declared public host: scheme = %q, want https", got)
+	}
+	if got := srv.schemeOf(mk("FRESH.example.com.", "")); got != "https" {
+		t.Errorf("case and trailing dot normalized: scheme = %q, want https", got)
+	}
+	if got := srv.schemeOf(mk("fresh.example.com:443", "")); got != "https" {
+		t.Errorf("default port stripped: scheme = %q, want https", got)
+	}
+	if got := srv.schemeOf(mk("fresh.example.com", "http")); got != "https" {
+		t.Errorf("an untrusted caller's proto cannot downgrade a declared https host: %q, want https", got)
+	}
+	if got := srv.schemeOf(mk("app.example.com", "")); got != "http" {
+		t.Errorf("undeclared host: scheme = %q, want http", got)
+	}
+	if got := srv.schemeOf(mk("evil.example.com:9009", "")); got != "http" {
+		t.Errorf("a port the declaration does not name: scheme = %q, want http", got)
+	}
+}
+
 // F4 (audit 202610): a page on another origin that holds an off-server
 // app's nonce used to start that app's login and receive the token. Now
 // the login can only start from the app's own origin, and the sign-in
