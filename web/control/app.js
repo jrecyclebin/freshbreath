@@ -2291,7 +2291,7 @@ function AuthForm({ form, setForm, record }) {
 
   const kind = form.kind;
   const d = form.descriptor;
-  const secretPlaceholder = isEdit && record.has_secret ? 'Stored — leave blank to keep' : '';
+  const secretPlaceholder = isEdit && record.has_secret ? 'Stored — leave blank to keep (re-enter if you move an endpoint)' : '';
 
   return (
     <>

@@ -244,6 +244,19 @@ func (s *Store) ListAuthRecords() ([]*AuthRecord, error) {
 // UpdateAuthRecord replaces a record's fields. A builtin record keeps its
 // name and kind. An empty incoming secret keeps the stored one, so the
 // masked serialization can round-trip through an edit form.
+// ErrSecretNeeded refuses an update that moves a record's endpoints (or
+// changes its kind) while leaving the stored secret to carry over.
+var ErrSecretNeeded = errors.New("this change moves where the stored secret is sent; enter the secret again")
+
+// authEndpointsMoved reports whether any URL a record talks to now points
+// somewhere new. Clearing one sends nothing anywhere, so it doesn't count.
+func authEndpointsMoved(from, to AuthDescriptor) bool {
+	moved := func(a, b string) bool { return b != "" && a != b }
+	return moved(from.Issuer, to.Issuer) || moved(from.AuthorizeURL, to.AuthorizeURL) ||
+		moved(from.TokenURL, to.TokenURL) || moved(from.UserInfoURL, to.UserInfoURL) ||
+		moved(from.UserEmailsURL, to.UserEmailsURL) || moved(from.Resource, to.Resource)
+}
+
 func (s *Store) UpdateAuthRecord(id int64, name, kind string, d AuthDescriptor) error {
 	existing, err := s.GetAuthRecord(id)
 	if err != nil {
@@ -254,6 +267,14 @@ func (s *Store) UpdateAuthRecord(id int64, name, kind string, d AuthDescriptor) 
 	}
 	if existing.Builtin {
 		name, kind = existing.Name, existing.Kind
+	}
+	// A blank secret keeps the stored one, but only while the record still
+	// points where it did: otherwise anyone who may edit it could move the
+	// endpoints and receive a secret they can't read.
+	keeping := (d.ClientSecret == "" && existing.Descriptor.ClientSecret != "") ||
+		(d.Key == "" && existing.Descriptor.Key != "")
+	if keeping && (kind != existing.Kind || authEndpointsMoved(existing.Descriptor, d)) {
+		return ErrSecretNeeded
 	}
 	if d.ClientSecret == "" {
 		d.ClientSecret = existing.Descriptor.ClientSecret

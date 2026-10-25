@@ -1623,7 +1623,11 @@ func (s *Server) registerAuthTools(mcps *mcp.Server, role string) {
 		if kind == "" {
 			kind = existing.Kind
 		}
+		// Patch onto the stored descriptor minus its secrets: a secret the
+		// caller didn't send is left for UpdateAuthRecord to keep (or to
+		// refuse to carry somewhere new).
 		desc := existing.Descriptor
+		desc.ClientSecret, desc.Key = "", ""
 		if raw, ok := args["descriptor"].(map[string]interface{}); ok {
 			descBytes, _ := json.Marshal(raw)
 			json.Unmarshal(descBytes, &desc)

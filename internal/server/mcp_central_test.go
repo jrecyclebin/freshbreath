@@ -240,3 +240,38 @@ func TestMCPServiceDescriptorSchemaHasNoAuthFields(t *testing.T) {
 		}
 	}
 }
+
+// F9 (audit 202610) through the MCP tool: update_auth patches onto the
+// stored descriptor, so it must not carry the stored secret along as if
+// the caller had typed it — or a moved token URL would keep it.
+func TestUpdateAuthToolCantMoveAStoredSecret(t *testing.T) {
+	srv := newTestServer(t)
+	rec, err := srv.store.CreateAuthRecord("Corp", db.AuthOAuth2, db.AuthDescriptor{
+		AuthorizeURL: "https://idp.example/authorize", TokenURL: "https://idp.example/token",
+		ClientID: "cid", ClientSecret: "shh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callCentralTool(t, srv, "update_auth", map[string]interface{}{
+		"name": "Corp", "descriptor": map[string]interface{}{"token_url": "https://evil.example/token"},
+	})
+	if !res.IsError || !strings.Contains(toolResultText(t, res), "enter the secret again") {
+		t.Errorf("moved token url without the secret: %s", toolResultText(t, res))
+	}
+	got, _ := srv.store.GetAuthRecord(rec.ID)
+	if got.Descriptor.TokenURL != "https://idp.example/token" {
+		t.Errorf("token url = %q", got.Descriptor.TokenURL)
+	}
+
+	// A patch that doesn't move anything still keeps the secret.
+	res = callCentralTool(t, srv, "update_auth", map[string]interface{}{
+		"name": "Corp", "descriptor": map[string]interface{}{"scopes": "read"},
+	})
+	if res.IsError {
+		t.Fatalf("scopes patch: %s", toolResultText(t, res))
+	}
+	if got, _ := srv.store.GetAuthRecord(rec.ID); got.Descriptor.ClientSecret != "shh" || got.Descriptor.Scopes != "read" {
+		t.Errorf("after patch: secret %q scopes %q", got.Descriptor.ClientSecret, got.Descriptor.Scopes)
+	}
+}
