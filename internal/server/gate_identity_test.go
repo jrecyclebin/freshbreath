@@ -154,13 +154,14 @@ func mcpOAuthLogin(t *testing.T, srv *Server, resource string) string {
 	if rr.Code != 200 {
 		t.Fatalf("authorize status = %d, body = %s", rr.Code, rr.Body.String())
 	}
+	browser := setCookies(rr)
 	rr = testRequest(t, srv, "POST", "/oauth/authorize",
-		strings.NewReader(`{"state":"`+interstitialState(t, rr.Body.String())+`","tokens":[]}`), nil)
+		strings.NewReader(`{"state":"`+interstitialState(t, rr.Body.String())+`","tokens":[]}`), browser)
 	var cont map[string]string
 	json.Unmarshal(rr.Body.Bytes(), &cont)
 	leg, _ := url.Parse(cont["redirect"])
 
-	rr = testRequest(t, srv, "GET", "/service/callback?code=c1&state="+leg.Query().Get("state"), nil, nil)
+	rr = testRequest(t, srv, "GET", "/service/callback?code=c1&state="+leg.Query().Get("state"), nil, browser)
 	back, _ := url.Parse(rr.Header().Get("Location"))
 	code := back.Query().Get("code")
 	if rr.Code != http.StatusFound || code == "" {
@@ -262,9 +263,10 @@ func TestAppDoorSSHGateOffAdminYieldsFrbr(t *testing.T) {
 	sshRec := builtinAuth(t, srv, db.AuthSSHKey)
 	nonce := appBehind(t, srv, "ssh-app", &sshRec.ID)
 
-	leg, _ := url.Parse(appLoginStart(t, srv, nonce))
+	start := appLoginStart(t, srv, nonce)
+	leg, _ := url.Parse(start)
 	body := `{"state":"` + leg.Query().Get("state") + `","email":"` + knownEmail + `","passphrase":"correct horse"}`
-	rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), nil)
+	rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), openForm(t, srv, start))
 	if rr.Code != 200 {
 		t.Fatalf("ssh-auth status = %d, body = %s", rr.Code, rr.Body.String())
 	}
@@ -296,7 +298,7 @@ func TestControlPassSurvivesOtherGateSignIn(t *testing.T) {
 		t.Fatalf("control: redirect = %q, want the passphrase form", rr.Header().Get("Location"))
 	}
 	body := `{"state":"` + leg.Query().Get("state") + `","email":"` + knownEmail + `","passphrase":"correct horse"}`
-	rr = testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), nil)
+	rr = testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), setCookies(rr))
 	pass := gateCookie(rr)
 	if pass == nil {
 		t.Fatalf("passphrase login set no pass: %d %s", rr.Code, rr.Body.String())
@@ -340,4 +342,83 @@ func TestCallbackNeedsTheBrowserThatStartedTheLogin(t *testing.T) {
 	if rr := testRequest(t, srv, "GET", callback, nil, browser); rr.Code != 200 {
 		t.Errorf("starting browser: callback status %d, body %s", rr.Code, rr.Body.String())
 	}
+}
+
+// Audit 202610-r3 #1: the MCP consent click wasn't tied to a browser, so
+// whoever registered a client could click Allow themselves and send a
+// user straight to the sign-in leg, then collect the code at their own
+// redirect_uri. The consent page now binds the flow, and the Allow POST,
+// the form legs and the provider callback all refuse any other browser.
+func TestMCPConsentNeedsTheBrowserThatSawIt(t *testing.T) {
+	authorize := func(t *testing.T, srv *Server) (contState string, browser map[string]string) {
+		t.Helper()
+		clientID, _ := registerOAuthClient(t, srv, "https://attacker.example/cb")
+		_, challenge := pkcePair()
+		q := url.Values{
+			"client_id":             {clientID},
+			"redirect_uri":          {"https://attacker.example/cb"},
+			"state":                 {"s"},
+			"code_challenge":        {challenge},
+			"code_challenge_method": {"S256"},
+			"resource":              {"/mcp"},
+		}
+		rr := testRequest(t, srv, "GET", "/oauth/authorize?"+q.Encode(), nil, nil)
+		if rr.Code != 200 {
+			t.Fatalf("authorize: %d %s", rr.Code, rr.Body.String())
+		}
+		return interstitialState(t, rr.Body.String()), setCookies(rr)
+	}
+	allow := func(t *testing.T, srv *Server, contState string, browser map[string]string) *httptest.ResponseRecorder {
+		return testRequest(t, srv, "POST", "/oauth/authorize",
+			strings.NewReader(`{"state":"`+contState+`","tokens":[]}`), browser)
+	}
+
+	t.Run("allow from another browser", func(t *testing.T) {
+		srv := newTestServer(t)
+		makeAdminAuth(t, srv, builtinAuth(t, srv, db.AuthSSHKey))
+		contState, _ := authorize(t, srv)
+		if rr := allow(t, srv, contState, nil); rr.Code != http.StatusForbidden {
+			t.Errorf("Allow without the consent page's cookie: %d, want 403", rr.Code)
+		}
+	})
+
+	t.Run("form leg from another browser", func(t *testing.T) {
+		srv := newTestServer(t)
+		makeAdminAuth(t, srv, builtinAuth(t, srv, db.AuthSSHKey))
+		contState, browser := authorize(t, srv)
+		rr := allow(t, srv, contState, browser)
+		var cont map[string]string
+		json.Unmarshal(rr.Body.Bytes(), &cont)
+		leg, _ := url.Parse(cont["redirect"])
+		if leg.Path != "/service/ssh-auth" {
+			t.Fatalf("Allow sent the browser to %q, want the passphrase form", cont["redirect"])
+		}
+		// The victim opens the link: opening it must not bind the flow to them.
+		victim := openForm(t, srv, leg.String())
+		body := `{"state":"` + leg.Query().Get("state") + `","email":"nobody@example.com","passphrase":"whatever"}`
+		if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), victim); rr.Code != http.StatusForbidden {
+			t.Errorf("form POST from a browser that only opened the link: %d, want 403", rr.Code)
+		}
+		if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), browser); rr.Code != http.StatusUnauthorized {
+			t.Errorf("form POST from the consenting browser: %d, want 401 (bad credentials, not refused)", rr.Code)
+		}
+	})
+
+	t.Run("provider callback from another browser", func(t *testing.T) {
+		srv := newTestServer(t)
+		makeAdminAuth(t, srv, fakeGitHubIdP(t, srv))
+		knownUser(t, srv)
+		contState, browser := authorize(t, srv)
+		rr := allow(t, srv, contState, browser)
+		var cont map[string]string
+		json.Unmarshal(rr.Body.Bytes(), &cont)
+		leg, _ := url.Parse(cont["redirect"])
+		callback := "/service/callback?code=c1&state=" + leg.Query().Get("state")
+		if rr := testRequest(t, srv, "GET", callback, nil, nil); rr.Code != http.StatusForbidden {
+			t.Errorf("callback without the cookie: %d, want 403", rr.Code)
+		}
+		if rr := testRequest(t, srv, "GET", callback, nil, browser); rr.Code != http.StatusFound {
+			t.Errorf("callback in the consenting browser: %d, want 302 to the client", rr.Code)
+		}
+	})
 }

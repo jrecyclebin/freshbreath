@@ -368,7 +368,7 @@ func TestOAuthAuthorizeInterstitialFlow(t *testing.T) {
 	// Continue with no stored tokens: the flow begins the gate leg and
 	// sends the browser upstream.
 	rr2 := testRequest(t, srv, "POST", "/oauth/authorize",
-		strings.NewReader(`{"state":"`+contState+`","tokens":[]}`), nil)
+		strings.NewReader(`{"state":"`+contState+`","tokens":[]}`), setCookies(rr))
 	if rr2.Code != 200 {
 		t.Fatalf("continue status = %d, body = %s", rr2.Code, rr2.Body.String())
 	}
@@ -439,7 +439,7 @@ func TestOAuthAuthorizeLegSkip(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(map[string]interface{}{"state": contState, "tokens": []string{tok}})
-	rr2 := testRequest(t, srv, "POST", "/oauth/authorize", bytes.NewReader(body), nil)
+	rr2 := testRequest(t, srv, "POST", "/oauth/authorize", bytes.NewReader(body), setCookies(rr))
 	if rr2.Code != 200 {
 		t.Fatalf("continue status = %d, body = %s", rr2.Code, rr2.Body.String())
 	}
@@ -480,7 +480,7 @@ func TestOAuthAuthorizeLegSkip(t *testing.T) {
 	rrG := testRequest(t, srv, "GET", "/oauth/authorize?"+q.Encode(), nil, nil)
 	gState := interstitialState(t, rrG.Body.String())
 	rr4 := testRequest(t, srv, "POST", "/oauth/authorize",
-		strings.NewReader(`{"state":"`+gState+`","tokens":["garbage.token.here"]}`), nil)
+		strings.NewReader(`{"state":"`+gState+`","tokens":["garbage.token.here"]}`), setCookies(rrG))
 	if rr4.Code != 200 {
 		t.Fatalf("continue status = %d", rr4.Code)
 	}

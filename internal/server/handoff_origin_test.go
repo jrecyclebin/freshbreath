@@ -257,7 +257,7 @@ func TestLoginHandsOffServerAppsTheirRefreshToken(t *testing.T) {
 		}
 		u, _ := url.Parse(res.URL)
 		body, _ := json.Marshal(map[string]string{"state": u.Query().Get("state"), "email": "ada@example.com", "passphrase": "correct horse battery"})
-		rr = testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(string(body)), nil)
+		rr = testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(string(body)), openForm(t, srv, res.URL))
 		if rr.Code != 200 {
 			t.Fatalf("ssh-auth: %d %s", rr.Code, rr.Body.String())
 		}

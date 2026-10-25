@@ -83,10 +83,11 @@ func signInByKeyHolding(t *testing.T, srv *Server, loginURL string, pass *http.C
 	if err != nil || u.Path != "/service/apikey-auth" {
 		t.Fatalf("login URL = %q, want the api key form", loginURL)
 	}
-	var headers map[string]string
+	var held []string
 	if pass != nil {
-		headers = map[string]string{"Cookie": gatePassCookie + "=" + pass.Value}
+		held = append(held, gatePassCookie+"="+pass.Value)
 	}
+	headers := openForm(t, srv, loginURL, held...)
 	body := `{"state":"` + u.Query().Get("state") + `","api_key":"sekret"}`
 	rr := testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), headers)
 	if rr.Code != 200 {
@@ -146,7 +147,7 @@ func TestGatePassReturnsToThePageAsked(t *testing.T) {
 	rr := pageRequest(srv, "/"+slug+"/deep?x=1", "navigate", nil, nil)
 	u, _ := url.Parse(rr.Header().Get("Location"))
 	body := `{"state":"` + u.Query().Get("state") + `","api_key":"sekret"}`
-	rr = testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), nil)
+	rr = testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), setCookies(rr))
 	if !strings.Contains(rr.Body.String(), `window.location.replace("/gated/deep?x=1&frbr_signin=`) {
 		t.Errorf("callback page does not return to the page asked:\n%s", rr.Body.String())
 	}
@@ -236,7 +237,7 @@ func TestGatePassBreaksLoginLoop(t *testing.T) {
 	rr := pageRequest(srv, "/"+slug+"/deep?x=1", "navigate", nil, nil)
 	u, _ := url.Parse(rr.Header().Get("Location"))
 	body := `{"state":"` + u.Query().Get("state") + `","api_key":"sekret"}`
-	rr = testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), nil)
+	rr = testRequest(t, srv, "POST", "/service/apikey-auth", strings.NewReader(body), setCookies(rr))
 	pass := gateCookie(rr)
 	m := regexp.MustCompile(`window\.location\.replace\("([^"]+)"\)`).FindStringSubmatch(rr.Body.String())
 	if m == nil || !strings.HasPrefix(m[1], "/"+slug+"/deep?x=1&frbr_signin=") {

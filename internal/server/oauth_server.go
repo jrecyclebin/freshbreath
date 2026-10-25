@@ -398,12 +398,17 @@ func (os *oauthServer) handleAuthorizeStart(w http.ResponseWriter, r *http.Reque
 	})
 
 	contState := utils.GenNonce()
-	os.server.putPending(contState, &pendingAuth{
+	p := &pendingAuth{
 		mcpKey:    mcpKey,
 		legs:      legs,
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
-	})
+	}
+	os.server.putPending(contState, p)
+	// The consent click and every leg after it must come from the browser
+	// that saw this page: otherwise whoever registered the client could
+	// click Allow themselves and send the user straight to a sign-in leg.
+	os.server.bindBrowser(w, r, p)
 
 	var recIDs []string
 	for _, rec := range legs {
@@ -442,6 +447,10 @@ func (os *oauthServer) handleAuthorizeContinue(w http.ResponseWriter, r *http.Re
 			msg = "auth state expired — restart the login flow"
 		}
 		oauthWriteError(w, http.StatusBadRequest, "invalid_request", msg)
+		return
+	}
+	if !browserBound(r, p) {
+		oauthWriteError(w, http.StatusForbidden, "access_denied", signInStartedElsewhere)
 		return
 	}
 

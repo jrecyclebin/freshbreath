@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -112,6 +113,35 @@ func testRequest(t *testing.T, srv *Server, method, path string, body io.Reader,
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 	return rr
+}
+
+// setCookies is the Cookie header a browser would send back after rr, plus
+// any cookies it already held (extra, in "a=b; c=d" form).
+func setCookies(rr *httptest.ResponseRecorder, extra ...string) map[string]string {
+	cookies := append([]string{}, extra...)
+	for _, c := range rr.Result().Cookies() {
+		if c.MaxAge >= 0 {
+			cookies = append(cookies, c.Name+"="+c.Value)
+		}
+	}
+	return map[string]string{"Cookie": strings.Join(cookies, "; ")}
+}
+
+// openForm loads a credential form leg (/service/ssh-auth or
+// /service/apikey-auth) the way a browser would and returns the Cookie
+// header that binds a browser flow to it. extra carries cookies the
+// browser already holds.
+func openForm(t *testing.T, srv *Server, formURL string, extra ...string) map[string]string {
+	t.Helper()
+	u, err := url.Parse(formURL)
+	if err != nil {
+		t.Fatalf("form URL %q: %v", formURL, err)
+	}
+	rr := testRequest(t, srv, "GET", u.RequestURI(), nil, nil)
+	if rr.Code != 200 {
+		t.Fatalf("open form %s: %d %s", formURL, rr.Code, rr.Body.String())
+	}
+	return setCookies(rr, extra...)
 }
 
 // ── Static routes ──
@@ -833,14 +863,14 @@ func TestAPIKeyAuthFlow(t *testing.T) {
 
 	// Wrong key → 401, and the state survives for a retry.
 	rr := testRequest(t, srv, "POST", "/service/apikey-auth",
-		strings.NewReader(`{"state":"`+state+`","api_key":"wrong"}`), nil)
+		strings.NewReader(`{"state":"`+state+`","api_key":"wrong"}`), openForm(t, srv, "/service/apikey-auth?state="+state))
 	if rr.Code != 401 {
 		t.Fatalf("wrong key: status = %d, want 401", rr.Code)
 	}
 
 	// Right key → the final page hands the typed key back as a store entry.
 	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
-		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), openForm(t, srv, "/service/apikey-auth?state="+state))
 	if rr.Code != 200 {
 		t.Fatalf("right key: status = %d, body = %s", rr.Code, rr.Body.String())
 	}
@@ -871,7 +901,7 @@ func TestAPIKeyAuthFlowProxiedKeepsKeyServerSide(t *testing.T) {
 
 	state := apiKeyLoginState(t, srv, nonce)
 	rr := testRequest(t, srv, "POST", "/service/apikey-auth",
-		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), openForm(t, srv, "/service/apikey-auth?state="+state))
 	if rr.Code != 200 {
 		t.Fatalf("finish: status = %d, body = %s", rr.Code, rr.Body.String())
 	}
@@ -905,7 +935,7 @@ func TestAPIKeyAuthFlowProxiedKeepsKeyServerSide(t *testing.T) {
 	setAppGate(t, srv, bare, rec.ID)
 	state = apiKeyLoginState(t, srv, bare)
 	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
-		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), openForm(t, srv, "/service/apikey-auth?state="+state))
 	if rr.Code != 200 || strings.Contains(rr.Body.String(), "s3cret") {
 		t.Errorf("bare app: status = %d, leaks key = %v", rr.Code, strings.Contains(rr.Body.String(), "s3cret"))
 	}
@@ -962,7 +992,7 @@ func TestLoginReturnPath(t *testing.T) {
 	state := url[i+len("state="):]
 
 	rr = testRequest(t, srv, "POST", "/service/apikey-auth",
-		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), nil)
+		strings.NewReader(`{"state":"`+state+`","api_key":"s3cret"}`), openForm(t, srv, "/service/apikey-auth?state="+state))
 	if rr.Code != 200 {
 		t.Fatalf("finish: status = %d, body = %s", rr.Code, rr.Body.String())
 	}

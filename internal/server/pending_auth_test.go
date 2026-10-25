@@ -23,10 +23,11 @@ func TestPendingStateSurvivesBadCredentials(t *testing.T) {
 	srv := newTestServer(t)
 	state := "test-state-123"
 	srv.putPending(state, sshPending(t, srv))
+	browser := openForm(t, srv, "/service/ssh-auth?state="+state)
 
 	post := func() *httptest.ResponseRecorder {
 		body := strings.NewReader(`{"state":"` + state + `","email":"nobody@example.com","passphrase":"wrong"}`)
-		return testRequest(t, srv, "POST", "/service/ssh-auth", body, nil)
+		return testRequest(t, srv, "POST", "/service/ssh-auth", body, browser)
 	}
 
 	first := post()
@@ -152,13 +153,14 @@ func TestSignInFailuresAreLimited(t *testing.T) {
 	state := "limit-state"
 	srv.putPending(state, sshPending(t, srv))
 	body := `{"state":"` + state + `","email":"nobody@example.com","passphrase":"wrong-guess"}`
+	browser := openForm(t, srv, "/service/ssh-auth?state="+state)
 
 	for i := 0; i < loginFailureLimit; i++ {
-		if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), nil); rr.Code != 401 {
+		if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), browser); rr.Code != 401 {
 			t.Fatalf("attempt %d: got %d, want 401", i+1, rr.Code)
 		}
 	}
-	if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), nil); rr.Code != 429 {
+	if rr := testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(body), browser); rr.Code != 429 {
 		t.Fatalf("attempt past the limit: got %d, want 429", rr.Code)
 	}
 }

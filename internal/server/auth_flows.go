@@ -880,11 +880,13 @@ func (s *Server) handleBegin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, p.legURL, http.StatusFound)
 }
 
-// bindBrowser ties a browser login to the browser on this request: a
-// per-flow cookie the callback checks (browserBound), so someone else's
-// callback URL can't finish a login in it. Lax, because the provider's
-// redirect back is a cross-site navigation. Every leg of the flow shares
-// the one binding.
+// bindBrowser ties a login to the browser on this request: a per-flow
+// cookie every step that advances the flow checks (browserBound) — the
+// provider callback, the credential forms, the MCP consent — so a link
+// to someone else's flow can't finish it in another browser. Lax, because
+// the provider's redirect back is a cross-site navigation. Path is the
+// whole origin since those steps live under /service/ and /oauth/. Every
+// leg of the flow shares the one binding.
 func (s *Server) bindBrowser(w http.ResponseWriter, r *http.Request, p *pendingAuth) {
 	if p.bindID == "" {
 		p.bindID, p.bindSecret = utils.GenNonce(), utils.GenNonce()+utils.GenNonce()
@@ -892,7 +894,7 @@ func (s *Server) bindBrowser(w http.ResponseWriter, r *http.Request, p *pendingA
 	http.SetCookie(w, &http.Cookie{
 		Name:     loginBindCookie + p.bindID,
 		Value:    p.bindSecret,
-		Path:     "/service/callback",
+		Path:     "/",
 		MaxAge:   int(pendingAuthTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   s.schemeOf(r) == "https" || s.config.TLSCertFile != "",
@@ -901,6 +903,8 @@ func (s *Server) bindBrowser(w http.ResponseWriter, r *http.Request, p *pendingA
 }
 
 // bindPendingBrowser binds the browser flow pending under state, if any.
+// An MCP flow is never bound here: it was bound when the consent page was
+// shown, and binding it again would hand it to whoever opens the form link.
 func (s *Server) bindPendingBrowser(w http.ResponseWriter, r *http.Request, state string) {
 	if p, ok, _ := s.getPending(state); ok && p.mcpKey == "" {
 		s.bindBrowser(w, r, p)
@@ -918,6 +922,10 @@ func browserBound(r *http.Request, p *pendingAuth) bool {
 }
 
 const loginBindCookie = "frbr_login_"
+
+// signInStartedElsewhere is the refusal for a step from a browser the flow
+// isn't bound to.
+const signInStartedElsewhere = "This sign-in was started in a different browser (or its cookie was blocked). Start it again from where you began."
 
 // ── /service/callback ───────────────────────────────────────────────
 
@@ -940,7 +948,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unknown auth state", http.StatusBadRequest)
 		return
 	}
-	if p.mcpKey == "" && !browserBound(r, p) {
+	if !browserBound(r, p) {
 		gatePageError(w, http.StatusForbidden, "Sign-in started elsewhere",
 			"This sign-in was started in a different browser (or its cookie was blocked). Start it again from the app.")
 		return
@@ -1206,6 +1214,10 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Unknown auth state", http.StatusBadRequest)
 			return
 		}
+		if !browserBound(r, p) {
+			http.Error(w, signInStartedElsewhere, http.StatusForbidden)
+			return
+		}
 
 		ip := requestIP(r)
 		if s.loginFailures.blocked(ip, time.Now()) {
@@ -1282,6 +1294,10 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 		}
 		if !ok {
 			http.Error(w, "Unknown auth state", http.StatusBadRequest)
+			return
+		}
+		if !browserBound(r, p) {
+			http.Error(w, signInStartedElsewhere, http.StatusForbidden)
 			return
 		}
 
