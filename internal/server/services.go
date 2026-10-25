@@ -111,6 +111,19 @@ type OIDCClaims struct {
 	Raw      map[string]interface{} `json:"-"`
 }
 
+// emailMarkedVerified reports whether a provider said outright that an
+// email is verified — what the admin gate's "require verified email"
+// setting asks for.
+func emailMarkedVerified(v any) bool {
+	switch v := v.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(v, "true")
+	}
+	return false
+}
+
 // emailMarkedUnverified reports whether a provider said outright that an
 // email is unverified. Such an email must not name an account — anyone can
 // type someone else's address into a profile at some providers. A missing
@@ -331,10 +344,11 @@ func (s *Server) oauth2ExchangeCode(ctx context.Context, rec *db.AuthRecord, tok
 // device can't be revoked under another's name.
 func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, provider *oidc.Provider, tok *oauth2.Token) (*OIDCClaims, error) {
 	var email, name, sub string
+	var verified bool
 
 	if rec.Descriptor.UserInfoURL != "" {
 		if ui, ok := fetchUserInfoEndpoint(ctx, s.httpClient, rec.Descriptor.UserInfoURL, tok); ok {
-			email, name = ui.Email, ui.Name
+			email, name, verified = ui.Email, ui.Name, emailMarkedVerified(ui.Verified)
 			if emailMarkedUnverified(ui.Verified) {
 				email = ""
 			}
@@ -349,9 +363,9 @@ func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, p
 			}
 		}
 	} else if provider != nil {
-		e, n, st, ok := fetchOIDCUserInfo(ctx, provider, tok)
+		e, n, st, v, ok := fetchOIDCUserInfo(ctx, provider, tok)
 		if ok {
-			email, name, sub = e, n, st
+			email, name, sub, verified = e, n, st, v
 		}
 	}
 
@@ -359,7 +373,7 @@ func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, p
 	// main profile.
 	if email == "" && rec.Descriptor.UserEmailsURL != "" {
 		if e, ok := fetchPrimaryEmail(ctx, s.httpClient, rec.Descriptor.UserEmailsURL, tok); ok {
-			email = e
+			email, verified = e, true // the lookup only returns verified addresses
 		}
 	}
 
@@ -374,10 +388,11 @@ func (s *Server) identityFromUserInfo(ctx context.Context, rec *db.AuthRecord, p
 		}
 	}
 	return &OIDCClaims{
-		Email:   email,
-		Name:    name,
-		Subject: sub,
-		Raw:     map[string]interface{}{},
+		Email:    email,
+		Verified: verified,
+		Name:     name,
+		Subject:  sub,
+		Raw:      map[string]interface{}{},
 	}, nil
 }
 
@@ -422,10 +437,10 @@ func fetchUserInfoEndpoint(ctx context.Context, c *http.Client, url string, tok 
 }
 
 // fetchOIDCUserInfo calls the OIDC provider's userinfo best-effort.
-func fetchOIDCUserInfo(ctx context.Context, p *oidc.Provider, tok *oauth2.Token) (email, name, sub string, ok bool) {
+func fetchOIDCUserInfo(ctx context.Context, p *oidc.Provider, tok *oauth2.Token) (email, name, sub string, verified, ok bool) {
 	userInfo, err := p.UserInfo(ctx, oauth2.StaticTokenSource(tok))
 	if err != nil {
-		return "", "", "", false
+		return "", "", "", false, false
 	}
 	var ui struct {
 		Email    string `json:"email"`
@@ -433,12 +448,12 @@ func fetchOIDCUserInfo(ctx context.Context, p *oidc.Provider, tok *oauth2.Token)
 		Name     string `json:"name"`
 	}
 	if err := userInfo.Claims(&ui); err != nil {
-		return "", "", "", false
+		return "", "", "", false, false
 	}
 	if emailMarkedUnverified(ui.Verified) {
 		ui.Email = ""
 	}
-	return ui.Email, ui.Name, userInfo.Subject, true
+	return ui.Email, ui.Name, userInfo.Subject, emailMarkedVerified(ui.Verified), true
 }
 
 // fetchPrimaryEmail calls a record's emails endpoint best-effort and returns
@@ -761,14 +776,15 @@ func activeUser(u *db.User) error {
 // mintSubject decides the token subject for a completed interactive login:
 // frbr:<id> when the leg is the admin auth gate AND its provider-asserted
 // email belongs to a Fresh Breath user (role/name come from that row, never
-// the provider); ext:<provider>:<sub> otherwise. A non-admin gate's email
+// the provider) — and, with admin_require_verified_email on, the provider
+// marked that email verified; ext:<provider>:<sub> otherwise. A non-admin gate's email
 // never elevates to frbr — signing in to a service is not signing in to
 // Fresh Breath, so a service SSO can't mint a Fresh Breath user's identity
 // no matter what email it reports. SSH passphrase logins prove a user
 // directly (leg.user) and never reach here, so they mint frbr by their own
 // trust path regardless of which record they clear.
-func (s *Server) mintSubject(rec *db.AuthRecord, email, providerSub string) (subject string, user *db.User) {
-	if email != "" && s.isAdminAuthRecord(rec) {
+func (s *Server) mintSubject(rec *db.AuthRecord, email, providerSub string, emailVerified bool) (subject string, user *db.User) {
+	if email != "" && s.isAdminAuthRecord(rec) && (emailVerified || !s.adminRequiresVerifiedEmail()) {
 		if u, err := s.store.GetUserByEmail(email); err == nil {
 			return subjectForUser(u), u
 		}

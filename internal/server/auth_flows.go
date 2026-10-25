@@ -900,10 +900,11 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	leg := &completedLeg{
-		rec:   rec,
-		email: claims.Email,
-		name:  claims.Name,
-		sub:   claims.Subject,
+		rec:           rec,
+		email:         claims.Email,
+		emailVerified: emailMarkedVerified(claims.Verified),
+		name:          claims.Name,
+		sub:           claims.Subject,
 		upstream: &sealedUpstreamData{
 			UpstreamToken:    accessToken,
 			UpstreamRefresh:  refreshToken,

@@ -3062,6 +3062,8 @@ function SettingSection({ title, desc, children }) {
 function SettingsView({ session, services, apps, auth, onRefresh }) {
   const [selectedAuth, setSelectedAuth] = useState('');
   const [savedAuth, setSavedAuth] = useState('');
+  const [requireVerified, setRequireVerified] = useState(false);
+  const [savedRequireVerified, setSavedRequireVerified] = useState(false);
   const [creatingGate, setCreatingGate] = useState(false);
   const [defaultApp, setDefaultApp] = useState('');
   const [dbMode, setDbMode] = useState('read-only');
@@ -3074,6 +3076,8 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
         const id = d.admin_auth_service || '';
         setSelectedAuth(id);
         setSavedAuth(id);
+        setRequireVerified(!!d.admin_require_verified_email);
+        setSavedRequireVerified(!!d.admin_require_verified_email);
         setDefaultApp(d.default_app || '');
         setDbMode(d.mcp_database_mode || 'read-only');
       })
@@ -3083,8 +3087,9 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
 
   const saveAuth = async () => {
     try {
-      await frbr(session, 'PUT', '/api/settings', { admin_auth_service: selectedAuth });
+      await frbr(session, 'PUT', '/api/settings', { admin_auth_service: selectedAuth, admin_require_verified_email: requireVerified });
       setSavedAuth(selectedAuth);
+      setSavedRequireVerified(requireVerified);
       toast('Settings saved');
     } catch(e) { toast(e.message, true); }
   };
@@ -3097,6 +3102,11 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
       toast('Admin auth removed');
     } catch(e) { toast(e.message, true); }
   };
+
+  // Only an SSO links logins to users by email; the built-in SSH key
+  // proves the user directly, so the checkbox has nothing to do there.
+  const selectedKind = auth.find(r => String(r.id) === selectedAuth)?.kind;
+  const linksByEmail = selectedKind === 'oidc' || selectedKind === 'oauth2';
 
   const saveLanding = async () => {
     try {
@@ -3134,9 +3144,18 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
                 onChange={v => setSelectedAuth(v == null ? '' : String(v))}
                 onCreate={() => setCreatingGate(true)}
               />
+              {linksByEmail && (
+                <div className="field" style={{marginTop:12}}>
+                  <label style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer',fontSize:13,color:'var(--ink-1)',fontWeight:400}}>
+                    <input type="checkbox" name="admin_require_verified_email" checked={requireVerified} onChange={e=>setRequireVerified(e.target.checked)}/>
+                    <span>Require a verified email</span>
+                  </label>
+                  <span className="help">Sign-ins link to a Fresh Breath user by email. With this on, only an email the provider explicitly marks verified links; providers that never send the claim won't link anyone. Off, a missing claim still links, so know how your provider vets addresses.</span>
+                </div>
+              )}
             </div>
             <div style={{display:'flex',gap:8,marginTop:16}}>
-              <button className="btn btn-primary" onClick={saveAuth} disabled={selectedAuth === savedAuth}>Save</button>
+              <button className="btn btn-primary" onClick={saveAuth} disabled={selectedAuth === savedAuth && requireVerified === savedRequireVerified}>Save</button>
               {savedAuth && <button className="btn btn-ghost" onClick={unlink}>Unlink</button>}
             </div>
             {creatingGate && (

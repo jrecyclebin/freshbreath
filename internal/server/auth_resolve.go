@@ -271,13 +271,14 @@ func (s *Server) resolveOutboundCred(svc *db.Service, gate *db.AuthRecord, claim
 // completedLeg is one cleared auth leg: the record, the identity it proved,
 // and any upstream credential it yielded.
 type completedLeg struct {
-	rec          *db.AuthRecord
-	user         *db.User            // ssh_key logins resolve a user directly
-	email        string              // reported email (interactive kinds)
-	name         string              // display name from the provider or user row
-	sub          string              // provider subject (interactive kinds)
-	upstream     *sealedUpstreamData // interactive kinds; nil otherwise
-	presentedKey string              // api_key gates: the key the caller typed
+	rec           *db.AuthRecord
+	user          *db.User            // ssh_key logins resolve a user directly
+	email         string              // reported email (interactive kinds)
+	emailVerified bool                // the provider explicitly marked email verified
+	name          string              // display name from the provider or user row
+	sub           string              // provider subject (interactive kinds)
+	upstream      *sealedUpstreamData // interactive kinds; nil otherwise
+	presentedKey  string              // api_key gates: the key the caller typed
 }
 
 // identity resolves the subject and user row a leg proved.
@@ -290,7 +291,7 @@ func (s *Server) legIdentity(leg *completedLeg) (subject string, user *db.User) 
 		// holds the key".
 		return extSubject(authProvider(leg.rec), "key"), nil
 	}
-	return s.mintSubject(leg.rec, leg.email, leg.sub)
+	return s.mintSubject(leg.rec, leg.email, leg.sub, leg.emailVerified)
 }
 
 // mintForLegs turns a completed login into one access token and its

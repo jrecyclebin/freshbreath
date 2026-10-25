@@ -181,7 +181,7 @@ func TestMintSubjectAdminGateKnownEmailYieldsFrbr(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	subject, u := srv.mintSubject(rec, "known@example.com", "provider-sub-1")
+	subject, u := srv.mintSubject(rec, "known@example.com", "provider-sub-1", false)
 	if subject != subjectForUser(user) {
 		t.Errorf("subject = %q, want %q", subject, subjectForUser(user))
 	}
@@ -206,7 +206,7 @@ func TestMintSubjectNonAdminGateMatchingEmailYieldsExt(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	subject, u := srv.mintSubject(svcRec, "known@example.com", "provider-sub-1")
+	subject, u := srv.mintSubject(svcRec, "known@example.com", "provider-sub-1", false)
 	if subject != "ext:svc-idp:provider-sub-1" {
 		t.Errorf("subject = %q, want ext:svc-idp:provider-sub-1 (no elevation via a service gate)", subject)
 	}
@@ -224,7 +224,7 @@ func TestMintSubjectAdminGateNoEmailYieldsExt(t *testing.T) {
 		t.Fatalf("set admin_auth_service: %v", err)
 	}
 
-	subject, u := srv.mintSubject(rec, "", "provider-sub-9")
+	subject, u := srv.mintSubject(rec, "", "provider-sub-9", false)
 	if subject != "ext:idp:provider-sub-9" {
 		t.Errorf("subject = %q, want ext:idp:provider-sub-9", subject)
 	}
@@ -237,7 +237,7 @@ func TestMintSubjectUnknownEmailYieldsExt(t *testing.T) {
 	srv := newTestServer(t)
 	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
 
-	subject, u := srv.mintSubject(rec, "stranger@example.com", "provider-sub-2")
+	subject, u := srv.mintSubject(rec, "stranger@example.com", "provider-sub-2", false)
 	if subject != "ext:idp:provider-sub-2" {
 		t.Errorf("subject = %q, want ext:idp:provider-sub-2", subject)
 	}
@@ -437,8 +437,8 @@ func TestProviderSlugSharedAcrossRecords(t *testing.T) {
 	public := newAuthRecord(t, srv, "GitHub (public)", db.AuthOAuth2, db.AuthDescriptor{
 		AuthorizeURL: "https://github.example/authorize", Provider: "github"})
 
-	subject1, _ := srv.mintSubject(staff, "", "same-human")
-	subject2, _ := srv.mintSubject(public, "", "same-human")
+	subject1, _ := srv.mintSubject(staff, "", "same-human", false)
+	subject2, _ := srv.mintSubject(public, "", "same-human", false)
 	if subject1 != subject2 {
 		t.Errorf("subjects diverged across records sharing a provider: %q vs %q", subject1, subject2)
 	}

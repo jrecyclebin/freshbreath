@@ -866,7 +866,7 @@ func (s *Server) coreSetPassphraseByLink(token, passphrase string) (*db.User, er
 // ── Settings operations ─────────────────────────────────────────────
 
 // coreUpdateSettings applies the non-nil settings fields, validating each.
-func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp, mcpDBMode *string) error {
+func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp, mcpDBMode *string, requireVerifiedEmail *bool) error {
 	if err := s.gate(actor, rolesSuperuser); err != nil {
 		return err
 	}
@@ -909,7 +909,38 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 		}
 		s.audit(actor, "updated settings", "mcp_database_mode")
 	}
+	if requireVerifiedEmail != nil {
+		if err := s.store.SetSetting("admin_require_verified_email", strconv.FormatBool(*requireVerifiedEmail)); err != nil {
+			return cerr(http.StatusInternalServerError, "%v", err)
+		}
+		s.audit(actor, "updated settings", "admin_require_verified_email")
+	}
 	return nil
+}
+
+// settingsView is the settings as the panel and get_settings show them.
+func (s *Server) settingsView() map[string]interface{} {
+	result := map[string]interface{}{
+		"admin_auth_service": nil, "default_app": nil, "mcp_database_mode": "read-only",
+		"admin_require_verified_email": s.adminRequiresVerifiedEmail(),
+	}
+	if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
+		result["admin_auth_service"] = v
+	}
+	if v, err := s.store.GetSetting("default_app"); err == nil && v != "" {
+		result["default_app"] = v
+	}
+	if v, err := s.store.GetSetting("mcp_database_mode"); err == nil && v == "full-access" {
+		result["mcp_database_mode"] = v
+	}
+	return result
+}
+
+// adminRequiresVerifiedEmail reports whether the admin gate links a login
+// to a user only by an email the provider explicitly marked verified.
+func (s *Server) adminRequiresVerifiedEmail() bool {
+	v, err := s.store.GetSetting("admin_require_verified_email")
+	return err == nil && v == "true"
 }
 
 // ── App Web operations ─────────────────────────────────────────────
