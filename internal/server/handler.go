@@ -730,20 +730,56 @@ func (s *Server) schemeOf(r *http.Request) string {
 // proxyTrusted reports whether the connection's peer is a configured
 // proxy — the only places X-Forwarded-* is read from.
 func (s *Server) proxyTrusted(r *http.Request) bool {
-	host := r.RemoteAddr
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	ip, err := netip.ParseAddr(strings.Trim(host, "[]"))
-	if err != nil {
-		return false
-	}
+	ip, err := netip.ParseAddr(peerHost(r))
+	return err == nil && s.addrTrusted(ip)
+}
+
+func (s *Server) addrTrusted(ip netip.Addr) bool {
 	for _, p := range s.trustedProxies {
-		if p.Contains(ip) {
+		if p.Contains(ip.Unmap()) {
 			return true
 		}
 	}
 	return false
+}
+
+// peerHost is the TCP peer's address, without port or brackets.
+func peerHost(r *http.Request) string {
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.Trim(host, "[]")
+}
+
+// requestIP is the client a request came from — what the sign-in and
+// anonymous-endpoint limits count by. Behind a trusted proxy the peer is
+// the proxy, shared by every client, so the address comes from
+// X-Forwarded-For instead: the nearest hop that isn't itself a trusted
+// proxy. Hops further left were written by the client and prove nothing.
+func (s *Server) requestIP(r *http.Request) string {
+	peer := peerHost(r)
+	if !s.proxyTrusted(r) {
+		return peer
+	}
+	var hops []string
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		hops = append(hops, strings.Split(v, ",")...)
+	}
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		if h, _, err := net.SplitHostPort(hop); err == nil {
+			hop = h // some proxies append the client's port
+		}
+		ip, err := netip.ParseAddr(strings.Trim(hop, "[]"))
+		if err != nil {
+			return peer // a hop we can't read: don't guess past it
+		}
+		if !s.addrTrusted(ip) {
+			return ip.String()
+		}
+	}
+	return peer
 }
 
 // trustedProxySet collects the CIDRs X-Forwarded-Proto is honored from:

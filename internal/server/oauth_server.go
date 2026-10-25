@@ -221,7 +221,7 @@ func (os *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 		oauthWriteError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
 		return
 	}
-	if !os.server.allowRate("oauth/register", requestIP(r), oauthRegisterRate) {
+	if !os.server.allowRate("oauth/register", os.server.requestIP(r), oauthRegisterRate) {
 		oauthWriteError(w, http.StatusTooManyRequests, "invalid_request", "too many registrations from this address — wait a minute")
 		return
 	}

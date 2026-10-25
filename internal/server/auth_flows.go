@@ -1219,7 +1219,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		ip := requestIP(r)
+		ip := s.requestIP(r)
 		if s.loginFailures.blocked(ip, time.Now()) {
 			tooManyLogins(w)
 			return
@@ -1301,7 +1301,7 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		ip := requestIP(r)
+		ip := s.requestIP(r)
 		if s.loginFailures.blocked(ip, time.Now()) {
 			tooManyLogins(w)
 			return

@@ -48,14 +48,6 @@ func (s *Server) allowRate(bucket, ip string, limit int) bool {
 	return c.count <= limit
 }
 
-func requestIP(r *http.Request) string {
-	host := r.RemoteAddr
-	if i := strings.LastIndex(host, ":"); i > 0 {
-		host = host[:i]
-	}
-	return host
-}
-
 // writeUpdateStream runs fn with an event channel and drains it to the client
 // as text/event-stream. The channel is the seam: core stays testable without
 // a response writer. fn runs in the request's context, so a dropped client
@@ -251,7 +243,7 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.allowRate("updates/check", requestIP(r), updateCheckRate) {
+	if !s.allowRate("updates/check", s.requestIP(r), updateCheckRate) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
 		return
 	}
@@ -271,7 +263,7 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.allowRate("updates/apply", requestIP(r), updateApplyRate) {
+	if !s.allowRate("updates/apply", s.requestIP(r), updateApplyRate) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
 		return
 	}

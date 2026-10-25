@@ -183,3 +183,62 @@ func TestReturnPathBackslashesRefused(t *testing.T) {
 		}
 	}
 }
+
+// Audit 202610-r3 #7: behind a reverse proxy every client shares the
+// proxy's address, so ten bad passphrases from anyone locked everyone out.
+// The client is now the nearest X-Forwarded-For hop that isn't a trusted
+// proxy — and only a trusted peer's header is read at all.
+func TestRequestIPBehindTrustedProxy(t *testing.T) {
+	srv := newTestServer(t)
+	srv.trustedProxies = trustedProxySet(Config{TrustedProxies: []string{"10.0.0.0/8"}})
+	ip := func(peer string, xff ...string) string {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = peer
+		for _, v := range xff {
+			r.Header.Add("X-Forwarded-For", v)
+		}
+		return srv.requestIP(r)
+	}
+	for name, c := range map[string]struct {
+		got, want string
+	}{
+		"untrusted peer ignores the header": {ip("203.0.113.9:5000", "1.2.3.4"), "203.0.113.9"},
+		"trusted peer, one hop":             {ip("10.0.0.2:5000", "198.51.100.7"), "198.51.100.7"},
+		"spoofed hop left of the real one":  {ip("10.0.0.2:5000", "6.6.6.6, 198.51.100.7"), "198.51.100.7"},
+		"chained proxies are skipped":       {ip("10.0.0.2:5000", "198.51.100.7, 10.0.0.9"), "198.51.100.7"},
+		"split across header lines":         {ip("10.0.0.2:5000", "6.6.6.6", "198.51.100.7"), "198.51.100.7"},
+		"hop with a port":                   {ip("10.0.0.2:5000", "198.51.100.7:4433"), "198.51.100.7"},
+		"unreadable hop stops the walk":     {ip("10.0.0.2:5000", "garbage"), "10.0.0.2"},
+		"no header":                         {ip("10.0.0.2:5000"), "10.0.0.2"},
+		"ipv6 peer":                         {ip("[2001:db8::1]:5000"), "2001:db8::1"},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: got %q, want %q", name, c.got, c.want)
+		}
+	}
+
+	// And the lockout follows the client, not the proxy.
+	state := "proxied-state"
+	srv.putPending(state, sshPending(t, srv))
+	browser := openForm(t, srv, "/service/ssh-auth?state="+state)
+	post := func(client string) int {
+		r := httptest.NewRequest("POST", "/service/ssh-auth",
+			strings.NewReader(`{"state":"`+state+`","email":"nobody@example.com","passphrase":"wrong-guess"}`))
+		r.RemoteAddr = "10.0.0.2:5000"
+		r.Header.Set("X-Forwarded-For", client)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Cookie", browser["Cookie"])
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, r)
+		return rr.Code
+	}
+	for i := 0; i < loginFailureLimit; i++ {
+		post("198.51.100.66")
+	}
+	if code := post("198.51.100.66"); code != 429 {
+		t.Errorf("attacker past the limit: %d, want 429", code)
+	}
+	if code := post("198.51.100.7"); code != 401 {
+		t.Errorf("another client behind the same proxy: %d, want 401 (not locked out)", code)
+	}
+}
