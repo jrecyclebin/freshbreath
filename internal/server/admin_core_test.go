@@ -371,3 +371,57 @@ func TestUploadZipExtractCap(t *testing.T) {
 		t.Errorf("old web dir disturbed: %q (err %v)", got, err)
 	}
 }
+
+// F1 (audit 202610): a tasks/virtual definition lives at <dir>/<name>.txt,
+// so a name must never walk out of its directory. An Admin naming a
+// virtual service "../tasks/backup" used to overwrite a Superuser-only
+// task script.
+func TestServiceNameStaysInDefinitionDir(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	super := &db.User{ID: 1, Role: "Superuser"}
+	admin := &db.User{ID: 2, Role: "Admin"}
+
+	task, err := srv.coreCreateService(super, "backup", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	script := []byte("[run] Run the backup\necho backing-up\n")
+	if err := srv.coreWriteServiceFile(super, task.ID, script, ""); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+
+	for _, name := range []string{"../tasks/backup", "a/b", `a\b`, "..", ".hidden", "nul\x00byte"} {
+		_, err := srv.coreCreateService(admin, name, "", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
+		if ce, ok := err.(*coreErr); !ok || ce.status != http.StatusBadRequest {
+			t.Errorf("create %q: err = %v, want 400", name, err)
+		}
+	}
+	for _, name := range []string{"My Service", "deploy-2", "a..b"} {
+		if _, err := srv.coreCreateService(admin, name, "", db.ServiceDescriptor{Type: "virtual"}, nil, nil); err != nil {
+			t.Errorf("create %q: %v", name, err)
+		}
+	}
+
+	ok, err := srv.coreCreateService(admin, "innocent", "", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
+	if err != nil {
+		t.Fatalf("create innocent: %v", err)
+	}
+	err = srv.coreUpdateService(admin, ok.ID, "../tasks/backup", ok.URL, ok.Descriptor, nil, nil)
+	if ce, isCore := err.(*coreErr); !isCore || ce.status != http.StatusBadRequest {
+		t.Errorf("rename to traversal: err = %v, want 400", err)
+	}
+
+	// A row that predates the check still can't write outside virtual/.
+	id, err := srv.store.RegisterService("../tasks/backup", "/mcp/old", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
+	if err != nil {
+		t.Fatalf("register legacy row: %v", err)
+	}
+	if err := srv.coreWriteServiceFile(admin, id, []byte("[run] x\nid\n"), ""); err == nil {
+		t.Error("write through a legacy traversal name succeeded")
+	}
+	got, err := os.ReadFile(filepath.Join(srv.config.DataDir, "tasks", "backup.txt"))
+	if err != nil || !bytes.Equal(got, script) {
+		t.Fatalf("task script changed: %q, %v", got, err)
+	}
+}

@@ -1062,7 +1062,7 @@ func (s *Server) serviceBySlug(slug string) (*db.Service, error) {
 
 // loadTasksForService reads and parses the tasks file for a service.
 func (s *Server) loadTasksForService(svc *db.Service) ([]formats.Task, error) {
-	path := filepath.Join(s.config.DataDir, "tasks", svc.Name+".txt")
+	path := serviceDefinitionPath(s.config.DataDir, svc)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("tasks file not found: %s: %w", path, err)
