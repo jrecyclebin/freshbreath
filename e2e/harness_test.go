@@ -106,9 +106,9 @@ func startFreshbreathOn(t *testing.T, useTLS bool) *freshbreath {
 		EnvFile:       filepath.Join(dataDir, "config.env"),
 	}, store, localKey, agentMgr, sessionMgr, "e2e", "e2e")
 
-	// Served over TLS, like a real deployment: the browser only keeps the
-	// SameSite=None refresh cookie when it is Secure. Go clients, the
-	// server's own included, trust httptest's localhost certificate.
+	// Served over TLS, like a real deployment, so cookies come back Secure.
+	// Go clients, the server's own included, trust httptest's localhost
+	// certificate.
 	ts := &httptest.Server{Listener: ln, Config: &http.Server{Handler: srv, ErrorLog: log.New(quietHandshakes{}, "", log.LstdFlags)}}
 	if useTLS {
 		ts.StartTLS()

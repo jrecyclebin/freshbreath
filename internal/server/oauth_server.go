@@ -804,17 +804,19 @@ func (os *oauthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 🔒 Cookie-path authorization. The cookie is SameSite=None (file:// and
-	// foreign-origin apps need it), so it attaches to any cross-site request
-	// the browser makes to this path. The CORS origin allowlist gates *which
-	// origins* may call us at all, but a registered app is still allowed to
-	// call — so on the cookie path only (CLI/MCP carry the token in the body
-	// and are authorized by possession), the requesting app must actually
-	// stand in some relation to the token's auth record: its own gate, or
-	// the gate/acts_as of a service it is allowed to use. The token's own
-	// data.AuthID is the source of truth — there is no request parameter on
-	// this path to spoof.
+	// 🔒 Cookie-path authorization. The cookie belongs to this server's own
+	// pages, so a cookie refresh must be same-origin (SameSite=Strict keeps
+	// other sites' requests from carrying it, but a sibling subdomain is the
+	// same site). And the requesting app must stand in some relation to the
+	// token's auth record: its own gate, or the gate/acts_as of a service it
+	// is allowed to use. The token's own data.AuthID is the source of truth
+	// — there is no request parameter on this path to spoof. The form path
+	// (CLI/MCP, off-server apps) is authorized by possession.
 	if !fromForm {
+		if o := r.Header.Get("Origin"); o != "" && o != os.server.schemeOf(r)+"://"+r.Host {
+			oauthWriteError(w, http.StatusForbidden, "invalid_grant", "cookie refresh is same-origin only")
+			return
+		}
 		appNonce := r.Header.Get("X-App-Nonce")
 		if appNonce == "" {
 			oauthWriteError(w, http.StatusForbidden, "invalid_grant", "missing app for cookie refresh")
@@ -1033,16 +1035,22 @@ func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefresh
 //
 // Mint a refresh token, set the HttpOnly cookie, and write the JSON response.
 
-// writeTokenResponse always rotates the refresh token into a fresh HttpOnly
-// cookie. The body copy is gated on deliverRefreshInBody: CLI/MCP clients have
-// no cookie jar and read it from the body (OAuth's standard contract), but
-// browser flows ride the cookie, so echoing it there would only hand a
-// readable copy to any script on the page — defeating HttpOnly. Callers pass
-// false for cookie-sourced (browser) refreshes.
+// writeTokenResponse hands out the rotated refresh token one way only: in
+// the body for clients that sent theirs in the form (CLI/MCP, off-server
+// apps — OAuth's standard contract), or as the HttpOnly cookie for this
+// server's own pages, where a body copy would hand a readable token to any
+// script on the page. One holder per family: a second copy would rotate
+// behind the first one's back and trip reuse detection.
 func (os *oauthServer) writeTokenResponse(w http.ResponseWriter, r *http.Request, accessToken string, refreshData freshbreathRefreshData, scope string, deliverRefreshInBody bool) {
 	expiresIn := int(accessTokenTTL.Seconds())
 
-	rt, err := os.server.makeRefreshCookie(w, r, refreshData)
+	var rt string
+	var err error
+	if deliverRefreshInBody {
+		rt, err = os.server.mintRefreshToken(refreshData)
+	} else {
+		rt, err = os.server.makeRefreshCookie(w, r, refreshData)
+	}
 	if err != nil {
 		oauthWriteError(w, http.StatusInternalServerError, "server_error", "refresh token issuance failed")
 		return

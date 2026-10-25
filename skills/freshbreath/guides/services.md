@@ -353,4 +353,9 @@ is, so a file's text arrives byte for byte.
   store, which is what lets a second app skip the prompt. Apps served from their
   own origins don't, and will prompt separately.
 - **Client secrets** never reach the browser. Token exchange and refresh run on
-  the server, and refresh tokens live in HttpOnly cookies your code can't read.
+  the server. For apps on the Fresh Breath origin, refresh tokens live in
+  HttpOnly cookies your code can't read. An app that runs elsewhere can't use
+  that cookie (it only rides same-origin requests), so frbr.js keeps that
+  app's refresh token in its store entry, rotating it on every refresh. For a
+  `file://` app that store is readable by any local HTML file the browser
+  opens, so only open pages from disk that you trust.

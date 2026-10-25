@@ -170,7 +170,8 @@ func (s *Server) appNeedsClientKey(appNonce string) bool {
 
 // finishLogin mints the token for a fully-cleared pending login and hands
 // it off: to the MCP client via a one-shot code, or to the opener via the
-// postMessage page (with the refresh cookie set alongside).
+// postMessage page (with the refresh cookie set alongside, or the refresh
+// token in the entry for an app that runs elsewhere).
 func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingAuth) (string, error) {
 	// Pure api_key browser logins hand the key itself to the browser —
 	// but only when the app actually calls some service directly. An app
@@ -212,15 +213,22 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 		return withQuery(mcp.redirectURI, url.Values{"code": {code}, "state": {mcp.state}})
 	}
 
-	// Browser flow: refresh family + HttpOnly cookie, then the store entry
-	// via postMessage.
+	// Browser flow: a refresh family, then the store entry via postMessage.
+	// This server's own pages keep the refresh token in the HttpOnly
+	// cookie; an app that runs elsewhere can't spend that (it's Strict), so
+	// its entry carries the token instead and no cookie is set.
 	familyID, jti, err := s.newRefreshFamily(rd.Subject, rd.AuthID, deviceLabelFromUA(r.UserAgent()))
 	if err != nil {
 		log.Printf("create refresh family: %v", err)
 	} else {
 		rd.FamilyID, rd.JTI = familyID, jti
 	}
-	if _, err := s.makeRefreshCookie(w, r, rd); err != nil {
+	var clientRefresh string
+	if app, _ := s.store.GetApp(p.appNonce); s.appRunsElsewhere(app) {
+		if clientRefresh, err = s.mintRefreshToken(rd); err != nil {
+			return "", err
+		}
+	} else if _, err := s.makeRefreshCookie(w, r, rd); err != nil {
 		return "", err
 	}
 	if rd.FamilyID != "" {
@@ -245,6 +253,9 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	}
 	if len(rd.Legs) > 0 {
 		entry["legs"] = rd.Legs
+	}
+	if clientRefresh != "" {
+		entry["refresh_token"] = clientRefresh
 	}
 	writeCallbackPage(w, p, entry)
 	return "", nil

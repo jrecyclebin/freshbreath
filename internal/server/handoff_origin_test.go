@@ -227,3 +227,56 @@ func TestLoginStartsOnlyFromAppOrigin(t *testing.T) {
 		t.Errorf("sign-in form doesn't name the disk app:\n%s", page)
 	}
 }
+
+// F2 (audit 202610): the refresh cookie is Strict, so an app that runs
+// elsewhere can't spend it. Its login hands the refresh token over in the
+// store entry instead, and sets no cookie (one holder per refresh family).
+// The panel and hosted apps keep the HttpOnly cookie and never see the
+// token itself.
+func TestLoginHandsOffServerAppsTheirRefreshToken(t *testing.T) {
+	srv := newTestServer(t)
+	gate := builtinAuth(t, srv, db.AuthSSHKey)
+	if err := srv.store.SetSetting("admin_auth_service", strconv.FormatInt(gate.ID, 10)); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := srv.store.CreateUser("Ada", "ada@example.com", "Member", "Active")
+	if _, err := srv.coreGenerateSSHKey(u, u, "correct horse battery"); err != nil {
+		t.Fatalf("ssh key: %v", err)
+	}
+	remote, _ := srv.store.CreateApp("Remote", "Development", "https://app.example/", nil, nil)
+	srv.adminNonce = adminNonceFrom(srv.store)
+
+	login := func(headers map[string]string) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		rr := testRequest(t, srv, "GET", "/service/login?state=s1", nil, headers)
+		var res struct {
+			URL string `json:"url"`
+		}
+		if rr.Code != 200 || json.NewDecoder(rr.Body).Decode(&res) != nil {
+			t.Fatalf("login start: %d %s", rr.Code, rr.Body.String())
+		}
+		u, _ := url.Parse(res.URL)
+		body, _ := json.Marshal(map[string]string{"state": u.Query().Get("state"), "email": "ada@example.com", "passphrase": "correct horse battery"})
+		rr = testRequest(t, srv, "POST", "/service/ssh-auth", strings.NewReader(string(body)), nil)
+		if rr.Code != 200 {
+			t.Fatalf("ssh-auth: %d %s", rr.Code, rr.Body.String())
+		}
+		return rr, rr.Body.String()
+	}
+
+	rr, page := login(map[string]string{"Origin": "https://app.example", "X-App-Nonce": remote})
+	if !strings.Contains(page, `"refresh_token":"`) {
+		t.Error("off-server login entry carries no refresh_token")
+	}
+	if findRefreshCookie(rr) != nil {
+		t.Error("off-server login also set the refresh cookie")
+	}
+
+	rr, page = login(map[string]string{"X-App-Nonce": srv.adminNonce}) // the panel, same-origin
+	if strings.Contains(page, `"refresh_token"`) {
+		t.Error("panel login leaked the refresh token into the page")
+	}
+	if findRefreshCookie(rr) == nil {
+		t.Error("panel login set no refresh cookie")
+	}
+}

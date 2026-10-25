@@ -1019,34 +1019,17 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, r *http.Request, data 
 	// holding refresh tokens for several records keeps them in separate
 	// cookie slots (the jar keys cookies by name+domain+path). Record-scoped
 	// rather than service-scoped so every session behind one gate — however
-	// many services share it — refreshes from the same slot. SameSite=None is
-	// required because legitimate consumers include file://-loaded apps and
-	// apps served from a foreign origin registered in the app config; the
-	// cross-site CSRF surface this opens is closed by the app/record
-	// authorization in handleRefreshTokenGrant rather than by SameSite.
+	// many services share it — refreshes from the same slot.
 	//
-	// Secure flag: a SameSite=None cookie MUST also carry Secure or the
-	// spec-compliant browser refuses to store it at all (R10). The old check
-	// (TLSCertFile != "") broke the recommended TLS-terminating-proxy
-	// deployment, where the app speaks plain HTTP to the proxy and TLS
-	// terminates upstream — there TLSCertFile is empty, yet the request truly
-	// arrived over https, which the proxy signals via X-Forwarded-Proto. We
-	// therefore consult the request the same way schemeOf does (r.TLS != nil
-	// || X-Forwarded-Proto == "https"), and additionally keep TLSCertFile as a
-	// belt-and-suspenders fallback. X-Forwarded-Proto is client-controllable
-	// when NOT behind a proxy, but spoofing it to "https" over plain HTTP just
-	// makes the browser refuse the Secure cookie — self-defeating, no DoS
-	// or gain — so no extra validation is warranted here.
+	// SameSite=Strict: only this server's own pages (the panel, hosted
+	// apps) spend the cookie. Apps that run elsewhere hold their own refresh
+	// token instead (finishLogin), and handleRefreshTokenGrant refuses a
+	// cross-origin cookie refresh, since SameSite is per site, not origin.
 	//
-	// Plain HTTP can't carry SameSite=None at all, so there the cookie is Lax:
-	// same-origin pages (the control panel, hosted apps) still refresh, and
-	// only the file:// and foreign-origin consumers, which need TLS anyway,
-	// go without.
+	// Secure follows the request's own scheme (schemeOf: r.TLS or a trusted
+	// proxy's X-Forwarded-Proto), with TLSCertFile as a fallback, so the
+	// TLS-terminating-proxy deployment still gets a Secure cookie (R10).
 	secure := s.schemeOf(r) == "https" || s.config.TLSCertFile != ""
-	sameSite := http.SameSiteLaxMode
-	if secure {
-		sameSite = http.SameSiteNoneMode
-	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    rt,
@@ -1054,7 +1037,7 @@ func (s *Server) makeRefreshCookie(w http.ResponseWriter, r *http.Request, data 
 		MaxAge:   int(refreshTokenTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   secure,
-		SameSite: sameSite,
+		SameSite: http.SameSiteStrictMode,
 	})
 	return rt, nil
 }
