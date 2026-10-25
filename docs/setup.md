@@ -41,6 +41,12 @@ I'd immediately set up a user for yourself, using the built-in SSH auth.
 
 You'll now need to refresh and log in using the password you just created.
 
+> A note if you pick an SSO for **Admin auth** later: every app and service
+> with an empty *Protected by* inherits it, and lets in anyone that provider
+> signs in, not just Fresh Breath users. A company SSO is made for that. A
+> generic GitHub or Google login isn't: it signs in the whole internet, so only
+> run it that way on a LAN.
+
 ## Step 3. Host an app
 
 Go to the *Apps* area in the control panel and create a new one. For example,

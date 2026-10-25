@@ -36,7 +36,13 @@ A service has two auth slots that point at an **auth record** — a credential o
 login method standing on its own, shared by everything that names it:
 
 - **Protected by** — who may call in. Empty means *inherit the admin record*,
-  not *open*; only an explicit Anonymous record means open.
+  not *open*; only an explicit Anonymous record means open. Inheriting lets in
+  everyone the admin record's provider vouches for, Fresh Breath user or not —
+  just right for a company SSO, where that's your people. A generic GitHub or
+  Google login as the admin record vouches for *anyone* with such an account,
+  so every inheriting app and service (task services included) opens to the
+  world. Keep that setup to a LAN, or give those apps and services a gate of
+  their own.
 - **Acts as** — what credential goes upstream. Empty means *the caller's own*.
   **mcp** services have no acts-as: the MCP server decides. An open server
   needs nothing; an OAuth one (Notion, say) is signed in to as a step of
