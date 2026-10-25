@@ -1974,3 +1974,48 @@ func TestIdleOAuthClientsSwept(t *testing.T) {
 		t.Error("fresh client was swept")
 	}
 }
+
+// F13 (audit 202610): the code exchange never compared redirect_uri with
+// the one the authorize request named. A client that sends it must send
+// the same one; one that omits it (OAuth 2.1 / PKCE-only clients) is still
+// served, PKCE having bound the code already.
+func TestOAuthAuthCodeGrantChecksRedirectURI(t *testing.T) {
+	srv := newTestServer(t)
+	clientID, secret := registerOAuthClient(t, srv)
+	gate := oidcRecord(t, srv, "Up IdP")
+	subject := extSubject("up-idp", "u-77")
+	fbToken, err := srv.mintFreshbreathToken(subject, "user@example.com", "", "", gate.ID, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	exchange := func(redirect string) int {
+		verifier, challenge := pkcePair()
+		code := utils.GenNonce()
+		srv.oauthSrv.codesMu.Lock()
+		srv.oauthSrv.codes[code] = &mcpAuthCode{issued: time.Now(), pending: &mcpPendingAuth{
+			clientID: clientID, redirectURI: "http://127.0.0.1:7777/cb",
+			codeChallenge: challenge, codeChallengeMethod: "S256", fbToken: fbToken,
+			refreshData: freshbreathRefreshData{Subject: subject, AuthID: gate.ID},
+		}}
+		srv.oauthSrv.codesMu.Unlock()
+		form := url.Values{
+			"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier},
+			"client_id": {clientID}, "client_secret": {secret},
+		}
+		if redirect != "" {
+			form.Set("redirect_uri", redirect)
+		}
+		return postForm(t, srv, "/oauth/token", form).Code
+	}
+	for redirect, want := range map[string]int{
+		"http://127.0.0.1:7777/cb":    200,
+		"":                            200,
+		"http://127.0.0.1:7777/other": 400,
+		"https://evil.example/cb":     400,
+	} {
+		if got := exchange(redirect); got != want {
+			t.Errorf("redirect_uri %q: status %d, want %d", redirect, got, want)
+		}
+	}
+}

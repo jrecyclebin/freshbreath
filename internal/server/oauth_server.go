@@ -676,6 +676,13 @@ func (os *oauthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *ht
 		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "client_id mismatch")
 		return
 	}
+	// RFC 6749 §4.1.3: a redirect_uri sent here must be the one the
+	// authorize request named. OAuth 2.1 clients may omit it; PKCE has
+	// already bound the code to them.
+	if ru := r.Form.Get("redirect_uri"); ru != "" && ru != pending.redirectURI {
+		oauthWriteError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
+		return
+	}
 
 	// The access token was minted when the login legs finished; the code
 	// grant just delivers it and opens a refresh family.
