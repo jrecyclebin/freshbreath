@@ -79,7 +79,7 @@ superuser so an agent can bootstrap the server.
 | `create_app` | admin+ | `{name, environment, url?, owner_id?, protected_by?}` |
 | `update_app` | admin+ | Patch (same fields) |
 | `delete_app` | admin+ | Delete |
-| `get_app_members` / `set_app_members` | admin+ / all (read) | Member list |
+| `get_app_members` / `set_app_members` | admin+ / admin+ | Member list (Member/Read-only accounts only; non-members are pruned on rewrite) |
 | `get_app_services` / `set_app_services` | admin+ / all (read) | Which services an app may use |
 | `list_app_files` | all | `{nonce, area: web\|data\|dev\|staging\|production}` |
 | `search_app_files` | all | Grep app files (regex, `ignore_case`, `area`) |
@@ -165,8 +165,8 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 |---|---|---|---|
 | `/api/apps` | POST | any | Create app `{name, environment, url?, owner_id?, protected_by?}` → `{nonce, name}` |
 | `/api/apps` | GET | any | List apps (member/read-only: their apps) |
-| `/api/apps/{nonce}` | GET/PUT/DELETE | any | Detail / update (204) / delete (204) |
-| `/api/apps/{nonce}/members` | GET/PUT | any | App member list |
+| `/api/apps/{nonce}` | GET/PUT/DELETE | any | Detail / update (204; owner must be Admin+ or the current owner) / delete (204) |
+| `/api/apps/{nonce}/members` | GET/PUT | admin+ | App member list (Member/Read-only accounts; rewrites prune the rest) |
 | `/api/apps/{nonce}/services` | GET/PUT | any | Approved services for the app |
 | `/api/apps/{nonce}/web` | GET/POST/DELETE, ±`?file=path` | any canAccessApp | Web files. Bare GET = zip download; POST = multipart upload (100 MB cap); `?file=` = single-file GET/PUT/DELETE |
 | `/api/apps/{nonce}/data` | GET/POST/DELETE, ±`?file=path` | any canAccessApp | Private (unhosted) files; GET served with `CSP: sandbox`, `nosniff` |
@@ -182,7 +182,7 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/services` | GET/POST | List / create (descriptors per kind; core gates writes) |
 | `/api/services/{id}` | GET/PUT/DELETE | Detail / update / delete |
 | `/api/services/{id}/apps` | GET | Apps using this service |
-| `/api/services/{id}/members` | GET/PUT | Users trusted with the service file |
+| `/api/services/{id}/members` | GET/PUT | admin+ — users trusted with the service file (Member/Read-only accounts; rewrites prune the rest) |
 | `/api/services/{id}/tools` | GET | Tool summaries |
 | `/api/services/{id}/files` | GET/POST/PUT/DELETE | GET = txt download; POST = upload (50MB per file); PUT = full replace; DELETE = clear |
 

@@ -585,10 +585,12 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		return mcpToolResult(map[string]string{"status": "deleted"})
 	})
 
-	// get_app_members
-	mcps.AddTool(&mcp.Tool{
+	// get_app_members — the member list is an admin tool, flown under the
+	// same flag as writing it: an agent working for a member stops at the
+	// app, not at who on the roster is staffed on it.
+	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
 		Name:        "get_app_members",
-		Description: "Get the member user IDs for an app. Any role (must be a member for non-admin).",
+		Description: "Get the member user IDs for an app. Admin+ only.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -597,16 +599,11 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 			"required": []string{"nonce"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		user, err := s.mcpUser(req)
-		if err != nil {
-			return mcpToolError("auth: %v", err), nil
-		}
-
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		if err := s.gateApp(user, nonce); err != nil {
-			return mcpToolError("%v", err), nil
+		if nonce == "" {
+			return mcpToolError("nonce is required"), nil
 		}
 
 		ids, err := s.store.ListAppMembers(nonce)

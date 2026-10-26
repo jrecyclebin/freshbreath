@@ -1868,7 +1868,10 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAppMembers(w http.ResponseWriter, r *http.Request, nonce string) {
-	if !s.canAccessApp(r.Context(), nonce) {
+	// The member list is an admin tool: only Admin+ reads or rewrites who is
+	// staffed on an app. A member of the app used to read it too; member IDs
+	// are not theirs to see.
+	if u := userFromContext(r.Context()); !roleIn(u.Role, rolesAdminPlus) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -2296,8 +2299,13 @@ func (s *Server) handleServiceApps(w http.ResponseWriter, r *http.Request, servi
 }
 
 // handleServiceMembers reads or replaces the users trusted with a service's
-// definition file.
+// definition file. It is an admin tool: only Admin+ reads the list or
+// rewrites it.
 func (s *Server) handleServiceMembers(w http.ResponseWriter, r *http.Request, serviceID int64) {
+	if u := userFromContext(r.Context()); !roleIn(u.Role, rolesAdminPlus) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		members, err := s.store.ListServiceMembers(serviceID)
