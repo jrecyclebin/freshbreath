@@ -404,3 +404,134 @@ func TestHostKeyDeleteIsAdminOnly(t *testing.T) {
 		t.Fatalf("Member past the app gate: got %d, want 403", rr.Code)
 	}
 }
+
+// App owners come from the admin+ list. A new or changed owner must be an
+// Admin or Superuser; the app's current owner may ride along unchanged (a
+// demotion doesn't strand the app's own form) until someone picks another
+// owner, which is constrained to admin+ again.
+func TestAppOwnerMustBeAdminPlus(t *testing.T) {
+	srv := newTestServer(t)
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	owner := mustUser(t, srv, "Owain", "Admin", "Active")
+	member := mustUser(t, srv, "Mel", "Member", "Active")
+
+	appBody := func(ownerID string) string {
+		if ownerID == "" {
+			return `{"name":"spelling"}`
+		}
+		return `{"name":"spelling","owner_id":` + ownerID + `}`
+	}
+	if rr := requestAs(t, srv, admin, "POST", "/api/apps", appBody(strconv.FormatInt(member.ID, 10))); rr.Code != http.StatusBadRequest {
+		t.Fatalf("create with Member owner: got %d, want 400 (%s)", rr.Code, rr.Body.String())
+	}
+	rr := requestAs(t, srv, admin, "POST", "/api/apps", appBody(strconv.FormatInt(owner.ID, 10)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("create with Admin owner: got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var created struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("parse nonce: %v", err)
+	}
+	app, err := srv.store.GetApp(created.Nonce)
+	if err != nil || app.OwnerID == nil || *app.OwnerID != owner.ID {
+		t.Fatalf("owner = %v, err %v, want %d", app.OwnerID, err, owner.ID)
+	}
+
+	// Rewriting the app keeps a member owner only if it's the same one.
+	body := `{"name":"spelling","owner_id":` + strconv.FormatInt(member.ID, 10) + `}`
+	if rr := requestAs(t, srv, admin, "PUT", "/api/apps/"+created.Nonce, body); rr.Code != http.StatusBadRequest {
+		t.Fatalf("swap owner to Member: got %d, want 400 (%s)", rr.Code, rr.Body.String())
+	}
+	// A demoted owner stays attached while byte-identical.
+	oo, _ := srv.store.GetApp(created.Nonce)
+	if err := srv.store.UpdateUser(owner.ID, owner.Name, owner.Email, "Member", owner.Status, owner.Metadata); err != nil {
+		t.Fatalf("demote owner: %v", err)
+	}
+	if rr := requestAs(t, srv, admin, "PUT", "/api/apps/"+created.Nonce, `{"name":"spelling","owner_id":`+strconv.FormatInt(owner.ID, 10)+`}`); rr.Code != http.StatusNoContent {
+		t.Fatalf("keep demoted owner: got %d, want 204 (%s)", rr.Code, rr.Body.String())
+	}
+	if app, _ := srv.store.GetApp(created.Nonce); app.OwnerID == nil || *app.OwnerID != owner.ID {
+		t.Fatalf("owner changed while unchanged: %v (was %v)", app.OwnerID, oo.OwnerID)
+	}
+}
+
+// A member-list rewrite prunes anyone outside the Members access list
+// (Member and Read-only accounts): a Member promoted to Admin keeps their
+// existing link until the list is next saved, which is exactly this call.
+// Reading the member list is admin work too.
+func TestAppMembersPrunedOnRewrite(t *testing.T) {
+	srv := newTestServer(t)
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	admin2 := mustUser(t, srv, "Abe", "Admin", "Active")
+	member := mustUser(t, srv, "Mel", "Member", "Active")
+	reader := mustUser(t, srv, "Red", "Read-only", "Active")
+	nonce, err := srv.coreCreateApp(&db.User{ID: admin.ID, Role: "Admin"}, "book club", "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+
+	// No member of the app reads the roster.
+	if rr := requestAs(t, srv, member, "GET", "/api/apps/"+nonce+"/members", ""); rr.Code != http.StatusForbidden {
+		t.Fatalf("member GET members: got %d, want 403", rr.Code)
+	}
+
+	if err := srv.store.AddAppMember(nonce, member.ID); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"members":[` + strings.Join([]string{
+		strconv.FormatInt(member.ID, 10),
+		strconv.FormatInt(admin2.ID, 10),
+		strconv.FormatInt(reader.ID, 10),
+	}, ",") + `]}`
+	if rr := requestAs(t, srv, admin, "PUT", "/api/apps/"+nonce+"/members", body); rr.Code != http.StatusNoContent {
+		t.Fatalf("set members: got %d (%s)", rr.Code, rr.Body.String())
+	}
+	ids, err := srv.store.ListAppMembers(nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || !containsInt64(ids, member.ID) || !containsInt64(ids, reader.ID) {
+		t.Fatalf("members = %v, want [%d %d] — the Admin ride-along must be pruned",
+			ids, member.ID, reader.ID)
+	}
+
+	// An ID naming no user fails the rewrite rather than vanishing.
+	if rr := requestAs(t, srv, admin, "PUT", "/api/apps/"+nonce+"/members", `{"members":[424242]}`); rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown member id: got %d, want 400", rr.Code)
+	}
+}
+
+// Service member lists obey the same rule as app member lists.
+func TestServiceMembersPrunedOnRewrite(t *testing.T) {
+	srv := newTestServer(t)
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	admin2 := mustUser(t, srv, "Abe", "Admin", "Active")
+	member := mustUser(t, srv, "Mel", "Member", "Active")
+	svc, err := srv.coreCreateService(admin, "deploy", "", db.ServiceDescriptor{Type: "virtual"}, nil, nil)
+	if err != nil {
+		t.Fatalf("create service: %v", err)
+	}
+	// A non-admin reads the roster no more than they can rewrite it.
+	if rr := requestAs(t, srv, member, "GET", "/api/services/"+strconv.FormatInt(svc.ID, 10)+"/members", ""); rr.Code != http.StatusForbidden {
+		t.Fatalf("member GET service members: got %d, want 403", rr.Code)
+	}
+	body := `{"members":[` + strconv.FormatInt(member.ID, 10) + `,` + strconv.FormatInt(admin2.ID, 10) + `]}`
+	if rr := requestAs(t, srv, admin, "PUT", "/api/services/"+strconv.FormatInt(svc.ID, 10)+"/members", body); rr.Code != http.StatusNoContent {
+		t.Fatalf("set service members: got %d (%s)", rr.Code, rr.Body.String())
+	}
+	ids, _ := srv.store.ListServiceMembers(svc.ID)
+	if len(ids) != 1 || ids[0] != member.ID {
+		t.Fatalf("service members = %v, want [%d]", ids, member.ID)
+	}
+}
+
+func containsInt64(list []int64, v int64) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}

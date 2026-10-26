@@ -99,6 +99,14 @@ var (
 	rolesAll       = []string{"Superuser", "Admin", "Member", "Read-only"}
 	rolesAdminPlus = []string{"Superuser", "Admin"}
 	rolesSuperuser = []string{"Superuser"}
+
+	// assignableMemberRoles are the roles an app or service member may hold.
+	// Member and Read-only accounts are staffed by the member lists; Admins
+	// and Superusers already reach everything, so having them on a list
+	// grants nothing and hides the real staff. A Member promoted past this
+	// keeps any existing link only until the list is next rewritten — the
+	// rewrite is the prune point (resolveMembers).
+	assignableMemberRoles = []string{"Member", "Read-only"}
 )
 
 // roleIn reports whether role is in the allowed set. Used by MCP visibility
@@ -115,6 +123,55 @@ func (s *Server) gate(actor *db.User, allowed []string) error {
 		return nil
 	}
 	return cerr(http.StatusForbidden, "forbidden: requires %s", strings.Join(allowed, " or "))
+}
+
+// resolveMembers validates a member-list rewrite and returns the assignees:
+// every ID must name a real user, and only Member/Read-only accounts stay.
+// Admin+ users are pruned rather than refused — a promoted member's stale
+// link drops out here when the list is rewritten, instead of 400-ing a save
+// the list itself forced (see assignableMemberRoles).
+func (s *Server) resolveMembers(members []int64) ([]int64, error) {
+	kept := make([]int64, 0, len(members))
+	for _, uid := range members {
+		u, err := s.store.GetUser(uid)
+		if err != nil {
+			return nil, cerr(http.StatusBadRequest, "user %d: %v", uid, err)
+		}
+		if roleIn(u.Role, assignableMemberRoles) {
+			kept = append(kept, uid)
+		}
+	}
+	return kept, nil
+}
+
+// validateOwner checks an app's owner: none, an Admin+ account, or — on
+// update only — the app's current owner unchanged. That last clause keeps a
+// demoted owner from stranding the app's own form: they stay attached until
+// someone actively picks a different owner, whom the picker (and this check)
+// constrains to Admin+.
+func (s *Server) validateOwner(ownerID *int64, currentOwnerID *int64) error {
+	if ownerID == nil {
+		return nil
+	}
+	if currentOwnerID != nil && *ownerID == *currentOwnerID {
+		return nil
+	}
+	u, err := s.store.GetUser(*ownerID)
+	if err != nil {
+		return cerr(http.StatusBadRequest, "owner %d: %v", *ownerID, err)
+	}
+	if !roleIn(u.Role, rolesAdminPlus) {
+		return cerr(http.StatusBadRequest, "owner must be an Admin or Superuser, not %s", u.Role)
+	}
+	return nil
+}
+
+// plural returns "s" for counts above 1, for audit strings.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // gateApp returns a 403 *coreErr unless the actor is Admin+ or a member of
@@ -335,6 +392,9 @@ func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *i
 	if name == "" {
 		return "", cerr(http.StatusBadRequest, "name required")
 	}
+	if err := s.validateOwner(ownerID, nil); err != nil {
+		return "", err
+	}
 	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
 		return "", err
 	}
@@ -350,6 +410,13 @@ func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *i
 
 func (s *Server) coreUpdateApp(actor *db.User, nonce, name, env, url string, ownerID *int64, protectedBy *int64) error {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		return cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	if err := s.validateOwner(ownerID, app.OwnerID); err != nil {
 		return err
 	}
 	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
@@ -386,11 +453,19 @@ func (s *Server) coreSetAppMembers(actor *db.User, nonce string, members []int64
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return err
 	}
-	if err := s.store.SetAppMembers(nonce, members); err != nil {
+	kept, err := s.resolveMembers(members)
+	if err != nil {
+		return err
+	}
+	if pruned := len(members) - len(kept); pruned > 0 {
+		s.auditApp(actor, fmt.Sprintf("updated app members (pruned %d non-member user%s)", pruned, plural(pruned)), nonce)
+	} else {
+		s.auditApp(actor, "updated app members", nonce)
+	}
+	if err := s.store.SetAppMembers(nonce, kept); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
 	_ = s.store.TouchApp(nonce)
-	s.auditApp(actor, "updated app members", nonce)
 	return nil
 }
 
@@ -533,16 +608,19 @@ func (s *Server) coreSetServiceMembers(actor *db.User, id int64, members []int64
 	if err := s.gateTaskService(actor, svc.Descriptor.Type); err != nil {
 		return err
 	}
-	for _, uid := range members {
-		if _, err := s.store.GetUser(uid); err != nil {
-			return cerr(http.StatusBadRequest, "user %d: %v", uid, err)
-		}
+	kept, err := s.resolveMembers(members)
+	if err != nil {
+		return err
 	}
-	if err := s.store.SetServiceMembers(id, members); err != nil {
+	if pruned := len(members) - len(kept); pruned > 0 {
+		s.audit(actor, fmt.Sprintf("updated service members (pruned %d non-member user%s)", pruned, plural(pruned)), svc.Name)
+	} else {
+		s.audit(actor, "updated service members", svc.Name)
+	}
+	if err := s.store.SetServiceMembers(id, kept); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
 	_ = s.store.TouchService(id)
-	s.audit(actor, "updated service members", svc.Name)
 	return nil
 }
 

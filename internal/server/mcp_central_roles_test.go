@@ -46,11 +46,13 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 
 	// The full admin-API tool surface (42 tools) bucketed by minimum role.
 	// Mirrors the HTTP routes in handler.go's requireAnyRole groups.
-	allAppTools := []string{
-		"list_apps", "get_app", "get_app_members", "get_app_services", // all-roles
+allAppTools := []string{
+		"list_apps", "get_app", "get_app_services", // all-roles
 		"list_app_files", "search_app_files", "read_app_file", "write_app_file", "delete_app_file", // all-roles
 	}
-	allAppManageTools := []string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services"}
+	// get_app_members is admin+ with the other member tools: the roster is
+	// not shown to members, on MCP any more than in the panel.
+	allAppManageTools := []string{"create_app", "update_app", "delete_app", "get_app_members", "set_app_members", "set_app_services"}
 	allServiceTools := []string{"list_services", "get_service", "get_service_apps", "list_service_files", "read_service_file", "write_service_file", "delete_service_file"} // all-roles; files gated per service
 	allServiceManageTools := []string{"create_service", "update_service", "delete_service", "set_service_members"}
 	allUserTools := []string{"list_users", "get_user", "create_user", "update_user", "delete_user", "get_user_apps", "set_user_apps", "get_user_ssh_key", "generate_user_ssh_key", "delete_user_ssh_key", "create_user_passphrase_link"}
@@ -74,8 +76,8 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 	}{
 		{"Superuser", wantSuperuser, []string{"get_settings", "update_settings", "create_app", "delete_user", "list_services", "create_auth", "db_query", "db_execute"}, nil},
 		{"Admin", wantAdmin, []string{"create_app", "list_users", "list_services", "delete_service", "create_auth", "delete_auth", "db_query", "db_execute"}, []string{"get_settings", "update_settings"}},
-		{"Member", wantMember, []string{"list_apps", "get_app", "get_app_members", "get_app_services", "list_services", "list_auth", "write_service_file", "list_roles", "list_audit", "get_me", "update_me", "get_my_ssh_key", "db_query"},
-			[]string{"create_app", "update_app", "delete_app", "set_app_members", "set_app_services", "create_service", "set_service_members", "create_auth", "list_users", "create_user", "delete_user", "create_user_passphrase_link", "get_settings", "update_settings"}},
+		{"Member", wantMember, []string{"list_apps", "get_app", "get_app_services", "list_services", "list_auth", "write_service_file", "list_roles", "list_audit", "get_me", "update_me", "get_my_ssh_key", "db_query"},
+			[]string{"create_app", "update_app", "delete_app", "get_app_members", "set_app_members", "set_app_services", "create_service", "set_service_members", "create_auth", "list_users", "create_user", "delete_user", "create_user_passphrase_link", "get_settings", "update_settings"}},
 		{"Read-only", wantMember, []string{"list_apps", "get_me", "list_roles", "list_services", "list_auth", "db_query"},
 			[]string{"create_app", "delete_app", "list_users", "create_auth", "delete_service", "get_settings"}},
 	}

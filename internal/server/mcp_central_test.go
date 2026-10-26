@@ -11,9 +11,22 @@ import (
 
 func TestMCPCreateAppWithOwnerEmail(t *testing.T) {
 	srv := newTestServer(t)
-	owner, err := srv.store.CreateUser("App Owner", "appowner@example.com", "Member", "Active")
+	// Owners are Admin+ accounts: owning an app is accountability, not
+	// assignment. The email lookup is the tool's shorthand for the picker's
+	// list, so it obeys the same list.
+	owner, err := srv.store.CreateUser("App Owner", "appowner@example.com", "Admin", "Active")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
+	}
+	member, err := srv.store.CreateUser("Not Owner", "notowner@example.com", "Member", "Active")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	if res := callCentralTool(t, srv, "create_app", map[string]interface{}{
+		"name": "member-owned", "environment": "Development", "owner_email": member.Email,
+	}); !res.IsError {
+		t.Fatal("create_app with a Member owner should fail")
 	}
 
 	res := callCentralTool(t, srv, "create_app", map[string]interface{}{
@@ -49,7 +62,7 @@ func TestMCPUpdateAppWithOwnerEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	newOwner, err := srv.store.CreateUser("New Owner", "newowner@example.com", "Member", "Active")
+	newOwner, err := srv.store.CreateUser("New Owner", "newowner@example.com", "Admin", "Active")
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}

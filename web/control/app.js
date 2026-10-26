@@ -273,6 +273,12 @@ const useAuth = () => useContext(AuthCtx);
 // only keep the panel from offering what would answer 403.
 const isAdminRole = (user, authRequired) => !authRequired || user?.role === 'Superuser' || user?.role === 'Admin';
 const isSuperuserRole = (user, authRequired) => !authRequired || user?.role === 'Superuser';
+// An app or service member must be account-staffed: Member and Read-only
+// accounts are the ones the member lists name. Admins and Superusers reach
+// everything already, so a joined picker never offers them — a member
+// promoted past the list keeps their existing link only until the list is
+// next rewritten, which is where it gets pruned.
+const assignableMember = (u) => u?.role === 'Member' || u?.role === 'Read-only';
 const useRoles = () => {
   const { user, authRequired } = useAuth();
   return { isAdmin: isAdminRole(user, authRequired), isSuperuser: isSuperuserRole(user, authRequired) };
@@ -1502,6 +1508,7 @@ function UserAppTags({ apps, appList }) {
 // `onCreateGate` opens the inline auth-record modal from a gate slot.
 function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID, loading, onCreateGate }) {
   const toast = useToast();
+  const { isAdmin } = useRoles();
 
   // A service reached through an app answers to the *app's* gate — its own
   // protected_by does not stack. So a service guarded more tightly than the
@@ -1518,8 +1525,19 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
     })
     .filter(Boolean);
 
+  // Owners come from the admin+ list: owning an app is staff management by
+  // another name. The one exception is the app's current owner — shown even
+  // if no longer Admin+, so a demotion doesn't pretend the owner vanished;
+  // keeping them costs nothing, and a new owner pick is constrained to the
+  // list (the server enforces it).
+  const owner = users.find(u => String(u.id) === String(form.owner_id) && form.owner_id !== '');
+  const ownerKept = owner && !['Admin','Superuser'].includes(owner.role);
+
   return (
-    <>
+    <fieldset className="read-only-fields" disabled={!isAdmin}>
+      {!isAdmin && (
+        <span className="help">Read-only — only admins can change an app.</span>
+      )}
       <div className="field-row">
         <div className="field"><label>Name</label><input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
         <div className="field"><label>URL</label>
@@ -1547,22 +1565,26 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
         <div className="field"><label>Owner</label>
           <select className="input" name="owner_id" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
             <option value="">No owner</option>
-            {users.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+            {ownerKept && <option value={owner.id}>{owner.name} (current owner)</option>}
+            {users.filter(u=>['Admin','Superuser'].includes(u.role)).map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
           </select>
+          {!ownerKept && <span className="help">Chosen from Admins and Superusers.</span>}
         </div>
       </div>
-      <div className="field">
-        <label>Members</label>
-        <span className="help">Select which users are assigned to this app.</span>
-        {app && loading ? <span className="muted">Loading…</span> : (
-          <MultiSelect
-            options={users.map(u=>({value:u.id,label:u.name}))}
-            value={form.members}
-            onChange={(v)=>setForm(f=>({...f,members:v}))}
-            placeholder="No members"
-          />
-        )}
-      </div>
+      {isAdmin && (
+        <div className="field">
+          <label>Members</label>
+          <span className="help">Assigned to this app, from the Members list — Member and Read-only accounts.</span>
+          {app && loading ? <span className="muted">Loading…</span> : (
+            <MultiSelect
+              options={users.filter(assignableMember).map(u=>({value:u.id,label:u.name}))}
+              value={form.members}
+              onChange={(v)=>setForm(f=>({...f,members:v}))}
+              placeholder="No members"
+            />
+          )}
+        </div>
+      )}
       <AuthSlot
         label="Protected by"
         placeholder="— inherit (admin auth) —"
@@ -1600,13 +1622,14 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
           </div>
         )}
       </div>
-    </>
+    </fieldset>
   );
 }
 
 // The app settings page — what the edit drawer used to be, full-page now.
 function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuthID, onRefresh, navigate }) {
   const app = isNew ? null : apps.find(a => a.nonce === nonce);
+  const { isAdmin } = useRoles();
   const [form, setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],protected_by:null});
   const [creatingGate, setCreatingGate] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -1620,11 +1643,16 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
       setLoading(true);
       Promise.all([
         frbr(session, 'GET','/api/apps/'+app.nonce+'/services'),
-        frbr(session, 'GET','/api/apps/'+app.nonce+'/members'),
+        // The member list is an admin tool server-side too; members of the
+        // app get an empty list rather than a 403 here.
+        isAdmin ? frbr(session, 'GET','/api/apps/'+app.nonce+'/members') : Promise.resolve({members:[]}),
       ])
         .then(([svcs,mems])=>{
           const allowed = (svcs.services||[]).filter(l=>l.allowed).map(l=>l.service_id);
-          setForm(f=>({...f,services:allowed,members:mems.members||[]}));
+          // The roster rides the Members list: anyone not on it (a member
+          // promoted to Admin, say) drops out when this form is next saved.
+          const assignableIDs = new Set((users||[]).filter(assignableMember).map(u=>u.id));
+          setForm(f=>({...f,services:allowed,members:(mems.members||[]).filter(id=>assignableIDs.has(id))}));
         })
         .catch(e=>toast(e.message,true))
         .finally(()=>setLoading(false));
@@ -1685,8 +1713,8 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
         sub={app ? 'Settings, hosting slots and access.' : 'Name it and set who it answers to.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
-          {app && <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>}
-          <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>
+          {isAdmin && app && <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>}
+          {isAdmin && <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>}
         </>}
       />
       <div className={'page-form' + (app && !loading ? ' page-cols' : '')}>
@@ -2793,7 +2821,7 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
                 <label>Members</label>
                 <span className="help">Users who may edit this service's definition file — nothing else about it. Admins always can.</span>
                 <MultiSelect
-                  options={users.filter(u => u.role === 'Member' || u.role === 'Read-only').map(u => ({value:u.id,label:u.name}))}
+                  options={users.filter(assignableMember).map(u => ({value:u.id,label:u.name}))}
                   value={members}
                   onChange={setMembers}
                   placeholder="No members"
