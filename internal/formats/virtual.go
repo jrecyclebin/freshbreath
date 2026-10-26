@@ -1226,6 +1226,33 @@ type ErrSuspend struct {
 
 func (e *ErrSuspend) Error() string { return "suspended awaiting elicitation" }
 
+// ErrUpstreamStatus is an HTTP step that answered with a status no
+// `responses` block declared. The status and body ride along so the
+// browser path can answer with a real HTTP status and body (see
+// handleVirtualExec); the MCP path rebuilds the structured map via
+// ResultMap, the shape the executor used to return.
+type ErrUpstreamStatus struct {
+	Status int    // the upstream status code
+	Raw    string // the upstream body verbatim; "" when it was empty
+}
+
+func (e *ErrUpstreamStatus) Error() string {
+	return fmt.Sprintf("unexpected status %d", e.Status)
+}
+
+// ResultMap renders the error as the map the executor used to return as a
+// success value: {"error", "status", "body"}.
+func (e *ErrUpstreamStatus) ResultMap() map[string]interface{} {
+	m := map[string]interface{}{
+		"error":  e.Error(),
+		"status": e.Status,
+	}
+	if e.Raw != "" {
+		m["body"] = e.Raw
+	}
+	return m
+}
+
 // ResumeState carries a suspension plus the elicitation's answer back into
 // the executor. Execution restarts AT the saved step with Response injected
 // (assignments/assertions on the step re-run harmlessly — they are pure
@@ -1729,19 +1756,17 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 			return nil, fmt.Errorf("step %d, read body: %w", stepIdx, err)
 		}
 
-		// Check status against expected responses.
+		// Check status against expected responses. A step that declares
+		// none expects 200 — anything else is unexpected.
 		vr, expected := step.Responses[resp.StatusCode]
+		if !expected && len(step.Responses) == 0 && resp.StatusCode == http.StatusOK {
+			expected = true
+		}
 		if !expected {
-			// Return the raw upstream response so the caller can see what happened.
-			var parsedBody interface{}
-			if len(respBody) > 0 {
-				json.Unmarshal(respBody, &parsedBody)
-			}
-			return map[string]interface{}{
-				"error":  fmt.Sprintf("unexpected status %d", resp.StatusCode),
-				"status": resp.StatusCode,
-				"body":   parsedBody,
-			}, nil
+			// Return the raw upstream response so the caller can see what
+			// happened: the browser path answers with the real status and
+			// body, the MCP path with the structured map (ResultMap).
+			return nil, &ErrUpstreamStatus{Status: resp.StatusCode, Raw: string(respBody)}
 		}
 
 		// Parse response body into scope for the next step.
@@ -1760,7 +1785,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		}
 
 		// Apply shaping if present.
-		if vr.Shaping != "" {
+		if vr != nil && vr.Shaping != "" {
 			return eval.run(vr.Shaping, scope)
 		}
 	}

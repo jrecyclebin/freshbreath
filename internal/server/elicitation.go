@@ -172,6 +172,11 @@ func (s *Server) answerRun(tools []formats.VirtualTool, resume *formats.ResumeSt
 	if errors.As(err, &susp) {
 		return s.suspendVirtualTool(susp.Susp, slug, session, hooks, sqlRunner), nil
 	}
+	// Undeclared upstream status keeps the structured map over MCP.
+	var up *formats.ErrUpstreamStatus
+	if errors.As(err, &up) {
+		result, err = up.ResultMap(), nil
+	}
 	if err != nil {
 		return mcpToolError("%v", err), nil
 	}

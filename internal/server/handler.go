@@ -1467,6 +1467,25 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 			http.Error(w, "tool requires elicitation — call it through the MCP endpoint with a client that supports elicitation", http.StatusBadRequest)
 			return
 		}
+		// An HTTP step hit a status no `responses` block declared: answer
+		// with the real status and the upstream body verbatim (JSON-typed
+		// when it parses as JSON); an empty one leaves the error message
+		// ("unexpected status N").
+		var up *formats.ErrUpstreamStatus
+		if errors.As(err, &up) {
+			if up.Raw != "" && json.Valid([]byte(up.Raw)) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(up.Status)
+				w.Write([]byte(up.Raw))
+				return
+			}
+			msg := up.Error()
+			if up.Raw != "" {
+				msg = up.Raw
+			}
+			http.Error(w, msg, up.Status)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

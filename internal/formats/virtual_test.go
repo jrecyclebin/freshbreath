@@ -747,22 +747,31 @@ HTTP 200
 	}
 
 	result, err := ExecuteVirtualTool(http.DefaultClient, tools, "oof", nil, VirtualAuth{}, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	var up *ErrUpstreamStatus
+	if !errors.As(err, &up) {
+		t.Fatalf("expected ErrUpstreamStatus, got %v", err)
 	}
-	m, ok := result.(map[string]interface{})
-	if !ok {
-		t.Fatalf("expected map result, got %T", result)
+	if result != nil {
+		t.Fatalf("expected nil result, got %v", result)
 	}
+	if up.Status != 500 {
+		t.Errorf("status = %v, want 500", up.Status)
+	}
+	if !strings.Contains(up.Error(), "unexpected status 500") {
+		t.Errorf("error = %v", up.Error())
+	}
+	if !strings.Contains(up.Raw, `"error": "boom"`) {
+		t.Errorf("raw = %q", up.Raw)
+	}
+	m := up.ResultMap()
 	if m["status"] != 500 {
-		t.Errorf("status = %v, want 500", m["status"])
+		t.Errorf("ResultMap status = %v, want 500", m["status"])
 	}
 	if !strings.Contains(fmt.Sprint(m["error"]), "unexpected status 500") {
-		t.Errorf("error = %v", m["error"])
+		t.Errorf("ResultMap error = %v", m["error"])
 	}
-	body, _ := m["body"].(map[string]interface{})
-	if body["error"] != "boom" {
-		t.Errorf("body.error = %v", body)
+	if !strings.Contains(fmt.Sprint(m["body"]), `"error": "boom"`) {
+		t.Errorf("ResultMap body = %v", m["body"])
 	}
 }
 
