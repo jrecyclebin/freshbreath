@@ -1508,6 +1508,7 @@ function UserAppTags({ apps, appList }) {
 // `onCreateGate` opens the inline auth-record modal from a gate slot.
 function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID, loading, onCreateGate }) {
   const toast = useToast();
+  const { isAdmin } = useRoles();
 
   // A service reached through an app answers to the *app's* gate — its own
   // protected_by does not stack. So a service guarded more tightly than the
