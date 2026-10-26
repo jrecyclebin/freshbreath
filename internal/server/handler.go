@@ -293,6 +293,10 @@ func (s *Server) handleCORSOptions(w http.ResponseWriter, r *http.Request) {
 func (s *Server) SetupRoutes() {
 	s.knownHosts = knownHostSet(s.config)
 	s.trustedProxies = trustedProxySet(s.config)
+	if u, err := url.Parse(s.config.PublicBaseURL); err == nil && u.Scheme != "" {
+		s.publicScheme = u.Scheme
+		s.publicHost = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(u.Hostname()), "."))
+	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/control", s.handleControl)
@@ -716,9 +720,13 @@ func controlCSP(page []byte) string {
 }
 
 // schemeOf returns the request's scheme — "https" when the connection
-// is TLS, or when a trusted proxy says the hop it saw was TLS. The nonce
-// resolution path, renderEnvJS and originAllowed share it so they agree
-// on what "same-origin" means.
+// is TLS, when a trusted proxy says the hop it saw was TLS, or when the
+// request's Host is the FRBR_BASE_URL host: the operator has declared
+// what the outside world calls this server there, so its scheme is
+// authoritative (hostAllowed already accepts only hosts the operator
+// controls, and matching the Host name means a caller cannot pick the
+// scheme for any other name). The nonce resolution path, renderEnvJS and
+// originAllowed share schemeOf so they agree on what "same-origin" means.
 //
 // X-Forwarded-Proto is honored only from a peer in FRBR_TRUSTED_PROXIES
 // (loopback by default, and always): the header is client-settable, so
@@ -728,7 +736,20 @@ func (s *Server) schemeOf(r *http.Request) string {
 	if r.TLS != nil || (r.Header.Get("X-Forwarded-Proto") == "https" && s.proxyTrusted(r)) {
 		return "https"
 	}
+	if s.publicHost != "" && requestHostname(r.Host) == s.publicHost {
+		return s.publicScheme
+	}
 	return "http"
+}
+
+// requestHostname normalizes a Host header value to a lowercase host name:
+// IPv6 brackets off, default-parsing of the hostport, trailing dot off.
+func requestHostname(hostport string) string {
+	host := hostport
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
 }
 
 // proxyTrusted reports whether the connection's peer is a configured
