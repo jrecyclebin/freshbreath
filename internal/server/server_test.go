@@ -362,7 +362,7 @@ func TestServiceToolsTasks(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(srv.config.DataDir, "tasks"), 0755); err != nil {
 		t.Fatalf("mkdir tasks: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("[greet] Say hello\necho hi\n---\n[build] Compile\nmake\n"), 0644); err != nil {
+	if err := os.WriteFile(path, []byte("[greet] Say hello\necho \"Hello, $TASK_NAME and $TASK_HOST\"\n---\n[build] Compile\nmake\n"), 0644); err != nil {
 		t.Fatalf("write tasks file: %v", err)
 	}
 	defer os.Remove(path)
@@ -381,9 +381,26 @@ func TestServiceToolsTasks(t *testing.T) {
 	if first["name"] != "greet" || first["description"] != "Say hello" {
 		t.Errorf("first tool = %v, want {name:greet description:Say hello}", first)
 	}
+	// Task args are read out of the script: names only, all strings, none
+	// required (scripts don't declare them, the server enforces nothing).
+	greetArgs := first["args"].([]interface{})
+	if len(greetArgs) != 2 {
+		t.Fatalf("greet args = %v, want [host name]", greetArgs)
+	}
+	for i, want := range []string{"host", "name"} {
+		a := greetArgs[i].(map[string]interface{})
+		if a["name"] != want || a["type"] != "string" || a["required"] != false {
+			t.Errorf("greet arg %d = %v, want name:%s type:string required:false", i, a, want)
+		}
+	}
 	second := tools[1].(map[string]interface{})
 	if second["name"] != "build" || second["description"] != "Compile" {
 		t.Errorf("second tool = %v, want {name:build description:Compile}", second)
+	}
+	if args, ok := second["args"]; ok {
+		if buildArgs := args.([]interface{}); len(buildArgs) != 0 {
+			t.Errorf("build args = %v, want none", buildArgs)
+		}
 	}
 }
 
@@ -396,7 +413,14 @@ func TestServiceToolsVirtual(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(srv.config.DataDir, "virtual"), 0755); err != nil {
 		t.Fatalf("mkdir virtual: %v", err)
 	}
-	content := "[get-user] Fetch a user\nGET https://api.example.com/users/$id\n---\n[list-users] List users\nGET https://api.example.com/users\n"
+	content := `[get-user] Fetch a user
+GET https://api.example.com/users/$id
+---
+[list-users] List users
+$limit is number?
+$status is "active" | "disabled"
+GET https://api.example.com/users?limit=$limit&status=$status
+`
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write virtual file: %v", err)
 	}
@@ -418,6 +442,32 @@ func TestServiceToolsVirtual(t *testing.T) {
 	}
 	if names[0] != "get-user" || names[1] != "list-users" {
 		t.Errorf("tool names = %v, want [get-user list-users]", names)
+	}
+	// get-user: one inferred param, required (no `?` annotation).
+	getArgs := tools[0].(map[string]interface{})["args"].([]interface{})
+	if len(getArgs) != 1 {
+		t.Fatalf("get-user args = %v, want [id]", getArgs)
+	}
+	idArg := getArgs[0].(map[string]interface{})
+	if idArg["name"] != "id" || idArg["type"] != "string" || idArg["required"] != true {
+		t.Errorf("get-user arg = %v, want {name:id type:string required:true}", idArg)
+	}
+	// list-users: an optional number, a required enum with its values.
+	listArgs := tools[1].(map[string]interface{})["args"].([]interface{})
+	if len(listArgs) != 2 {
+		t.Fatalf("list-users args = %v, want [limit status]", listArgs)
+	}
+	limit := listArgs[0].(map[string]interface{})
+	if limit["name"] != "limit" || limit["type"] != "number" || limit["required"] != false {
+		t.Errorf("limit arg = %v, want {name:limit type:number required:false}", limit)
+	}
+	status := listArgs[1].(map[string]interface{})
+	if status["name"] != "status" || status["type"] != "string" || status["required"] != true {
+		t.Errorf("status arg = %v, want {name:status type:string required:true}", status)
+	}
+	vals, _ := status["values"].([]interface{})
+	if len(vals) != 2 || vals[0] != "active" || vals[1] != "disabled" {
+		t.Errorf("status values = %v, want [active disabled]", vals)
 	}
 }
 

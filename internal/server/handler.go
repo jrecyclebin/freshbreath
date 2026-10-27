@@ -1245,12 +1245,24 @@ func (s *Server) loadTasksForService(svc *db.Service) ([]formats.Task, error) {
 	return formats.ParseTasksFile(data), nil
 }
 
+// serviceToolArg is one argument in a tool's signature: name, declared
+// type, whether the caller must supply it, and — for enums — the allowed
+// values.
+type serviceToolArg struct {
+	Name     string   `json:"name"`
+	Type     string   `json:"type"`
+	Required bool     `json:"required"`
+	Format   string   `json:"format,omitempty"` // email/uri/date/date-time
+	Values   []string `json:"values,omitempty"` // enum choices
+}
+
 // serviceToolSummary is a lightweight, safe-to-expose view of a task or
-// virtual tool: name and description only, no script bodies.
+// virtual tool: name, description and argument signature, no script bodies.
 type serviceToolSummary struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	AppOnly     bool   `json:"appOnly,omitempty"`
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	AppOnly     bool             `json:"appOnly,omitempty"`
+	Args        []serviceToolArg `json:"args,omitempty"`
 }
 
 // loadServiceToolSummaries returns the tool names and descriptions exposed by
@@ -1268,7 +1280,14 @@ func (s *Server) loadServiceToolSummaries(svc *db.Service) ([]serviceToolSummary
 		}
 		out := make([]serviceToolSummary, len(tasks))
 		for i, t := range tasks {
-			out[i] = serviceToolSummary{Name: t.Name, Description: t.Desc}
+			// Tasks don't declare arguments: the names are read out of the
+			// script ($TASK_<NAME> references), everything is a string, and
+			// nothing is enforced — the script just gets what the caller sent.
+			args := make([]serviceToolArg, 0)
+			for _, a := range t.Args() {
+				args = append(args, serviceToolArg{Name: a, Type: "string"})
+			}
+			out[i] = serviceToolSummary{Name: t.Name, Description: t.Desc, Args: args}
 		}
 		return out, nil
 	case "virtual":
@@ -1281,7 +1300,17 @@ func (s *Server) loadServiceToolSummaries(svc *db.Service) ([]serviceToolSummary
 		}
 		out := make([]serviceToolSummary, len(tools))
 		for i, t := range tools {
-			out[i] = serviceToolSummary{Name: t.Name, Description: t.Description, AppOnly: t.AppOnly}
+			args := make([]serviceToolArg, len(t.Params))
+			for j, p := range t.Params {
+				args[j] = serviceToolArg{
+					Name:     p.Name,
+					Type:     string(p.Type),
+					Required: !p.Optional,
+					Format:   p.Format,
+					Values:   p.Values,
+				}
+			}
+			out[i] = serviceToolSummary{Name: t.Name, Description: t.Description, AppOnly: t.AppOnly, Args: args}
 		}
 		return out, nil
 	default:
@@ -1394,14 +1423,10 @@ func (s *Server) actsAsRecord(svc *db.Service) (*db.AuthRecord, bool) {
 func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, token string) {
 	switch r.Method {
 	case http.MethodGet:
-		tasks, err := s.loadTasksForService(svc)
+		tools, err := s.loadServiceToolSummaries(svc)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
-		}
-		tools := make([]map[string]string, len(tasks))
-		for i, t := range tasks {
-			tools[i] = map[string]string{"name": t.Name, "description": t.Desc}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
@@ -1417,13 +1442,13 @@ func (s *Server) handleTaskCallInner(w http.ResponseWriter, r *http.Request, svc
 func (s *Server) handleVirtualCallInner(w http.ResponseWriter, r *http.Request, svc *db.Service, auth formats.VirtualAuth) {
 	switch r.Method {
 	case http.MethodGet:
-		tools, err := s.loadVirtualTools(svc)
+		tools, err := s.loadServiceToolSummaries(svc)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"tools": formats.VirtualToolSummaries(tools)})
+		json.NewEncoder(w).Encode(map[string]interface{}{"tools": tools})
 
 	case http.MethodPost:
 		s.handleVirtualExec(w, r, svc, auth)
