@@ -217,6 +217,43 @@ func TestAppDoorEmptyGateInheritsAdminYieldsFrbr(t *testing.T) {
 	if sub := appOAuthLogin(t, srv, nonce); sub != subjectForUser(u) {
 		t.Errorf("subject = %q, want %s (empty protected_by inherits the admin gate)", sub, subjectForUser(u))
 	}
+
+	// But the inherited gate also admits anyone the IdP vouches for, user
+	// row or not — a stranger at the admin IdP mints ext:github:4242 (see
+	// TestMintSubjectUnknownEmailYieldsExt), and that token runs the app's
+	// services. Behind an OIDC/OAuth2 admin gate that is "anyone with a
+	// GitHub account". KNOWN FINDING (audit 2026, F3): flip this half into
+	// a regression test (want 403) when the fix lands.
+	srv.config.DataDir = t.TempDir() // task execution writes into DataDir
+	super := mustUser(t, srv, "root", "Superuser", "Active")
+	task, err := srv.coreCreateService(super, "deploy", "", db.ServiceDescriptor{Type: "tasks"}, nil, nil)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := srv.coreWriteServiceFile(super, task.ID, []byte("[whoami] Who runs this\necho ran-as-server\n"), ""); err != nil {
+		t.Fatalf("write task: %v", err)
+	}
+	if err := srv.store.SetAppServiceLinks(nonce, []int64{task.ID}); err != nil {
+		t.Fatalf("link task: %v", err)
+	}
+	stranger, err := srv.mintFreshbreathToken("ext:github:4242", "stranger@gmail.com", "", "Stranger", gh.ID, nil, nil)
+	if err != nil {
+		t.Fatalf("mint stranger token: %v", err)
+	}
+
+	// The control panel API refuses them...
+	rr := testRequest(t, srv, http.MethodGet, "/api/me", nil, map[string]string{"Authorization": "Bearer " + stranger})
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("/api/me for stranger = %d, want 401", rr.Code)
+	}
+	// ...but the app door runs the task for them.
+	rr = testRequest(t, srv, http.MethodPost, "/service/call/deploy", strings.NewReader(`{"task":"whoami"}`), map[string]string{
+		"X-App-Nonce":   nonce,
+		"Authorization": "Bearer " + stranger,
+	})
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "ran-as-server") {
+		t.Errorf("stranger task call through inherited admin gate = %d %s, want the task run (finding F3)", rr.Code, rr.Body.String())
+	}
 }
 
 func TestServiceDoorNonAdminGateMatchingEmailYieldsExt(t *testing.T) {

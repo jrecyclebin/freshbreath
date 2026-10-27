@@ -31,4 +31,6 @@ static.html
 .sidecar-start.sh
 .sidecar-base
 .td-root
+/bench
 /design
+/exports

