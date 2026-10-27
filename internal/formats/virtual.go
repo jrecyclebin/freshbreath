@@ -1229,8 +1229,8 @@ func (e *ErrSuspend) Error() string { return "suspended awaiting elicitation" }
 // ErrUpstreamStatus is an HTTP step that answered with a status no
 // `responses` block declared. The status and body ride along so the
 // browser path can answer with a real HTTP status and body (see
-// handleVirtualExec); the MCP path rebuilds the structured map via
-// ResultMap, the shape the executor used to return.
+// handleVirtualExec); the MCP path flags the result IsError with the
+// message and body as text (ToolError).
 type ErrUpstreamStatus struct {
 	Status int    // the upstream status code
 	Raw    string // the upstream body verbatim; "" when it was empty
@@ -1240,17 +1240,13 @@ func (e *ErrUpstreamStatus) Error() string {
 	return fmt.Sprintf("unexpected status %d", e.Status)
 }
 
-// ResultMap renders the error as the map the executor used to return as a
-// success value: {"error", "status", "body"}.
-func (e *ErrUpstreamStatus) ResultMap() map[string]interface{} {
-	m := map[string]interface{}{
-		"error":  e.Error(),
-		"status": e.Status,
+// ToolError renders the error as MCP tool-result text: the message, plus
+// the upstream body verbatim when there is one.
+func (e *ErrUpstreamStatus) ToolError() string {
+	if e.Raw == "" {
+		return e.Error()
 	}
-	if e.Raw != "" {
-		m["body"] = e.Raw
-	}
-	return m
+	return fmt.Sprintf("%s: %s", e.Error(), e.Raw)
 }
 
 // ResumeState carries a suspension plus the elicitation's answer back into
@@ -1765,7 +1761,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		if !expected {
 			// Return the raw upstream response so the caller can see what
 			// happened: the browser path answers with the real status and
-			// body, the MCP path with the structured map (ResultMap).
+			// body, the MCP path with an IsError result (ToolError).
 			return nil, &ErrUpstreamStatus{Status: resp.StatusCode, Raw: string(respBody)}
 		}
 

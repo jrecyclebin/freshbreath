@@ -763,15 +763,8 @@ HTTP 200
 	if !strings.Contains(up.Raw, `"error": "boom"`) {
 		t.Errorf("raw = %q", up.Raw)
 	}
-	m := up.ResultMap()
-	if m["status"] != 500 {
-		t.Errorf("ResultMap status = %v, want 500", m["status"])
-	}
-	if !strings.Contains(fmt.Sprint(m["error"]), "unexpected status 500") {
-		t.Errorf("ResultMap error = %v", m["error"])
-	}
-	if !strings.Contains(fmt.Sprint(m["body"]), `"error": "boom"`) {
-		t.Errorf("ResultMap body = %v", m["body"])
+	if !strings.Contains(up.ToolError(), `unexpected status 500: {"error": "boom"}`) {
+		t.Errorf("ToolError = %v", up.ToolError())
 	}
 }
 

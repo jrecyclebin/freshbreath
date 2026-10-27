@@ -203,12 +203,11 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 			if errors.As(err, &susp) {
 				return s.suspendVirtualTool(susp.Susp, svcSlug, req.Session, hooks, sqlRunner), nil
 			}
-			// An undeclared upstream status keeps the structured map the
-			// executor used to return; only the browser path answers with a
-			// real HTTP status (handleVirtualExec).
+			// An undeclared upstream status is a tool execution error, same
+			// as every other failure — message plus the upstream body.
 			var up *formats.ErrUpstreamStatus
 			if errors.As(err, &up) {
-				result, err = up.ResultMap(), nil
+				return mcpToolError("%s", up.ToolError()), nil
 			}
 			if err != nil {
 				return &mcp.CallToolResult{

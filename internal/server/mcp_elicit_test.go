@@ -293,3 +293,55 @@ func TestVirtualFormElicitationOldProtocol(t *testing.T) {
 		t.Fatalf("result = %s", text)
 	}
 }
+
+// TestVirtualMCPUpstreamStatusIsError pins the MCP path's answer to an HTTP
+// step whose status no `responses` block declared: a tool execution error —
+// IsError result carrying the "unexpected status N" message plus the
+// upstream body — mirroring the browser path's real HTTP status.
+func TestVirtualMCPUpstreamStatusIsError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/empty" {
+			w.WriteHeader(502)
+			return
+		}
+		w.WriteHeader(503)
+		fmt.Fprint(w, `{"error": "boom"}`)
+	}))
+	defer upstream.Close()
+
+	toolFile := fmt.Sprintf(`[oops] Hit an upstream endpoint.
+
+GET %s/api/oops
+HTTP 200
+---
+[empty] Hit an empty upstream endpoint.
+
+GET %s/api/empty
+HTTP 200
+`, upstream.URL, upstream.URL)
+	srv, _, _ := newVirtualSvcServer(t, toolFile, db.ServiceDescriptor{Type: "virtual"})
+	cs := connectElicitClient(t, srv, nil, nil)
+
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "oops"})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("oops: IsError = false, text = %s", toolResultText(t, res))
+	}
+	text := toolResultText(t, res)
+	if !strings.Contains(text, "unexpected status 503") || !strings.Contains(text, `"error": "boom"`) {
+		t.Errorf("oops: text = %s", text)
+	}
+
+	res, err = cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "empty"})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("empty: IsError = false, text = %s", toolResultText(t, res))
+	}
+	if text := toolResultText(t, res); !strings.Contains(text, "unexpected status 502") {
+		t.Errorf("empty: text = %s", text)
+	}
+}
