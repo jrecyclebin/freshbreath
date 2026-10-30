@@ -61,6 +61,7 @@ type Server struct {
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
 	hostedHosts       map[string]hostedApp // host name → app served at its own remote URL
 	handoffs          handoffTickets       // finished page-gate logins on their way to an app's host
+	tunnel            tunnel               // the tailcat tunnel, when activated
 	hostedMu          sync.RWMutex
 	actTickets        actTickets                         // /api/act capability tickets (in-memory only)
 	pendingElicits    pendingElicits                     // virtual-tool elicitation suspend/resume state (in-memory only)
@@ -241,6 +242,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 	// sees a registration should still clean up.
 	s.oauthSrv.clients.sweepIdle()
 	s.SetupRoutes()
+	go s.resumeTunnel()
 
 	// Periodically expire stale SSH agent keys and sessions.
 	go func() {

@@ -850,7 +850,10 @@ function serviceInstructions(service) {
 }
 
 function hostRoute(app) {
-  if (app.url && !app.url.includes('://')) return '/' + app.url.replace(/^\//, '');
+  if (app.url && app.url.includes('://')) {
+    try { return new URL(app.url).origin; } catch { /* fall through to the name's slug */ }
+  }
+  if (app.url) return '/' + app.url.replace(/^\//, '');
   const slug = (app.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   return '/' + slug;
 }
@@ -1541,7 +1544,8 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
       <div className="field-row">
         <div className="field"><label>Name</label><input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
         <div className="field"><label>URL</label>
-          <input className="input" name="app_url" {...NO_FILL} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="https://hostname.com:port"/>
+          <input className="input" name="app_url" {...NO_FILL} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="blog, or https://blog.example.com"/>
+          <span className="help">A path on this server (<code>blog</code> serves at <code>/blog/</code>), or a full URL. With a full URL, files you upload are served at that host — point its DNS here.</span>
         </div>
       </div>
       {app && app.nonce && (
@@ -3228,6 +3232,13 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
         </SettingSection>
 
         <SettingSection
+          title="Tunnel"
+          desc={<>Reach this server from anywhere through a <a href="https://github.com/tailscale/tailcat" target="_blank" rel="noopener noreferrer">tailcat</a> tunnel — nothing opened to the Internet. Through the tunnel, sign in with your email and SSH key passphrase (<code>POST /service/tunnel</code>) and send the token as a Bearer to the API and MCP. The address is a secret: anyone holding it can try to sign in.</>}
+        >
+          <TunnelSettings session={session}/>
+        </SettingSection>
+
+        <SettingSection
           title="MCP database mode"
           desc={<>Whether the central MCP server's <code>db_execute</code> tool may write to databases. <code>db_query</code> is read-only no matter what; this only governs <code>db_execute</code>. Not a privilege boundary — an admin could do the same via the HTTP API — just accident prevention for a model asked to “clean up the old rows”.</>}
         >
@@ -3247,6 +3258,52 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
 
       </div>
     </>
+  );
+}
+
+// The tunnel's switch and its address. Starting it reaches out to a relay,
+// so it can take a few seconds.
+function TunnelSettings({ session }) {
+  const [state, setState] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+
+  useEffect(() => {
+    frbr(session, 'GET', '/api/tunnel').then(setState).catch(e => toast(e.message, true));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const set = async (enabled, reset = false) => {
+    if (reset && !confirm('Make a new tunnel address? The old one stops working, and everyone signed in through it is signed out.')) return;
+    setBusy(true);
+    try {
+      setState(await frbr(session, 'PUT', '/api/tunnel', { enabled, reset }));
+      toast(enabled ? 'Tunnel on' : 'Tunnel off');
+    } catch(e) { toast(e.message, true); }
+    finally { setBusy(false); }
+  };
+
+  if (!state) return <span className="muted">Loading…</span>;
+  return (
+    <div className="field" style={{maxWidth:560}}>
+      {state.enabled ? (
+        <>
+          <label>Address</label>
+          <div style={{display:'flex',gap:8}}>
+            <input className="input mono" name="tunnel_address" {...NO_FILL} value={state.address} readOnly style={{fontSize:12,flex:1,minWidth:0}}/>
+            <button className="btn btn-ghost" onClick={() => copyText(state.address, toast)} title="Copy address"><Icon name="copy" size={14}/></button>
+          </div>
+          <span className="help">On the other machine: <code>tailcat forward {'<address>'} 18080:80</code>, then use <code>http://localhost:18080</code>.</span>
+        </>
+      ) : (
+        <span className="help">Off. Turning it on keeps the same address it had before, unless you make a new one.</span>
+      )}
+      <div style={{display:'flex',gap:8,marginTop:16}}>
+        <button className="btn btn-primary" onClick={() => set(!state.enabled)} disabled={busy}>
+          {busy ? 'Working…' : state.enabled ? 'Turn off' : 'Turn on'}
+        </button>
+        <button className="btn btn-ghost" onClick={() => set(state.enabled, true)} disabled={busy}>New address</button>
+      </div>
+    </div>
   );
 }
 

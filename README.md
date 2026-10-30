@@ -222,6 +222,47 @@ environment to Production so the bare URL goes live. Sites you don't care to
 stage can just live on Development forever — the bare URL serves it by
 default.
 
+### Where an app lives
+
+An app's **URL** decides where it's served:
+
+- **A slug** — `blog` serves the app at `/blog/`. A leading or trailing slash
+  is cleaned up for you. Apps can't sit in subdirectories (`/blog/admin`):
+  make a `blog` app and publish into its `admin` folder instead. `api`,
+  `control`, `mcp`, `service` and `oauth` are Fresh Breath's own.
+- **A full URL** — `https://blog.example.com`. If the app has files, Fresh
+  Breath serves them at that host (point its DNS at this server) and nowhere
+  else; slots are `https://blog.example.com/@staging/` and so on. That host
+  answers only for its own app: the control panel and admin API aren't there,
+  and the app's sign-ins and sessions stay on that host, apart from the
+  panel's. With no files, the URL just says where the app runs, so it's
+  allowed to call in (CORS).
+- **Blank** — the slug of the app's name, or (with no files) a page you're
+  running from disk.
+
+## The tunnel
+
+Settings → **Tunnel** gives this server a [tailcat](https://github.com/tailscale/tailcat)
+address: a WireGuard tunnel you can reach from any machine, with nothing
+opened to the Internet. The address is a secret and survives restarts until
+you make a new one (which signs everyone out of the tunnel).
+
+Through the tunnel there's one way in — your email and SSH key passphrase —
+and nothing else answers until you've used it:
+
+```sh
+tailcat forward tcXXXXXXXX 18080:80     # on the other machine
+curl -s localhost:18080/service/tunnel \
+  -d '{"email":"you@example.com","passphrase":"..."}'
+# → {"access_token":"...","token_type":"Bearer","expires_in":43200}
+curl -s localhost:18080/api/me -H "Authorization: Bearer $TOKEN"
+```
+
+The token works only through the tunnel, for 12 hours, as you — your role,
+at the control panel's door — so the admin API, `/mcp` and anything gated by
+the panel's auth record work for an MCP client given that header. There are
+no cookies or browser pages through the tunnel.
+
 ## Remote updates
 
 I've started using Fresh Breath for projects I do for others. Give them a
