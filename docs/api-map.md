@@ -212,6 +212,7 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/tunnel` | GET/PUT | superuser | Tailcat tunnel status / `PUT {enabled, reset}` |
 | `/api/remotes` | GET/POST | admin+ | List remotes / `POST {name, address}` adds one (tailcat address, sealed; never returned, a `fingerprint` stands in) |
 | `/api/remotes/{id}` | PUT/DELETE | admin+ | `PUT {name}` renames (an `address` is refused: a new address is a new remote) / delete |
+| `/api/remotes/{id}/{rest}` | any | admin+ | Proxied to `/{rest}` on the remote, through its tunnel. Send the remote's access token as `X-Tunnel-Token`; it leaves as the remote's `Authorization`. `Cookie`, `Origin`, `X-App-Nonce` and this server's `Authorization` stay here. No path filter: the remote's own gates decide. Pair with `{rest}` = `service/direct`, refresh with `oauth/token/{auth_id}`. Streams (SSE) flow through. Writes are audited here; reads and refreshes aren't |
 
 ### Global databases (alias mount)
 

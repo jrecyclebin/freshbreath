@@ -1,10 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/types/key"
@@ -118,5 +124,248 @@ func TestRemoteAddressIsFixed(t *testing.T) {
 	}
 	if rr := requestAs(t, srv, admin, "DELETE", "/api/remotes/"+r.ID, ""); rr.Code != http.StatusNotFound {
 		t.Errorf("delete again: %d, want 404", rr.Code)
+	}
+}
+
+// ── The proxy ──
+
+// dialTo makes remote clients reach handler over real HTTP, standing in
+// for the tunnel. closed counts how many clients were closed.
+func dialTo(t *testing.T, handler http.Handler, closed *int) func(string) *remoteConn {
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+	return func(string) *remoteConn {
+		tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", ts.Listener.Addr().String())
+		}}
+		return &remoteConn{client: &http.Client{Transport: tr}, close: func() {
+			tr.CloseIdleConnections()
+			if closed != nil {
+				*closed++
+			}
+		}}
+	}
+}
+
+// remoteRequest is requestAs with headers of our own.
+func remoteRequest(srv *Server, as *db.User, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	req = req.WithContext(context.WithValue(req.Context(), userKey, as))
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	return rr
+}
+
+// remoteSetup is server A with an Admin and a remote that reaches server
+// B's tunnel, where the known user (of role bRole) has a passphrase.
+func remoteSetup(t *testing.T, bRole string) (a *Server, admin *db.User, remote *db.Remote) {
+	t.Helper()
+	a, b := newTestServer(t), newTestServer(t)
+	setAdminSSH(t, b)
+	passphraseUser(t, b, bRole)
+	a.remoteConns.open = dialTo(t, b.tunnelHandler(), nil)
+	admin = mustUser(t, a, "Ada", "Admin", "Active")
+	return a, admin, addRemote(t, a, admin, "Server B", testTailcatAddr(t))
+}
+
+func pairRemote(t *testing.T, a *Server, as *db.User, remote *db.Remote) tunnelPair {
+	t.Helper()
+	rr := remoteRequest(a, as, "POST", "/api/remotes/"+remote.ID+"/service/direct",
+		`{"email":"`+knownEmail+`","passphrase":"correct horse"}`, nil)
+	if rr.Code != 200 {
+		t.Fatalf("pair: %d %s", rr.Code, rr.Body.String())
+	}
+	var p tunnelPair
+	json.Unmarshal(rr.Body.Bytes(), &p)
+	if p.Access == "" || p.Refresh == "" || p.AuthID == 0 {
+		t.Fatalf("pair gave %s", rr.Body.String())
+	}
+	return p
+}
+
+// Pair, call and refresh, all through A's proxy.
+func TestRemoteProxyRoundTrip(t *testing.T) {
+	a, admin, remote := remoteSetup(t, "Superuser")
+	base := "/api/remotes/" + remote.ID
+	p := pairRemote(t, a, admin, remote)
+
+	rr := remoteRequest(a, admin, "GET", base+"/api/me", "", map[string]string{"X-Tunnel-Token": p.Access})
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), knownEmail) {
+		t.Fatalf("remote /api/me: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr = remoteRequest(a, admin, "POST", base+"/oauth/token/"+strconv.FormatInt(p.AuthID, 10),
+		"grant_type=refresh_token&refresh_token="+p.Refresh,
+		map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	if rr.Code != 200 {
+		t.Fatalf("remote refresh: %d %s", rr.Code, rr.Body.String())
+	}
+	var next tunnelPair
+	json.Unmarshal(rr.Body.Bytes(), &next)
+	if next.Refresh == "" || next.Refresh == p.Refresh {
+		t.Errorf("refresh didn't rotate: %s", rr.Body.String())
+	}
+	if rr := remoteRequest(a, admin, "GET", base+"/api/me", "", map[string]string{"X-Tunnel-Token": next.Access}); rr.Code != 200 {
+		t.Errorf("refreshed token at the remote: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// The remote decides what its user may do; the proxy only carries it.
+func TestRemoteProxyLeavesAuthorizationToTheRemote(t *testing.T) {
+	a, admin, remote := remoteSetup(t, "Member")
+	base := "/api/remotes/" + remote.ID
+	p := pairRemote(t, a, admin, remote)
+
+	if rr := remoteRequest(a, admin, "GET", base+"/api/users", "", map[string]string{"X-Tunnel-Token": p.Access}); rr.Code != http.StatusForbidden {
+		t.Errorf("B Member at B's /api/users: %d, want B's 403", rr.Code)
+	}
+	if rr := remoteRequest(a, admin, "GET", base+"/api/me", "", nil); rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "/service/direct") {
+		t.Errorf("no remote token: %d %s, want B's 401", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRemoteProxyIsForAdmins(t *testing.T) {
+	a, _, remote := remoteSetup(t, "Superuser")
+	member := mustUser(t, a, "Mo", "Member", "Active")
+	if rr := remoteRequest(a, member, "POST", "/api/remotes/"+remote.ID+"/service/direct",
+		`{"email":"`+knownEmail+`","passphrase":"correct horse"}`, nil); rr.Code != http.StatusForbidden {
+		t.Errorf("Member through the proxy: %d, want 403", rr.Code)
+	}
+}
+
+// What belongs to A stays at A: its cookies, its bearer, the page's origin
+// and app. The remote's token goes on as the remote's Authorization, and
+// the remote's cookies don't come back.
+func TestRemoteProxyHeaders(t *testing.T) {
+	a := newTestServer(t)
+	var seen *http.Request
+	a.remoteConns.open = dialTo(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r
+		w.Header().Set("Set-Cookie", "remote=1")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("X-Remote", "yes")
+		w.WriteHeader(201)
+		w.Write([]byte("made"))
+	}), nil)
+	admin := mustUser(t, a, "Ada", "Admin", "Active")
+	remote := addRemote(t, a, admin, "Spy", testTailcatAddr(t))
+
+	rr := remoteRequest(a, admin, "POST", "/api/remotes/"+remote.ID+"/api/things?x=1", `{"a":1}`, map[string]string{
+		"Authorization":  "Bearer a-panel-token",
+		"Cookie":         "frbr_gate=abc",
+		"Origin":         "http://example.com",
+		"X-App-Nonce":    "panelnonce",
+		"X-Tunnel-Token": "Bearer b-token",
+		"X-Custom":       "kept",
+	})
+	if rr.Code != 201 || rr.Body.String() != "made" || rr.Header().Get("X-Remote") != "yes" {
+		t.Fatalf("response: %d %q %v", rr.Code, rr.Body.String(), rr.Header())
+	}
+	if rr.Header().Get("Set-Cookie") != "" {
+		t.Error("the remote's cookie came back")
+	}
+	if seen == nil {
+		t.Fatal("the remote saw nothing")
+	}
+	if seen.URL.Path != "/api/things" || seen.URL.RawQuery != "x=1" || seen.Method != "POST" {
+		t.Errorf("remote got %s %s?%s", seen.Method, seen.URL.Path, seen.URL.RawQuery)
+	}
+	if got := seen.Header.Get("Authorization"); got != "Bearer b-token" {
+		t.Errorf("remote Authorization: %q", got)
+	}
+	for _, h := range []string{"Cookie", "Origin", "X-App-Nonce", "X-Tunnel-Token"} {
+		if seen.Header.Get(h) != "" {
+			t.Errorf("%s reached the remote: %q", h, seen.Header.Get(h))
+		}
+	}
+	if seen.Header.Get("X-Custom") != "kept" {
+		t.Error("an ordinary header was dropped")
+	}
+}
+
+// An event stream reaches the browser as it's written, not when it ends.
+func TestRemoteProxyStreams(t *testing.T) {
+	a := newTestServer(t)
+	release := make(chan struct{})
+	a.remoteConns.open = dialTo(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: one\n\n"))
+		w.(http.Flusher).Flush()
+		// Wait for the test to see "one" (but never hang a failing test).
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		case <-time.After(5 * time.Second):
+			return
+		}
+		w.Write([]byte("data: two\n\n"))
+	}), nil)
+	admin := mustUser(t, a, "Ada", "Admin", "Active")
+	remote := addRemote(t, a, admin, "Streamer", testTailcatAddr(t))
+
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, admin)))
+	}))
+	defer front.Close()
+	resp, err := http.Get(front.URL + "/api/remotes/" + remote.ID + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	first := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := resp.Body.Read(buf)
+		first <- string(buf[:n])
+	}()
+	select {
+	case got := <-first:
+		if !strings.Contains(got, "one") {
+			t.Errorf("first chunk: %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the first event was held back until the stream ended")
+	}
+	close(release)
+	rest, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(rest), "two") {
+		t.Errorf("rest of the stream: %q", rest)
+	}
+}
+
+// An unknown remote is a 404, an unreachable one a 502, and deleting a
+// remote closes its client.
+func TestRemoteProxyFailuresAndCleanup(t *testing.T) {
+	a := newTestServer(t)
+	admin := mustUser(t, a, "Ada", "Admin", "Active")
+	if rr := remoteRequest(a, admin, "GET", "/api/remotes/nope/api/me", "", nil); rr.Code != http.StatusNotFound {
+		t.Errorf("unknown remote: %d, want 404", rr.Code)
+	}
+
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadAddr := dead.Listener.Addr().String()
+	dead.Close()
+	closed := 0
+	a.remoteConns.open = func(string) *remoteConn {
+		tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", deadAddr)
+		}}
+		return &remoteConn{client: &http.Client{Transport: tr}, close: func() { closed++ }}
+	}
+	remote := addRemote(t, a, admin, "Gone", testTailcatAddr(t))
+	if rr := remoteRequest(a, admin, "GET", "/api/remotes/"+remote.ID+"/api/me", "", nil); rr.Code != http.StatusBadGateway {
+		t.Errorf("unreachable remote: %d, want 502", rr.Code)
+	}
+	if rr := requestAs(t, a, admin, "DELETE", "/api/remotes/"+remote.ID, ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d", rr.Code)
+	}
+	if closed != 1 {
+		t.Errorf("client closed %d times on delete, want 1", closed)
 	}
 }
