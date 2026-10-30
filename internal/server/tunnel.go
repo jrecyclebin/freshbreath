@@ -27,7 +27,7 @@ import (
 // carries the tunnel's pre-shared key) and stays the same across restarts
 // until it is reset.
 //
-// Through the tunnel there is one way in: POST /service/tunnel with an
+// Through the tunnel there is one way in: POST /service/direct with an
 // email and SSH key passphrase. It answers with the token pair a
 // passphrase sign-in to the built-in SSH record gets — 15 minutes, then
 // refreshed at /oauth/token like any other — so the same session works
@@ -213,8 +213,8 @@ func (s *Server) tunnelHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Cookie")
 		switch p := r.URL.Path; {
-		case p == "/service/tunnel":
-			s.handleTunnelLogin(w, r)
+		case p == "/service/direct":
+			s.handleDirectLogin(w, r)
 			return
 		case p == "/oauth/token" || strings.HasPrefix(p, "/oauth/token/"):
 			// A refresh is authorized by the refresh token it spends.
@@ -223,7 +223,7 @@ func (s *Server) tunnelHandler() http.Handler {
 		}
 		if err := s.tunnelAuthorize(r); err != nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="freshbreath-tunnel"`)
-			http.Error(w, "Sign in through the tunnel first: POST /service/tunnel with {\"email\", \"passphrase\"}, then send the access token as a Bearer. ("+err.Error()+")", http.StatusUnauthorized)
+			http.Error(w, "Sign in first: POST /service/direct with {\"email\", \"passphrase\"}, then send the access token as a Bearer. ("+err.Error()+")", http.StatusUnauthorized)
 			return
 		}
 		s.ServeHTTP(w, r)
@@ -269,85 +269,6 @@ func (s *Server) tunnelAuthorize(r *http.Request) error {
 	}
 	r.Header.Set("Authorization", "Bearer "+tok)
 	return nil
-}
-
-// handleTunnelLogin is the tunnel's sign-in: an email and SSH key
-// passphrase in, the same token pair a passphrase sign-in to the built-in
-// SSH record gets out. The access token lasts 15 minutes; the refresh
-// token is spent at /oauth/token/{auth_id}.
-func (s *Server) handleTunnelLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyMaxBytes)
-	var req struct {
-		Email      string `json:"email"`
-		Passphrase string `json:"passphrase"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Passphrase == "" {
-		http.Error(w, "email and passphrase required", http.StatusBadRequest)
-		return
-	}
-	ip := s.requestIP(r)
-	if s.loginFailures.blocked(ip, time.Now()) {
-		tooManyLogins(w)
-		return
-	}
-	// One answer for every failure, as on the sign-in form.
-	user, err := s.store.GetUserByEmail(req.Email)
-	if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
-		!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
-		s.loginFailures.fail(ip, time.Now())
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-		return
-	}
-	if user.Status != "Active" {
-		http.Error(w, "This account is "+strings.ToLower(user.Status)+" — ask an admin to activate it", http.StatusForbidden)
-		return
-	}
-	if s.agentMgr != nil {
-		if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, sshAgentTTL); err != nil {
-			log.Printf("agent add key for user %d: %v", user.ID, err)
-		}
-	}
-
-	access, refresh, sshID, err := s.mintTunnelSession(user)
-	if err != nil {
-		log.Printf("tunnel sign-in for user %d: %v", user.ID, err)
-		http.Error(w, "Tunnel sign-in failed", http.StatusInternalServerError)
-		return
-	}
-	_ = s.store.LogAudit(user.ID, user.Email, "login", "tunnel passphrase")
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"access_token":  access,
-		"refresh_token": refresh,
-		"token_type":    "Bearer",
-		"expires_in":    int(accessTokenTTL.Seconds()),
-		"auth_id":       sshID,
-	})
-}
-
-// mintTunnelSession starts a refresh family for user on the built-in SSH
-// record and mints its first pair.
-func (s *Server) mintTunnelSession(user *db.User) (access, refresh string, sshID int64, err error) {
-	if sshID, err = s.store.BuiltinAuthID(db.AuthSSHKey); err != nil {
-		return "", "", 0, err
-	}
-	subject := subjectForUser(user)
-	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, nil, nil); err != nil {
-		return "", "", 0, err
-	}
-	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID}
-	if rd.FamilyID, rd.JTI, err = s.newRefreshFamily(subject, sshID, "tunnel"); err != nil {
-		return "", "", 0, err
-	}
-	if refresh, err = s.mintRefreshToken(rd); err != nil {
-		return "", "", 0, err
-	}
-	return access, refresh, sshID, nil
 }
 
 // handleTunnel is the panel's control: GET reports the tunnel, PUT

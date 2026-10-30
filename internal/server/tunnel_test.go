@@ -66,7 +66,7 @@ type tunnelPair struct {
 
 func tunnelLogin(t *testing.T, srv *Server) tunnelPair {
 	t.Helper()
-	rr := tunnelRequest(srv, "POST", "/service/tunnel", `{"email":"`+knownEmail+`","passphrase":"correct horse"}`, nil)
+	rr := tunnelRequest(srv, "POST", "/service/direct", `{"email":"`+knownEmail+`","passphrase":"correct horse"}`, nil)
 	if rr.Code != 200 {
 		t.Fatalf("tunnel sign-in: %d %s", rr.Code, rr.Body.String())
 	}
@@ -99,7 +99,7 @@ func TestTunnelNeedsASignIn(t *testing.T) {
 			t.Errorf("%s without a token: %d, want 401", path, rr.Code)
 		}
 	}
-	if rr := tunnelRequest(srv, "POST", "/service/tunnel", `{"email":"`+knownEmail+`","passphrase":"nope"}`, nil); rr.Code != 401 {
+	if rr := tunnelRequest(srv, "POST", "/service/direct", `{"email":"`+knownEmail+`","passphrase":"nope"}`, nil); rr.Code != 401 {
 		t.Errorf("wrong passphrase: %d, want 401", rr.Code)
 	}
 
@@ -136,7 +136,7 @@ func TestTunnelTokenStaysInTheTunnelWhenThePanelIsNotSSH(t *testing.T) {
 	if rr := testRequest(t, srv, "GET", "/api/me", nil, bearer(p.Access)); rr.Code != 401 {
 		t.Errorf("tunnel token at an OIDC-gated panel: %d, want 401", rr.Code)
 	}
-	if rr := testRequest(t, srv, "POST", "/service/tunnel", strings.NewReader(`{"email":"`+knownEmail+`","passphrase":"correct horse"}`), nil); rr.Code == 200 {
+	if rr := testRequest(t, srv, "POST", "/service/direct", strings.NewReader(`{"email":"`+knownEmail+`","passphrase":"correct horse"}`), nil); rr.Code == 200 {
 		t.Error("tunnel sign-in answered on the main listener")
 	}
 }
@@ -199,7 +199,7 @@ func TestTunnelSessionIsRevocable(t *testing.T) {
 	p := tunnelLogin(t, srv)
 
 	rr := tunnelRequest(srv, "GET", "/api/me/sessions", "", bearer(p.Access))
-	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"device_label":"tunnel"`) {
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"device_label":"direct"`) {
 		t.Fatalf("sessions: %d %s", rr.Code, rr.Body.String())
 	}
 	if rr := tunnelRequest(srv, "DELETE", "/api/me/sessions", "", bearer(p.Access)); rr.Code != 204 {
