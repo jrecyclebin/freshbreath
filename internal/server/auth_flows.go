@@ -192,12 +192,10 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 		if err != nil {
 			return "", err
 		}
-		s.grantGatePass(w, r, familyID, []int64{rec.ID})
-		writeCallbackPage(w, p, map[string]interface{}{
+		return s.deliverLogin(w, r, p, familyID, []int64{rec.ID}, map[string]interface{}{
 			"v": 1, "auth_id": rec.ID, "kind": rec.Kind,
 			"key": p.done[0].presentedKey, "header": rec.Descriptor.Header,
 		})
-		return "", nil
 	}
 
 	token, rd, err := s.mintForLegs(p.done, p.gateID, p.primaryID)
@@ -236,9 +234,6 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	} else if _, err := s.makeRefreshCookie(w, r, rd); err != nil {
 		return "", err
 	}
-	if rd.FamilyID != "" {
-		s.grantGatePass(w, r, rd.FamilyID, append([]int64{rd.AuthID}, rd.Legs...))
-	}
 
 	primary := p.done[len(p.done)-1].rec
 	for _, leg := range p.done {
@@ -262,8 +257,97 @@ func (s *Server) finishLogin(w http.ResponseWriter, r *http.Request, p *pendingA
 	if clientRefresh != "" {
 		entry["refresh_token"] = clientRefresh
 	}
+	return s.deliverLogin(w, r, p, rd.FamilyID, append([]int64{rd.AuthID}, rd.Legs...), entry)
+}
+
+// deliverLogin gives a finished browser login to the page that asked: the
+// gate pass for the records it cleared, and the store entry by way of the
+// callback page. A login a page gate on an app's own host started is
+// finishing on this server's main address, where neither would reach the
+// app — so both wait in a one-shot ticket and the browser is sent to the
+// app's host to collect them (handleHandoff).
+func (s *Server) deliverLogin(w http.ResponseWriter, r *http.Request, p *pendingAuth, familyID string, authIDs []int64, entry map[string]interface{}) (string, error) {
+	if p.handoffTo != "" {
+		ticket := s.handoffs.put(handoffTicket{
+			host:     normalizedHostName(strings.TrimPrefix(strings.TrimPrefix(p.handoffTo, "https://"), "http://")),
+			familyID: familyID,
+			authIDs:  authIDs,
+			entry:    entry,
+			returnTo: p.returnTo,
+		})
+		return p.handoffTo + "/service/handoff?ticket=" + url.QueryEscape(ticket), nil
+	}
+	if familyID != "" {
+		s.grantGatePass(w, r, familyID, authIDs)
+	}
 	writeCallbackPage(w, p, entry)
 	return "", nil
+}
+
+// handoffTicket is a finished page-gate login waiting for its app's host
+// to collect it.
+type handoffTicket struct {
+	host     string // the app's host name; only that host may collect it
+	familyID string
+	authIDs  []int64
+	entry    map[string]interface{}
+	returnTo string
+	expires  time.Time
+}
+
+// handoffTickets holds tickets for handoffTTL, each good for one use. The
+// zero value is ready to use.
+type handoffTickets struct {
+	mu  sync.Mutex
+	tix map[string]handoffTicket
+}
+
+const handoffTTL = 2 * time.Minute
+
+func (h *handoffTickets) put(t handoffTicket) string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := time.Now()
+	if h.tix == nil {
+		h.tix = make(map[string]handoffTicket)
+	}
+	for id, old := range h.tix {
+		if now.After(old.expires) {
+			delete(h.tix, id)
+		}
+	}
+	id := utils.GenNonce() + utils.GenNonce()
+	t.expires = now.Add(handoffTTL)
+	h.tix[id] = t
+	return id
+}
+
+// take removes and returns a live ticket.
+func (h *handoffTickets) take(id string) (handoffTicket, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	t, ok := h.tix[id]
+	delete(h.tix, id)
+	return t, ok && time.Now().Before(t.expires)
+}
+
+// handleHandoff is where a page-gate login on an app's own host lands: on
+// that host, so the gate pass is set there and the store entry is written
+// to that origin's storage, then back to the page that asked. The control
+// panel's host never holds the app's session, and the app's host never
+// sees the panel's.
+func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.handoffs.take(r.URL.Query().Get("ticket"))
+	if !ok || t.host != normalizedHostName(r.Host) {
+		gatePageError(w, http.StatusBadRequest, "Sign-in expired",
+			"This sign-in link was already used or has expired. Reload the app to sign in again.")
+		return
+	}
+	if t.familyID != "" {
+		s.grantGatePass(w, r, t.familyID, t.authIDs)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writeCallbackPage(w, &pendingAuth{returnTo: t.returnTo, opener: s.schemeOf(r) + "://" + r.Host}, t.entry)
 }
 
 // loginOpenerOrigin is the only window origin a finished browser login may
@@ -575,12 +659,25 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
 	}
+	_, onAppHost := s.hostApp(r.Host)
+	if onAppHost {
+		p.handoffTo = p.opener
+	}
 	next, err := s.beginLeg(r.Context(), p)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to begin auth: %v", err), http.StatusInternalServerError)
 		return false
 	}
-	s.bindBrowser(w, r, p) // a navigation on this origin: the cookie sticks
+	if onAppHost {
+		// The login runs at this server's main address, so it must be
+		// bound to the browser there: a provider leg stops at
+		// /service/begin to bind, a form leg's page binds itself.
+		if p.legURL != "" {
+			next = s.config.PublicBaseURL + "/service/begin?state=" + p.legState
+		}
+	} else {
+		s.bindBrowser(w, r, p) // a navigation on this origin: the cookie sticks
+	}
 	http.Redirect(w, r, next, http.StatusFound)
 	return false
 }
