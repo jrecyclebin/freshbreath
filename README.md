@@ -254,14 +254,18 @@ and nothing else answers until you've used it:
 tailcat forward tcXXXXXXXX 18080:80     # on the other machine
 curl -s localhost:18080/service/tunnel \
   -d '{"email":"you@example.com","passphrase":"..."}'
-# → {"access_token":"...","token_type":"Bearer","expires_in":43200}
+# → {"access_token":"...","refresh_token":"...","token_type":"Bearer","expires_in":900}
 curl -s localhost:18080/api/me -H "Authorization: Bearer $TOKEN"
+curl -s localhost:18080/service/tunnel -d '{"refresh_token":"..."}'   # a new pair
 ```
 
-The token works only through the tunnel, for 12 hours, as you — your role,
-at the control panel's door — so the admin API, `/mcp` and anything gated by
-the panel's auth record work for an MCP client given that header. There are
-no cookies or browser pages through the tunnel.
+The access token lasts 15 minutes and the refresh token rotates on every
+use, just like a panel sign-in. They work only through the tunnel, as you
+(your role, at the control panel's door), so the admin API, `/mcp` and
+anything gated by the panel's auth record work for an MCP client given that
+header. A tunnel sign-in shows up under your sessions as `tunnel`. Signing
+out or resetting your passphrase ends it right away. There are no cookies or
+browser pages through the tunnel.
 
 ## Remote updates
 

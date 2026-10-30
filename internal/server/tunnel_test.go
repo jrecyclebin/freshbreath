@@ -55,17 +55,29 @@ func passphraseUser(t *testing.T, srv *Server, role string) *db.User {
 
 func tunnelLogin(t *testing.T, srv *Server) string {
 	t.Helper()
-	rr := tunnelRequest(srv, "POST", "/service/tunnel", `{"email":"`+knownEmail+`","passphrase":"correct horse"}`, nil)
+	access, _ := tunnelSession(t, srv, `{"email":"`+knownEmail+`","passphrase":"correct horse"}`)
+	return access
+}
+
+// tunnelSession posts body to the tunnel's door and returns the pair.
+func tunnelSession(t *testing.T, srv *Server, body string) (access, refresh string) {
+	t.Helper()
+	rr := tunnelRequest(srv, "POST", "/service/tunnel", body, nil)
 	if rr.Code != 200 {
-		t.Fatalf("tunnel login: %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("tunnel sign-in: %d %s", rr.Code, rr.Body.String())
 	}
 	var res map[string]interface{}
 	json.Unmarshal(rr.Body.Bytes(), &res)
-	tok, _ := res["access_token"].(string)
-	if tok == "" {
-		t.Fatalf("no token in %s", rr.Body.String())
+	access, _ = res["access_token"].(string)
+	refresh, _ = res["refresh_token"].(string)
+	if access == "" || refresh == "" || res["expires_in"] != float64(900) {
+		t.Fatalf("want a 15-minute pair, got %s", rr.Body.String())
 	}
-	return tok
+	return access, refresh
+}
+
+func tunnelRefreshBody(refresh string) string {
+	return `{"refresh_token":"` + refresh + `"}`
 }
 
 func TestTunnelNeedsItsOwnSignIn(t *testing.T) {
@@ -186,5 +198,76 @@ func TestTunnelIdentityPersists(t *testing.T) {
 	}
 	if !again.Key.Equal(first.Key) || !again.PSK.Equal(first.PSK) {
 		t.Error("identity changed between loads")
+	}
+}
+
+// A refresh token rotates: each spend gives a new pair, and spending one
+// that has been rotated past ends the whole session.
+func TestTunnelRefreshRotates(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	passphraseUser(t, srv, "Superuser")
+	tunnelUp(srv, "nodekey:one")
+	_, r1 := tunnelSession(t, srv, `{"email":"`+knownEmail+`","passphrase":"correct horse"}`)
+
+	a2, r2 := tunnelSession(t, srv, tunnelRefreshBody(r1))
+	if rr := tunnelRequest(srv, "GET", "/api/me", "", map[string]string{"Authorization": "Bearer " + a2}); rr.Code != 200 {
+		t.Fatalf("refreshed access token: %d %s", rr.Code, rr.Body.String())
+	}
+	a3, _ := tunnelSession(t, srv, tunnelRefreshBody(r2))
+
+	// r1 is two rotations back: theft, so the session is over.
+	if rr := tunnelRequest(srv, "POST", "/service/tunnel", tunnelRefreshBody(r1), nil); rr.Code != 401 {
+		t.Errorf("stale refresh token: %d, want 401", rr.Code)
+	}
+	if rr := tunnelRequest(srv, "GET", "/api/me", "", map[string]string{"Authorization": "Bearer " + a3}); rr.Code != 401 {
+		t.Errorf("access token after reuse: %d, want 401", rr.Code)
+	}
+}
+
+// Access and refresh tokens don't stand in for each other, and neither is
+// any use at the main listener's token endpoint.
+func TestTunnelTokenKindsStayApart(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	passphraseUser(t, srv, "Superuser")
+	tunnelUp(srv, "nodekey:one")
+	access, refresh := tunnelSession(t, srv, `{"email":"`+knownEmail+`","passphrase":"correct horse"}`)
+
+	if rr := tunnelRequest(srv, "GET", "/api/me", "", map[string]string{"Authorization": "Bearer " + refresh}); rr.Code != 401 {
+		t.Errorf("refresh token as a bearer: %d, want 401", rr.Code)
+	}
+	if rr := tunnelRequest(srv, "POST", "/service/tunnel", tunnelRefreshBody(access), nil); rr.Code != 401 {
+		t.Errorf("access token as a refresh token: %d, want 401", rr.Code)
+	}
+	form := strings.NewReader("grant_type=refresh_token&refresh_token=" + refresh)
+	rr := testRequest(t, srv, "POST", "/oauth/token", form, map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+	if rr.Code == 200 {
+		t.Errorf("tunnel refresh token spent at /oauth/token: %s", rr.Body.String())
+	}
+}
+
+// A tunnel session is a session like any other: it's listed, and signing
+// out (or a passphrase reset, which revokes the same way) ends it at once.
+func TestTunnelSessionIsRevocable(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	passphraseUser(t, srv, "Superuser")
+	tunnelUp(srv, "nodekey:one")
+	access, refresh := tunnelSession(t, srv, `{"email":"`+knownEmail+`","passphrase":"correct horse"}`)
+	auth := map[string]string{"Authorization": "Bearer " + access}
+
+	rr := tunnelRequest(srv, "GET", "/api/me/sessions", "", auth)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), `"device_label":"tunnel"`) {
+		t.Fatalf("sessions: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := tunnelRequest(srv, "DELETE", "/api/me/sessions", "", auth); rr.Code != 204 {
+		t.Fatalf("sign out everywhere: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := tunnelRequest(srv, "GET", "/api/me", "", auth); rr.Code != 401 {
+		t.Errorf("access token after sign-out: %d, want 401", rr.Code)
+	}
+	if rr := tunnelRequest(srv, "POST", "/service/tunnel", tunnelRefreshBody(refresh), nil); rr.Code != 401 {
+		t.Errorf("refresh after sign-out: %d, want 401", rr.Code)
 	}
 }
