@@ -3233,7 +3233,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
 
         <SettingSection
           title="Tunnel"
-          desc={<>Reach this server from anywhere through a <a href="https://github.com/tailscale/tailcat" target="_blank" rel="noopener noreferrer">tailcat</a> tunnel — nothing opened to the Internet. Through the tunnel, sign in with your email and SSH key passphrase (<code>POST /service/tunnel</code>) and send the token as a Bearer to the API and MCP. The address is a secret: anyone holding it can try to sign in.</>}
+          desc={<>Reach this server from anywhere through a <a href="https://github.com/tailscale/tailcat" target="_blank" rel="noopener noreferrer">tailcat</a> tunnel — nothing opened to the Internet. Through the tunnel, sign in with your email and SSH key passphrase (<code>POST /service/direct</code>) and send the token as a Bearer to the API and MCP. The address is a secret: anyone holding it can try to sign in.</>}
         >
           <TunnelSettings session={session}/>
         </SettingSection>

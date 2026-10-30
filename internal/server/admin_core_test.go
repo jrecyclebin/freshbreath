@@ -91,6 +91,25 @@ func TestCoreAuthoritySelfOrAdmin(t *testing.T) {
 	}
 }
 
+// Deleting a key ends the sessions signed in with it, as a passphrase
+// reset does.
+func TestDeleteSSHKeyEndsSessions(t *testing.T) {
+	srv := newTestServer(t)
+	passphraseUser(t, srv, "Member")
+	u, _ := srv.store.GetUserByEmail(knownEmail)
+	sshID, _ := srv.store.BuiltinAuthID(db.AuthSSHKey)
+	family, _, err := srv.newRefreshFamily(subjectForUser(u), sshID, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.coreDeleteSSHKey(u, u); err != nil {
+		t.Fatal(err)
+	}
+	if fam, ok, _ := srv.store.GetRefreshFamily(family); !ok || !fam.Revoked {
+		t.Errorf("session survived deleting the key: %+v", fam)
+	}
+}
+
 // TestCoreServiceFilesAuthority verifies that task service files are
 // Superuser only: neither a Member nor an Admin may read or change them.
 func TestCoreServiceFilesAuthority(t *testing.T) {

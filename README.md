@@ -245,23 +245,30 @@ An app's **URL** decides where it's served:
 Settings → **Tunnel** gives this server a [tailcat](https://github.com/tailscale/tailcat)
 address: a WireGuard tunnel you can reach from any machine, with nothing
 opened to the Internet. The address is a secret and survives restarts until
-you make a new one (which signs everyone out of the tunnel).
+you make a new one.
 
 Through the tunnel there's one way in — your email and SSH key passphrase —
 and nothing else answers until you've used it:
 
 ```sh
 tailcat forward tcXXXXXXXX 18080:80     # on the other machine
-curl -s localhost:18080/service/tunnel \
+curl -s localhost:18080/service/direct \
   -d '{"email":"you@example.com","passphrase":"..."}'
-# → {"access_token":"...","token_type":"Bearer","expires_in":43200}
+# → {"access_token":"...","refresh_token":"...","token_type":"Bearer","expires_in":900,"auth_id":1}
 curl -s localhost:18080/api/me -H "Authorization: Bearer $TOKEN"
+curl -s localhost:18080/oauth/token/1 \
+  -d grant_type=refresh_token -d refresh_token=...     # a new pair
 ```
 
-The token works only through the tunnel, for 12 hours, as you — your role,
-at the control panel's door — so the admin API, `/mcp` and anything gated by
-the panel's auth record work for an MCP client given that header. There are
-no cookies or browser pages through the tunnel.
+That's the same sign-in as the built-in SSH record's, so it refreshes at
+`/oauth/token/{auth_id}` like any other and shows up under your sessions as
+`direct`. Through the tunnel it works as you (your role, at the control
+panel's door), whatever the panel is gated by, since a passphrase is the only
+sign-in a tunnel can offer. So the admin API, `/mcp` and anything gated by
+the panel's auth record work for an MCP client given that header. On the
+main address it's an SSH sign-in like any other: it opens the panel only
+when the panel uses SSH sign-in. There are no cookies or browser pages
+through the tunnel.
 
 ## Remote updates
 

@@ -1354,6 +1354,87 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleDirectLogin is a direct sign-in, for clients with no browser to
+// run a login in: an email and SSH key passphrase in, the same token pair
+// a passphrase sign-in to the built-in SSH record gets out. The access
+// token lasts 15 minutes; the refresh token is spent at
+// /oauth/token/{auth_id}. It answers only through the tunnel (see
+// tunnelHandler).
+func (s *Server) handleDirectLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyMaxBytes)
+	var req struct {
+		Email      string `json:"email"`
+		Passphrase string `json:"passphrase"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Passphrase == "" {
+		http.Error(w, "email and passphrase required", http.StatusBadRequest)
+		return
+	}
+	ip := s.requestIP(r)
+	if s.loginFailures.blocked(ip, time.Now()) {
+		tooManyLogins(w)
+		return
+	}
+	// One answer for every failure, as on the sign-in form.
+	user, err := s.store.GetUserByEmail(req.Email)
+	if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
+		!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
+		s.loginFailures.fail(ip, time.Now())
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	if user.Status != "Active" {
+		http.Error(w, "This account is "+strings.ToLower(user.Status)+" — ask an admin to activate it", http.StatusForbidden)
+		return
+	}
+	if s.agentMgr != nil {
+		if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, sshAgentTTL); err != nil {
+			log.Printf("agent add key for user %d: %v", user.ID, err)
+		}
+	}
+
+	access, refresh, sshID, err := s.mintDirectSession(user)
+	if err != nil {
+		log.Printf("direct sign-in for user %d: %v", user.ID, err)
+		http.Error(w, "Sign-in failed", http.StatusInternalServerError)
+		return
+	}
+	_ = s.store.LogAudit(user.ID, user.Email, "login", "direct passphrase")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"access_token":  access,
+		"refresh_token": refresh,
+		"token_type":    "Bearer",
+		"expires_in":    int(accessTokenTTL.Seconds()),
+		"auth_id":       sshID,
+	})
+}
+
+// mintDirectSession starts a refresh family for user on the built-in SSH
+// record and mints its first pair.
+func (s *Server) mintDirectSession(user *db.User) (access, refresh string, sshID int64, err error) {
+	if sshID, err = s.store.BuiltinAuthID(db.AuthSSHKey); err != nil {
+		return "", "", 0, err
+	}
+	subject := subjectForUser(user)
+	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, nil, nil); err != nil {
+		return "", "", 0, err
+	}
+	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID}
+	if rd.FamilyID, rd.JTI, err = s.newRefreshFamily(subject, sshID, "direct"); err != nil {
+		return "", "", 0, err
+	}
+	if refresh, err = s.mintRefreshToken(rd); err != nil {
+		return "", "", 0, err
+	}
+	return access, refresh, sshID, nil
+}
+
 // handleAPIKeyAuth is the key-entry form: the browser face of an api_key
 // gate. The typed key must match the record's stored key.
 func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
