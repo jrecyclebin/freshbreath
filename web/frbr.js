@@ -82,12 +82,16 @@ function uuidv4() {
 // Pass in the session that clears the app's gate.
 //
 export async function api(session, path, opts = {}) {
+  return authedFetch(session, `${API}${path}`, jsonInit(opts));
+}
+
+// Only objects and arrays are stringified. Strings, binary bodies
+// (Blob/File, ArrayBuffer, typed arrays, ReadableStream) and pre-encoded
+// forms pass through untouched — JSON.stringify(file) yields "{}", and a
+// string would arrive in quotes, either of which corrupts raw uploads
+// (e.g. SSH file sync's hash-verified PUTs).
+function jsonInit(opts) {
   const init = { ...opts };
-  // Only objects and arrays are stringified. Strings, binary bodies
-  // (Blob/File, ArrayBuffer, typed arrays, ReadableStream) and pre-encoded
-  // forms pass through untouched — JSON.stringify(file) yields "{}", and a
-  // string would arrive in quotes, either of which corrupts raw uploads
-  // (e.g. SSH file sync's hash-verified PUTs).
   const body = init.body;
   const isRawBody = typeof body === "string" || body instanceof Blob ||
     body instanceof ArrayBuffer || ArrayBuffer.isView(body) ||
@@ -98,7 +102,7 @@ export async function api(session, path, opts = {}) {
     if (!init.headers.has('Content-Type')) init.headers.set('Content-Type', 'application/json');
     init.body = JSON.stringify(body);
   }
-  return authedFetch(session, `${API}${path}`, init);
+  return init;
 }
 
 // Every authorized request out of frbr.js. An invalid token buys one
@@ -106,6 +110,10 @@ export async function api(session, path, opts = {}) {
 // newer login for — buys one fresh login through the door that minted the
 // credential, and another retry. Still refused after that throws
 // SessionExpired, so neither error reaches the caller as a response.
+//
+// An answer a remote gave (marked X-Frbr-Remote by the proxy) is about the
+// remote's session, not this one, so it goes back to the caller untouched
+// — RemoteSession deals with it.
 async function authedFetch(session, url, init) {
   session = session?.current ?? null;
   const original = session;
@@ -117,8 +125,9 @@ async function authedFetch(session, url, init) {
     return fetch(url, { ...init, headers });
   };
 
+  const ours = (r) => !r.headers.has("X-Frbr-Remote");
   let r = await send(session);
-  if (r.status >= 400 && r.status < 500 && renewable) {
+  if (r.status >= 400 && r.status < 500 && renewable && ours(r)) {
     try {
       await session.refresh();
       r = await send(session);
@@ -129,7 +138,7 @@ async function authedFetch(session, url, init) {
 
   // A stream body was spent by the first send, so it can't ride a retry.
   const replayable = !(init.body instanceof ReadableStream);
-  if (r.status === 401 && session && replayable && window.__FRBR_RELOGIN !== false) {
+  if (r.status === 401 && ours(r) && session && replayable && window.__FRBR_RELOGIN !== false) {
     const fresh = await ensureLogin(session.door);
     if (fresh) {
       // login() hands back a ServiceProxy for service doors; the
@@ -140,7 +149,7 @@ async function authedFetch(session, url, init) {
     }
   }
 
-  if (r.status === 401) throw new SessionExpired(session?.authID ?? GATE_ID);
+  if (r.status === 401 && ours(r)) throw new SessionExpired(session?.authID ?? GATE_ID);
   return r;
 }
 
@@ -168,22 +177,33 @@ const storeKey = (authID) => STORE_PREFIX + authID;
 // we don't recognize is discarded outright: re-logging in is cheap, and
 // guessing at an unknown shape is not.
 function readEntry(authID) {
-  if (!authID) return null;
-  let e = null;
-  try { e = JSON.parse(localStorage.getItem(storeKey(authID)) || "null"); } catch {}
-  if (!e || typeof e !== "object") return null;
-  if (e.v !== STORE_V) { evictEntry(authID); return null; }
-  return e;
+  return authID ? readStored(storeKey(authID)) : null;
 }
 
 function writeEntry(entry) {
-  entry.written_at = new Date().toISOString();
-  try { localStorage.setItem(storeKey(entry.auth_id), JSON.stringify(entry)); } catch {}
-  return entry;
+  return writeStored(storeKey(entry.auth_id), entry);
 }
 
 function evictEntry(authID) {
-  try { localStorage.removeItem(storeKey(authID)); } catch {}
+  evictStored(storeKey(authID));
+}
+
+function readStored(key) {
+  let e = null;
+  try { e = JSON.parse(localStorage.getItem(key) || "null"); } catch {}
+  if (!e || typeof e !== "object") return null;
+  if (e.v !== STORE_V) { evictStored(key); return null; }
+  return e;
+}
+
+function writeStored(key, entry) {
+  entry.written_at = new Date().toISOString();
+  try { localStorage.setItem(key, JSON.stringify(entry)); } catch {}
+  return entry;
+}
+
+function evictStored(key) {
+  try { localStorage.removeItem(key); } catch {}
 }
 
 // expires_at is required, so it is always derived from something: the
@@ -197,6 +217,27 @@ function expiryFrom(tokenResponse) {
   }
   const exp = jwtPayload(tokenResponse.access_token)?.exp;
   return new Date(exp ? exp * 1000 : 0).toISOString();
+}
+
+// What a refresh posts: the entry's own refresh token, or none, in which
+// case the HttpOnly cookie carries it.
+function refreshBody(e) {
+  const body = new URLSearchParams({ grant_type: "refresh_token" });
+  if (e.refresh_token) body.set("refresh_token", e.refresh_token);
+  return body;
+}
+
+// The entry a refresh answer rotates e into. Only an entry that came with
+// a refresh token keeps one; a cookie session never stores it.
+function rotatedEntry(e, t) {
+  const next = {
+    ...e,
+    access_token: t.access_token,
+    token_type: t.token_type || e.token_type || "Bearer",
+    expires_at: expiryFrom(t),
+  };
+  if (e.refresh_token && t.refresh_token) next.refresh_token = t.refresh_token;
+  return next;
 }
 
 // Thrown when a login is gone for good: the refresh was refused, or the
@@ -310,8 +351,6 @@ export class AuthSession {
     // id: a browser holding several records' refresh tokens keeps them in
     // distinct cookie slots. An app that runs elsewhere sends the one its
     // entry holds, and gets the rotated one back in the body.
-    const body = new URLSearchParams({ grant_type: "refresh_token" });
-    if (e.refresh_token) body.set("refresh_token", e.refresh_token);
     const r = await fetch(`${API}/oauth/token/${e.auth_id}`, {
       method: "POST",
       headers: {
@@ -319,7 +358,7 @@ export class AuthSession {
         "X-App-Nonce": APP_NONCE,
       },
       credentials: e.refresh_token ? "omit" : "include",
-      body,
+      body: refreshBody(e),
     });
     if (!r.ok) {
       if (r.status === 400 || r.status === 401) {
@@ -335,17 +374,7 @@ export class AuthSession {
       }
       throw new Error(`Token refresh failed (${r.status})`);
     }
-    const t = await r.json();
-    const next = {
-      ...e,
-      access_token: t.access_token,
-      token_type: t.token_type || e.token_type || "Bearer",
-      expires_at: expiryFrom(t),
-    };
-    // Only an entry that came with a refresh token keeps one; a cookie
-    // session never stores it.
-    if (e.refresh_token && t.refresh_token) next.refresh_token = t.refresh_token;
-    this.#entry = writeEntry(next);
+    this.#entry = writeEntry(rotatedEntry(e, await r.json()));
   }
 
   // Drop this session's credential and its stored entry. The server keeps
@@ -356,6 +385,154 @@ export class AuthSession {
     evictEntry(this.authID);
     this.#entry = { auth_id: this.authID };
   }
+}
+
+// ── RemoteSession ───────────────────────────────────────────────────
+//
+// A sign-in on a remote: another Fresh Breath this server reaches through
+// its tunnel, driven through the proxy at /api/remotes/<id>/. The remote's
+// tokens live here in the browser, at localStorage["frbr:tunnel:<id>"],
+// and never on this server. Every call carries two credentials: this
+// page's own session clears this server's door, and the remote's access
+// token rides along as X-Tunnel-Token for the remote's.
+//
+// The remote's session is the remote's: one of its users, its 15-minute
+// token, its 14-day refresh family. When it lapses for good, RemoteExpired
+// says so — nothing about this page's own sign-in changes.
+
+const TUNNEL_PREFIX = "frbr:tunnel:";
+const remoteSessions = new Map();
+
+// Thrown when a remote sign-in is gone: never made, refused on refresh, or
+// forgotten. Deliberately not a SessionExpired, which means this page's
+// own sign-in ended.
+export class RemoteExpired extends Error {
+  constructor(remoteID) {
+    super("Signed out of this remote — sign in to it again");
+    this.name = "RemoteExpired";
+    this.remoteID = remoteID;
+  }
+}
+
+export class RemoteSession {
+  #id;
+  #entry;
+  #refreshing = null;
+
+  constructor(id) {
+    this.#id = id;
+    this.#entry = readStored(TUNNEL_PREFIX + id);
+  }
+
+  // One session per remote, so concurrent calls share one refresh.
+  static for(id) {
+    let rs = remoteSessions.get(id);
+    if (!rs) { rs = new RemoteSession(id); remoteSessions.set(id, rs); }
+    return rs;
+  }
+
+  get id()        { return this.#id; }
+  get paired()    { return !!this.#entry?.access_token; }
+  get authID()    { return this.#entry?.auth_id ?? null; }
+  get user_name() { return jwtPayload(this.#entry?.access_token)?.user_name; }
+  get email()     { return jwtPayload(this.#entry?.access_token)?.user_email; }
+  get expiresAt() { return this.#entry?.expires_at ? new Date(this.#entry.expires_at) : null; }
+
+  get live() {
+    const t = Date.parse(this.#entry?.expires_at);
+    return this.paired && Number.isFinite(t) && t - Date.now() > REFRESH_MARGIN_MS;
+  }
+
+  /**
+   * Sign in to the remote as one of its users. The passphrase passes
+   * through this server to the remote and is kept by neither.
+   */
+  async pair(email, passphrase) {
+    const r = await this.#send("/service/direct", jsonInit({ method: "POST", body: { email, passphrase } }));
+    if (!r.ok) throw new Error((await r.text()).trim() || `Sign-in to the remote failed (${r.status})`);
+    const t = await r.json();
+    this.#entry = writeStored(TUNNEL_PREFIX + this.#id, {
+      v: STORE_V,
+      remote_id: this.#id,
+      auth_id: t.auth_id,
+      access_token: t.access_token,
+      refresh_token: t.refresh_token,
+      token_type: t.token_type || "Bearer",
+      expires_at: expiryFrom(t),
+    });
+    return this;
+  }
+
+  /**
+   * Call the remote: path is the remote's own (/api/me), opts as for api().
+   * A lapsing token is refreshed first, and a 401 from the remote buys one
+   * refresh and a retry; still refused throws RemoteExpired.
+   */
+  async fetch(path, opts = {}) {
+    if (!this.paired) throw new RemoteExpired(this.#id);
+    const init = jsonInit(opts);
+    if (!this.live) await this.refresh();
+    let r = await this.#send(path, init, true);
+    const replayable = !(init.body instanceof ReadableStream);
+    if (r.status === 401 && r.headers.has("X-Frbr-Remote") && replayable) {
+      await this.refresh();
+      r = await this.#send(path, init, true);
+    }
+    if (r.status === 401 && r.headers.has("X-Frbr-Remote")) {
+      this.forget();
+      throw new RemoteExpired(this.#id);
+    }
+    return r;
+  }
+
+  async refresh() {
+    if (this.#refreshing) return this.#refreshing;
+    this.#refreshing = this.#doRefresh();
+    try { return await this.#refreshing; }
+    finally { this.#refreshing = null; }
+  }
+
+  async #doRefresh() {
+    const e = this.#entry;
+    if (!e?.refresh_token) { this.forget(); throw new RemoteExpired(this.#id); }
+    const r = await this.#send(`/oauth/token/${e.auth_id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: refreshBody(e),
+    });
+    if (!r.ok) {
+      // The remote refused: its refresh family is gone. This server
+      // refusing (the panel's own sign-in) has already thrown
+      // SessionExpired from authedFetch, and leaves the entry be.
+      if (r.headers.has("X-Frbr-Remote") && (r.status === 400 || r.status === 401)) {
+        this.forget();
+        throw new RemoteExpired(this.#id);
+      }
+      throw new Error(`Remote token refresh failed (${r.status})`);
+    }
+    this.#entry = writeStored(TUNNEL_PREFIX + this.#id, rotatedEntry(e, await r.json()));
+  }
+
+  // Drop this browser's sign-in to the remote. The remote's refresh family
+  // lives on there until it expires or is revoked in the remote's own
+  // sessions list.
+  forget() {
+    evictStored(TUNNEL_PREFIX + this.#id);
+    this.#entry = null;
+  }
+
+  // Through this server's proxy, as this page's own session. withToken
+  // adds the remote's access token; the sign-in and refresh go without.
+  #send(path, init, withToken = false) {
+    const headers = new Headers(init.headers);
+    if (withToken && this.#entry?.access_token) headers.set("X-Tunnel-Token", this.#entry.access_token);
+    return authedFetch(currentSession(), `${API}/api/remotes/${encodeURIComponent(this.#id)}${path}`, { ...init, headers });
+  }
+}
+
+/** The sign-in on a remote (signed in or not yet) — see RemoteSession. */
+export function remote(id) {
+  return RemoteSession.for(id);
 }
 
 // ── login ───────────────────────────────────────────────────────────
@@ -1295,6 +1472,7 @@ export default ServiceProxy;
 if (typeof window !== 'undefined') {
   window.FreshBreath = window.FrBr = {
     api, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
+    remote, RemoteSession, RemoteExpired,
     sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
   };
 }

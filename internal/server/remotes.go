@@ -316,6 +316,9 @@ func (s *Server) proxyRemote(w http.ResponseWriter, r *http.Request, id, rest st
 	s.auditRemoteCall(actorFromContext(r), remote, r.Method, rest, resp.StatusCode)
 
 	copyHeaders(w.Header(), resp.Header)
+	// Marks the answer as the remote's, so a client can tell the remote's
+	// 401 (its session lapsed) from this server's (the panel's did).
+	w.Header().Set("X-Frbr-Remote", "1")
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(&flushWriter{w: w}, resp.Body)
 }

@@ -268,6 +268,9 @@ func TestRemoteProxyHeaders(t *testing.T) {
 	if rr.Header().Get("Set-Cookie") != "" {
 		t.Error("the remote's cookie came back")
 	}
+	if rr.Header().Get("X-Frbr-Remote") != "1" {
+		t.Error("the remote's answer isn't marked as the remote's")
+	}
 	if seen == nil {
 		t.Fatal("the remote saw nothing")
 	}
@@ -344,8 +347,8 @@ func TestRemoteProxyStreams(t *testing.T) {
 func TestRemoteProxyFailuresAndCleanup(t *testing.T) {
 	a := newTestServer(t)
 	admin := mustUser(t, a, "Ada", "Admin", "Active")
-	if rr := remoteRequest(a, admin, "GET", "/api/remotes/nope/api/me", "", nil); rr.Code != http.StatusNotFound {
-		t.Errorf("unknown remote: %d, want 404", rr.Code)
+	if rr := remoteRequest(a, admin, "GET", "/api/remotes/nope/api/me", "", nil); rr.Code != http.StatusNotFound || rr.Header().Get("X-Frbr-Remote") != "" {
+		t.Errorf("unknown remote: %d (marked %q), want this server's own 404", rr.Code, rr.Header().Get("X-Frbr-Remote"))
 	}
 
 	dead := httptest.NewServer(http.NotFoundHandler())
