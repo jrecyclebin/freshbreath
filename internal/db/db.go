@@ -178,6 +178,14 @@ func (s *Store) Migrate() error {
       last_error_at        TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_update_feeds_mode ON update_feeds(mode);
+    CREATE TABLE IF NOT EXISTS remotes (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      address     TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      created_by  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
   `)
 	if err != nil {
 		return err
@@ -1784,5 +1792,74 @@ func (s *Store) SetUpdateFeedError(id, msg string) error {
 		"UPDATE update_feeds SET last_error = ?, last_error_at = ? WHERE id = ?",
 		msg, time.Now().UTC().Format(time.RFC3339), id,
 	)
+	return err
+}
+
+// ── Remotes ──
+//
+// Another Fresh Breath reached through its tailcat address. The address is
+// a secret (it carries the remote's pre-shared key), so it is sealed at
+// rest like any other stored secret, and it never changes once stored: it
+// is the remote's identity.
+
+const remoteCols = `id, name, address, fingerprint, created_by, created_at`
+
+func (s *Store) scanRemote(row interface{ Scan(...any) error }) (*Remote, error) {
+	r := &Remote{}
+	var sealed, createdAt string
+	if err := row.Scan(&r.ID, &r.Name, &sealed, &r.Fingerprint, &r.CreatedBy, &createdAt); err != nil {
+		return nil, err
+	}
+	addr, err := s.openField(sealed)
+	if err != nil {
+		return nil, fmt.Errorf("remote %s address: %w", r.ID, err)
+	}
+	r.Address = addr
+	r.CreatedAt = parseTime(createdAt)
+	return r, nil
+}
+
+func (s *Store) CreateRemote(r *Remote) error {
+	_, err := s.db.Exec(
+		`INSERT INTO remotes (id, name, address, fingerprint, created_by) VALUES (?, ?, ?, ?, ?)`,
+		r.ID, r.Name, s.sealField(r.Address), r.Fingerprint, r.CreatedBy,
+	)
+	return err
+}
+
+func (s *Store) ListRemotes() ([]*Remote, error) {
+	rows, err := s.db.Query(`SELECT ` + remoteCols + ` FROM remotes ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Remote
+	for rows.Next() {
+		r, err := s.scanRemote(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetRemote(id string) (*Remote, error) {
+	r, err := s.scanRemote(s.db.QueryRow(`SELECT `+remoteCols+` FROM remotes WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return nil, errors.New("remote not found")
+	}
+	return r, err
+}
+
+// RenameRemote changes a remote's name, the only thing about it that can
+// change.
+func (s *Store) RenameRemote(id, name string) error {
+	_, err := s.db.Exec(`UPDATE remotes SET name = ? WHERE id = ?`, name, id)
+	return err
+}
+
+func (s *Store) DeleteRemote(id string) error {
+	_, err := s.db.Exec(`DELETE FROM remotes WHERE id = ?`, id)
 	return err
 }

@@ -50,6 +50,7 @@ provider redirect → provider calls `callback` → "legs" are completed in sequ
 | `/service/apikey-auth` | GET/POST | API-key gate form & POST `{state, api_key}` |
 | `/service/logout` | GET/POST | Clears browser login state |
 | `/service/passphrase` | GET/POST | Invite/reset link page: token in link is credential; POST sets passphrase |
+| `/service/direct` | POST | **Tunnel only.** Headless sign-in: `{email, passphrase}` → the built-in SSH record's token pair `{access_token, refresh_token, expires_in, auth_id}`; refresh at `/oauth/token/{auth_id}`. Session label `direct` |
 
 ## 3. Service proxy & direct calls
 
@@ -208,6 +209,9 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/onboarding/skip` | POST | superuser | Skip onboarding |
 | `/api/tls` | POST | superuser | Local HTTPS setup |
 | `/api/tls/ca.pem` | GET | superuser | Local CA cert |
+| `/api/tunnel` | GET/PUT | superuser | Tailcat tunnel status / `PUT {enabled, reset}` |
+| `/api/remotes` | GET/POST | admin+ | List remotes / `POST {name, address}` adds one (tailcat address, sealed; never returned, a `fingerprint` stands in) |
+| `/api/remotes/{id}` | PUT/DELETE | admin+ | `PUT {name}` renames (an `address` is refused: a new address is a new remote) / delete |
 
 ### Global databases (alias mount)
 
