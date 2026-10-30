@@ -209,8 +209,18 @@ func (s *Server) storeTunnelIdentity(id tunnelIdentity) error {
 // the panel's door — the passphrase is the only sign-in the tunnel can
 // offer, so it stands in for whatever the panel asks. Cookies are dropped:
 // nothing through the tunnel rides a browser session.
+//
+// Any Host but a local one (localhost, an IP) becomes "localhost": the
+// tunnel always means this server's own routes. The Host check guards
+// against DNS rebinding, which a tailcat address can't be used for, and an
+// app's own host name would otherwise steer the request into that app. A
+// local Host is kept, port and all, since frbr.js builds its API base from
+// it for a client on `tailcat forward`.
 func (s *Server) tunnelHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.isLocalHost(r.Host) {
+			r.Host = "localhost"
+		}
 		r.Header.Del("Cookie")
 		switch p := r.URL.Path; {
 		case p == "/service/direct":

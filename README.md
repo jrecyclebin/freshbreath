@@ -270,6 +270,10 @@ main address it's an SSH sign-in like any other: it opens the panel only
 when the panel uses SSH sign-in. There are no cookies or browser pages
 through the tunnel.
 
+Through the tunnel the server answers as itself whatever `Host` a client
+sends, so apps served at their own host name aren't reachable there. Apps
+at a slug (`/blog/`) are.
+
 ## Remote updates
 
 I've started using Fresh Breath for projects I do for others. Give them a

@@ -248,3 +248,34 @@ func TestTunnelIdentityPersists(t *testing.T) {
 		t.Error("identity changed between loads")
 	}
 }
+
+// Through the tunnel the Host names this server, whatever the client
+// sends: an app's own host doesn't steer into the app, and a name the
+// server doesn't answer to isn't refused. A local Host keeps its port.
+func TestTunnelPinsTheHost(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	passphraseUser(t, srv, "Superuser")
+	hostedRemoteApp(t, srv, nil)
+	p := tunnelLogin(t, srv)
+
+	for _, host := range []string{"blog.example.org", "nowhere.example.com", "localhost:18080", "127.0.0.1:18080"} {
+		req := httptest.NewRequest("GET", "/api/me", nil)
+		req.Host = host
+		req.Header.Set("Authorization", "Bearer "+p.Access)
+		rr := httptest.NewRecorder()
+		srv.tunnelHandler().ServeHTTP(rr, req)
+		if rr.Code != 200 || !strings.Contains(rr.Body.String(), knownEmail) {
+			t.Errorf("Host %s: %d %s, want the panel's /api/me", host, rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/frbr.js", nil)
+	req.Host = "localhost:18080"
+	req.Header.Set("Authorization", "Bearer "+p.Access)
+	rr := httptest.NewRecorder()
+	srv.tunnelHandler().ServeHTTP(rr, req)
+	if !strings.Contains(rr.Body.String(), `"apiBase":"http://localhost:18080"`) {
+		t.Errorf("frbr.js through a forward should keep its port: %d", rr.Code)
+	}
+}
