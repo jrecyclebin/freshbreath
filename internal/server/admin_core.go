@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -372,6 +373,52 @@ func publicSSHInfo(k *sshkit.SSHKeyInfo) *sshkit.SSHKeyInfo {
 
 // ── App operations ──────────────────────────────────────────────────
 
+// reservedAppSlugs are the top-level paths Fresh Breath serves itself; an
+// app mounted at one would never be reached.
+var reservedAppSlugs = map[string]bool{
+	"api": true, "control": true, "mcp": true, "service": true, "oauth": true,
+}
+
+// normalizeAppURL cleans up where an app is hosted. A remote URL
+// (https://blog.example.com) keeps its location, with the scheme and host
+// lowercased. Anything else is a mount point on this server, stored as the
+// bare slug: "/blog/" becomes "blog". Subdirectories, reserved paths and
+// characters a slug can't carry are refused. Blank stays blank — the app
+// is then mounted at its name's slug, or runs from disk.
+func normalizeAppURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return "", cerr(http.StatusBadRequest, "app url %q is not a valid URL", raw)
+		}
+		u.Scheme = strings.ToLower(u.Scheme)
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return "", cerr(http.StatusBadRequest, "app url %q must be http or https", raw)
+		}
+		u.Host = strings.ToLower(u.Host)
+		if u.Path == "/" {
+			u.Path = ""
+		}
+		return u.String(), nil
+	}
+	slug := strings.ToLower(strings.Trim(raw, "/"))
+	if first, rest, sub := strings.Cut(slug, "/"); sub {
+		return "", cerr(http.StatusBadRequest,
+			"Apps cannot be hosted at subdirectories - create a '%s' app and publish to its '%s' folder to achieve this.", first, rest)
+	}
+	if slug == "" || slugify(slug) != slug {
+		return "", cerr(http.StatusBadRequest, "app url %q must be a slug of letters, digits and dashes (like 'blog') or a full https:// URL", raw)
+	}
+	if reservedAppSlugs[slug] {
+		return "", cerr(http.StatusBadRequest, "'%s' is reserved by Fresh Breath - pick another path for this app", slug)
+	}
+	return slug, nil
+}
+
 // validateAuthSlot checks that an optional slot reference points at a real
 // auth record. Every kind is eligible in both slots — what a kind means just
 // differs by slot — so existence is the whole check.
@@ -391,6 +438,10 @@ func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *i
 	}
 	if name == "" {
 		return "", cerr(http.StatusBadRequest, "name required")
+	}
+	url, err := normalizeAppURL(url)
+	if err != nil {
+		return "", err
 	}
 	if err := s.validateOwner(ownerID, nil); err != nil {
 		return "", err
@@ -415,6 +466,9 @@ func (s *Server) coreUpdateApp(actor *db.User, nonce, name, env, url string, own
 	app, err := s.store.GetApp(nonce)
 	if err != nil {
 		return cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	if url, err = normalizeAppURL(url); err != nil {
+		return err
 	}
 	if err := s.validateOwner(ownerID, app.OwnerID); err != nil {
 		return err
@@ -1299,7 +1353,11 @@ func (s *Server) coreDownloadAppWeb(actor *db.User, nonce string) ([]byte, strin
 	if err := zw.Close(); err != nil {
 		return nil, "", cerr(http.StatusInternalServerError, "zip close failed: %v", err)
 	}
-	return buf.Bytes(), appSlug(app), nil
+	name := appSlug(app)
+	if name == "" {
+		name = slugify(app.Name)
+	}
+	return buf.Bytes(), name, nil
 }
 
 // uploadFile is one file from an upload request. Name is the client's
@@ -1472,7 +1530,7 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 	}
 	s.rebuildHostedRoutes()
 	s.audit(actor, "uploaded web files", app.Name)
-	return "/" + appSlug(app), nil
+	return appLocation(app), nil
 }
 
 // coreUploadAppData adds uploaded files to an app's data area at their
@@ -1584,7 +1642,10 @@ func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (st
 	}
 	s.rebuildHostedRoutes()
 	s.audit(actor, "deployed "+source+" → "+target, app.Name)
-	return "/" + appSlug(app) + "@" + target, nil
+	if appHostName(app) != "" {
+		return appLocation(app) + "/@" + target, nil
+	}
+	return appLocation(app) + "@" + target, nil
 }
 
 // copyDir recursively copies the contents of src into dst, preserving file
@@ -2181,6 +2242,11 @@ func (s *Server) isHostedNonce(nonce string) bool {
 	s.hostedMu.RLock()
 	defer s.hostedMu.RUnlock()
 	for _, ha := range s.hostedRoutes {
+		if ha.nonce == nonce {
+			return true
+		}
+	}
+	for _, ha := range s.hostedHosts {
 		if ha.nonce == nonce {
 			return true
 		}

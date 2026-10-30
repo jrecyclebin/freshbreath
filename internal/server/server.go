@@ -59,6 +59,8 @@ type Server struct {
 	publicHost        string                // FRBR_BASE_URL's host name (lowercased, no port)
 	trustedProxies    []netip.Prefix        // peers whose X-Forwarded-Proto is honored (see schemeOf)
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
+	hostedHosts       map[string]hostedApp // host name → app served at its own remote URL
+	handoffs          handoffTickets       // finished page-gate logins on their way to an app's host
 	hostedMu          sync.RWMutex
 	actTickets        actTickets                         // /api/act capability tickets (in-memory only)
 	pendingElicits    pendingElicits                     // virtual-tool elicitation suspend/resume state (in-memory only)
@@ -110,6 +112,11 @@ type pendingAuth struct {
 	appNonce string // requesting app (or adminNonce); "" for MCP flows
 	appState string // opener's correlation state (browser flows)
 	returnTo string // same-origin path to bounce a top-level login back to
+	// handoffTo is the origin of an app's own host when a page gate there
+	// started the login. The login runs on this server's main address, so
+	// its result is carried back to that host (handleHandoff) rather than
+	// landing on the wrong one.
+	handoffTo string
 	opener   string // origin the finished login is posted to (see loginOpenerOrigin)
 	mcpKey   string // key into mcpAuthPending; "" for browser flows
 
@@ -214,6 +221,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		pending:        make(map[string]*pendingAuth),
 		lastSeenAt:     make(map[int64]time.Time),
 		hostedRoutes:   make(map[string]hostedApp),
+		hostedHosts:    make(map[string]hostedApp),
 		httpClient:     &http.Client{Timeout: 300 * time.Second},
 		oidcProviders:  make(map[string]*oidc.Provider),
 		localKey:       localKey,
