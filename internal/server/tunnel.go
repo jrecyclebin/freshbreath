@@ -12,8 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-jose/go-jose/v4"
-	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/tailscale/tailcat"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
@@ -30,23 +28,17 @@ import (
 // until it is reset.
 //
 // Through the tunnel there is one way in: POST /service/tunnel with an
-// email and SSH key passphrase, which answers with a tunnel access token
-// (15 minutes) and refresh token, the panel's own rhythm. Every other
-// request must carry the access token as its bearer — no cookies, no
-// OAuth redirects, no open pages. The session is a refresh family like any
-// panel sign-in, so it is listed, revoked and ended by a passphrase reset
-// the same way. Tunnel tokens are good only through the tunnel (the main
-// listener refuses their audiences), and only for the address they were
-// minted under: resetting the address signs everyone out.
+// email and SSH key passphrase. It answers with the token pair a
+// passphrase sign-in to the built-in SSH record gets — 15 minutes, then
+// refreshed at /oauth/token like any other — so the same session works
+// through the tunnel and, wherever that record is a gate, on the main
+// listener. Every other request must carry an access token as its bearer:
+// no cookies, no OAuth redirects, no open pages.
 // Inside, the request goes on as that user at the control panel's door,
 // so the admin API, the central MCP and anything behind the panel's gate
 // work as they would for them in the panel.
 
-const (
-	tunnelAudience        = "freshbreath-tunnel"
-	tunnelRefreshAudience = "freshbreath-tunnel-refresh"
-	tunnelStartWait       = 45 * time.Second
-)
+const tunnelStartWait = 45 * time.Second
 
 // tunnelIdentity is what keeps the tunnel's address the same across
 // restarts, sealed into the tunnel_identity setting.
@@ -62,7 +54,6 @@ type tunnel struct {
 	srv  *tailcat.Server
 	http *http.Server
 	addr string
-	pub  string // the server's node public key; tunnel tokens are bound to it
 }
 
 type tunnelStatus struct {
@@ -89,8 +80,8 @@ func (s *Server) resumeTunnel() {
 }
 
 // coreSetTunnel turns the tunnel on or off. reset discards its identity
-// first, so it comes back (if on) at a new address and every tunnel token
-// minted under the old one stops working.
+// first, so it comes back (if on) at a new address. Sessions signed in
+// through the old address live on; ending those is the sessions list's job.
 func (s *Server) coreSetTunnel(ctx context.Context, actor *db.User, enabled, reset bool) (tunnelStatus, error) {
 	if err := s.gate(actor, rolesSuperuser); err != nil {
 		return tunnelStatus{}, err
@@ -168,7 +159,6 @@ func (s *Server) startTunnel(ctx context.Context) error {
 		}
 	}()
 	s.tunnel.srv, s.tunnel.http, s.tunnel.addr = ts, hs, string(addr)
-	s.tunnel.pub = id.Key.Public().String()
 	return nil
 }
 
@@ -180,7 +170,7 @@ func (s *Server) stopTunnel() {
 	}
 	s.tunnel.http.Close()
 	s.tunnel.srv.Close()
-	s.tunnel.srv, s.tunnel.http, s.tunnel.addr, s.tunnel.pub = nil, nil, "", ""
+	s.tunnel.srv, s.tunnel.http, s.tunnel.addr = nil, nil, ""
 }
 
 func (s *Server) loadTunnelIdentity() (tunnelIdentity, error) {
@@ -211,41 +201,80 @@ func (s *Server) storeTunnelIdentity(id tunnelIdentity) error {
 	return s.store.SetSetting("tunnel_identity", sealed)
 }
 
-// tunnelHandler fronts every request that comes through the tunnel: the
-// sign-in, or a request carrying a tunnel token, which goes on to the
-// usual handler as that user at the panel's door. Cookies are dropped —
+// tunnelHandler fronts every request that comes through the tunnel. Past
+// the sign-in and the token refresh, a request must carry a Fresh Breath
+// token bound to the panel's record or to the built-in SSH record (what a
+// tunnel sign-in mints). The panel's own tokens go on as they are; an SSH
+// token, when the panel is gated some other way, is exchanged for one at
+// the panel's door — the passphrase is the only sign-in the tunnel can
+// offer, so it stands in for whatever the panel asks. Cookies are dropped:
 // nothing through the tunnel rides a browser session.
 func (s *Server) tunnelHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Cookie")
-		if r.URL.Path == "/service/tunnel" {
+		switch p := r.URL.Path; {
+		case p == "/service/tunnel":
 			s.handleTunnelLogin(w, r)
 			return
-		}
-		user, err := s.verifyTunnelToken(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-		if err != nil {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="freshbreath-tunnel"`)
-			http.Error(w, "Sign in through the tunnel first: POST /service/tunnel with {\"email\", \"passphrase\"}, then send the token as a Bearer. ("+err.Error()+")", http.StatusUnauthorized)
+		case p == "/oauth/token" || strings.HasPrefix(p, "/oauth/token/"):
+			// A refresh is authorized by the refresh token it spends.
+			s.ServeHTTP(w, r)
 			return
 		}
-		// The panel's door takes its own kind of token; hand it one for
-		// this user, minted per request and never seen by the client.
-		r.Header.Del("Authorization")
-		if rec, err := s.adminAuthRecord(); err == nil && rec != nil {
-			tok, err := s.mintFreshbreathToken(subjectForUser(user), user.Email, user.Role, user.Name, rec.ID, nil, nil)
-			if err != nil {
-				http.Error(w, "Tunnel sign-in failed", http.StatusInternalServerError)
-				return
-			}
-			r.Header.Set("Authorization", "Bearer "+tok)
+		if err := s.tunnelAuthorize(r); err != nil {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="freshbreath-tunnel"`)
+			http.Error(w, "Sign in through the tunnel first: POST /service/tunnel with {\"email\", \"passphrase\"}, then send the access token as a Bearer. ("+err.Error()+")", http.StatusUnauthorized)
+			return
 		}
 		s.ServeHTTP(w, r)
 	})
 }
 
-// handleTunnelLogin is the tunnel's only open door. An email and SSH key
-// passphrase start a session; a refresh token continues one. Either way
-// the answer is a fresh access and refresh token pair.
+// tunnelAuthorize checks a tunnel request's bearer and, for an SSH token
+// while the panel is gated by another record, swaps in a token for the
+// panel's record, minted per request and never seen by the client. It
+// keeps the SSH binding as a leg, so services acting as the SSH record
+// still get the caller's login.
+func (s *Server) tunnelAuthorize(r *http.Request) error {
+	raw := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	claims, err := s.verifyFreshbreathToken(raw)
+	if err != nil || claims == nil {
+		return errors.New("no valid token")
+	}
+	admin, err := s.adminAuthRecord()
+	if err != nil {
+		return err
+	}
+	if admin != nil && claims.boundTo(admin.ID) {
+		return nil
+	}
+	sshID, err := s.store.BuiltinAuthID(db.AuthSSHKey)
+	if err != nil || !claims.boundTo(sshID) {
+		return errors.New("token is not for this server's SSH sign-in")
+	}
+	if admin == nil {
+		return nil // setup mode: the panel's door is open anyway
+	}
+	user, err := s.userFromSubject(claims.Subject)
+	if err != nil || user == nil {
+		return errors.New("unknown user")
+	}
+	if user.Status != "Active" {
+		return errors.New("account is not active")
+	}
+	legs := append([]int64{claims.AuthID}, claims.Legs...)
+	tok, err := s.mintFreshbreathToken(claims.Subject, user.Email, user.Role, user.Name, admin.ID, legs, nil)
+	if err != nil {
+		return errors.New("tunnel sign-in failed")
+	}
+	r.Header.Set("Authorization", "Bearer "+tok)
+	return nil
+}
+
+// handleTunnelLogin is the tunnel's sign-in: an email and SSH key
+// passphrase in, the same token pair a passphrase sign-in to the built-in
+// SSH record gets out. The access token lasts 15 minutes; the refresh
+// token is spent at /oauth/token/{auth_id}.
 func (s *Server) handleTunnelLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -253,68 +282,43 @@ func (s *Server) handleTunnelLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, jsonBodyMaxBytes)
 	var req struct {
-		Email        string `json:"email"`
-		Passphrase   string `json:"passphrase"`
-		RefreshToken string `json:"refresh_token"`
+		Email      string `json:"email"`
+		Passphrase string `json:"passphrase"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil ||
-		(req.RefreshToken == "" && (req.Email == "" || req.Passphrase == "")) {
-		http.Error(w, "email and passphrase (or refresh_token) required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Passphrase == "" {
+		http.Error(w, "email and passphrase required", http.StatusBadRequest)
 		return
 	}
-
-	var family, jti string
-	if req.RefreshToken != "" {
-		var err error
-		if family, jti, err = s.refreshTunnelSession(req.RefreshToken); err != nil {
-			writeErr(w, err)
-			return
+	ip := s.requestIP(r)
+	if s.loginFailures.blocked(ip, time.Now()) {
+		tooManyLogins(w)
+		return
+	}
+	// One answer for every failure, as on the sign-in form.
+	user, err := s.store.GetUserByEmail(req.Email)
+	if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
+		!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
+		s.loginFailures.fail(ip, time.Now())
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	if user.Status != "Active" {
+		http.Error(w, "This account is "+strings.ToLower(user.Status)+" — ask an admin to activate it", http.StatusForbidden)
+		return
+	}
+	if s.agentMgr != nil {
+		if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, sshAgentTTL); err != nil {
+			log.Printf("agent add key for user %d: %v", user.ID, err)
 		}
-	} else {
-		ip := s.requestIP(r)
-		if s.loginFailures.blocked(ip, time.Now()) {
-			tooManyLogins(w)
-			return
-		}
-		// One answer for every failure, as on the sign-in form.
-		user, err := s.store.GetUserByEmail(req.Email)
-		if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
-			!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
-			s.loginFailures.fail(ip, time.Now())
-			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-			return
-		}
-		if user.Status != "Active" {
-			http.Error(w, "This account is "+strings.ToLower(user.Status)+" — ask an admin to activate it", http.StatusForbidden)
-			return
-		}
-		if s.tunnelPub() == "" {
-			http.Error(w, "Tunnel sign-in failed: the tunnel is not running", http.StatusServiceUnavailable)
-			return
-		}
-		if s.agentMgr != nil {
-			if err := s.agentMgr.AddKey(user.ID, user.Metadata.SSHKey, req.Passphrase, sshAgentTTL); err != nil {
-				log.Printf("agent add key for user %d: %v", user.ID, err)
-			}
-		}
-		// The session is bound to the panel's record, as a panel sign-in
-		// would be (none in setup mode).
-		var authID int64
-		if rec, err := s.adminAuthRecord(); err == nil && rec != nil {
-			authID = rec.ID
-		}
-		if family, jti, err = s.newRefreshFamily(subjectForUser(user), authID, "tunnel"); err != nil {
-			http.Error(w, "Tunnel sign-in failed", http.StatusInternalServerError)
-			return
-		}
-		_ = s.store.LogAudit(user.ID, user.Email, "login", "tunnel passphrase")
 	}
 
-	access, refresh, err := s.mintTunnelTokens(family, jti)
+	access, refresh, sshID, err := s.mintTunnelSession(user)
 	if err != nil {
+		log.Printf("tunnel sign-in for user %d: %v", user.ID, err)
 		http.Error(w, "Tunnel sign-in failed", http.StatusInternalServerError)
 		return
 	}
+	_ = s.store.LogAudit(user.ID, user.Email, "login", "tunnel passphrase")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -322,138 +326,28 @@ func (s *Server) handleTunnelLogin(w http.ResponseWriter, r *http.Request) {
 		"refresh_token": refresh,
 		"token_type":    "Bearer",
 		"expires_in":    int(accessTokenTTL.Seconds()),
+		"auth_id":       sshID,
 	})
 }
 
-// refreshTunnelSession spends a tunnel refresh token, rotating its family
-// the way the OAuth refresh grant does: the current token moves the family
-// on, the previous one is let through again within the grace window (a
-// retry after a lost answer), and anything else is taken as theft and ends
-// the session.
-func (s *Server) refreshTunnelSession(raw string) (family, jti string, err error) {
-	claims, fam, _, err := s.parseTunnelToken(raw, tunnelRefreshAudience)
-	if err != nil {
-		return "", "", cerr(http.StatusUnauthorized, "Invalid refresh token: %v — sign in again", err)
+// mintTunnelSession starts a refresh family for user on the built-in SSH
+// record and mints its first pair.
+func (s *Server) mintTunnelSession(user *db.User) (access, refresh string, sshID int64, err error) {
+	if sshID, err = s.store.BuiltinAuthID(db.AuthSSHKey); err != nil {
+		return "", "", 0, err
 	}
-	inGrace := claims.ID == fam.PrevJTI && !fam.RotatedAt.IsZero() && time.Since(fam.RotatedAt) <= refreshGraceWindow
-	if claims.ID != fam.CurrentJTI && !inGrace {
-		_ = s.store.RevokeRefreshFamily(fam.ID)
-		return "", "", cerr(http.StatusUnauthorized, "Refresh token reuse detected — the session is ended, sign in again")
+	subject := subjectForUser(user)
+	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, nil, nil); err != nil {
+		return "", "", 0, err
 	}
-	next := fam.CurrentJTI
-	if !inGrace {
-		next = newJTI()
-		ok, err := s.store.RotateRefreshFamily(fam.ID, fam.CurrentJTI, next, time.Now())
-		if err != nil {
-			return "", "", cerr(http.StatusInternalServerError, "rotation failed")
-		}
-		if !ok {
-			return "", "", cerr(http.StatusUnauthorized, "Refresh token was rotated elsewhere — sign in again")
-		}
+	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID}
+	if rd.FamilyID, rd.JTI, err = s.newRefreshFamily(subject, sshID, "tunnel"); err != nil {
+		return "", "", 0, err
 	}
-	return fam.ID, next, nil
-}
-
-// tunnelClaims are carried by both kinds of tunnel token; the audience
-// tells an access token from a refresh token.
-type tunnelClaims struct {
-	josejwt.Claims        // a refresh token's jti is Claims.ID
-	Tunnel         string `json:"tun"` // the tunnel's node public key
-	Family         string `json:"fam"` // the refresh family the session lives in
-}
-
-func (s *Server) tunnelPub() string {
-	s.tunnel.mu.Lock()
-	defer s.tunnel.mu.Unlock()
-	return s.tunnel.pub
-}
-
-// mintTunnelTokens mints a session's access token and its refresh token
-// (stamped with jti), both bound to the running tunnel's address.
-func (s *Server) mintTunnelTokens(family, jti string) (access, refresh string, err error) {
-	fam, ok, err := s.store.GetRefreshFamily(family)
-	if err != nil || !ok {
-		return "", "", fmt.Errorf("family %s: %v", family, err)
+	if refresh, err = s.mintRefreshToken(rd); err != nil {
+		return "", "", 0, err
 	}
-	pub := s.tunnelPub()
-	if pub == "" {
-		return "", "", errors.New("tunnel is not running")
-	}
-	sig, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		return "", "", err
-	}
-	now := time.Now()
-	mint := func(aud, id string, ttl time.Duration) (string, error) {
-		return josejwt.Signed(sig).Claims(tunnelClaims{
-			Claims: josejwt.Claims{
-				Issuer:   "freshbreath",
-				Subject:  fam.Subject,
-				Audience: josejwt.Audience{aud},
-				ID:       id,
-				IssuedAt: josejwt.NewNumericDate(now),
-				Expiry:   josejwt.NewNumericDate(now.Add(ttl)),
-			},
-			Tunnel: pub,
-			Family: family,
-		}).Serialize()
-	}
-	if access, err = mint(tunnelAudience, "", accessTokenTTL); err != nil {
-		return "", "", err
-	}
-	if refresh, err = mint(tunnelRefreshAudience, jti, refreshTokenTTL); err != nil {
-		return "", "", err
-	}
-	return access, refresh, nil
-}
-
-// parseTunnelToken checks a tunnel token of the given audience: signed
-// here, for this tunnel address, in a live session of an active user. The
-// user and family are re-read, so a revoked session (sign-out, passphrase
-// reset) or a deactivated account is out at once.
-func (s *Server) parseTunnelToken(raw, audience string) (*tunnelClaims, *db.RefreshFamily, *db.User, error) {
-	if raw == "" {
-		return nil, nil, nil, errors.New("no token")
-	}
-	tok, err := josejwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.HS256})
-	if err != nil {
-		return nil, nil, nil, errors.New("not a tunnel token")
-	}
-	var claims tunnelClaims
-	if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &claims); err != nil {
-		return nil, nil, nil, errors.New("not a tunnel token")
-	}
-	if err := claims.Claims.Validate(josejwt.Expected{
-		Issuer:      "freshbreath",
-		AnyAudience: josejwt.Audience{audience},
-		Time:        time.Now(),
-	}); err != nil {
-		return nil, nil, nil, fmt.Errorf("token invalid: %w", err)
-	}
-	if pub := s.tunnelPub(); pub == "" || claims.Tunnel != pub {
-		return nil, nil, nil, errors.New("token is for another tunnel address")
-	}
-	fam, ok, err := s.store.GetRefreshFamily(claims.Family)
-	if err != nil || !ok || fam.Revoked || fam.Subject != claims.Subject || time.Now().After(fam.ExpiresAt) {
-		return nil, nil, nil, errors.New("session has ended")
-	}
-	user, err := s.userFromSubject(claims.Subject)
-	if err != nil || user == nil {
-		return nil, nil, nil, errors.New("unknown user")
-	}
-	if user.Status != "Active" {
-		return nil, nil, nil, errors.New("account is not active")
-	}
-	return &claims, fam, user, nil
-}
-
-// verifyTunnelToken checks a tunnel access token and returns its user.
-func (s *Server) verifyTunnelToken(raw string) (*db.User, error) {
-	_, _, user, err := s.parseTunnelToken(raw, tunnelAudience)
-	return user, err
+	return access, refresh, sshID, nil
 }
 
 // handleTunnel is the panel's control: GET reports the tunnel, PUT

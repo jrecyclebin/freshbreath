@@ -896,6 +896,15 @@ func (s *Server) coreDeleteSSHKey(actor, target *db.User) error {
 	if err := s.store.UpdateUser(target.ID, target.Name, target.Email, target.Role, target.Status, &meta); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
+	// As with a passphrase reset: a key is deleted when it's no longer
+	// trusted, so the agent's decrypted copy and the sessions signed in
+	// with it go too.
+	if s.agentMgr != nil {
+		s.agentMgr.RemoveKey(target.ID)
+	}
+	if err := s.store.RevokeUserRefreshFamilies(subjectForUser(target)); err != nil {
+		return cerr(http.StatusInternalServerError, "revoke sessions: %v", err)
+	}
 	s.audit(actor, "deleted SSH key for user", target.Email)
 	return nil
 }
