@@ -79,10 +79,11 @@ function uuidv4() {
 // ── API helper ───────────────────────────────────────────────────────
 //
 // Extracted from the control panel. Apps may need access to the central API.
-// Pass in the session that clears the app's gate.
+// Pass in the session that clears the app's gate — or a remote's session,
+// and path is that remote's own (/api/me).
 //
 export async function api(session, path, opts = {}) {
-  return authedFetch(session, `${API}${path}`, jsonInit(opts));
+  return authedFetch(session, `${session?.current.base ?? API}${path}`, jsonInit(opts));
 }
 
 // Only objects and arrays are stringified. Strings, binary bodies
@@ -113,9 +114,10 @@ function jsonInit(opts) {
 //
 // An answer a remote gave (marked X-Frbr-Remote by the proxy) is about the
 // remote's session, not this one, so it goes back to the caller untouched
-// — RemoteSession deals with it.
+// — remoteFetch deals with it.
 async function authedFetch(session, url, init) {
   session = session?.current ?? null;
+  if (session?.remote) return remoteFetch(session, url, init);
   const original = session;
   let renewable = false;
   const send = (s) => {
@@ -125,7 +127,7 @@ async function authedFetch(session, url, init) {
     return fetch(url, { ...init, headers });
   };
 
-  const ours = (r) => !r.headers.has("X-Frbr-Remote");
+  const ours = (r) => !fromRemote(r);
   let r = await send(session);
   if (r.status >= 400 && r.status < 500 && renewable && ours(r)) {
     try {
@@ -153,6 +155,48 @@ async function authedFetch(session, url, init) {
   return r;
 }
 
+const fromRemote = (r) => r.headers.has("X-Frbr-Remote");
+
+// A call to a remote carries two sign-ins. This page's own clears this
+// server's door, through authedFetch like anything else; the remote's rides
+// along as X-Tunnel-Token. A refused answer from the remote buys one
+// refresh and a retry, then one sign-in prompt and another retry. Still
+// refused throws RemoteExpired — never SessionExpired, which would read as
+// this page's own sign-in ending.
+async function remoteFetch(session, url, init) {
+  const send = () => {
+    const headers = new Headers(init.headers);
+    session.addAuth(headers);
+    return authedFetch(currentSession(), url, { ...init, headers });
+  };
+  const refused = (r) => !r || (r.status === 401 && fromRemote(r));
+  // A stream body was spent by the first send, so it can't ride a retry.
+  const replayable = !(init.body instanceof ReadableStream);
+
+  let r = null; // nothing sent yet: there was no sign-in to send
+  if (session.signedIn) {
+    r = await send();
+    if (refused(r) && replayable) {
+      try {
+        await session.refresh();
+        r = await send();
+      } catch (e) {
+        if (!(e instanceof RemoteExpired)) throw e;
+      }
+    }
+  }
+
+  if (refused(r) && (!r || replayable) && window.__FRBR_RELOGIN !== false) {
+    if (await ensurePairing(session)) r = await send();
+  }
+
+  if (refused(r)) {
+    session.forget();
+    throw new RemoteExpired(session.remote.id);
+  }
+  return r;
+}
+
 // ── The store ───────────────────────────────────────────────────────
 //
 // One entry per cleared auth record at localStorage["frbr:auth:<id>"].
@@ -164,13 +208,19 @@ async function authedFetch(session, url, init) {
 // two apps behind one gate prompt once between them. Spending is still
 // bounded by X-App-Nonce and the app's service links, not by who can read
 // a key.
+//
+// A sign-in on a remote is kept at localStorage["frbr:tunnel:<remote id>"]
+// instead: its auth_id is the remote's own record, which could collide
+// with one of ours.
 
 const STORE_PREFIX = "frbr:auth:";
+const TUNNEL_PREFIX = "frbr:tunnel:";
 const STORE_V = 1;
 // Refresh this far ahead of expiry, so a request never races the clock.
 const REFRESH_MARGIN_MS = 5 * 60_000;
 
 const storeKey = (authID) => STORE_PREFIX + authID;
+const entryKey = (e) => e.remote ? TUNNEL_PREFIX + e.remote.id : storeKey(e.auth_id);
 
 // Read an entry, live or lapsed — a lapsed token entry is still worth
 // having, since the refresh cookie can revive it. An entry from a schema
@@ -181,11 +231,7 @@ function readEntry(authID) {
 }
 
 function writeEntry(entry) {
-  return writeStored(storeKey(entry.auth_id), entry);
-}
-
-function evictEntry(authID) {
-  evictStored(storeKey(authID));
+  return writeStored(entryKey(entry), entry);
 }
 
 function readStored(key) {
@@ -251,14 +297,32 @@ export class SessionExpired extends Error {
   }
 }
 
+// Thrown when a remote sign-in is gone: never made, refused on refresh, or
+// the sign-in prompt was dismissed. Deliberately not a SessionExpired,
+// which means this page's own sign-in ended.
+export class RemoteExpired extends Error {
+  constructor(remoteID) {
+    super("Signed out of this remote — sign in to it again");
+    this.name = "RemoteExpired";
+    this.remoteID = remoteID;
+  }
+}
+
 // ── AuthSession ─────────────────────────────────────────────────────
 //
 // One per auth record, held in a registry keyed by id. Two proxies behind
 // the same gate get the same session: one credential, one refresh mutex,
 // one storage slot. When a refresh lands, every proxy riding that session
 // recovers together.
+//
+// A remote's session is one too, keyed by the remote's id: a sign-in on
+// another Fresh Breath this server reaches through its tunnel, driven
+// through the proxy at /api/remotes/<id>/. It's the remote's own — one of
+// its users, its 15-minute token, its 14-day refresh family — and its
+// tokens live only here in the browser, never on this server.
 
 const sessions = new Map();
+const registryKey = (e) => e.remote ? `remote:${e.remote.id}` : e.auth_id;
 
 export class AuthSession {
   #entry;
@@ -268,10 +332,10 @@ export class AuthSession {
   constructor(entry) { this.#entry = entry; }
 
   static for(entry) {
-    const existing = sessions.get(entry.auth_id);
+    const existing = sessions.get(registryKey(entry));
     if (existing) { existing.#entry = entry; return existing; }
     const session = new AuthSession(entry);
-    sessions.set(entry.auth_id, session);
+    sessions.set(registryKey(entry), session);
     return session;
   }
 
@@ -300,6 +364,19 @@ export class AuthSession {
   // The service URL whose login minted this credential (null for the app's
   // own gate) — the door a fresh login goes back through.
   get door()      { return this.#entry.door ?? null; }
+  get signedIn()  { return !!(this.#entry.access_token || this.#entry.key); }
+
+  // The remote this sign-in is on — {id, name, fingerprint}, the last two
+  // null when unknown — or null for one of ours.
+  get remote() {
+    const r = this.#entry.remote;
+    return r ? { ...r } : null;
+  }
+  // Where api() paths go: a remote's through this server's proxy.
+  get base() {
+    const r = this.#entry.remote;
+    return r ? `${API}/api/remotes/${encodeURIComponent(r.id)}` : API;
+  }
 
   // Whether this session already clears a given record — directly, or as
   // one of the legs sealed into a merged two-leg token.
@@ -311,6 +388,11 @@ export class AuthSession {
   // credential is one a refresh could renew. A typed key is not.
   addAuth(headers) {
     const e = this.#entry;
+    if (e.remote) {
+      // This page's own session takes Authorization; see remoteFetch.
+      if (e.access_token) headers.set("X-Tunnel-Token", e.access_token);
+      return !!e.access_token;
+    }
     if (e.access_token) {
       headers.set("Authorization", `${e.token_type || "Bearer"} ${e.access_token}`);
       return true;
@@ -344,6 +426,7 @@ export class AuthSession {
 
   async #doRefresh() {
     const e = this.#entry;
+    if (e.remote) return this.#refreshRemote(e);
     if (!e.access_token) return; // nothing to rotate
 
     // On the server's origin the refresh token rides an HttpOnly cookie
@@ -377,83 +460,40 @@ export class AuthSession {
     this.#entry = writeEntry(rotatedEntry(e, await r.json()));
   }
 
-  // Drop this session's credential and its stored entry. The server keeps
-  // no session to end — the refresh family dies with the next attempt to
-  // use it. The object stays registered, emptied, so the next login for
-  // this record refills it and whoever still holds it recovers too.
-  forget() {
-    evictEntry(this.authID);
-    this.#entry = { auth_id: this.authID };
-  }
-}
-
-// ── RemoteSession ───────────────────────────────────────────────────
-//
-// A sign-in on a remote: another Fresh Breath this server reaches through
-// its tunnel, driven through the proxy at /api/remotes/<id>/. The remote's
-// tokens live here in the browser, at localStorage["frbr:tunnel:<id>"],
-// and never on this server. Every call carries two credentials: this
-// page's own session clears this server's door, and the remote's access
-// token rides along as X-Tunnel-Token for the remote's.
-//
-// The remote's session is the remote's: one of its users, its 15-minute
-// token, its 14-day refresh family. When it lapses for good, RemoteExpired
-// says so — nothing about this page's own sign-in changes.
-
-const TUNNEL_PREFIX = "frbr:tunnel:";
-const remoteSessions = new Map();
-
-// Thrown when a remote sign-in is gone: never made, refused on refresh, or
-// forgotten. Deliberately not a SessionExpired, which means this page's
-// own sign-in ended.
-export class RemoteExpired extends Error {
-  constructor(remoteID) {
-    super("Signed out of this remote — sign in to it again");
-    this.name = "RemoteExpired";
-    this.remoteID = remoteID;
-  }
-}
-
-export class RemoteSession {
-  #id;
-  #entry;
-  #refreshing = null;
-
-  constructor(id) {
-    this.#id = id;
-    this.#entry = readStored(TUNNEL_PREFIX + id);
-  }
-
-  // One session per remote, so concurrent calls share one refresh.
-  static for(id) {
-    let rs = remoteSessions.get(id);
-    if (!rs) { rs = new RemoteSession(id); remoteSessions.set(id, rs); }
-    return rs;
-  }
-
-  get id()        { return this.#id; }
-  get paired()    { return !!this.#entry?.access_token; }
-  get authID()    { return this.#entry?.auth_id ?? null; }
-  get user_name() { return jwtPayload(this.#entry?.access_token)?.user_name; }
-  get email()     { return jwtPayload(this.#entry?.access_token)?.user_email; }
-  get expiresAt() { return this.#entry?.expires_at ? new Date(this.#entry.expires_at) : null; }
-
-  get live() {
-    const t = Date.parse(this.#entry?.expires_at);
-    return this.paired && Number.isFinite(t) && t - Date.now() > REFRESH_MARGIN_MS;
+  // A remote refreshes through the proxy, as this page's own session. This
+  // server refusing has already thrown SessionExpired from authedFetch; only
+  // the remote refusing (a marked answer) means its refresh family is gone.
+  async #refreshRemote(e) {
+    if (!e.refresh_token) { this.forget(); throw new RemoteExpired(e.remote.id); }
+    const r = await authedFetch(currentSession(), `${this.base}/oauth/token/${e.auth_id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: refreshBody(e),
+    });
+    if (!r.ok) {
+      if (fromRemote(r) && (r.status === 400 || r.status === 401)) {
+        this.forget();
+        throw new RemoteExpired(e.remote.id);
+      }
+      throw new Error(`Remote token refresh failed (${r.status})`);
+    }
+    this.#entry = writeEntry(rotatedEntry(e, await r.json()));
   }
 
   /**
-   * Sign in to the remote as one of its users. The passphrase passes
-   * through this server to the remote and is kept by neither.
+   * Sign in to a remote as one of its users. The passphrase passes through
+   * this server to the remote and is kept by neither.
    */
   async pair(email, passphrase) {
-    const r = await this.#send("/service/direct", jsonInit({ method: "POST", body: { email, passphrase } }));
+    const e = this.#entry;
+    if (!e.remote) throw new TypeError("pair() is for a remote's session");
+    const r = await authedFetch(currentSession(), `${this.base}/service/direct`,
+      jsonInit({ method: "POST", body: { email, passphrase } }));
     if (!r.ok) throw new Error((await r.text()).trim() || `Sign-in to the remote failed (${r.status})`);
     const t = await r.json();
-    this.#entry = writeStored(TUNNEL_PREFIX + this.#id, {
+    this.#entry = writeEntry({
       v: STORE_V,
-      remote_id: this.#id,
+      remote: e.remote,
       auth_id: t.auth_id,
       access_token: t.access_token,
       refresh_token: t.refresh_token,
@@ -463,76 +503,37 @@ export class RemoteSession {
     return this;
   }
 
-  /**
-   * Call the remote: path is the remote's own (/api/me), opts as for api().
-   * A lapsing token is refreshed first, and a 401 from the remote buys one
-   * refresh and a retry; still refused throws RemoteExpired.
-   */
-  async fetch(path, opts = {}) {
-    if (!this.paired) throw new RemoteExpired(this.#id);
-    const init = jsonInit(opts);
-    if (!this.live) await this.refresh();
-    let r = await this.#send(path, init, true);
-    const replayable = !(init.body instanceof ReadableStream);
-    if (r.status === 401 && r.headers.has("X-Frbr-Remote") && replayable) {
-      await this.refresh();
-      r = await this.#send(path, init, true);
-    }
-    if (r.status === 401 && r.headers.has("X-Frbr-Remote")) {
-      this.forget();
-      throw new RemoteExpired(this.#id);
-    }
-    return r;
-  }
-
-  async refresh() {
-    if (this.#refreshing) return this.#refreshing;
-    this.#refreshing = this.#doRefresh();
-    try { return await this.#refreshing; }
-    finally { this.#refreshing = null; }
-  }
-
-  async #doRefresh() {
-    const e = this.#entry;
-    if (!e?.refresh_token) { this.forget(); throw new RemoteExpired(this.#id); }
-    const r = await this.#send(`/oauth/token/${e.auth_id}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: refreshBody(e),
-    });
-    if (!r.ok) {
-      // The remote refused: its refresh family is gone. This server
-      // refusing (the panel's own sign-in) has already thrown
-      // SessionExpired from authedFetch, and leaves the entry be.
-      if (r.headers.has("X-Frbr-Remote") && (r.status === 400 || r.status === 401)) {
-        this.forget();
-        throw new RemoteExpired(this.#id);
-      }
-      throw new Error(`Remote token refresh failed (${r.status})`);
-    }
-    this.#entry = writeStored(TUNNEL_PREFIX + this.#id, rotatedEntry(e, await r.json()));
-  }
-
-  // Drop this browser's sign-in to the remote. The remote's refresh family
-  // lives on there until it expires or is revoked in the remote's own
-  // sessions list.
+  // Drop this session's credential and its stored entry. The server keeps
+  // no session to end — the refresh family dies with the next attempt to
+  // use it (a remote's lives on there until it expires or is revoked in
+  // the remote's own sessions list). The object stays registered, emptied,
+  // so the next login refills it and whoever still holds it recovers too.
   forget() {
-    evictStored(TUNNEL_PREFIX + this.#id);
-    this.#entry = null;
-  }
-
-  // Through this server's proxy, as this page's own session. withToken
-  // adds the remote's access token; the sign-in and refresh go without.
-  #send(path, init, withToken = false) {
-    const headers = new Headers(init.headers);
-    if (withToken && this.#entry?.access_token) headers.set("X-Tunnel-Token", this.#entry.access_token);
-    return authedFetch(currentSession(), `${API}/api/remotes/${encodeURIComponent(this.#id)}${path}`, { ...init, headers });
+    const e = this.#entry;
+    evictStored(entryKey(e));
+    this.#entry = e.remote ? { remote: e.remote } : { auth_id: e.auth_id };
   }
 }
 
-/** The sign-in on a remote (signed in or not yet) — see RemoteSession. */
-export function remote(id) {
-  return RemoteSession.for(id);
+/**
+ * The session on a remote, signed in or not yet. Pass its id, or the
+ * remote as /api/remotes lists it, so a sign-in prompt can say which
+ * remote it's for. Calls on it go through api() or its own fetch().
+ */
+export function remote(r) {
+  const info = typeof r === "string" ? { id: r } : r;
+  // What's known of the remote so far: the caller's, the stored entry's
+  // (from its last sign-in), or the session's from earlier on this page.
+  const stored = readStored(TUNNEL_PREFIX + info.id) ?? {};
+  const known = sessions.get(`remote:${info.id}`)?.remote ?? stored.remote ?? {};
+  return AuthSession.for({
+    ...stored,
+    remote: {
+      id: info.id,
+      name: info.name ?? known.name ?? null,
+      fingerprint: info.fingerprint ?? known.fingerprint ?? null,
+    },
+  });
 }
 
 // ── login ───────────────────────────────────────────────────────────
@@ -692,44 +693,48 @@ async function promptLogin(serviceURL) {
   return loginDialog(serviceURL, note);
 }
 
-// The re-login prompt. Styles go on through the CSSOM, which a CSP that
+// The prompts' look. Styles go on through the CSSOM, which a CSP that
 // blocks inline <style> still allows.
+const DIALOG_CSS = [
+  "background:#1e1e1e", "color:#f5f5f5", "border:1px solid #555",
+  "border-radius:10px", "padding:20px 22px", "max-width:340px",
+  "box-shadow:0 8px 32px rgba(0,0,0,.5)", "text-align:center",
+  "font:14px system-ui, sans-serif",
+].join(";");
+const TITLE_CSS = "font-weight:600; font-size:16px; margin-bottom:8px";
+const MSG_CSS = "color:#bbb; margin-bottom:16px; line-height:1.4";
+const PRIMARY_CSS = [
+  "padding:7px 18px", "cursor:pointer", "border:0", "border-radius:6px",
+  "background:#3b82f6", "color:#fff", "font:600 14px system-ui, sans-serif",
+].join(";");
+const SECONDARY_CSS = [
+  "padding:7px 14px", "cursor:pointer", "border:1px solid #666",
+  "border-radius:6px", "background:transparent", "color:#ddd",
+  "font:14px system-ui, sans-serif",
+].join(";");
+const INPUT_CSS = [
+  "display:block", "width:100%", "box-sizing:border-box", "margin-bottom:10px",
+  "padding:7px 9px", "border:1px solid #555", "border-radius:6px",
+  "background:#121212", "color:#f5f5f5", "font:14px system-ui, sans-serif",
+].join(";");
+
+function styled(tag, css, text = "") {
+  const el = document.createElement(tag);
+  el.style.cssText = css;
+  el.textContent = text;
+  return el;
+}
+
+// The re-login prompt.
 function loginDialog(serviceURL, note) {
   return new Promise((resolve) => {
-    const dialog = document.createElement("dialog");
+    const dialog = styled("dialog", DIALOG_CSS);
     dialog.setAttribute("aria-label", "Session expired");
-    dialog.style.cssText = [
-      "background:#1e1e1e", "color:#f5f5f5", "border:1px solid #555",
-      "border-radius:10px", "padding:20px 22px", "max-width:340px",
-      "box-shadow:0 8px 32px rgba(0,0,0,.5)", "text-align:center",
-      "font:14px system-ui, sans-serif",
-    ].join(";");
-
-    const title = document.createElement("div");
-    title.textContent = "Session expired";
-    title.style.cssText = "font-weight:600; font-size:16px; margin-bottom:8px";
-
-    const msg = document.createElement("div");
-    msg.textContent = note ?? "Your session has ended. Log in again to continue.";
-    msg.style.cssText = "color:#bbb; margin-bottom:16px; line-height:1.4";
-
-    const loginBtn = document.createElement("button");
-    loginBtn.textContent = "Log in";
-    loginBtn.style.cssText = [
-      "padding:7px 18px", "cursor:pointer", "border:0", "border-radius:6px",
-      "background:#3b82f6", "color:#fff", "font:600 14px system-ui, sans-serif",
-    ].join(";");
-
-    const cancelBtn = document.createElement("button");
-    cancelBtn.textContent = "Not now";
-    cancelBtn.style.cssText = [
-      "padding:7px 14px", "cursor:pointer", "border:1px solid #666",
-      "border-radius:6px", "background:transparent", "color:#ddd",
-      "font:14px system-ui, sans-serif",
-    ].join(";");
-
-    const buttons = document.createElement("div");
-    buttons.style.cssText = "display:flex; gap:10px; justify-content:center";
+    const title = styled("div", TITLE_CSS, "Session expired");
+    const msg = styled("div", MSG_CSS, note ?? "Your session has ended. Log in again to continue.");
+    const loginBtn = styled("button", PRIMARY_CSS, "Log in");
+    const cancelBtn = styled("button", SECONDARY_CSS, "Not now");
+    const buttons = styled("div", "display:flex; gap:10px; justify-content:center");
     buttons.append(loginBtn, cancelBtn);
     dialog.append(title, msg, buttons);
 
@@ -754,6 +759,76 @@ function loginDialog(serviceURL, note) {
   });
 }
 
+// One sign-in prompt per remote: calls that fail together share it, and
+// all retry once it lands. Resolves with the session, or null if dismissed.
+const pairings = new Map(); // remote id → the prompt in flight
+
+function ensurePairing(session) {
+  const { id } = session.remote;
+  if (!pairings.has(id)) {
+    pairings.set(id, pairDialog(session).finally(() => pairings.delete(id)));
+  }
+  return pairings.get(id);
+}
+
+// The remote sign-in prompt. No OAuth flow can reach a remote, so it asks
+// for the remote's own email and passphrase here. The fingerprint is the
+// remote's identity, which a name isn't: an Admin can rename remotes.
+function pairDialog(session) {
+  return new Promise((resolve) => {
+    const { id, name, fingerprint } = session.remote;
+    const label = name ?? id;
+    const dialog = styled("dialog", DIALOG_CSS);
+    dialog.setAttribute("aria-label", `Sign in to ${label}`);
+    const title = styled("div", TITLE_CSS, `Sign in to ${label}`);
+    const print = styled("div", "color:#888; font:12px ui-monospace, monospace; margin-bottom:8px",
+      fingerprint ? `fingerprint ${fingerprint}` : "");
+    const msg = styled("div", MSG_CSS,
+      "Use your account on that remote. The passphrase passes through this server, and neither keeps it.");
+
+    const form = styled("form", "margin:0");
+    const email = styled("input", INPUT_CSS);
+    email.type = "email";
+    email.placeholder = "Email";
+    email.autocomplete = "username";
+    email.required = true;
+    const pass = styled("input", INPUT_CSS);
+    pass.type = "password";
+    pass.placeholder = "Passphrase";
+    pass.autocomplete = "current-password";
+    pass.required = true;
+    const signInBtn = styled("button", PRIMARY_CSS, "Sign in");
+    signInBtn.type = "submit";
+    const cancelBtn = styled("button", SECONDARY_CSS, "Not now");
+    cancelBtn.type = "button";
+    const buttons = styled("div", "display:flex; gap:10px; justify-content:center; margin-top:6px");
+    buttons.append(signInBtn, cancelBtn);
+    form.append(email, pass, buttons);
+    dialog.append(title, print, msg, form);
+
+    let result = null;
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      signInBtn.disabled = cancelBtn.disabled = true;
+      try {
+        result = await session.pair(email.value.trim(), pass.value);
+        dialog.close();
+      } catch (e) {
+        if (e instanceof SessionExpired) { dialog.close(); return; } // this page's own sign-in ended
+        msg.textContent = e?.message ?? "Sign-in failed — try again.";
+        pass.value = "";
+        signInBtn.disabled = cancelBtn.disabled = false;
+      }
+    };
+    cancelBtn.onclick = () => dialog.close();
+    dialog.onclose = () => { dialog.remove(); resolve(result); };
+
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    email.focus();
+  });
+}
+
 /**
  * Log in to a service and get back a proxy for it.
  *
@@ -773,8 +848,12 @@ function loginDialog(serviceURL, note) {
  * A window needs a click behind it, so call "normal" and "fresh" from one.
  * "fresh" opens its window before anything else, while that click counts.
  *
- * @param {string} [serviceURL] — a registered service URL, or omitted (or
- *                                null) for the app's own gate
+ * "remote://<name>" signs in to a remote instead, and returns its
+ * AuthSession — call fetch("/api/...") on it. It prompts for the remote's
+ * email and passphrase in a dialog (no window, so no click needed).
+ *
+ * @param {string} [serviceURL] — a registered service URL, "remote://<name>",
+ *                                or omitted (or null) for the app's own gate
  * @param {"normal"|"silent"|"fresh"} [mode]
  * @returns {Promise<ServiceProxy|AuthSession|null>}
  */
@@ -784,6 +863,9 @@ export async function login(serviceURL, mode = "normal") {
   if (mode === false) { mode = "silent"; }
   if (!["normal", "silent", "fresh"].includes(mode)) {
     throw new TypeError(`login mode must be "normal", "silent" or "fresh", not ${JSON.stringify(mode)}`);
+  }
+  if (serviceURL?.startsWith(REMOTE_SCHEME)) {
+    return loginRemote(decodeURIComponent(serviceURL.slice(REMOTE_SCHEME.length)), mode);
   }
   const popup = mode === "fresh" ? openLoginWindow("about:blank") : null;
   try {
@@ -810,6 +892,40 @@ export async function login(serviceURL, mode = "normal") {
   } finally {
     popup?.close(); // a no-op once the login closed it; otherwise unused
   }
+}
+
+const REMOTE_SCHEME = "remote://";
+
+// The name picks the remote once, here; the session is kept by its id from
+// then on, so a later rename can't redirect it.
+async function loginRemote(name, mode) {
+  const session = remote(await findRemote(name));
+  if (mode === "fresh") session.forget();
+  if (session.signedIn) {
+    try {
+      await session.check();
+      return session;
+    } catch (e) {
+      if (!(e instanceof RemoteExpired)) throw e;
+    }
+  }
+  if (mode === "silent") return null;
+  return ensurePairing(session);
+}
+
+// Remote names are unique, ignoring case, so this is the one. The exact
+// name goes first: SQLite only ignores ASCII case, so "Ärger" and "ärger"
+// can both exist. An id is taken too, when no remote has that name.
+async function findRemote(name) {
+  const r = await api(currentSession(), "/api/remotes");
+  if (!r.ok) throw new Error(`Couldn't list remotes (${r.status}): ${await r.text().catch(() => "")}`);
+  const { remotes } = await r.json();
+  const lower = name.toLowerCase();
+  const found = remotes.find(x => x.name === name) ??
+    remotes.find(x => x.name.toLowerCase() === lower) ??
+    remotes.find(x => x.id === name);
+  if (!found) throw new Error(`No remote named "${name}"`);
+  return found;
 }
 
 /**
@@ -1472,7 +1588,7 @@ export default ServiceProxy;
 if (typeof window !== 'undefined') {
   window.FreshBreath = window.FrBr = {
     api, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
-    remote, RemoteSession, RemoteExpired,
+    remote, RemoteExpired,
     sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
   };
 }

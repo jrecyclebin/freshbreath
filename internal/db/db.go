@@ -186,6 +186,9 @@ func (s *Store) Migrate() error {
       created_by  INTEGER NOT NULL DEFAULT 0,
       created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
+    -- Names are how people pick a remote (login("remote://<name>")), so two
+    -- can't share one, whatever the case.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_remotes_name ON remotes(name COLLATE NOCASE);
   `)
 	if err != nil {
 		return err
@@ -1819,11 +1822,18 @@ func (s *Store) scanRemote(row interface{ Scan(...any) error }) (*Remote, error)
 	return r, nil
 }
 
+// ErrRemoteNameTaken is what CreateRemote and RenameRemote return for a
+// name another remote already has (ignoring case).
+var ErrRemoteNameTaken = errors.New("another remote already has that name")
+
 func (s *Store) CreateRemote(r *Remote) error {
 	_, err := s.db.Exec(
 		`INSERT INTO remotes (id, name, address, fingerprint, created_by) VALUES (?, ?, ?, ?, ?)`,
 		r.ID, r.Name, s.sealField(r.Address), r.Fingerprint, r.CreatedBy,
 	)
+	if isUnique(err) {
+		return ErrRemoteNameTaken
+	}
 	return err
 }
 
@@ -1856,6 +1866,9 @@ func (s *Store) GetRemote(id string) (*Remote, error) {
 // change.
 func (s *Store) RenameRemote(id, name string) error {
 	_, err := s.db.Exec(`UPDATE remotes SET name = ? WHERE id = ?`, name, id)
+	if isUnique(err) {
+		return ErrRemoteNameTaken
+	}
 	return err
 }
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -62,10 +63,17 @@ func (s *Server) coreCreateRemote(actor *db.User, name, address string) (*db.Rem
 		CreatedBy:   actor.ID,
 	}
 	if err := s.store.CreateRemote(r); err != nil {
-		return nil, cerr(http.StatusInternalServerError, "%v", err)
+		return nil, remoteStoreErr(err)
 	}
 	s.audit(actor, "added remote", r.Name+" ("+r.Fingerprint+")")
 	return s.store.GetRemote(r.ID)
+}
+
+func remoteStoreErr(err error) error {
+	if errors.Is(err, db.ErrRemoteNameTaken) {
+		return cerr(http.StatusConflict, "%v", err)
+	}
+	return cerr(http.StatusInternalServerError, "%v", err)
 }
 
 func (s *Server) coreListRemotes(actor *db.User) ([]*db.Remote, error) {
@@ -91,7 +99,7 @@ func (s *Server) coreRenameRemote(actor *db.User, id, name string) error {
 		return cerr(http.StatusNotFound, "remote not found")
 	}
 	if err := s.store.RenameRemote(id, name); err != nil {
-		return cerr(http.StatusInternalServerError, "%v", err)
+		return remoteStoreErr(err)
 	}
 	s.audit(actor, "renamed remote", r.Name+" → "+name)
 	return nil

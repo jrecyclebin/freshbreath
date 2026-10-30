@@ -127,6 +127,25 @@ func TestRemoteAddressIsFixed(t *testing.T) {
 	}
 }
 
+// Names pick a remote in login("remote://<name>"), so no two share one,
+// whatever the case. A remote can still change the case of its own.
+func TestRemoteNamesAreUnique(t *testing.T) {
+	srv := newTestServer(t)
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	prod := addRemote(t, srv, admin, "Prod", testTailcatAddr(t))
+	other := addRemote(t, srv, admin, "Staging", testTailcatAddr(t))
+
+	if rr := requestAs(t, srv, admin, "POST", "/api/remotes", `{"name":" prod ","address":"`+testTailcatAddr(t)+`"}`); rr.Code != http.StatusConflict {
+		t.Errorf("adding a second prod: %d, want 409", rr.Code)
+	}
+	if rr := requestAs(t, srv, admin, "PUT", "/api/remotes/"+other.ID, `{"name":"PROD"}`); rr.Code != http.StatusConflict {
+		t.Errorf("renaming onto prod: %d, want 409", rr.Code)
+	}
+	if rr := requestAs(t, srv, admin, "PUT", "/api/remotes/"+prod.ID, `{"name":"PROD"}`); rr.Code != http.StatusNoContent {
+		t.Errorf("recasing its own name: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
 // ── The proxy ──
 
 // dialTo makes remote clients reach handler over real HTTP, standing in
