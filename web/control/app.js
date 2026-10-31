@@ -727,7 +727,7 @@ function TopBar({ user, onNav, onLogout }) {
             <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
               {dark ? 'Light mode' : 'Dark mode'}
             </MenuItem>
-            {isAdmin && <MenuItem icon="plug" onClick={() => onNav('remotes')}>Remotes &amp; Hosts</MenuItem>}
+            {isAdmin && <MenuItem icon="plug" onClick={() => onNav('remotes')}>Hosts &amp; Remotes</MenuItem>}
             {isSuperuser && <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>}
             {user && user.id && <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>}
             <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
@@ -3492,7 +3492,9 @@ function RemotesView({ session, apps, services, users, auth, adminAuthID, onRefr
 
   return (
     <>
-      <PageHead title="Remotes & Hosts" sub="Other Fresh Breath servers this one reaches through their tunnels, and the host names its apps live under."/>
+      <PageHead title="Hosts & Remotes" sub="Access to the outside world."/>
+      <HostsSection session={session} apps={apps} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={onRefresh}/>
+
       <h2 className="section-title">Remotes</h2>
       {remotes === null ? <span className="muted">Loading…</span> : remotes.length === 0 ? (
         <div className="feed-card feed-empty muted">No remotes yet.</div>
@@ -3556,8 +3558,6 @@ function RemotesView({ session, apps, services, users, auth, adminAuthID, onRefr
         <div className="remote-warning">⚠ {REMOTE_TRUST}</div>
         <span className="help">The address can't be changed later: it's the remote's identity. A new address means a new remote.</span>
       </div>
-
-      <HostsSection session={session} apps={apps} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={onRefresh}/>
     </>
   );
 }
