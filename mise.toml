@@ -225,8 +225,12 @@ description = "View outdated dependencies"
 run = "go list -u -m all 2>/dev/null | grep '\\['"
 
 [tasks.update]
-description = "Updated out-of-date modules"
-run = "go get -u ./... && go mod tidy"
+description = "Update out-of-date direct modules"
+# Name only direct requirements and skip -u: `go get -u` also drags every
+# indirect dep to its newest version, which pulled gvisor off its `go` branch
+# onto master (uncompilable) and broke tailscale's netstack. This way indirect
+# deps rise only as far as our direct deps actually ask for.
+run = '''go get $(go list -m -f '{{if not (or .Indirect .Main)}}{{.Path}}{{end}}' all) && go mod tidy'''
 
 # The docs site (docs/) is a self-contained Node project — package.json,
 # aube-lock.yaml, node_modules all live inside that one directory. aube brings
