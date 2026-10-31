@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tailscale/tailcat"
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
+	"tailscale.com/tailcfg"
 )
 
 // ── The tunnel ──
@@ -246,6 +248,67 @@ func TestTunnelIdentityPersists(t *testing.T) {
 	}
 	if !again.Key.Equal(first.Key) || !again.PSK.Equal(first.PSK) {
 		t.Error("identity changed between loads")
+	}
+}
+
+// The pinned relay is the whole region, not its DERP map ID: an address
+// drops the ID, so parsing one back numbers regions from 1, an ID the
+// live map doesn't have. Restarting on the pin must give the same address.
+func TestTunnelPinsTheWholeRelay(t *testing.T) {
+	srv := newTestServer(t)
+	id, err := srv.loadTunnelIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci := tailcat.ConnInfo{
+		ServerPublic:      tailcat.NodePublic{NodePublic: id.Key.Public()},
+		ServerDiscoPublic: tailcat.DiscoPublicForNode(id.Key),
+		PresharedKey:      id.PSK,
+		Region: []*tailcfg.DERPRegion{{
+			RegionID: 301, RegionCode: "nyc", RegionName: "New York City",
+			Nodes: []*tailcfg.DERPNode{{Name: "301a", RegionID: 301, HostName: "tc301a.ipn.dev", CanPort80: true}},
+		}},
+	}
+	addr := ci.Addr()
+	if !id.pinRelay(addr) {
+		t.Fatal("relay not pinned")
+	}
+	if err := srv.storeTunnelIdentity(id); err != nil {
+		t.Fatal(err)
+	}
+	again, err := srv.loadTunnelIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Region == nil || len(again.Region.Nodes) == 0 || again.Region.Nodes[0].HostName != "tc301a.ipn.dev" {
+		t.Fatalf("pinned region lost: %+v", again.Region)
+	}
+	ci.Region = []*tailcfg.DERPRegion{again.Region}
+	if ci.Addr() != addr {
+		t.Error("restarting on the pinned relay changes the address")
+	}
+}
+
+// An identity pinned by DERP map ID (always a meaningless 1) still loads,
+// keeping its key; the relay is picked afresh.
+func TestTunnelIgnoresARegionID(t *testing.T) {
+	srv := newTestServer(t)
+	id, err := srv.loadTunnelIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := json.Marshal(map[string]any{"key": id.Key, "psk": id.PSK, "region_id": 1})
+	sealed, err := seal(srv.deriveSubkey(db.SealSubkeyLabel), plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.store.SetSetting("tunnel_identity", sealed)
+	again, err := srv.loadTunnelIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Key.Equal(id.Key) || again.Region != nil {
+		t.Errorf("old identity loaded wrong: region %+v", again.Region)
 	}
 }
 
