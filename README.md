@@ -274,6 +274,34 @@ Through the tunnel the server answers as itself whatever `Host` a client
 sends, so apps served at their own host name aren't reachable there. Apps
 at a slug (`/blog/`) are.
 
+## Remotes
+
+Once a server has a tunnel, another Fresh Breath can drive it. Paste its
+tunnel address into **Remotes** (in your avatar menu, for Admins) and give it
+a name. Then sign in to it with your account *on that server*: its email
+and passphrase pass through this server and neither one keeps them. The
+remote's tokens live in your browser only, so each person signs in for
+themselves, and a sign-in lasts as long as the remote's refresh family (14
+days).
+
+> ⚠️ A remote becomes part of this server. What it sends back is trusted
+> like this server's own content, so it can act with the access of anyone
+> using the panel, up to Superuser. Only add servers you trust as much as
+> this one.
+
+From code it's one more kind of `login()`:
+
+```js
+const prod = await login("remote://prod");   // prompts the first time
+const r = await api(prod, "/api/apps");       // the remote's own API
+```
+
+Names are unique (ignoring case) and can be changed. The address can't: it's
+the remote's identity, so a new address means a new remote. The fingerprint
+shown beside each one is a short form of that identity, and the sign-in
+prompt shows it too, so you can tell the server you're typing your
+passphrase into is the one you meant.
+
 ## Remote updates
 
 I've started using Fresh Breath for projects I do for others. Give them a

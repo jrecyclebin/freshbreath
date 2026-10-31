@@ -963,6 +963,22 @@ select.input {
   flex-wrap: wrap;
 }
 .feed-row:last-child { border-bottom: 0; }
+/* Remotes reuse the feed card; each row is wrapped with its "Look" panel,
+   so the divider goes on the wrapper. */
+.remote-item { border-bottom: 1px solid var(--line-soft); }
+.remote-item:last-child { border-bottom: 0; }
+.remote-item .feed-row { border-bottom: 0; }
+.remote-glance { padding: 8px 16px 16px; font-size: 13px; }
+.remote-warning {
+  margin: 14px 0 8px;
+  padding: 12px 14px;
+  border: 1px solid oklch(from var(--tone-red) var(--tone-border-l) calc(c * .33) h);
+  border-radius: 8px;
+  background: oklch(from var(--tone-red) var(--tone-bg-l) calc(c * .25) h);
+  color: oklch(from var(--tone-red) var(--tone-fg-l) calc(c * .67) h);
+  font-size: 13px;
+  line-height: 1.5;
+}
 .feed-id { flex: 1 1 260px; min-width: 0; }
 .feed-name {
   display: flex;

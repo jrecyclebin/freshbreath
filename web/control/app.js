@@ -726,6 +726,7 @@ function TopBar({ user, onNav, onLogout }) {
             <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
               {dark ? 'Light mode' : 'Dark mode'}
             </MenuItem>
+            {isAdmin && <MenuItem icon="plug" onClick={() => onNav('remotes')}>Remotes</MenuItem>}
             {isSuperuser && <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>}
             {user && user.id && <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>}
             <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
@@ -3307,6 +3308,163 @@ function TunnelSettings({ session }) {
   );
 }
 
+// ── Remotes ────────────────────────────────────────────────────────────
+
+const REMOTE_TRUST = 'A remote becomes part of this server. What it sends back is trusted like this server\'s own content, so it can act with the access of anyone using this panel, up to Superuser. Only add servers you trust as much as this one.';
+
+// Other Fresh Breaths this one drives through their tunnel addresses. The
+// list is this server's; each sign-in on a remote is this browser's own,
+// kept by frbr.js, so the status column reads the store, not the server.
+function RemotesView({ session }) {
+  const [remotes, setRemotes] = useState(null);
+  const [name, setName] = useState('');
+  const [address, setAddress] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(null); // id of the remote showing details
+  const [, setStoreTick] = useState(0);   // a sign-in changed the store: re-read it
+  const storeChanged = () => setStoreTick(t => t + 1);
+  const toast = useToast();
+
+  const load = () => frbr(session, 'GET', '/api/remotes')
+    .then(d => setRemotes(d.remotes || []))
+    .catch(e => toast(e.message, true));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const add = async () => {
+    if (!confirm(REMOTE_TRUST + '\n\nAdd "' + name.trim() + '"?')) return;
+    setBusy(true);
+    try {
+      await frbr(session, 'POST', '/api/remotes', { name, address });
+      setName(''); setAddress('');
+      toast('Remote added');
+      load();
+    } catch (e) { toast(e.message, true); }
+    finally { setBusy(false); }
+  };
+
+  const rename = async (r) => {
+    const next = prompt(`Rename "${r.name}" to:`, r.name);
+    if (!next || next.trim() === r.name) return;
+    try { await frbr(session, 'PUT', '/api/remotes/' + r.id, { name: next }); load(); }
+    catch (e) { toast(e.message, true); }
+  };
+
+  const remove = async (r) => {
+    if (!confirm(`Delete remote "${r.name}"? Your sign-in on it is forgotten too.`)) return;
+    try {
+      await frbr(session, 'DELETE', '/api/remotes/' + r.id);
+      FrBr.remote(r).forget();
+      toast('Remote deleted');
+      load();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const signIn = async (r) => {
+    try {
+      if (await FrBr.login('remote://' + encodeURIComponent(r.name))) setOpen(r.id);
+    } catch (e) { toast(e.message, true); }
+    storeChanged();
+  };
+
+  const forget = (r) => {
+    FrBr.remote(r).forget();
+    if (open === r.id) setOpen(null);
+    storeChanged();
+  };
+
+  return (
+    <>
+      <PageHead title="Remotes" sub="Other Fresh Breath servers this one reaches through their tunnels."/>
+      {remotes === null ? <span className="muted">Loading…</span> : remotes.length === 0 ? (
+        <div className="feed-card feed-empty muted">No remotes yet.</div>
+      ) : (
+        <div className="feed-card" style={{marginBottom:24}}>
+          {remotes.map(r => {
+            const rs = FrBr.remote(r);
+            return (
+              <div key={r.id} className="remote-item">
+                <div className="feed-row">
+                  <div className="feed-id">
+                    <div className="feed-name">{r.name}</div>
+                    <div className="feed-url mono" title="Fingerprint: the remote's relay region and key, which a name can't fake">{r.fingerprint}</div>
+                  </div>
+                  <div className="feed-status">
+                    {rs.signedIn
+                      ? <>Signed in as {rs.email || rs.user_name || 'someone'}</>
+                      : <span className="muted">not signed in</span>}
+                  </div>
+                  <div className="feed-actions">
+                    {rs.signedIn ? <>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setOpen(open === r.id ? null : r.id)}>{open === r.id ? 'Hide' : 'Look'}</button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => forget(r)}>Forget</button>
+                    </> : (
+                      <button className="btn btn-ghost btn-sm" onClick={() => signIn(r)}><Icon name="key" size={13}/> Sign in</button>
+                    )}
+                    <button className="btn btn-ghost btn-sm" onClick={() => rename(r)} title="Rename"><Icon name="edit" size={13}/></button>
+                    <button className="btn btn-ghost btn-sm" style={{color:'var(--tone-red)'}} onClick={() => remove(r)} title="Delete remote"><Icon name="trash" size={13}/></button>
+                  </div>
+                </div>
+                {open === r.id && rs.signedIn && <RemoteGlance rs={rs} onSignedOut={storeChanged}/>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div style={{borderTop:remotes && remotes.length ? '1px solid var(--line-soft)' : undefined,paddingTop:20}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <div className="field" style={{width:180}}>
+            <label>Name</label>
+            <input className="input" name="remote_name" {...NO_FILL} value={name} onChange={e => setName(e.target.value)} placeholder="prod"/>
+          </div>
+          <div className="field" style={{flex:1,minWidth:260}}>
+            <label>Tunnel address</label>
+            <input className="input mono" name="remote_address" {...NO_FILL} style={{fontSize:12}} value={address} onChange={e => setAddress(e.target.value)}
+              placeholder="from the remote's Settings → Tunnel"/>
+          </div>
+          <div className="field" style={{alignSelf:'flex-end'}}>
+            <button className="btn btn-primary" disabled={busy || !name.trim() || !address.trim()} onClick={add}>
+              <Icon name="plus" size={14}/> Add remote
+            </button>
+          </div>
+        </div>
+        <div className="remote-warning">⚠ {REMOTE_TRUST}</div>
+        <span className="help">The address can't be changed later: it's the remote's identity. A new address means a new remote.</span>
+      </div>
+    </>
+  );
+}
+
+// A read-only look at a remote, as the user signed in there: who they are
+// and its apps. Mostly proof the pipe works end to end.
+function RemoteGlance({ rs, onSignedOut }) {
+  const [me, setMe] = useState(null);
+  const [apps, setApps] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    Promise.all([frbr(rs, 'GET', '/api/me'), frbr(rs, 'GET', '/api/apps')])
+      .then(([m, a]) => { setMe(m.user); setApps(a.apps || []); })
+      .catch(e => {
+        setError(e.message);
+        if (e instanceof FrBr.RemoteExpired) onSignedOut();
+      });
+  }, [rs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div className="remote-glance">
+      {error ? <span style={{color:'var(--tone-red)'}}>⚠ {error}</span>
+        : !me ? <span className="muted">Loading…</span>
+        : <>
+            <div style={{marginBottom:6}}>{me.name} <Badge tone={roleTone(me.role)}>{me.role}</Badge></div>
+            <div className="muted">
+              {apps.length === 0 ? 'No apps.' : `Apps: ${apps.map(a => a.name).join(', ')}`}
+            </div>
+          </>}
+    </div>
+  );
+}
+
 // ── Profile ────────────────────────────────────────────────────────────
 
 // The signed-in user's own page: their name and email, and their SSH key.
@@ -3812,6 +3970,7 @@ const fmtShortTime = (iso) => {
 //   /control/apps/:nonce/edit-tools           -> the app's own service's tools editor
 //   /control/auth/new · /control/auth/:id     -> auth record page
 //   /control/users|roles|audit|settings       -> the user area and settings
+//   /control/remotes                          -> other servers, through their tunnels
 //   /control/profile                          -> the signed-in user's own page
 const parseRoute = () => {
   const parts = window.location.pathname.replace(/^\/control\/?/, '').split('/').filter(Boolean);
@@ -3831,7 +3990,7 @@ const parseRoute = () => {
     if (b === 'new') return { page: 'authrecord', params: { isNew: true } };
     if (b) return { page: 'authrecord', params: { authId: b } };
   }
-  if (!b && ['users', 'roles', 'audit', 'settings', 'profile'].includes(a)) return { page: a, params: {} };
+  if (!b && ['users', 'roles', 'audit', 'settings', 'profile', 'remotes'].includes(a)) return { page: a, params: {} };
   return { page: 'home', params: {} };
 };
 
@@ -3919,7 +4078,7 @@ function AppShell() {
 
   // Pages a role can't use fall back to home rather than a wall of 403s.
   const page =
-    (route.page === 'users' && !isAdmin) || (route.page === 'settings' && !isSuperuser) ? 'home' : route.page;
+    (['users', 'remotes'].includes(route.page) && !isAdmin) || (route.page === 'settings' && !isSuperuser) ? 'home' : route.page;
 
   return (
     <div className="app-shell">
@@ -3947,6 +4106,7 @@ function AppShell() {
         {page==='roles'     && <RolesView roles={roles}/>}
         {page==='audit'     && <AuditView audit={audit} isAdmin={isAdmin}/>}
         {page==='profile'   && <ProfileView session={session}/>}
+        {page==='remotes'   && <RemotesView session={session}/>}
         {page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} onRefresh={load}/>}
       </main>
     </div>

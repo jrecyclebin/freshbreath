@@ -518,7 +518,7 @@ export class AuthSession {
 /**
  * The session on a remote, signed in or not yet. Pass its id, or the
  * remote as /api/remotes lists it, so a sign-in prompt can say which
- * remote it's for. Calls on it go through api() or its own fetch().
+ * remote it's for. Calls on it go through api(session, path).
  */
 export function remote(r) {
   const info = typeof r === "string" ? { id: r } : r;
@@ -849,7 +849,7 @@ function pairDialog(session) {
  * "fresh" opens its window before anything else, while that click counts.
  *
  * "remote://<name>" signs in to a remote instead, and returns its
- * AuthSession — call fetch("/api/...") on it. It prompts for the remote's
+ * AuthSession — pass it to api(). It prompts for the remote's
  * email and passphrase in a dialog (no window, so no click needed).
  *
  * @param {string} [serviceURL] — a registered service URL, "remote://<name>",
