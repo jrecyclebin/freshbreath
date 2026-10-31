@@ -168,7 +168,7 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/apps` | GET | any | List apps (member/read-only: their apps) |
 | `/api/apps/{nonce}` | GET/PUT/DELETE | any | Detail / update (204; owner must be Admin+ or the current owner) / delete (204) |
 | `/api/apps/{nonce}/members` | GET/PUT | admin+ | App member list (Member/Read-only accounts; rewrites prune the rest) |
-| `/api/apps/{nonce}/services` | GET/PUT | any | Approved services for the app |
+| `/api/apps/{nonce}/services` | GET/PUT | GET: any with access to the app; PUT: admin+, member of the app | Approved services for the app / `PUT {services}` rewrites them. An Admin sets the whole list. A Member sets only their share: services they're a member of are linked or unlinked as listed, links to any other service stay, and listing a new one of those is 403 |
 | `/api/apps/{nonce}/web` | GET/POST/DELETE, ±`?file=path` | any canAccessApp | Web files. Bare GET = zip download; POST = multipart upload (100 MB cap); `?file=` = single-file GET/PUT/DELETE |
 | `/api/apps/{nonce}/data` | GET/POST/DELETE, ±`?file=path` | any canAccessApp | Private (unhosted) files; GET served with `CSP: sandbox`, `nosniff` |
 | `/api/apps/{nonce}/service/files` or `/tools` | GET etc. | any canAccessApp | The app's own virtual service (files = definition; tools = summaries) |

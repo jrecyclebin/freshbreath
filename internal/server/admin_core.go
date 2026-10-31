@@ -102,7 +102,8 @@ var (
 	rolesSuperuser = []string{"Superuser"}
 
 	// rolesMemberPlus can act on their own patch: a Member creates apps on
-	// the hosts they're members of. Core narrows a Member down further.
+	// the hosts they're members of, and wires the services they're members
+	// of into the apps they're members of. Core narrows a Member down further.
 	rolesMemberPlus = []string{"Superuser", "Admin", "Member"}
 
 	// assignableMemberRoles are the roles an app or service member may hold.
@@ -586,9 +587,20 @@ func (s *Server) coreSetAppMembers(actor *db.User, nonce string, members []int64
 	return nil
 }
 
+// coreSetAppServices rewrites the services an app links to. A Member
+// (of the app) rewrites only their own share: the services they're a
+// member of. Links to every other service stay as they are, and asking to
+// add one of those is a 403.
 func (s *Server) coreSetAppServices(actor *db.User, nonce string, services []int64) error {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gate(actor, rolesMemberPlus); err != nil {
 		return err
+	}
+	if !roleIn(actor.Role, rolesAdminPlus) {
+		kept, err := s.memberServiceLinks(actor, nonce, services)
+		if err != nil {
+			return err
+		}
+		services = kept
 	}
 	if err := s.store.SetAppServiceLinks(nonce, services); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
@@ -596,6 +608,46 @@ func (s *Server) coreSetAppServices(actor *db.User, nonce string, services []int
 	_ = s.store.TouchApp(nonce)
 	s.auditApp(actor, "updated app services", nonce)
 	return nil
+}
+
+// memberServiceLinks is the link list a Member's request adds up to: the
+// links to services they aren't a member of, untouched, plus the requested
+// services they are a member of.
+func (s *Server) memberServiceLinks(actor *db.User, nonce string, requested []int64) ([]int64, error) {
+	if ok, _ := s.store.IsAppMember(nonce, actor.ID); !ok {
+		return nil, cerr(http.StatusForbidden, "forbidden: you aren't a member of this app")
+	}
+	links, err := s.store.GetAppServiceLinks(nonce)
+	if err != nil {
+		return nil, cerr(http.StatusInternalServerError, "%v", err)
+	}
+	mine := func(sid int64) bool {
+		ok, _ := s.store.IsServiceMember(sid, actor.ID)
+		return ok
+	}
+	var out []int64
+	linked := map[int64]bool{}
+	for _, l := range links {
+		if l.Allowed {
+			linked[l.ServiceID] = true
+			if !mine(l.ServiceID) {
+				out = append(out, l.ServiceID)
+			}
+		}
+	}
+	for _, sid := range requested {
+		switch {
+		case slices.Contains(out, sid):
+			// Someone else's link, kept as is.
+		case mine(sid):
+			if !slices.Contains(out, sid) {
+				out = append(out, sid)
+			}
+		case !linked[sid]:
+			return nil, cerr(http.StatusForbidden, "forbidden: you can link only services you're a member of (service %d)", sid)
+		}
+	}
+	return out, nil
 }
 
 // ── Service operations ──────────────────────────────────────────────

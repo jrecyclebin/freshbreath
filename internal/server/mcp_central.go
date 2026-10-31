@@ -474,7 +474,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 				"environment":  map[string]interface{}{"type": "string", "description": "Environment (Development, Staging, Production)"},
 				"url":          map[string]interface{}{"type": "string", "description": "Where the app is hosted: a slug on this server ('blog' serves at /blog/; no subdirectories; api, control, mcp, service and oauth are reserved), or a full URL: one level down on a listed host (https://<host>/<slug>) to be served there, or anywhere else for an app that runs elsewhere and calls in. Blank: mounted at the slug of its name, or run from disk."},
 				"owner_email":  map[string]interface{}{"type": "string", "description": "Owner email address (optional)"},
-				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 or omitted = Anonymous (open)"},
+				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 or omitted = inherit (the host's gate for an app on a listed host, else the admin record — NOT open; use an anonymous record for open)"},
 			},
 			"required": []string{"name"},
 		},
@@ -518,7 +518,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 				"environment":  map[string]interface{}{"type": "string", "description": "New environment"},
 				"url":          map[string]interface{}{"type": "string", "description": "Where the app is hosted: a slug on this server ('blog' serves at /blog/; no subdirectories; api, control, mcp, service and oauth are reserved), or a full URL: one level down on a listed host (https://<host>/<slug>) to be served there, or anywhere else for an app that runs elsewhere and calls in. Blank: mounted at the slug of its name, or run from disk."},
 				"owner_email":  map[string]interface{}{"type": "string", "description": "New owner email address (optional)"},
-				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 clears to inherit-admin, omitted keeps the current gate"},
+				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 clears it to inherit (the host's gate for an app on a listed host, else the admin record), omitted keeps the current gate"},
 			},
 			"required": []string{"nonce", "name"},
 		},
@@ -683,9 +683,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	})
 
 	// set_app_services
-	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
+	addToolIf(roleIn(role, rolesMemberPlus), mcps, &mcp.Tool{
 		Name:        "set_app_services",
-		Description: "Set the services linked to an app. Admin+ only.",
+		Description: "Set the services linked to an app. Admin+ set the whole list. A Member of the app sets only their share: services they're a member of are linked or unlinked as listed, links to any other service stay as they are, and listing a new one of those is refused.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

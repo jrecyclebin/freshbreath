@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -271,5 +273,97 @@ func TestMemberSeesTheirHosts(t *testing.T) {
 	}
 	if rr := requestAs(t, srv, mo, "POST", "/api/hosts", fmt.Sprintf(`{"name":"mine.example.org","owner_id":%d}`, mo.ID)); rr.Code != 403 {
 		t.Errorf("Member adds a host: %d, want 403", rr.Code)
+	}
+}
+
+// ── Members wiring their services into their apps ──
+
+// serviceShare sets up Mo as a member of the Notes app and of services A
+// and B; C belongs to nobody Mo knows. An Admin has linked A and C.
+func serviceShare(t *testing.T, srv *Server) (mo *db.User, nonce string, a, b, c int64) {
+	t.Helper()
+	mo = mustUser(t, srv, "Mo", "Member", "Active")
+	nonce, _ = srv.store.CreateApp("Notes", "Development", "notes", nil, nil)
+	srv.store.SetAppMembers(nonce, []int64{mo.ID})
+	var ids [3]int64
+	for i, name := range []string{"svc-a", "svc-b", "svc-c"} {
+		id, err := srv.store.RegisterService(name, "http://"+name+".example", db.ServiceDescriptor{Type: "api"}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = id
+	}
+	a, b, c = ids[0], ids[1], ids[2]
+	srv.store.SetServiceMembers(a, []int64{mo.ID})
+	srv.store.SetServiceMembers(b, []int64{mo.ID})
+	srv.store.SetAppServiceLinks(nonce, []int64{a, c})
+	return mo, nonce, a, b, c
+}
+
+func linkedServices(t *testing.T, srv *Server, nonce string) []int64 {
+	t.Helper()
+	links, err := srv.store.GetAppServiceLinks(nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, l := range links {
+		if l.Allowed {
+			ids = append(ids, l.ServiceID)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// A Member rewrites only their share: their services come and go as
+// asked, anyone else's link stays, whether or not they list it.
+func TestMemberWiresTheirServices(t *testing.T) {
+	srv := newTestServer(t)
+	mo, nonce, a, b, c := serviceShare(t, srv)
+	want := []int64{b, c}
+	slices.Sort(want)
+
+	for _, body := range []string{
+		fmt.Sprintf(`{"services":[%d]}`, b),       // C not listed: kept anyway
+		fmt.Sprintf(`{"services":[%d,%d]}`, c, b), // C listed: kept, nothing more
+	} {
+		srv.store.SetAppServiceLinks(nonce, []int64{a, c})
+		rr := requestAs(t, srv, mo, "PUT", "/api/apps/"+nonce+"/services", body)
+		if rr.Code/100 != 2 {
+			t.Fatalf("%s: %d %s", body, rr.Code, rr.Body.String())
+		}
+		if got := linkedServices(t, srv, nonce); !slices.Equal(got, want) {
+			t.Errorf("%s: linked %v, want %v (A off, B on, C untouched)", body, got, want)
+		}
+	}
+}
+
+func TestMemberWiresOnlyWhatsTheirs(t *testing.T) {
+	srv := newTestServer(t)
+	mo, nonce, a, _, c := serviceShare(t, srv)
+	before := linkedServices(t, srv, nonce)
+	d, _ := srv.store.RegisterService("svc-d", "http://d.example", db.ServiceDescriptor{Type: "api"}, nil, nil)
+
+	if rr := requestAs(t, srv, mo, "PUT", "/api/apps/"+nonce+"/services", fmt.Sprintf(`{"services":[%d,%d]}`, a, d)); rr.Code != 403 {
+		t.Errorf("adding someone else's service: %d %s, want 403", rr.Code, rr.Body.String())
+	}
+	other, _ := srv.store.CreateApp("Other", "Development", "other", nil, nil)
+	if rr := requestAs(t, srv, mo, "PUT", "/api/apps/"+other+"/services", fmt.Sprintf(`{"services":[%d]}`, a)); rr.Code != 403 {
+		t.Errorf("an app they aren't a member of: %d, want 403", rr.Code)
+	}
+	// MCP reaches the core without the HTTP handler's app check.
+	var ce *coreErr
+	if err := srv.coreSetAppServices(mo, other, []int64{a}); !errors.As(err, &ce) || ce.status != 403 {
+		t.Errorf("core, an app they aren't a member of: %v, want 403", err)
+	}
+	ro := mustUser(t, srv, "Rita", "Read-only", "Active")
+	srv.store.SetAppMembers(nonce, []int64{mo.ID, ro.ID})
+	srv.store.SetServiceMembers(c, []int64{ro.ID})
+	if rr := requestAs(t, srv, ro, "PUT", "/api/apps/"+nonce+"/services", `{"services":[]}`); rr.Code != 403 {
+		t.Errorf("Read-only: %d, want 403", rr.Code)
+	}
+	if got := linkedServices(t, srv, nonce); !slices.Equal(got, before) {
+		t.Errorf("refused writes changed the links: %v, want %v", got, before)
 	}
 }

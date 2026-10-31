@@ -1529,6 +1529,7 @@ function UserAppTags({ apps, appList }) {
 function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID, hosts = [], loading, onCreateGate }) {
   const toast = useToast();
   const { isAdmin } = useRoles();
+  const { user } = useAuth();
 
   // A service reached through an app answers to the *app's* gate — its own
   // protected_by does not stack. So a service guarded more tightly than the
@@ -1555,10 +1556,48 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
   const owner = users.find(u => String(u.id) === String(form.owner_id) && form.owner_id !== '');
   const ownerKept = owner && !['Admin','Superuser'].includes(owner.role);
 
+  // A Member of the app wires in their own services: the ones they're a
+  // member of. Links to anything else stay as an Admin left them.
+  const memberWiring = !isAdmin && !!app && user?.role === 'Member';
+  const mine = services.filter(sv => (sv.members || []).includes(user?.id));
+  const mineIDs = new Set(mine.map(sv => sv.id));
+  const othersLinked = services.filter(sv => form.services.includes(sv.id) && !mineIDs.has(sv.id));
+  const serviceAccess = (
+    <div className="field">
+      <label>Service access</label>
+      <span className="help">Select which services this app can access. Linking a service with SQL tools also grants this app's pages its database — the link is the grant.</span>
+      {memberWiring && (
+        <span className="help">
+          You can link the services you're a member of.
+          {othersLinked.length > 0 && <> Also linked, by an Admin: {othersLinked.map(s => s.name).join(', ')}.</>}
+        </span>
+      )}
+      {app && loading ? <span className="muted">Loading…</span> : (
+        <MultiSelect
+          options={(memberWiring ? mine : services).map(s=>({value:s.id,label:s.name}))}
+          value={memberWiring ? form.services.filter(id=>mineIDs.has(id)) : form.services}
+          onChange={(v)=>setForm(f=>({...f,services: memberWiring ? [...f.services.filter(id=>!mineIDs.has(id)), ...v] : v}))}
+          placeholder="No service access"
+        />
+      )}
+      {exposed.length > 0 && (
+        <div className="help" style={{color:'var(--amber, #b7791f)',marginTop:8,lineHeight:1.5}}>
+          <Icon name="bell" size={12}/>{' '}
+          <b>Wider than {exposed.length === 1 ? 'it asks for' : 'they ask for'}.</b>{' '}
+          This app's gate governs everything reached through it, so linking{' '}
+          {exposed.map(e => `${e.service.name} (${e.gate.name})`).join(', ')}{' '}
+          {exposed.length === 1 ? 'opens it' : 'opens them'} to everyone who clears{' '}
+          {appGate ? appGate.name : 'no gate at all'}. Link anyway if that's the intent.
+        </div>
+      )}
+    </div>
+  );
+
   return (
+    <>
     <fieldset className="read-only-fields" disabled={!isAdmin}>
       {!isAdmin && (
-        <span className="help">Read-only — only admins can change an app.</span>
+        <span className="help">Read-only — only admins can change an app{memberWiring ? ', but you can link your own services below' : ''}.</span>
       )}
       <div className="field-row">
         <div className="field"><label>Name</label><input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
@@ -1623,29 +1662,10 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
         onChange={v=>setForm(f=>({...f,protected_by:v}))}
         onCreate={onCreateGate}
       />
-      <div className="field">
-        <label>Service access</label>
-        <span className="help">Select which services this app can access. Linking a service with SQL tools also grants this app's pages its database — the link is the grant.</span>
-        {app && loading ? <span className="muted">Loading…</span> : (
-          <MultiSelect
-            options={services.map(s=>({value:s.id,label:s.name}))}
-            value={form.services}
-            onChange={(v)=>setForm(f=>({...f,services:v}))}
-            placeholder="No service access"
-          />
-        )}
-        {exposed.length > 0 && (
-          <div className="help" style={{color:'var(--amber, #b7791f)',marginTop:8,lineHeight:1.5}}>
-            <Icon name="bell" size={12}/>{' '}
-            <b>Wider than {exposed.length === 1 ? 'it asks for' : 'they ask for'}.</b>{' '}
-            This app's gate governs everything reached through it, so linking{' '}
-            {exposed.map(e => `${e.service.name} (${e.gate.name})`).join(', ')}{' '}
-            {exposed.length === 1 ? 'opens it' : 'opens them'} to everyone who clears{' '}
-            {appGate ? appGate.name : 'no gate at all'}. Link anyway if that's the intent.
-          </div>
-        )}
-      </div>
+      {!memberWiring && serviceAccess}
     </fieldset>
+    {memberWiring && serviceAccess}
+    </>
   );
 }
 
@@ -1688,8 +1708,11 @@ const memberAppURL = (form) => `https://${form.host}/${form.slug || slugify(form
 function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuthID, hosts, onRefresh, navigate }) {
   const app = isNew ? null : apps.find(a => a.nonce === nonce);
   const { isAdmin } = useRoles();
-  // A Member with hosts can create apps there; the rest stays Admin-only.
+  const { user } = useAuth();
+  // A Member with hosts can create apps there, and a Member of an app can
+  // link their own services into it; the rest stays Admin-only.
   const memberCreating = !isAdmin && !app && hosts.length > 0;
+  const memberWiring = !isAdmin && !!app && user?.role === 'Member';
   const [form, setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],protected_by:null});
   const [creatingGate, setCreatingGate] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -1732,6 +1755,14 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
         toast('App created');
         onRefresh();
         navigate('app', { nonce: resp.nonce });
+      } catch(e) { toast(e.message,true); }
+      return;
+    }
+    if (memberWiring) {
+      try {
+        await frbr(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
+        toast('Services updated');
+        onRefresh();
       } catch(e) { toast(e.message,true); }
       return;
     }
@@ -1783,7 +1814,7 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
           {isAdmin && app && <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>}
-          {(isAdmin || memberCreating) && <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>}
+          {(isAdmin || memberCreating || memberWiring) && <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>}
         </>}
       />
       <div className={'page-form' + (app && !loading ? ' page-cols' : '')}>
