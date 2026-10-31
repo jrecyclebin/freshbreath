@@ -230,13 +230,18 @@ An app's **URL** decides where it's served:
   is cleaned up for you. Apps can't sit in subdirectories (`/blog/admin`):
   make a `blog` app and publish into its `admin` folder instead. `api`,
   `control`, `mcp`, `service` and `oauth` are Fresh Breath's own.
-- **A full URL** — `https://blog.example.com`. If the app has files, Fresh
-  Breath serves them at that host (point its DNS at this server) and nowhere
-  else; slots are `https://blog.example.com/@staging/` and so on. That host
-  answers only for its own app: the control panel and admin API aren't there,
-  and the app's sign-ins and sessions stay on that host, apart from the
-  panel's. With no files, the URL just says where the app runs, so it's
-  allowed to call in (CORS).
+- **A full URL on a listed host** — `https://blog.example.com/notes`, where
+  `blog.example.com` is on the Hosts list (Remotes page; point its DNS at
+  this server). Apps sit one level down, never at the root; slots are
+  `https://blog.example.com/notes@staging/` and so on, and the root
+  redirects to the host's default app. A host answers only for its own
+  apps: the control panel and admin API aren't there, and sign-ins and
+  sessions stay on that host, apart from the panel's — shared by every app
+  on it, on purpose. An app that leaves its gate blank inherits the host's
+  gate, if it has one, before admin auth.
+- **Any other full URL** — `https://myapp.netlify.app`, or a localhost dev
+  server. The URL just says where the app runs; Fresh Breath doesn't serve
+  it, but lets it call in (CORS) with its nonce.
 - **Blank** — the slug of the app's name, or (with no files) a page you're
   running from disk.
 
@@ -271,7 +276,7 @@ when the panel uses SSH sign-in. There are no cookies or browser pages
 through the tunnel.
 
 Through the tunnel the server answers as itself whatever `Host` a client
-sends, so apps served at their own host name aren't reachable there. Apps
+sends, so apps on a listed host aren't reachable there. Apps
 at a slug (`/blog/`) are.
 
 ## Remotes

@@ -254,7 +254,7 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, p applyPol
 				if strings.TrimSpace(op.Create.Name) == "" {
 					return fmt.Errorf("op %d: app %s has no name to create it with", i, op.Target)
 				}
-				if _, err := normalizeAppURL(op.Create.URL); err != nil {
+				if _, err := s.normalizeAppURL(op.Create.URL, op.Target); err != nil {
 					return fmt.Errorf("op %d: %v", i, err)
 				}
 			} else if gate, err := s.resolveAppGate(app); !p.importing && err == nil && !gateAllowsApply(gate, p.claims) {

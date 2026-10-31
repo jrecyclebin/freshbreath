@@ -65,7 +65,23 @@ func (s *Server) resolveAppGate(app *db.App) (*db.AuthRecord, error) {
 	if app.ProtectedBy != nil {
 		return s.store.GetAuthRecord(*app.ProtectedBy)
 	}
+	if gate := s.hostGate(app); gate != nil {
+		return s.store.GetAuthRecord(*gate)
+	}
 	return s.adminAuthRecord()
+}
+
+// hostGate is the gate of the listed host an app is mounted on, if it has
+// one: what an app on a host inherits before admin auth.
+func (s *Server) hostGate(app *db.App) *int64 {
+	host, slug := appHostMount(app)
+	if slug == "" {
+		return nil
+	}
+	if hh, ok := s.appHost(host); ok {
+		return hh.gate
+	}
+	return nil
 }
 
 // keysEqual compares two credential strings in constant time.

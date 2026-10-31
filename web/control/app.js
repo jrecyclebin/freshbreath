@@ -853,16 +853,20 @@ function serviceInstructions(service) {
 
 function hostRoute(app) {
   if (app.url && app.url.includes('://')) {
-    try { return new URL(app.url).origin; } catch { /* fall through to the name's slug */ }
+    try {
+      const u = new URL(app.url);
+      return u.origin + u.pathname.replace(/\/+$/, '');
+    } catch { /* fall through to the name's slug */ }
   }
   if (app.url) return '/' + app.url.replace(/^\//, '');
   const slug = (app.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   return '/' + slug;
 }
 
-// A slot's address: <route>@dev, or <origin>/@dev for an app at its own
-// address (an origin with "@dev" right after it would read as a username).
-const slotRoute = (route, slot) => route + (route.includes('://') ? '/@' : '@') + slot;
+// A slot's address: <route>@dev, or <origin>/@dev for an app that runs
+// elsewhere at a bare origin (one with "@dev" right after it would read as
+// a username).
+const slotRoute = (route, slot) => route + (/^[a-z]+:\/\/[^/]+$/i.test(route) ? '/@' : '@') + slot;
 
 // An app is hosted when any deployment slot has content: the dev upload or a
 // staging/production deploy. Slots live at <route>@dev|@staging|@prod; the
@@ -979,7 +983,7 @@ const ENTITY_VIEWS = [
   { id: 'auth',     label: 'Auth',            singular: 'auth record', icon: 'key'   },
 ];
 
-function HomePage({ session, navigate, apps, services, auth, users, adminAuthID, onRefresh }) {
+function HomePage({ session, navigate, apps, services, auth, users, adminAuthID, hosts, onRefresh }) {
   const { user } = useAuth();
   const { isAdmin } = useRoles();
   const [view, setView] = useState('recent');
@@ -1046,7 +1050,8 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
 
   const detailCell = (row) => {
     const e = row.entity;
-    if (row.kind !== 'auth') return <GateCell slot={e.protected_by} auth={auth} adminAuthID={adminAuthID}/>;
+    if (row.kind === 'app') return <GateCell slot={e.protected_by} auth={auth} adminAuthID={appInheritedID(e.url, hosts, adminAuthID)}/>;
+    if (row.kind === 'service') return <GateCell slot={e.protected_by} auth={auth} adminAuthID={adminAuthID}/>;
     return e.descriptor?.provider
       ? <span className="mono" style={{fontSize:12.5}}>{e.descriptor.provider}</span>
       : <span className="muted">—</span>;
@@ -1174,7 +1179,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
 
       {dropFiles && (
         <UploadModal session={session} files={dropFiles} apps={apps} services={services} auth={auth}
-                     users={users} adminAuthID={adminAuthID} onClose={() => setDropFiles(null)}
+                     users={users} adminAuthID={adminAuthID} hosts={hosts} onClose={() => setDropFiles(null)}
                      onSaved={onRefresh} navigate={navigate}/>
       )}
     </>
@@ -1515,7 +1520,7 @@ function UserAppTags({ apps, appList }) {
 // The app form's fields, shared by the app page and the upload modal's
 // new-app flow, so the two can't drift apart. `app` is null for a new one;
 // `onCreateGate` opens the inline auth-record modal from a gate slot.
-function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID, loading, onCreateGate }) {
+function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID, hosts = [], loading, onCreateGate }) {
   const toast = useToast();
   const { isAdmin } = useRoles();
 
@@ -1524,7 +1529,9 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
   // app it is being linked into is about to become reachable by a wider
   // audience than whoever set it up chose. Say so at the moment of the link;
   // don't refuse it, because sometimes that is exactly the intent.
-  const appGate = effectiveGate(form.protected_by, auth, adminAuthID);
+  const gateHost = appHostOf(form.url, hosts);
+  const inheritsFrom = gateHost?.protected_by != null ? gateHost.name : 'admin auth';
+  const appGate = effectiveGate(form.protected_by, auth, appInheritedID(form.url, hosts, adminAuthID));
   const exposed = form.services
     .map(id => {
       const service = services.find(s => s.id === id);
@@ -1597,12 +1604,12 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
       )}
       <AuthSlot
         label="Protected by"
-        placeholder="— inherit (admin auth) —"
+        placeholder={`— inherit (${inheritsFrom}) —`}
         help={
           appGate
             ? (appGate.kind === 'anonymous'
                 ? 'Open to anyone who can reach this app.'
-                : `Visitors clear ${appGate.name}${form.protected_by == null ? ' (inherited from admin auth)' : ''} before the page loads — and everything it calls answers to this gate.`)
+                : `Visitors clear ${appGate.name}${form.protected_by == null ? ` (inherited from ${inheritsFrom})` : ''} before the page loads — and everything it calls answers to this gate.`)
             : 'No admin auth is configured, so this app is open to anyone who can reach it.'
         }
         records={auth}
@@ -1637,7 +1644,7 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
 }
 
 // The app settings page — what the edit drawer used to be, full-page now.
-function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuthID, onRefresh, navigate }) {
+function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuthID, hosts, onRefresh, navigate }) {
   const app = isNew ? null : apps.find(a => a.nonce === nonce);
   const { isAdmin } = useRoles();
   const [form, setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],protected_by:null});
@@ -1730,7 +1737,7 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
       <div className={'page-form' + (app && !loading ? ' page-cols' : '')}>
         <div className="page-col">
           <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
-                         auth={auth} adminAuthID={adminAuthID} loading={loading}
+                         auth={auth} adminAuthID={adminAuthID} hosts={hosts} loading={loading}
                          onCreateGate={()=>setCreatingGate(true)}/>
         </div>
         {app && !loading && (
@@ -1784,7 +1791,7 @@ const SLOT_NAMES = { dev:'Development', staging:'Staging', prod:'Production' };
 // virtual service definition — the type is asked here, not guessed,
 // because both formats are just bracketed headers over plain text.
 // files is a list of { file, path } (see droppedFiles).
-function UploadModal({ session, files, apps, services, users, auth, adminAuthID, onClose, onSaved, navigate }) {
+function UploadModal({ session, files, apps, services, users, auth, adminAuthID, hosts, onClose, onSaved, navigate }) {
   const { user } = useAuth();
   const { isAdmin } = useRoles();
   const single = files.length === 1 ? files[0] : null;
@@ -1908,7 +1915,7 @@ function UploadModal({ session, files, apps, services, users, auth, adminAuthID,
             appForm && (
               <div className="upload-body">
                 <AppFormFields form={appForm} setForm={setAppForm} app={null} services={services} users={users}
-                               auth={auth} adminAuthID={adminAuthID}
+                               auth={auth} adminAuthID={adminAuthID} hosts={hosts}
                                onCreateGate={()=>setCreatingGate(true)}/>
               </div>
             )
@@ -2262,6 +2269,20 @@ const authOptions = (records) =>
 // only an explicit Anonymous record means open. A null here is setup mode —
 // no admin auth configured yet, which is also wide open.
 const effectiveGate = (slotID, records, adminID) => authRecord(records, slotID ?? adminID);
+
+// The listed host an app's URL sits on, one level down
+// (https://<host>/<slug>), or undefined.
+const appHostOf = (url, hosts) => {
+  if (!url || !url.includes('://')) return undefined;
+  try {
+    const u = new URL(url);
+    if (u.pathname.split('/').filter(Boolean).length !== 1) return undefined;
+    return hosts.find(h => h.name === u.hostname.toLowerCase());
+  } catch { return undefined; }
+};
+
+// What an app's empty gate slot inherits: its host's gate, else admin auth.
+const appInheritedID = (url, hosts, adminID) => appHostOf(url, hosts)?.protected_by ?? adminID;
 
 // How narrow an audience a gate admits. The server ranks the kinds (it is
 // the half that can be tested); a missing gate is the widest thing there is.
@@ -4154,6 +4175,7 @@ function AppShell() {
   const [services,setServices] = useState([]);
   const [auth,setAuth] = useState([]);
   const [adminAuthID,setAdminAuthID] = useState(null);
+  const [hosts,setHosts] = useState([]);
   const [roles,setRoles] = useState([]);
   const [audit,setAudit] = useState([]);
   const [loading,setLoading] = useState(true);
@@ -4174,7 +4196,7 @@ function AppShell() {
       // dropdown needs it: an empty slot resolves to it, so the panel cannot
       // label a single inherited gate without knowing which record that is.
       // The users list is admin-only, so nobody else asks for it.
-      const [u,a,s,r,au,ar,st] = await Promise.all([
+      const [u,a,s,r,au,ar,st,h] = await Promise.all([
         isAdmin ? frbr(session, 'GET','/api/users') : Promise.resolve({users: []}),
         frbr(session, 'GET','/api/apps'),
         frbr(session, 'GET','/api/services'),
@@ -4186,10 +4208,13 @@ function AppShell() {
         isSuperuser
           ? frbr(session, 'GET','/api/settings').catch(()=>({}))
           : Promise.resolve({admin_auth_service: window.__HOMESLICE_CONFIG?.authRecordID || null}),
+        // Hosts name the gate their apps inherit.
+        isAdmin ? frbr(session, 'GET','/api/hosts') : Promise.resolve({hosts: []}),
       ]);
       setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]);
       setRoles(r.roles||[]); setAudit(au.audit||[]); setAuth(ar.auth||[]);
       setAdminAuthID(st.admin_auth_service ? Number(st.admin_auth_service) : null);
+      setHosts(h.hosts||[]);
     } catch(e) { if (!authRequired || user) toast('Failed to load: '+e.message, true); }
     setLoading(false);
   },[authRequired, user, session, isAdmin, isSuperuser]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -4216,8 +4241,8 @@ function AppShell() {
       <main className="main">
         {sessionExpired && <SessionBanner onLogin={login} onDismiss={clearExpired}/>}
         {['users','roles','audit'].includes(page) && <UserAreaTabs active={page} onNav={navigate}/>}
-        {page==='home'      && <HomePage session={session} navigate={navigate} apps={apps} services={services} auth={auth} users={users} adminAuthID={adminAuthID} onRefresh={load}/>}
-        {page==='app'       && <AppPage session={session} nonce={route.params.nonce} isNew={route.params.isNew} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load} navigate={navigate}/>}
+        {page==='home'      && <HomePage session={session} navigate={navigate} apps={apps} services={services} auth={auth} users={users} adminAuthID={adminAuthID} hosts={hosts} onRefresh={load}/>}
+        {page==='app'       && <AppPage session={session} nonce={route.params.nonce} isNew={route.params.isNew} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} hosts={hosts} onRefresh={load} navigate={navigate}/>}
         {page==='service'   && <ServicePage session={session} serviceId={route.params.serviceId} isNew={route.params.isNew} services={services} auth={auth} adminAuthID={adminAuthID} apps={apps} users={users} onRefresh={load} navigate={navigate}/>}
         {page==='tools'     && (() => {
           const svc = services.find(s => String(s.id) === route.params.serviceId);

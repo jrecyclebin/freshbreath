@@ -659,7 +659,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
 	}
-	_, onAppHost := s.hostApp(r.Host)
+	_, onAppHost := s.appHost(r.Host)
 	if onAppHost {
 		p.handoffTo = p.opener
 	}

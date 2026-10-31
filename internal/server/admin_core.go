@@ -379,13 +379,18 @@ var reservedAppSlugs = map[string]bool{
 	"api": true, "control": true, "mcp": true, "service": true, "oauth": true,
 }
 
-// normalizeAppURL cleans up where an app is hosted. A remote URL
-// (https://blog.example.com) keeps its location, with the scheme and host
-// lowercased. Anything else is a mount point on this server, stored as the
-// bare slug: "/blog/" becomes "blog". Subdirectories, reserved paths and
-// characters a slug can't carry are refused. Blank stays blank — the app
-// is then mounted at its name's slug, or runs from disk.
-func normalizeAppURL(raw string) (string, error) {
+// normalizeAppURL cleans up where an app is hosted, for the app self (""
+// for a new one). A URL on a listed host must be one level down
+// (https://blog.example.com/notes), the slug held to the same rules as
+// one here, and no other app at it. Any other URL — an unlisted host, or a
+// machine (localhost, an IP) — is an app running elsewhere, calling in
+// cross-origin, and keeps its location. Either way the
+// scheme and host are lowercased. Anything else is a mount point on this
+// server, stored as the bare slug: "/blog/" becomes "blog".
+// Subdirectories, reserved paths and characters a slug can't carry are
+// refused. Blank stays blank — the app is then mounted at its name's
+// slug, or runs from disk.
+func (s *Server) normalizeAppURL(raw, self string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
@@ -400,6 +405,9 @@ func normalizeAppURL(raw string) (string, error) {
 			return "", cerr(http.StatusBadRequest, "app url %q must be http or https", raw)
 		}
 		u.Host = strings.ToLower(u.Host)
+		if _, listed := s.appHost(u.Host); listed {
+			return s.normalizeHostURL(u, normalizedHostName(u.Host), raw, self)
+		}
 		if u.Path == "/" {
 			u.Path = ""
 		}
@@ -417,6 +425,35 @@ func normalizeAppURL(raw string) (string, error) {
 		return "", cerr(http.StatusBadRequest, "'%s' is reserved by Fresh Breath - pick another path for this app", slug)
 	}
 	return slug, nil
+}
+
+// normalizeHostURL finishes normalizeAppURL for a URL on a listed host.
+func (s *Server) normalizeHostURL(u *url.URL, host, raw, self string) (string, error) {
+	slug := strings.ToLower(strings.Trim(u.Path, "/"))
+	if slug == "" {
+		return "", cerr(http.StatusBadRequest, "apps sit one level down on a host, not at its root - like %s://%s/my-app", u.Scheme, u.Host)
+	}
+	if first, rest, sub := strings.Cut(slug, "/"); sub {
+		return "", cerr(http.StatusBadRequest,
+			"Apps cannot be hosted at subdirectories - create a '%s' app and publish to its '%s' folder to achieve this.", first, rest)
+	}
+	if slugify(slug) != slug {
+		return "", cerr(http.StatusBadRequest, "app url %q must end in a slug of letters, digits and dashes (like /blog)", raw)
+	}
+	if reservedAppSlugs[slug] {
+		return "", cerr(http.StatusBadRequest, "'%s' is reserved by Fresh Breath - pick another path for this app", slug)
+	}
+	clean := u.Scheme + "://" + u.Host + "/" + slug
+	apps, err := s.store.ListHostedApps()
+	if err != nil {
+		return "", cerr(http.StatusInternalServerError, "%v", err)
+	}
+	for _, a := range apps {
+		if h, sl := appHostMount(a); a.Nonce != self && h == host && sl == slug {
+			return "", cerr(http.StatusConflict, "%q is already at %s/%s", a.Name, host, slug)
+		}
+	}
+	return clean, nil
 }
 
 // validateAuthSlot checks that an optional slot reference points at a real
@@ -445,7 +482,7 @@ func (s *Server) coreCreateAppWithNonce(actor *db.User, nonce, name, env, url st
 	if name == "" {
 		return "", cerr(http.StatusBadRequest, "name required")
 	}
-	url, err := normalizeAppURL(url)
+	url, err := s.normalizeAppURL(url, nonce)
 	if err != nil {
 		return "", err
 	}
@@ -473,7 +510,7 @@ func (s *Server) coreUpdateApp(actor *db.User, nonce, name, env, url string, own
 	if err != nil {
 		return cerr(http.StatusNotFound, "app not found: %v", err)
 	}
-	if url, err = normalizeAppURL(url); err != nil {
+	if url, err = s.normalizeAppURL(url, nonce); err != nil {
 		return err
 	}
 	if err := s.validateOwner(ownerID, app.OwnerID); err != nil {
@@ -1657,9 +1694,9 @@ func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (st
 	}
 	s.rebuildHostedRoutes()
 	s.audit(actor, "deployed "+source+" → "+target, app.Name)
-	// An origin with "@prod" right after it would read as a username.
+	// A bare origin with "@prod" right after it would read as a username.
 	loc := appLocation(app)
-	if strings.Contains(loc, "://") {
+	if u, err := url.Parse(loc); err == nil && u.Host != "" && u.Path == "" {
 		loc += "/"
 	}
 	return loc + "@" + target, nil
@@ -2263,8 +2300,8 @@ func (s *Server) isHostedNonce(nonce string) bool {
 			return true
 		}
 	}
-	for _, ha := range s.hostedHosts {
-		if ha.nonce == nonce {
+	for _, hh := range s.hostedHosts {
+		if hh.hasNonce(nonce) {
 			return true
 		}
 	}

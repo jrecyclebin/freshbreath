@@ -37,17 +37,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Fresh Breath does not answer to host %q. Add it to Hosts on the Remotes page (or set FRBR_BASE_URL to it) to allow it.", r.Host), http.StatusMisdirectedRequest)
 		return
 	}
-	// An app served at its own host name gets that host to itself: none of
-	// the panel, the admin API or the central MCP answer there, and the
-	// only app a request may name is the host's own. Its pages can't reach
-	// the panel's sessions — cookies stay with the host that set them.
-	if ha, ok := s.hostApp(r.Host); ok {
+	// A listed host belongs to its apps: none of the panel, the admin API
+	// or the central MCP answer there, and the only apps a request may name
+	// are the host's own. Its pages can't reach the panel's sessions —
+	// cookies stay with the host that set them — but they share theirs
+	// with each other, on purpose.
+	if hh, ok := s.appHost(r.Host); ok {
 		if !appHostServes(r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
-		if n := requestAppNonce(r); n != "" && n != ha.nonce {
-			http.Error(w, "This host serves only its own app", http.StatusForbidden)
+		if n := requestAppNonce(r); n != "" && !hh.hasNonce(n) {
+			http.Error(w, "This host serves only its own apps", http.StatusForbidden)
 			return
 		}
 	}
@@ -185,14 +186,13 @@ func appHostServes(p string) bool {
 	return true
 }
 
-// hostApp returns the app served at its own remote URL on this request's
-// host, if any.
-func (s *Server) hostApp(hostport string) (hostedApp, bool) {
+// appHost returns the listed host a request's Host names, if any.
+func (s *Server) appHost(hostport string) (*hostedHost, bool) {
 	host := normalizedHostName(hostport)
 	s.hostedMu.RLock()
 	defer s.hostedMu.RUnlock()
-	ha, ok := s.hostedHosts[host]
-	return ha, ok
+	hh, ok := s.hostedHosts[host]
+	return hh, ok
 }
 
 // normalizedHostName is a Host header's name alone: no port, no brackets,
@@ -219,7 +219,7 @@ func (s *Server) hostAllowed(hostport string) bool {
 	if s.knownHosts[host] {
 		return true
 	}
-	_, ok := s.hostApp(host)
+	_, ok := s.appHost(host)
 	return ok
 }
 
@@ -568,9 +568,32 @@ func appHostName(app *db.App) string {
 	return host
 }
 
-// appLocation is where a hosted app's pages are reached: "/slug" on this
-// server, or the origin of its remote URL.
+// appHostMount is where an app with a remote URL sits: its host name and
+// the one path segment under it (https://<host>/<slug>). slug is "" when
+// the URL has no place on a host: at the root, deeper down, or reserved.
+// host is "" for any URL appHostName doesn't count.
+func appHostMount(app *db.App) (host, slug string) {
+	if host = appHostName(app); host == "" {
+		return "", ""
+	}
+	u, err := url.Parse(app.URL)
+	if err != nil {
+		return "", ""
+	}
+	slug = strings.Trim(u.Path, "/")
+	if slug == "" || strings.Contains(slug, "/") || reservedAppSlugs[slug] {
+		return host, ""
+	}
+	return host, slug
+}
+
+// appLocation is where an app's pages are reached: "/slug" on this server,
+// "https://<host>/<slug>" on a host, or just the origin of a URL that
+// runs elsewhere.
 func appLocation(app *db.App) string {
+	if _, slug := appHostMount(app); slug != "" {
+		return appRegisteredOrigin(app) + "/" + slug
+	}
 	if o := appRegisteredOrigin(app); o != "" {
 		return o
 	}
@@ -596,20 +619,26 @@ func (s *Server) rebuildHostedRoutes() {
 	routes := make(map[string]hostedApp, len(apps))
 	// Every listed host is an app host, even before any app is on it: the
 	// panel never answers there.
-	hosts := make(map[string]hostedApp, len(listed))
+	hosts := make(map[string]*hostedHost, len(listed))
+	defaults := make(map[string]string, len(listed)) // host → default app nonce
 	for _, h := range listed {
-		hosts[strings.ToLower(h.Name)] = hostedApp{}
+		name := strings.ToLower(h.Name)
+		hosts[name] = &hostedHost{gate: h.ProtectedBy, apps: map[string]hostedApp{}}
+		defaults[name] = h.DefaultApp
 	}
 	for _, a := range apps {
 		if !s.appHasSlotDir(a.Nonce) {
 			continue
 		}
 		ha := hostedApp{nonce: a.Nonce, environment: a.Environment}
-		if host := appHostName(a); host != "" {
-			// Only a listed host routes; any other name is an app that
-			// runs elsewhere.
-			if _, ok := hosts[host]; ok {
-				hosts[host] = ha
+		if host, slug := appHostMount(a); host != "" {
+			// Only a listed host routes, and only one level down; any
+			// other name is an app that runs elsewhere.
+			if hh := hosts[host]; hh != nil && slug != "" {
+				hh.apps[slug] = ha
+				if defaults[host] == a.Nonce {
+					hh.defaultSlug = slug
+				}
 			}
 		} else if slug := appSlug(a); slug != "" {
 			routes[slug] = ha
@@ -633,7 +662,7 @@ func (s *Server) appHasSlotDir(nonce string) bool {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if _, onAppHost := s.hostApp(r.Host); r.URL.Path == "/" && !onAppHost {
+	if _, onAppHost := s.appHost(r.Host); r.URL.Path == "/" && !onAppHost {
 		if nonce, _ := s.store.GetSetting("default_app"); nonce != "" && nonce != "control" && s.isHostedNonce(nonce) {
 			if app, err := s.store.GetApp(nonce); err == nil {
 				http.Redirect(w, r, appLocation(app)+"/", http.StatusFound)
@@ -649,28 +678,34 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
 
-	// On an app's own host the whole path is the app's, but for a leading
-	// /@slot; elsewhere the first segment is the slug. An @slot suffix
-	// picks a deployment slot explicitly: @dev, @staging, @prod. Slugs
-	// themselves are alnum+dash, so '@' is unambiguous.
-	ha, ok := s.hostApp(r.Host)
-	slug, rest := "", path
-	if !ok {
-		slug, rest, _ = strings.Cut(path, "/")
-	} else if strings.HasPrefix(path, "@") {
-		slug, rest, _ = strings.Cut(path, "/")
-	}
+	// The first segment is the slug, on this server's own names and on a
+	// listed host alike; a host's root redirects to its default app. An
+	// @slot suffix picks a deployment slot explicitly: @dev, @staging,
+	// @prod. Slugs themselves are alnum+dash, so '@' is unambiguous.
+	slug, rest, _ := strings.Cut(path, "/")
 	slot, explicitSlot := "", false
 	if i := strings.IndexByte(slug, '@'); i >= 0 {
 		slot, explicitSlot, slug = slug[i+1:], true, slug[:i]
 	}
-	if slug != "" {
+	hh, onHost := s.appHost(r.Host)
+	if onHost && path == "" && hh.defaultSlug != "" {
+		target := "/" + hh.defaultSlug + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
+	var ha hostedApp
+	var ok bool
+	if onHost {
+		ha, ok = hh.apps[slug]
+	} else {
 		s.hostedMu.RLock()
 		ha, ok = s.hostedRoutes[slug]
 		s.hostedMu.RUnlock()
 	}
-
-	if !ok {
+	if slug == "" || !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -991,12 +1026,11 @@ func isSubdomainHost(host string) bool {
 // a caller that already holds it. FRBR-15 will fold
 // subdomain and per-app-port maps into nonceForLocation; until then those
 // host shapes fail closed here on purpose.
+//
+// On a listed host the same steps run: ServeHTTP has already refused any
+// nonce that isn't one of the host's apps, and a location resolves among
+// the host's mounts.
 func (s *Server) resolveAppNonce(r *http.Request) string {
-	// An app's own host serves that app alone (ServeHTTP refuses any
-	// other nonce there), so the host is the answer.
-	if ha, ok := s.hostApp(r.Host); ok {
-		return ha.nonce
-	}
 	if h := r.Header.Get("X-App-Nonce"); h != "" {
 		if h == s.adminNonce {
 			return h
@@ -1082,6 +1116,10 @@ func (s *Server) nonceForLocation(locURL string, r *http.Request) (string, bool)
 	}
 	if slug == "control" {
 		return "", false
+	}
+	if hh, onHost := s.appHost(r.Host); onHost {
+		ha, ok := hh.apps[slug]
+		return ha.nonce, ok
 	}
 	s.hostedMu.RLock()
 	ha, ok := s.hostedRoutes[slug]

@@ -58,7 +58,7 @@ type Server struct {
 	publicHost        string                // FRBR_BASE_URL's host name (lowercased, no port)
 	trustedProxies    []netip.Prefix        // peers whose X-Forwarded-Proto is honored (see schemeOf)
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
-	hostedHosts       map[string]hostedApp // listed host name → the app served there (zero if none yet)
+	hostedHosts       map[string]*hostedHost // listed host name → its apps
 	handoffs          handoffTickets       // finished page-gate logins on their way to an app's host
 	tunnel            tunnel               // the tailcat tunnel, when activated
 	remoteConns       remoteConns          // open tailcat clients to remotes
@@ -102,6 +102,24 @@ type updateRateCount struct {
 type hostedApp struct {
 	nonce       string
 	environment string
+}
+
+// hostedHost is a listed host as routing sees it: the apps mounted one
+// level down, where its root redirects, and the gate its apps inherit.
+// Rebuilt whole and never changed after, so it's read without a lock.
+type hostedHost struct {
+	gate        *int64               // nil = apps fall through to admin auth
+	defaultSlug string               // "" = the root is a 404
+	apps        map[string]hostedApp // slug → app
+}
+
+func (h *hostedHost) hasNonce(nonce string) bool {
+	for _, ha := range h.apps {
+		if ha.nonce == nonce {
+			return true
+		}
+	}
+	return false
 }
 
 // pendingAuth is one login in progress: the auth records still to clear
@@ -222,7 +240,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 		pending:        make(map[string]*pendingAuth),
 		lastSeenAt:     make(map[int64]time.Time),
 		hostedRoutes:   make(map[string]hostedApp),
-		hostedHosts:    make(map[string]hostedApp),
+		hostedHosts:    make(map[string]*hostedHost),
 		httpClient:     &http.Client{Timeout: 300 * time.Second},
 		oidcProviders:  make(map[string]*oidc.Provider),
 		localKey:       localKey,
