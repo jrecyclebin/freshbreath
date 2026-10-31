@@ -95,9 +95,21 @@ func TestReservedNameIsNotMounted(t *testing.T) {
 	}
 }
 
+// listHost puts name on the Hosts list, straight into the store.
+func listHost(t *testing.T, srv *Server, name string) *db.Host {
+	t.Helper()
+	h := &db.Host{ID: "host-" + name, Name: name}
+	if err := srv.store.CreateHost(h); err != nil {
+		t.Fatal(err)
+	}
+	srv.rebuildHostedRoutes()
+	return h
+}
+
 // hostedRemoteApp creates an app at https://blog.example.org with a page.
 func hostedRemoteApp(t *testing.T, srv *Server, protectedBy *int64) string {
 	t.Helper()
+	listHost(t, srv, "blog.example.org")
 	nonce, err := srv.store.CreateApp("Blog", "Development", "https://blog.example.org", nil, protectedBy)
 	if err != nil {
 		t.Fatal(err)

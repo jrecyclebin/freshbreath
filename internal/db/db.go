@@ -189,6 +189,21 @@ func (s *Store) Migrate() error {
     -- Names are how people pick a remote (login("remote://<name>")), so two
     -- can't share one, whatever the case.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_remotes_name ON remotes(name COLLATE NOCASE);
+    CREATE TABLE IF NOT EXISTS hosts (
+      id           TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      owner_id     INTEGER,
+      protected_by INTEGER,
+      default_app  TEXT NOT NULL DEFAULT '',
+      created_by   INTEGER NOT NULL DEFAULT 0,
+      created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_name ON hosts(name COLLATE NOCASE);
+    CREATE TABLE IF NOT EXISTS host_members (
+      host_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      PRIMARY KEY (host_id, user_id)
+    );
   `)
 	if err != nil {
 		return err
@@ -833,12 +848,19 @@ func (s *Store) DeleteUser(id int64) error {
 	if err != nil {
 		return err
 	}
+	_, err = s.db.Exec("DELETE FROM host_members WHERE user_id = ?", id)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.Exec("DELETE FROM users WHERE id = ?", id)
 	if err != nil {
 		return err
 	}
 	// Clear owner references
-	_, err = s.db.Exec("UPDATE apps SET owner_id = NULL WHERE owner_id = ?", id)
+	if _, err = s.db.Exec("UPDATE apps SET owner_id = NULL WHERE owner_id = ?", id); err != nil {
+		return err
+	}
+	_, err = s.db.Exec("UPDATE hosts SET owner_id = NULL WHERE owner_id = ?", id)
 	return err
 }
 
@@ -1885,4 +1907,154 @@ func (s *Store) RenameRemote(id, name string) error {
 func (s *Store) DeleteRemote(id string) error {
 	_, err := s.db.Exec(`DELETE FROM remotes WHERE id = ?`, id)
 	return err
+}
+
+// ── Hosts ──
+//
+// The DNS names apps are published under, one level down
+// (https://<name>/<slug>). The list is the whole truth about which names
+// besides its own this server answers to.
+
+const hostCols = `id, name, owner_id, protected_by, default_app, created_by, created_at`
+
+func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
+	h := &Host{}
+	var ownerID, protectedBy sql.NullInt64
+	var createdAt string
+	if err := row.Scan(&h.ID, &h.Name, &ownerID, &protectedBy, &h.DefaultApp, &h.CreatedBy, &createdAt); err != nil {
+		return nil, err
+	}
+	if ownerID.Valid {
+		h.OwnerID = &ownerID.Int64
+	}
+	if protectedBy.Valid {
+		h.ProtectedBy = &protectedBy.Int64
+	}
+	h.CreatedAt = parseTime(createdAt)
+	h.Members = []int64{}
+	return h, nil
+}
+
+// ErrHostNameTaken is what CreateHost and UpdateHost return for a name
+// another host already has (ignoring case).
+var ErrHostNameTaken = errors.New("another host already has that name")
+
+// ListHosts returns every host, with its members, by name.
+func (s *Store) ListHosts() ([]*Host, error) {
+	rows, err := s.db.Query(`SELECT ` + hostCols + ` FROM hosts ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Host
+	byID := map[string]*Host{}
+	for rows.Next() {
+		h, err := scanHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+		byID[h.ID] = h
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	mrows, err := s.db.Query(`SELECT host_id, user_id FROM host_members ORDER BY user_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer mrows.Close()
+	for mrows.Next() {
+		var hostID string
+		var uid int64
+		if err := mrows.Scan(&hostID, &uid); err != nil {
+			return nil, err
+		}
+		if h := byID[hostID]; h != nil {
+			h.Members = append(h.Members, uid)
+		}
+	}
+	return out, mrows.Err()
+}
+
+func (s *Store) GetHost(id string) (*Host, error) {
+	h, err := scanHost(s.db.QueryRow(`SELECT `+hostCols+` FROM hosts WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return nil, errors.New("host not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(`SELECT user_id FROM host_members WHERE host_id = ? ORDER BY user_id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid int64
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		h.Members = append(h.Members, uid)
+	}
+	return h, rows.Err()
+}
+
+// CreateHost stores a new host and its members.
+func (s *Store) CreateHost(h *Host) error {
+	return s.writeHost(h, true)
+}
+
+// UpdateHost rewrites everything about a host but its id and creator.
+func (s *Store) UpdateHost(h *Host) error {
+	return s.writeHost(h, false)
+}
+
+func (s *Store) writeHost(h *Host, create bool) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if create {
+		_, err = tx.Exec(
+			`INSERT INTO hosts (id, name, owner_id, protected_by, default_app, created_by) VALUES (?, ?, ?, ?, ?, ?)`,
+			h.ID, h.Name, h.OwnerID, h.ProtectedBy, h.DefaultApp, h.CreatedBy,
+		)
+	} else {
+		_, err = tx.Exec(
+			`UPDATE hosts SET name = ?, owner_id = ?, protected_by = ?, default_app = ? WHERE id = ?`,
+			h.Name, h.OwnerID, h.ProtectedBy, h.DefaultApp, h.ID,
+		)
+	}
+	if isUnique(err) {
+		return ErrHostNameTaken
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM host_members WHERE host_id = ?`, h.ID); err != nil {
+		return err
+	}
+	for _, uid := range h.Members {
+		if _, err := tx.Exec(`INSERT INTO host_members (host_id, user_id) VALUES (?, ?)`, h.ID, uid); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) DeleteHost(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM host_members WHERE host_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM hosts WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

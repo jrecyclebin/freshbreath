@@ -28,7 +28,6 @@ type Config struct {
 	TLSCertFile   string
 	TLSKeyFile    string
 	EnvFile       string   // the env file config loads from (or would); local TLS writes here
-	AllowedHosts  []string // extra Host names this server answers to (FRBR_ALLOWED_HOSTS)
 	TrustedProxies []string // IPs/CIDRs whose X-Forwarded-Proto is honored (FRBR_TRUSTED_PROXIES)
 }
 
@@ -59,7 +58,7 @@ type Server struct {
 	publicHost        string                // FRBR_BASE_URL's host name (lowercased, no port)
 	trustedProxies    []netip.Prefix        // peers whose X-Forwarded-Proto is honored (see schemeOf)
 	hostedRoutes      map[string]hostedApp // slug → hosted app route
-	hostedHosts       map[string]hostedApp // host name → app served at its own remote URL
+	hostedHosts       map[string]hostedApp // listed host name → the app served there (zero if none yet)
 	handoffs          handoffTickets       // finished page-gate logins on their way to an app's host
 	tunnel            tunnel               // the tailcat tunnel, when activated
 	remoteConns       remoteConns          // open tailcat clients to remotes

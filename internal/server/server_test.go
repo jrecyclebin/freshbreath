@@ -56,7 +56,6 @@ func newTestServer(t *testing.T) *Server {
 			Dir:           baseDir,
 			DataDir:       baseDir,
 			PublicBaseURL: "http://localhost:9009",
-			AllowedHosts:  []string{"example.com"}, // httptest's default Host
 		},
 		store:          store,
 		pending:        make(map[string]*pendingAuth),
@@ -73,6 +72,7 @@ func newTestServer(t *testing.T) *Server {
 	}
 	srv.oauthSrv = newOAuthServer(srv)
 	srv.SetupRoutes()
+	srv.knownHosts["example.com"] = true // httptest's default Host
 	return srv
 }
 

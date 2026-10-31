@@ -310,12 +310,13 @@ func (s *Store) DeleteAuthRecord(id int64) error {
 	var refs int
 	err = s.db.QueryRow(`
     SELECT (SELECT COUNT(*) FROM services WHERE protected_by = ?1 OR acts_as = ?1)
-         + (SELECT COUNT(*) FROM apps WHERE protected_by = ?1)`, id).Scan(&refs)
+         + (SELECT COUNT(*) FROM apps WHERE protected_by = ?1)
+         + (SELECT COUNT(*) FROM hosts WHERE protected_by = ?1)`, id).Scan(&refs)
 	if err != nil {
 		return err
 	}
 	if refs > 0 {
-		return fmt.Errorf("auth record is used by %d service(s) or app(s)", refs)
+		return fmt.Errorf("auth record is used by %d service(s), app(s) or host(s)", refs)
 	}
 	_, err = s.db.Exec("DELETE FROM auth_records WHERE id = ?", id)
 	return err

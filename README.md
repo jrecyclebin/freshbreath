@@ -393,7 +393,6 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 | `FRBR_LISTEN_ADDR` | `:9009` | HTTP bind address |
 | `FRBR_TLS_CERT` | *(none)* | Path to TLS certificate (PEM) |
 | `FRBR_TLS_KEY` | *(none)* | Path to TLS private key (PEM) |
-| `FRBR_ALLOWED_HOSTS` | *(none)* | Extra host names the server answers to, comma-separated. IP addresses, `localhost`, the `FRBR_BASE_URL` host and the machine's own hostname are always accepted; any other `Host` gets a 421, which blocks DNS-rebinding attacks on a local install. |
 | `FRBR_TRUSTED_PROXIES` | *(loopback only)* | IPs or CIDRs whose `X-Forwarded-Proto` and `X-Forwarded-For` are honored, comma-separated — set this when TLS terminates on another box (or in a non-loopback local proxy). Behind a trusted proxy, sign-in lockouts and rate limits count by the client address the proxy reports, so set it or every client shares the proxy's. Loopback is always trusted, since a TCP peer cannot spoof it; a client that sets the headers itself is ignored. |
 
 IPs or CIDRs whose `X-Forwarded-Proto` is honored, comma-separated — set this when TLS terminates on another box (or in a non-loopback local proxy) whose addresses you can name. Loopback is always trusted, since a TCP peer cannot spoof it; a client that sets the header itself is ignored. If TLS ends at a load balancer you cannot name (Azure App Service, most managed hosting), don't list it: set `FRBR_BASE_URL` instead, whose scheme is trusted for its own host. |

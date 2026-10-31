@@ -137,6 +137,22 @@ type Remote struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+// Host is a DNS name pointed at this server that apps are published
+// under, one level down (https://<name>/<slug>). Apps on it that inherit
+// their gate get ProtectedBy (nil = admin auth); DefaultApp (a nonce, or
+// "") is where its root redirects. Members are Member accounts allowed to
+// create apps on it; those apps get OwnerID as their owner.
+type Host struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	OwnerID     *int64    `json:"owner_id"`
+	ProtectedBy *int64    `json:"protected_by"`
+	DefaultApp  string    `json:"default_app"`
+	Members     []int64   `json:"members"`
+	CreatedBy   int64     `json:"created_by"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // ServiceDescriptor describes what a service IS. Auth lives elsewhere: the
 // protected_by / acts_as columns reference auth_records
 // (design/decoupled-auth.md).

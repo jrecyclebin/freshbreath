@@ -34,7 +34,7 @@ import (
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.hostAllowed(r.Host) {
-		http.Error(w, fmt.Sprintf("Fresh Breath does not answer to host %q. Add it to FRBR_ALLOWED_HOSTS (or set FRBR_BASE_URL to it) to allow it.", r.Host), http.StatusMisdirectedRequest)
+		http.Error(w, fmt.Sprintf("Fresh Breath does not answer to host %q. Add it to Hosts on the Remotes page (or set FRBR_BASE_URL to it) to allow it.", r.Host), http.StatusMisdirectedRequest)
 		return
 	}
 	// An app served at its own host name gets that host to itself: none of
@@ -209,8 +209,8 @@ func normalizedHostName(hostport string) string {
 // page can point a DNS name of its own at a local install (DNS rebinding)
 // and then call it as same-origin, so only names the operator controls
 // pass: IP literals and localhost (a page can't make those its origin),
-// the FRBR_BASE_URL host, this machine's hostname, FRBR_ALLOWED_HOSTS, and
-// the host of each app hosted here at its own remote URL.
+// the FRBR_BASE_URL host, this machine's hostname, and the listed hosts
+// (the Hosts list on the Remotes page).
 func (s *Server) hostAllowed(hostport string) bool {
 	host := normalizedHostName(hostport)
 	if net.ParseIP(host) != nil || host == "localhost" || strings.HasSuffix(host, ".localhost") {
@@ -248,9 +248,6 @@ func knownHostSet(cfg Config) map[string]bool {
 	if name, err := os.Hostname(); err == nil {
 		add(name)
 		add(name + ".local")
-	}
-	for _, h := range cfg.AllowedHosts {
-		add(h)
 	}
 	return hosts
 }
@@ -456,6 +453,8 @@ func (s *Server) SetupRoutes() {
 	// (design/remotes-todo.md).
 	s.mux.HandleFunc("/api/remotes", s.authWrap(pipeline(s.handleRemotes, adminPlus)))
 	s.mux.HandleFunc("/api/remotes/", s.authWrap(pipeline(s.handleRemoteDetail, adminPlus)))
+	s.mux.HandleFunc("/api/hosts", s.authWrap(pipeline(s.handleHosts, adminPlus)))
+	s.mux.HandleFunc("/api/hosts/", s.authWrap(pipeline(s.handleHostDetail, adminPlus)))
 	s.mux.HandleFunc("/api/tls/ca.pem", s.authWrap(pipeline(s.handleLocalCA, superuser)))
 
 	// Remote update feeds (design/remote-updates.md). Management is
@@ -589,17 +588,27 @@ func (s *Server) rebuildHostedRoutes() {
 		log.Printf("rebuildHostedRoutes: %v", err)
 		return
 	}
+	listed, err := s.store.ListHosts()
+	if err != nil {
+		log.Printf("rebuildHostedRoutes: %v", err)
+		return
+	}
 	routes := make(map[string]hostedApp, len(apps))
-	hosts := make(map[string]hostedApp)
+	// Every listed host is an app host, even before any app is on it: the
+	// panel never answers there.
+	hosts := make(map[string]hostedApp, len(listed))
+	for _, h := range listed {
+		hosts[strings.ToLower(h.Name)] = hostedApp{}
+	}
 	for _, a := range apps {
 		if !s.appHasSlotDir(a.Nonce) {
 			continue
 		}
 		ha := hostedApp{nonce: a.Nonce, environment: a.Environment}
 		if host := appHostName(a); host != "" {
-			// A name this server already answers to as itself stays the
-			// panel's: the app there just runs elsewhere (another port).
-			if !s.knownHosts[host] {
+			// Only a listed host routes; any other name is an app that
+			// runs elsewhere.
+			if _, ok := hosts[host]; ok {
 				hosts[host] = ha
 			}
 		} else if slug := appSlug(a); slug != "" {
