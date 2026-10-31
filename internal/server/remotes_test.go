@@ -489,3 +489,88 @@ func TestTransferNeedsARemoteSignIn(t *testing.T) {
 		t.Errorf("bad token: %+v", last)
 	}
 }
+
+// A pull is a transfer the other way: the remote packs, this server
+// imports, as the user here, matching and creating as an import does.
+// Pulling again updates in place.
+func TestTransferPullsFromARemote(t *testing.T) {
+	a, b := newTestServer(t), newTestServer(t)
+	a.config.DataDir, b.config.DataDir = t.TempDir(), t.TempDir()
+	setAdminSSH(t, b)
+	passphraseUser(t, b, "Admin")
+	a.remoteConns.open = dialTo(t, b.tunnelHandler(), nil)
+	admin := mustUser(t, a, "Ada", "Admin", "Active")
+	remote := addRemote(t, a, admin, "Server B", testTailcatAddr(t))
+	p := pairRemote(t, a, admin, remote)
+
+	nonce, _ := b.store.CreateApp("Their Blog", "", "", nil, nil)
+	createSlotFile(t, b, nonce, "staging", "index.html", []byte("v1"))
+	if _, err := b.store.RegisterService("greeter", "/mcp/greeter", db.ServiceDescriptor{Type: "virtual"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	bsvc, _ := b.store.GetServiceByName("greeter")
+	os.MkdirAll(filepath.Dir(serviceDefinitionPath(b.config.DataDir, bsvc)), 0755)
+	os.WriteFile(serviceDefinitionPath(b.config.DataDir, bsvc), []byte("their def"), 0644)
+
+	pull := func() []sseEvent {
+		t.Helper()
+		rr := remoteRequest(a, admin, "POST", "/api/transfer",
+			`{"remote":"`+remote.ID+`","direction":"pull","apps":["`+nonce+`"],"services":["greeter"]}`,
+			map[string]string{"X-Tunnel-Token": p.Access})
+		if rr.Code != 200 {
+			t.Fatalf("pull: %d %s", rr.Code, rr.Body.String())
+		}
+		return parseSSE(rr.Body.String())
+	}
+	events := pull()
+	var seq []string
+	for _, e := range events {
+		if e.Event != "op" {
+			seq = append(seq, e.Event)
+		}
+	}
+	if want := "[fetch fetch extract validate done]"; fmt.Sprint(seq) != want {
+		t.Fatalf("events = %v, want %s (%v)", seq, want, events)
+	}
+	if app, err := a.store.GetApp(nonce); err != nil || app.Name != "Their Blog" {
+		t.Fatalf("app here: %+v %v", app, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(a.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v1" {
+		t.Errorf("staging here = %q", got)
+	}
+	asvc, err := a.store.GetServiceByURL("/mcp/greeter")
+	if err != nil {
+		t.Fatalf("service here: %v", err)
+	}
+	if got, _ := os.ReadFile(serviceDefinitionPath(a.config.DataDir, asvc)); string(got) != "their def" {
+		t.Errorf("service file here = %q", got)
+	}
+
+	createSlotFile(t, b, nonce, "staging", "index.html", []byte("v2"))
+	for _, e := range pull() {
+		if e.Data["status"] == "created" {
+			t.Errorf("second pull created %v again", e.Data["target"])
+		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(a.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v2" {
+		t.Errorf("staging after the second pull = %q", got)
+	}
+}
+
+// Export hands out files and emails, so it's for Admins; a remote Member
+// signed in there can't pull anything.
+func TestTransferPullNeedsAnAdminThere(t *testing.T) {
+	a, admin, remote := remoteSetup(t, "Member")
+	p := pairRemote(t, a, admin, remote)
+	rr := remoteRequest(a, admin, "POST", "/api/transfer",
+		`{"remote":"`+remote.ID+`","direction":"pull","apps":["whatever"]}`,
+		map[string]string{"X-Tunnel-Token": p.Access})
+	events := parseSSE(rr.Body.String())
+	if last := events[len(events)-1]; last.Event != "feed_error" || !strings.Contains(fmt.Sprint(last.Data["message"]), "403") {
+		t.Errorf("Member there: %+v", last)
+	}
+	if rr := remoteRequest(a, admin, "POST", "/api/transfer", `{"remote":"`+remote.ID+`","direction":"sideways"}`,
+		map[string]string{"X-Tunnel-Token": p.Access}); rr.Code != http.StatusBadRequest {
+		t.Errorf("bad direction: %d, want 400", rr.Code)
+	}
+}

@@ -305,6 +305,11 @@ a new app's gate is the record with the same name there, and its owner and
 members are the users with the same emails. Anything with no match is left
 empty, so the gate falls back to the remote's panel gate.
 
+The same modal's **Fetch** switch runs it the other way: it lists the
+remote's apps and services, and copies the ones you pick here, by the same
+rules. What you fetch becomes this server's own, so its task scripts need a
+Superuser here to land.
+
 Names are unique (ignoring case) and can be changed. The address can't: it's
 the remote's identity, so a new address means a new remote. The fingerprint
 shown beside each one is a short form of that identity, and the sign-in

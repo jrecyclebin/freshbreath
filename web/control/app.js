@@ -3316,7 +3316,7 @@ const REMOTE_TRUST = 'A remote becomes part of this server. What it sends back i
 // Other Fresh Breaths this one drives through their tunnel addresses. The
 // list is this server's; each sign-in on a remote is this browser's own,
 // kept by frbr.js, so the status column reads the store, not the server.
-function RemotesView({ session, apps, services }) {
+function RemotesView({ session, apps, services, onRefresh }) {
   const [remotes, setRemotes] = useState(null);
   const [transferTo, setTransferTo] = useState(null); // the remote the Transfer modal is for
   const [name, setName] = useState('');
@@ -3422,7 +3422,7 @@ function RemotesView({ session, apps, services }) {
 
       {transferTo && (
         <TransferModal session={session} remote={transferTo} apps={apps} services={services}
-          onClose={() => { setTransferTo(null); storeChanged(); }}/>
+          onClose={() => { setTransferTo(null); storeChanged(); onRefresh?.(); }}/>
       )}
 
       <div style={{borderTop:remotes && remotes.length ? '1px solid var(--line-soft)' : undefined,paddingTop:20}}>
@@ -3449,31 +3449,37 @@ function RemotesView({ session, apps, services }) {
   );
 }
 
-// Send apps and services to a remote: the Build archive picker, with each
-// row tagged by what the remote will do with it. The remote matches the
-// same way an update feed does — apps by nonce, services by URL — and
-// creates what it doesn't have; the tags here are that rule, read off its
-// own lists beforehand.
+// Move apps and services between here and a remote: the Build archive
+// picker, listing ours to send or the remote's to fetch, each row tagged
+// by what the receiving side will do with it. The receiver matches the way
+// an update feed does — apps by nonce, services by URL — and creates what
+// it doesn't have; the tags are that rule, read off its lists beforehand.
 function TransferModal({ session, remote, apps, services, onClose }) {
   const rs = FrBr.remote(remote);
+  const [mode, setMode] = useState('send'); // or 'fetch'
   const [sel, setSel] = useState({ apps: [], services: [] });
-  const [there, setThere] = useState(null); // {nonces, urls} the remote already has
+  const [theirs, setTheirs] = useState(null); // the remote's {apps, services}
   const [log, setLog] = useState(null);
   const toast = useToast();
 
-  const trimSlash = (u = '') => u.replace(/\/+$/, '');
   useEffect(() => {
     Promise.all([frbr(rs, 'GET', '/api/apps'), frbr(rs, 'GET', '/api/services')])
-      .then(([a, sv]) => setThere({
-        nonces: new Set((a.apps || []).map(x => x.nonce)),
-        urls: new Set((sv.services || []).map(x => trimSlash(x.url))),
-      }))
+      .then(([a, sv]) => setTheirs({ apps: a.apps || [], services: sv.services || [] }))
       .catch(e => toast(e.message, true));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const switchTo = (m) => { setMode(m); setSel({ apps: [], services: [] }); setLog(null); };
+
+  // What the picker lists, and what the receiving side already has.
+  const fetching = mode === 'fetch';
+  const listed = fetching ? theirs : { apps, services };
+  const receiver = fetching ? { apps, services } : theirs;
+  const trimSlash = (u = '') => u.replace(/\/+$/, '');
   const tag = (kind, item) => {
-    if (!there) return null;
-    const has = kind === 'app' ? there.nonces.has(item.nonce) : there.urls.has(trimSlash(item.url));
+    if (!receiver) return null;
+    const has = kind === 'app'
+      ? receiver.apps.some(a => a.nonce === item.nonce)
+      : receiver.services.some(sv => trimSlash(sv.url) === trimSlash(item.url));
     return <Badge tone={has ? 'blue' : 'green'}>{has ? 'update' : 'new'}</Badge>;
   };
 
@@ -3485,26 +3491,48 @@ function TransferModal({ session, remote, apps, services, onClose }) {
       rs.addAuth(headers);
       await FrBr.sseStream('/api/transfer', {
         session, headers,
-        body: { remote: remote.id, apps: sel.apps, services: sel.services },
+        body: { remote: remote.id, direction: fetching ? 'pull' : 'push', apps: sel.apps, services: sel.services },
         onEvent: (ev, data) => setLog(prev => prev && { events: [...prev.events, { event: ev, data }] }),
       });
     } catch (e) { toast(e.message, true); }
   };
 
+  const tab = (m, label) => (
+    <button className={'btn btn-sm ' + (mode === m ? 'btn-primary' : 'btn-ghost')} onClick={() => switchTo(m)}>{label}</button>
+  );
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:520}}>
-        <h3 style={{marginBottom:12}}>Transfer to {remote.name}</h3>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+          <h3 style={{flex:1,margin:0}}>{fetching ? `Fetch from ${remote.name}` : `Transfer to ${remote.name}`}</h3>
+          {tab('send', 'Send')}
+          {tab('fetch', 'Fetch')}
+        </div>
         <p className="muted" style={{fontSize:13,marginBottom:16}}>
-          Send the selected apps (current staging slot — dev if none yet) and service definitions to “{remote.name}”,
-          as {rs.email || 'your account there'}. Ones it already has are updated in their staging slots; new ones are
-          created there, with gates matched by auth record name and owners and members by email.
+          {fetching ? <>
+            Copy the selected apps (their staging slot — dev if none yet) and service definitions from “{remote.name}”
+            to this server, as you. Ones this server has are updated in their staging slots; new ones are created here,
+            with gates matched by auth record name and owners and members by email.
+          </> : <>
+            Send the selected apps (current staging slot — dev if none yet) and service definitions to “{remote.name}”,
+            as {rs.email || 'your account there'}. Ones it already has are updated in their staging slots; new ones are
+            created there, with gates matched by auth record name and owners and members by email.
+          </>}
         </p>
-        <ArchivePicker apps={apps} services={services} sel={sel} setSel={setSel} tag={tag}/>
+        {fetching && (
+          <div className="remote-warning" style={{marginTop:0,marginBottom:16}}>
+            ⚠ What you fetch becomes this server's own: its pages are served here, and its task scripts run here.
+            Fetch only what you'd install yourself.
+          </div>
+        )}
+        {listed
+          ? <ArchivePicker apps={listed.apps} services={listed.services} sel={sel} setSel={setSel} tag={tag}/>
+          : <span className="muted">Loading the remote's apps and services…</span>}
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
           <button className="btn btn-ghost" onClick={onClose}>Close</button>
           <button className="btn btn-primary" disabled={sel.apps.length + sel.services.length === 0} onClick={run}>
-            <Icon name="transfer" size={14}/> Transfer
+            <Icon name="transfer" size={14}/> {fetching ? 'Fetch' : 'Transfer'}
           </button>
         </div>
         {log && <UpdateProgress events={log.events}/>}
@@ -3756,7 +3784,9 @@ function UpdateProgress({ events, onClose }) {
     const d = e.data || {};
     let text;
     switch (e.event) {
-      case 'fetch': case 'decrypt': case 'validate': case 'manifest': case 'encrypt': case 'extract':
+      case 'fetch':
+        text = d.name ? (d.status === 'start' ? `fetching from ${d.name}…` : `fetched from ${d.name}`) : 'fetch…'; break;
+      case 'decrypt': case 'validate': case 'manifest': case 'encrypt': case 'extract':
         text = `${e.event}…${d.ops ? ` (${d.ops} ops)` : ''}`; break;
       case 'collect': text = `collecting ${d.apps ?? 0} app(s), ${d.services ?? 0} service(s)`; break;
       case 'app': text = `packaged app ${d.nonce} (from ${d.source_slot})`; break;
@@ -4200,7 +4230,7 @@ function AppShell() {
         {page==='roles'     && <RolesView roles={roles}/>}
         {page==='audit'     && <AuditView audit={audit} isAdmin={isAdmin}/>}
         {page==='profile'   && <ProfileView session={session}/>}
-        {page==='remotes'   && <RemotesView session={session} apps={apps} services={services}/>}
+        {page==='remotes'   && <RemotesView session={session} apps={apps} services={services} onRefresh={load}/>}
         {page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} onRefresh={load}/>}
       </main>
     </div>

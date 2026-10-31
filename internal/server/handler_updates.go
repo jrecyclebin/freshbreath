@@ -319,10 +319,12 @@ func (s *Server) handleUpdateImport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleTransfer serves POST /api/transfer {remote, apps, services} — send
-// apps and services to a remote, as the remote user whose token rides in
-// X-Tunnel-Token (as for the proxy). Admin+, SSE progress: this server's
-// packing, then the remote's import.
+// handleTransfer serves POST /api/transfer {remote, direction, apps,
+// services} — move apps and services between here and a remote, as the
+// remote user whose token rides in X-Tunnel-Token (as for the proxy).
+// direction "push" (the default) sends ours there; "pull" fetches the
+// remote's here, apps and services named as the remote knows them.
+// Admin+, SSE progress.
 func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -334,12 +336,17 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Remote   string   `json:"remote"`
-		Apps     []string `json:"apps"`
-		Services []string `json:"services"`
+		Remote    string   `json:"remote"`
+		Direction string   `json:"direction"`
+		Apps      []string `json:"apps"`
+		Services  []string `json:"services"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Direction != "" && body.Direction != "push" && body.Direction != "pull" {
+		http.Error(w, `direction must be "push" or "pull"`, http.StatusBadRequest)
 		return
 	}
 	if _, err := s.store.GetRemote(body.Remote); err != nil {
@@ -352,6 +359,39 @@ func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
-		return s.coreTransfer(r.Context(), actor, body.Remote, token, body.Apps, body.Services, ch)
+		return s.coreTransfer(r.Context(), actor, body.Remote, token, body.Direction == "pull", body.Apps, body.Services, ch)
 	})
+}
+
+// handleUpdateExport serves POST /api/updates/export {apps, services} — the
+// other half of a pull: the archive an import takes (a plain tar.gz, with
+// what it needs to create each one), for another server to fetch through
+// the tunnel. Admin+ by its mount; task services take a Superuser, as for
+// building.
+func (s *Server) handleUpdateExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := actorFromContext(r)
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body struct {
+		Apps     []string `json:"apps"`
+		Services []string `json:"services"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	data, _, err := s.packArchive(actor, body.Apps, body.Services, "", true, func(UpdateEvent) error { return nil })
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	s.audit(actor, "exported for a transfer", fmt.Sprintf("%d app(s), %d service(s)", len(body.Apps), len(body.Services)))
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Write(data)
 }

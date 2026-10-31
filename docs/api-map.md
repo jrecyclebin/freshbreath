@@ -262,7 +262,8 @@ once the handler stashes the verified user in context.
 | `/api/updates/check` | GET | **anonymous** (rate-limited) | `coreCheckAllUpdateFeeds` — apps pull their own updates |
 | `/api/updates/apply` | POST | **anonymous** (rate-limited) | `{ids?}`; SSE progress while applying |
 | `/api/updates/import` | POST | admin+ | A transfer from another server: the body is a plain tar.gz with a manifest; SSE progress. Matches like a feed (apps by nonce, services by URL) and creates what's missing: gates by auth record name, owner and members by email, no match left empty. Task services need a Superuser |
-| `/api/transfer` | POST | admin+ | `{remote, apps, services}` with the remote's token in `X-Tunnel-Token`: packs them here and sends them to the remote's `/api/updates/import`; SSE progress, ours then the remote's |
+| `/api/updates/export` | POST | admin+ | `{apps, services}` → the plain tar.gz an import takes (with what it needs to create each). The far end of a pull. Task services need a Superuser |
+| `/api/transfer` | POST | admin+ | `{remote, direction, apps, services}` with the remote's token in `X-Tunnel-Token`. `push` (default) packs ours and sends them to the remote's `/api/updates/import`, relaying its progress; `pull` fetches the remote's `/api/updates/export` (apps and services as the remote names them) and imports it here as the caller. SSE progress |
 
 `/api/updates/check` and `/api/updates/apply` are deliberately mounted bare —
 the point is that a hosted app can check/apply without holding a role token.

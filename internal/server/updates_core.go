@@ -1259,11 +1259,13 @@ func (s *Server) coreImportArchive(ctx context.Context, actor *db.User, data []b
 	return emit(UpdateEvent{Event: "done", Version: manifest.Version, Applied: len(manifest.Ops)})
 }
 
-// coreTransfer packs the selected apps and services and sends them to a
-// remote's import, through its tunnel, as the remote user whose token the
-// browser holds (this server never keeps it). The remote's progress events
-// come back into this stream after this server's own.
-func (s *Server) coreTransfer(ctx context.Context, actor *db.User, remoteID, token string, apps, services []string, progress chan<- UpdateEvent) error {
+// coreTransfer moves apps and services between this server and a remote,
+// as the remote user whose token the browser holds (this server never
+// keeps it). A push packs them here and sends them to the remote's import,
+// whose progress events come back into this stream. A pull fetches the
+// remote's export and imports it here, as actor. Either way the importing
+// side matches and creates the same way.
+func (s *Server) coreTransfer(ctx context.Context, actor *db.User, remoteID, token string, pull bool, apps, services []string, progress chan<- UpdateEvent) error {
 	emit := func(e UpdateEvent) error {
 		select {
 		case progress <- e:
@@ -1283,34 +1285,70 @@ func (s *Server) coreTransfer(ctx context.Context, actor *db.User, remoteID, tok
 	if err != nil {
 		return fail("collect", cerr(http.StatusNotFound, "remote not found"))
 	}
+
+	if pull {
+		if err := emit(UpdateEvent{Event: "fetch", Step: "fetch", Name: remote.Name, Status: "start"}); err != nil {
+			return err
+		}
+		req, _ := json.Marshal(map[string][]string{"apps": apps, "services": services})
+		resp, err := s.callRemote(ctx, remote, token, "/api/updates/export", "application/json", req)
+		s.audit(actor, "fetched from remote", fmt.Sprintf("%s: %d app(s), %d service(s)", remote.Name, len(apps), len(services)))
+		if err != nil {
+			return fail("fetch", err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize+1))
+		if err != nil {
+			return fail("fetch", fmt.Errorf("download: %w", err))
+		}
+		if len(data) > maxArchiveSize {
+			return fail("fetch", fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
+		}
+		if err := emit(UpdateEvent{Event: "fetch", Step: "fetch", Name: remote.Name, Status: "ok"}); err != nil {
+			return err
+		}
+		return s.coreImportArchive(ctx, actor, data, progress)
+	}
+
 	plain, _, err := s.packArchive(actor, apps, services, "", true, emit)
 	if err != nil {
 		return fail("collect", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost/api/updates/import", bytes.NewReader(plain))
-	if err != nil {
-		return fail("send", err)
-	}
-	req.Header.Set("Content-Type", "application/gzip")
-	req.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(token, "Bearer "))
 	if err := emit(UpdateEvent{Event: "send", Step: "send", Name: remote.Name, Status: "ok"}); err != nil {
 		return err
 	}
-	resp, err := s.remoteConns.get(remote).client.Do(req)
+	resp, err := s.callRemote(ctx, remote, token, "/api/updates/import", "application/gzip", plain)
+	s.audit(actor, "transferred to remote", fmt.Sprintf("%s: %d app(s), %d service(s)", remote.Name, len(apps), len(services)))
 	if err != nil {
-		return fail("send", fmt.Errorf("could not reach %q: %w", remote.Name, err))
+		return fail("send", err)
 	}
 	defer resp.Body.Close()
-	s.audit(actor, "transferred to remote", fmt.Sprintf("%s: %d app(s), %d service(s) (%d)", remote.Name, len(apps), len(services), resp.StatusCode))
-	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if resp.StatusCode == http.StatusUnauthorized {
-			return fail("send", fmt.Errorf("%q turned down your sign-in there; sign in to it again", remote.Name))
-		}
-		return fail("send", fmt.Errorf("%q answered %d: %s", remote.Name, resp.StatusCode, strings.TrimSpace(string(msg))))
-	}
 	return relayUpdateEvents(resp.Body, emit)
+}
+
+// callRemote POSTs body to path on a remote, through its tunnel, as the
+// remote user token belongs to. Anything but a 200 is an error worth
+// showing; the caller closes a 200's body.
+func (s *Server) callRemote(ctx context.Context, remote *db.Remote, token, path, contentType string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost"+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(token, "Bearer "))
+	resp, err := s.remoteConns.get(remote).client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("could not reach %q: %w", remote.Name, err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp, nil
+	}
+	defer resp.Body.Close()
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("%q turned down your sign-in there; sign in to it again", remote.Name)
+	}
+	return nil, fmt.Errorf("%q answered %d: %s", remote.Name, resp.StatusCode, strings.TrimSpace(string(msg)))
 }
 
 // relayUpdateEvents reads another server's update event stream and emits

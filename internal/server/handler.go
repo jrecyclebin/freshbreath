@@ -468,6 +468,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/api/updates/check", s.handleUpdateCheck)
 	s.mux.HandleFunc("/api/updates/apply", s.handleUpdateApply)
 	s.mux.HandleFunc("/api/updates/import", s.authWrap(pipeline(s.handleUpdateImport, adminPlus)))
+	s.mux.HandleFunc("/api/updates/export", s.authWrap(pipeline(s.handleUpdateExport, adminPlus)))
 	s.mux.HandleFunc("/api/transfer", s.authWrap(pipeline(s.handleTransfer, adminPlus)))
 
 	// SSH host keys (TOFU) — same access gate as SSH sessions
