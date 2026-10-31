@@ -3495,7 +3495,7 @@ function RemotesView({ session, apps, services, users, auth, adminAuthID, onRefr
       <PageHead title="Hosts & Remotes" sub="Access to the outside world."/>
       <HostsSection session={session} apps={apps} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={onRefresh}/>
 
-      <h2 className="section-title">Remotes</h2>
+      <h2 className="section-title" style={{marginTop:32}}>Remotes</h2>
       {remotes === null ? <span className="muted">Loading…</span> : remotes.length === 0 ? (
         <div className="feed-card feed-empty muted">No remotes yet.</div>
       ) : (
@@ -3667,7 +3667,7 @@ function HostsSection({ session, apps, users, auth, adminAuthID, onRefresh }) {
 
   return (
     <>
-      <h2 className="section-title" style={{marginTop:32}}>Hosts</h2>
+      <h2 className="section-title">Hosts</h2>
       <p className="muted" style={{fontSize:13,marginBottom:12}}>
         The names besides its own this server answers to. Apps live one level down
         (<code>https://blog.example.com/notes</code>), and apps sharing a host share its sign-ins.
