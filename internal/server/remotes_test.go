@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
 	"poggers.institute/freshbreath/internal/db"
@@ -86,6 +87,42 @@ func TestRemoteAddressIsNeverShown(t *testing.T) {
 	}
 	if got, _ := srv.store.GetRemote(r.ID); got == nil || got.Address != addr {
 		t.Errorf("stored address didn't round-trip")
+	}
+}
+
+// A real address carries relay hosts but no region codes (parsing numbers
+// regions from 1), so the fingerprint names the relay from the DERP map,
+// or by its host when the map can't help.
+func TestRemoteFingerprintNamesTheRelay(t *testing.T) {
+	nk := key.NewNode()
+	ci := tailcat.ConnInfo{
+		ServerPublic:      tailcat.NodePublic{NodePublic: nk.Public()},
+		ServerDiscoPublic: tailcat.DiscoPublicForNode(nk),
+		Region: []*tailcfg.DERPRegion{{
+			RegionID: 301, RegionCode: "nyc",
+			Nodes: []*tailcfg.DERPNode{{Name: "301a", RegionID: 301, HostName: "tc301a.ipn.dev"}},
+		}},
+	}
+	parsed, err := tailcat.ParseAddr(ci.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm := &tailcfg.DERPMap{Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{
+		302: {RegionID: 302, RegionCode: "sfo", Nodes: []*tailcfg.DERPNode{{HostName: "tc302a.ipn.dev"}}},
+		301: {RegionID: 301, RegionCode: "nyc", Nodes: []*tailcfg.DERPNode{{HostName: "TC301A.ipn.dev"}}},
+	}}
+	for _, c := range []struct {
+		name string
+		dm   *tailcfg.DERPMap
+		want string
+	}{
+		{"in the map", dm, "nyc-"},
+		{"no map", nil, "tc301a-"},
+		{"not in the map", &tailcfg.DERPMap{Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{302: dm.Regions[302]}}, "tc301a-"},
+	} {
+		if got := remoteFingerprint(parsed, c.dm); !strings.HasPrefix(got, c.want) || len(got) != len(c.want)+8 {
+			t.Errorf("%s: fingerprint %q, want %s<8 key chars>", c.name, got, c.want)
+		}
 	}
 }
 

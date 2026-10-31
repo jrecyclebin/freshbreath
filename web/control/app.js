@@ -3526,14 +3526,16 @@ function TransferModal({ session, remote, apps, services, onClose }) {
             Fetch only what you'd install yourself.
           </div>
         )}
-        {listed
+        {log ? null : listed
           ? <ArchivePicker apps={listed.apps} services={listed.services} sel={sel} setSel={setSel} tag={tag}/>
           : <span className="muted">Loading the remote's apps and services…</span>}
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
           <button className="btn btn-ghost" onClick={onClose}>Close</button>
-          <button className="btn btn-primary" disabled={sel.apps.length + sel.services.length === 0} onClick={run}>
-            <Icon name="transfer" size={14}/> {fetching ? 'Fetch' : 'Transfer'}
-          </button>
+          {!log && (
+            <button className="btn btn-primary" disabled={sel.apps.length + sel.services.length === 0} onClick={run}>
+              <Icon name="transfer" size={14}/> {fetching ? 'Fetch' : 'Transfer'}
+            </button>
+          )}
         </div>
         {log && <UpdateProgress events={log.events}/>}
       </div>
