@@ -270,3 +270,23 @@ func TestMigrateSealPassIdempotent(t *testing.T) {
 		t.Fatalf("idempotence broken:\n first: %s\nsecond: %s", first, second)
 	}
 }
+
+// A remote's tailcat address carries its pre-shared key: sealed at rest.
+func TestRemoteAddressSealedAtRest(t *testing.T) {
+	store := newTestStore(t)
+	store.SetSealKey([]byte("0123456789abcdef0123456789abcdef"))
+	if err := store.CreateRemote(&Remote{ID: "r1", Name: "X", Address: "tcSECRETADDRESS", Fingerprint: "r1-abc"}); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := store.DB().QueryRow("SELECT address FROM remotes WHERE id = 'r1'").Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(raw, sealedPrefix) || strings.Contains(raw, "SECRET") {
+		t.Fatalf("address not sealed at rest: %s", raw)
+	}
+	got, err := store.GetRemote("r1")
+	if err != nil || got.Address != "tcSECRETADDRESS" {
+		t.Fatalf("unsealed address: %v %+v", err, got)
+	}
+}

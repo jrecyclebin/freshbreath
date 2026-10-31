@@ -12,6 +12,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -293,4 +294,104 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
 		return s.coreApplyUpdateFeeds(r.Context(), claims, body.IDs, ch)
 	})
+}
+
+// handleUpdateImport serves POST /api/updates/import — a transfer from
+// another server: the body is the archive (a plain tar.gz), the answer an
+// SSE stream like apply's. Admin+, by its mount.
+func (s *Server) handleUpdateImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := actorFromContext(r)
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		writeErr(w, err)
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxArchiveSize))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("archive too large or unreadable: %v", err), http.StatusBadRequest)
+		return
+	}
+	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
+		return s.coreImportArchive(r.Context(), actor, data, ch)
+	})
+}
+
+// handleTransfer serves POST /api/transfer {remote, direction, apps,
+// services} — move apps and services between here and a remote, as the
+// remote user whose token rides in X-Tunnel-Token (as for the proxy).
+// direction "push" (the default) sends ours there; "pull" fetches the
+// remote's here, apps and services named as the remote knows them.
+// Admin+, SSE progress.
+func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := actorFromContext(r)
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body struct {
+		Remote    string   `json:"remote"`
+		Direction string   `json:"direction"`
+		Apps      []string `json:"apps"`
+		Services  []string `json:"services"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.Direction != "" && body.Direction != "push" && body.Direction != "pull" {
+		http.Error(w, `direction must be "push" or "pull"`, http.StatusBadRequest)
+		return
+	}
+	if _, err := s.store.GetRemote(body.Remote); err != nil {
+		http.Error(w, "remote not found", http.StatusNotFound)
+		return
+	}
+	token := strings.TrimSpace(r.Header.Get("X-Tunnel-Token"))
+	if token == "" {
+		http.Error(w, "sign in to the remote first (no X-Tunnel-Token)", http.StatusBadRequest)
+		return
+	}
+	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
+		return s.coreTransfer(r.Context(), actor, body.Remote, token, body.Direction == "pull", body.Apps, body.Services, ch)
+	})
+}
+
+// handleUpdateExport serves POST /api/updates/export {apps, services} — the
+// other half of a pull: the archive an import takes (a plain tar.gz, with
+// what it needs to create each one), for another server to fetch through
+// the tunnel. Admin+ by its mount; task services take a Superuser, as for
+// building.
+func (s *Server) handleUpdateExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := actorFromContext(r)
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body struct {
+		Apps     []string `json:"apps"`
+		Services []string `json:"services"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	data, _, err := s.packArchive(actor, body.Apps, body.Services, "", true, func(UpdateEvent) error { return nil })
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	s.audit(actor, "exported for a transfer", fmt.Sprintf("%d app(s), %d service(s)", len(body.Apps), len(body.Services)))
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Write(data)
 }

@@ -42,10 +42,12 @@ const tunnelStartWait = 45 * time.Second
 
 // tunnelIdentity is what keeps the tunnel's address the same across
 // restarts, sealed into the tunnel_identity setting.
+// Region is the relay the first start picked, kept whole rather than by
+// its DERP map ID: an address doesn't carry the ID, and the map can change.
 type tunnelIdentity struct {
-	Key      key.NodePrivate      `json:"key"`
-	PSK      tailcat.PresharedKey `json:"psk"`
-	RegionID int                  `json:"region_id,omitempty"`
+	Key    key.NodePrivate      `json:"key"`
+	PSK    tailcat.PresharedKey `json:"psk"`
+	Region *tailcfg.DERPRegion  `json:"region,omitempty"`
 }
 
 // tunnel is the running tailcat server, if any.
@@ -130,7 +132,7 @@ func (s *Server) startTunnel(ctx context.Context) error {
 	ts := &tailcat.Server{
 		Key:          id.Key,
 		PresharedKey: id.PSK,
-		RegionID:     tailcfg.DERPRegionID(id.RegionID),
+		Region:       id.Region,
 		Logf:         func(string, ...any) {}, // the relay chatter is no use to an operator
 	}
 	ln, err := ts.Listen(ctx, "tcp", ":80")
@@ -139,13 +141,9 @@ func (s *Server) startTunnel(ctx context.Context) error {
 		return err
 	}
 	addr := ts.TailcatAddr()
-	if id.RegionID == 0 {
-		// Pin the relay the first start picked, so the address holds.
-		if ci, err := tailcat.ParseAddr(addr); err == nil && len(ci.Region) > 0 {
-			id.RegionID = int(ci.Region[0].RegionID)
-			if err := s.storeTunnelIdentity(id); err != nil {
-				log.Printf("tunnel: relay not pinned, the address may change on restart: %v", err)
-			}
+	if id.Region == nil && id.pinRelay(addr) {
+		if err := s.storeTunnelIdentity(id); err != nil {
+			log.Printf("tunnel: relay not pinned, the address may change on restart: %v", err)
 		}
 	}
 	hs := &http.Server{
@@ -171,6 +169,17 @@ func (s *Server) stopTunnel() {
 	s.tunnel.http.Close()
 	s.tunnel.srv.Close()
 	s.tunnel.srv, s.tunnel.http, s.tunnel.addr = nil, nil, ""
+}
+
+// pinRelay keeps the relay named in addr, so the next start comes back at
+// the same address.
+func (id *tunnelIdentity) pinRelay(addr tailcat.Addr) bool {
+	ci, err := tailcat.ParseAddr(addr)
+	if err != nil || len(ci.Region) == 0 {
+		return false
+	}
+	id.Region = ci.Region[0]
+	return true
 }
 
 func (s *Server) loadTunnelIdentity() (tunnelIdentity, error) {
@@ -209,8 +218,18 @@ func (s *Server) storeTunnelIdentity(id tunnelIdentity) error {
 // the panel's door — the passphrase is the only sign-in the tunnel can
 // offer, so it stands in for whatever the panel asks. Cookies are dropped:
 // nothing through the tunnel rides a browser session.
+//
+// Any Host but a local one (localhost, an IP) becomes "localhost": the
+// tunnel always means this server's own routes. The Host check guards
+// against DNS rebinding, which a tailcat address can't be used for, and an
+// app's own host name would otherwise steer the request into that app. A
+// local Host is kept, port and all, since frbr.js builds its API base from
+// it for a client on `tailcat forward`.
 func (s *Server) tunnelHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.isLocalHost(r.Host) {
+			r.Host = "localhost"
+		}
 		r.Header.Del("Cookie")
 		switch p := r.URL.Path; {
 		case p == "/service/direct":

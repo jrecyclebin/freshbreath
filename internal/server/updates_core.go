@@ -9,6 +9,7 @@ package server
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -61,7 +62,9 @@ type UpdateEvent struct {
 // UpdateManifest is the descriptor at the heart of an update archive. Two op
 // actions only (update_app_files, update_service_files) — the smallest
 // vocabulary that's still useful, which is what makes the anonymous trigger
-// surface tolerable: file ops can't change ownership or create anything.
+// surface tolerable: a feed's file ops can't change ownership or create
+// anything. An import (a transfer from another server, applied by a signed-in
+// Admin) matches targets the same way, and creates the ones it doesn't find.
 type UpdateManifest struct {
 	Version string     `json:"version"`
 	Ops     []UpdateOp `json:"ops"`
@@ -69,9 +72,40 @@ type UpdateManifest struct {
 
 type UpdateOp struct {
 	Action string `json:"action"`
+	// An app's nonce, or a service's URL. Archives built before services
+	// matched by URL name the service instead; that still works.
 	Target string `json:"target"`
 	Source string `json:"source,omitempty"` // path inside the tarball; defaulted per action
 	Slot   string `json:"slot,omitempty"`   // v1: staging only
+	// What an import needs to create the target where it's missing. Feeds
+	// never create, so their archives leave it out.
+	Create *CreateSpec `json:"create,omitempty"`
+}
+
+// CreateSpec describes an app or service as it is on the server it came
+// from. Auth records go by name and users by email, since ids mean nothing
+// on another server; whatever has no match there is left empty — a gate
+// then inherits the admin gate, the safe default.
+type CreateSpec struct {
+	Name        string                `json:"name"`
+	URL         string                `json:"url,omitempty"`         // an app's own URL (a service's is its Target)
+	Environment string                `json:"environment,omitempty"` // apps
+	Descriptor  *db.ServiceDescriptor `json:"descriptor,omitempty"`  // services
+	Gate        string                `json:"gate,omitempty"`        // protected_by, by auth record name
+	ActsAs      string                `json:"acts_as,omitempty"`     // services: acts_as, by auth record name
+	Owner       string                `json:"owner,omitempty"`       // apps: by email (kept only if an Admin+ there)
+	Members     []string              `json:"members,omitempty"`     // by email
+}
+
+// applyPolicy is who applies an archive and how far it may go. A feed
+// applies on its owner's authority, each target gated by the caller's
+// token (claims, nil for anonymous), and only updates. An import applies
+// as the signed-in caller, whose role (Admin+, checked at the door) stands
+// in for the per-target gates, and creates what's missing.
+type applyPolicy struct {
+	owner     *db.User
+	claims    *freshbreathClaims
+	importing bool
 }
 
 // ── Archive crypto ──────────────────────────────────────────────────
@@ -128,6 +162,15 @@ func (op UpdateOp) opSource() string {
 		return "services/" + op.Target + ".txt"
 	}
 	return ""
+}
+
+// opService finds a service op's target: by URL, or by name for archives
+// built before services matched by URL.
+func (s *Server) opService(target string) (*db.Service, error) {
+	if svc, err := s.store.GetServiceByURL(target); err == nil {
+		return svc, nil
+	}
+	return s.store.GetServiceByName(target)
 }
 
 // archiveSourcePath resolves an op's in-archive source path against the
@@ -195,19 +238,26 @@ func gateAllowsApply(gate *db.AuthRecord, claims *freshbreathClaims) bool {
 
 // validateUpdateOps pre-flights every op against the store, the extracted
 // archive and the caller's reach before the first one executes: targets
-// must exist, sources must be in the tarball, slots default to staging,
-// and the caller must clear each target's gate (an open one needs no
-// proof). A validation failure touches nothing — "feed refused before it
-// started" beats "half-applied feed."
-func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.User, claims *freshbreathClaims) error {
+// must exist (or, importing, be creatable), sources must be in the
+// tarball, slots default to staging, and a feed's caller must clear each
+// target's gate (an open one needs no proof). A validation failure touches
+// nothing — "feed refused before it started" beats "half-applied feed."
+func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, p applyPolicy) error {
 	for i, op := range ops {
 		switch op.Action {
 		case "update_app_files":
 			app, err := s.store.GetApp(op.Target)
 			if err != nil {
-				return fmt.Errorf("op %d: app not found: %s", i, op.Target)
-			}
-			if gate, err := s.resolveAppGate(app); err == nil && !gateAllowsApply(gate, claims) {
+				if !p.importing || op.Create == nil {
+					return fmt.Errorf("op %d: app not found: %s", i, op.Target)
+				}
+				if strings.TrimSpace(op.Create.Name) == "" {
+					return fmt.Errorf("op %d: app %s has no name to create it with", i, op.Target)
+				}
+				if _, err := normalizeAppURL(op.Create.URL); err != nil {
+					return fmt.Errorf("op %d: %v", i, err)
+				}
+			} else if gate, err := s.resolveAppGate(app); !p.importing && err == nil && !gateAllowsApply(gate, p.claims) {
 				return fmt.Errorf("op %d: app %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
 			}
 			slot := op.Slot
@@ -218,20 +268,36 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.
 				return fmt.Errorf("op %d: slot %q not supported (v1: staging only)", i, slot)
 			}
 		case "update_service_files":
-			svc, err := s.store.GetServiceByName(op.Target)
+			svc, err := s.opService(op.Target)
 			if err != nil {
-				return fmt.Errorf("op %d: service not found: %s", i, op.Target)
+				if !p.importing || op.Create == nil || op.Create.Descriptor == nil {
+					return fmt.Errorf("op %d: service not found: %s", i, op.Target)
+				}
+				// Not found by URL, so the same name elsewhere is a different
+				// service: refuse rather than overwrite it.
+				if err := checkServiceName(op.Create.Name); err != nil {
+					return fmt.Errorf("op %d: %v", i, err)
+				}
+				if _, err := s.store.GetServiceByName(op.Create.Name); err == nil {
+					return fmt.Errorf("op %d: a service named %q already exists here at another URL", i, op.Create.Name)
+				}
+				svc = &db.Service{Name: op.Create.Name, URL: op.Target, Descriptor: *op.Create.Descriptor}
 			}
 			if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
 				return fmt.Errorf("op %d: service type %q does not support file publishing", i, svc.Descriptor.Type)
 			}
-			// A feed replaces task scripts on its owner's authority, so the
-			// owner must still be someone allowed to write them.
-			if err := s.gateTaskService(owner, svc.Descriptor.Type); err != nil {
+			// Task scripts are written on the owner's authority (a feed's
+			// owner, or whoever imports), so it must be someone allowed to.
+			if err := s.gateTaskService(p.owner, svc.Descriptor.Type); err != nil {
+				if p.importing {
+					return fmt.Errorf("op %d: task service %s can only be imported by a Superuser", i, op.Target)
+				}
 				return fmt.Errorf("op %d: task service %s can only be updated by a feed a Superuser owns", i, op.Target)
 			}
-			if gate, gerr := s.resolveServiceGate(svc); gerr == nil && !gateAllowsApply(gate, claims) {
-				return fmt.Errorf("op %d: service %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
+			if svc.ID != 0 && !p.importing {
+				if gate, gerr := s.resolveServiceGate(svc); gerr == nil && !gateAllowsApply(gate, p.claims) {
+					return fmt.Errorf("op %d: service %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
+				}
 			}
 		default:
 			return fmt.Errorf("op %d: unknown action %q", i, op.Action)
@@ -245,6 +311,108 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, owner *db.
 		}
 	}
 	return nil
+}
+
+// runUpdateOps validates every op, then runs them in manifest order,
+// creating a missing target first when importing. Each op overwrites, so a
+// retry from op 0 is safe. It reports the step that failed (validate or
+// op) with the error. Feeds and imports both go through here, which is
+// what keeps their matching the same.
+func (s *Server) runUpdateOps(ops []UpdateOp, archiveDir string, p applyPolicy, emit func(UpdateEvent) error) (string, error) {
+	if err := s.validateUpdateOps(ops, archiveDir, p); err != nil {
+		return "validate", err
+	}
+	if err := emit(UpdateEvent{Event: "validate", Step: "validate", Ops: len(ops), Status: "ok"}); err != nil {
+		return "validate", err
+	}
+	for i, op := range ops {
+		if err := emit(UpdateEvent{Event: "op", Index: i, Action: op.Action, Target: op.Target, Status: "start"}); err != nil {
+			return "op", err
+		}
+		if p.importing {
+			created, err := s.createOpTarget(op, p.owner)
+			if err != nil {
+				return "op", fmt.Errorf("op %d (create %s): %w", i, op.Target, err)
+			}
+			if created {
+				if err := emit(UpdateEvent{Event: "op", Index: i, Action: op.Action, Target: op.Target, Name: op.Create.Name, Status: "created"}); err != nil {
+					return "op", err
+				}
+			}
+		}
+		if err := s.executeUpdateOp(op, archiveDir); err != nil {
+			return "op", fmt.Errorf("op %d (%s %s): %w", i, op.Action, op.Target, err)
+		}
+		if err := emit(UpdateEvent{Event: "op", Index: i, Action: op.Action, Target: op.Target, Status: "done"}); err != nil {
+			return "op", err
+		}
+	}
+	return "", nil
+}
+
+// createOpTarget creates an import's target if it isn't here yet, as actor,
+// from the op's create spec. Auth records are matched by name and users by
+// email; no match leaves the slot empty. Reports whether it created one.
+func (s *Server) createOpTarget(op UpdateOp, actor *db.User) (bool, error) {
+	c := op.Create
+	switch op.Action {
+	case "update_app_files":
+		if _, err := s.store.GetApp(op.Target); err == nil || c == nil {
+			return false, nil
+		}
+		var owner *int64
+		if u, err := s.store.GetUserByEmail(c.Owner); c.Owner != "" && err == nil && roleIn(u.Role, rolesAdminPlus) {
+			owner = &u.ID
+		}
+		if _, err := s.coreCreateAppWithNonce(actor, op.Target, c.Name, c.Environment, c.URL, owner, s.authIDByName(c.Gate)); err != nil {
+			return false, err
+		}
+		if members := s.userIDsByEmail(c.Members); len(members) > 0 {
+			if err := s.coreSetAppMembers(actor, op.Target, members); err != nil {
+				return true, err
+			}
+		}
+		return true, nil
+	case "update_service_files":
+		if _, err := s.opService(op.Target); err == nil || c == nil || c.Descriptor == nil {
+			return false, nil
+		}
+		svc, err := s.coreCreateService(actor, c.Name, op.Target, *c.Descriptor, s.authIDByName(c.Gate), s.authIDByName(c.ActsAs))
+		if err != nil {
+			return false, err
+		}
+		if members := s.userIDsByEmail(c.Members); len(members) > 0 {
+			if err := s.coreSetServiceMembers(actor, svc.ID, members); err != nil {
+				return true, err
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// authIDByName is the id of the auth record with this name, or nil.
+func (s *Server) authIDByName(name string) *int64 {
+	if name == "" {
+		return nil
+	}
+	rec, err := s.store.GetAuthRecordByName(name)
+	if err != nil {
+		return nil
+	}
+	return &rec.ID
+}
+
+// userIDsByEmail is the ids of the users with these emails, skipping any
+// that have no account here.
+func (s *Server) userIDsByEmail(emails []string) []int64 {
+	var ids []int64
+	for _, e := range emails {
+		if u, err := s.store.GetUserByEmail(e); err == nil {
+			ids = append(ids, u.ID)
+		}
+	}
+	return ids
 }
 
 // executeUpdateOp runs one op against the extracted archive. Both actions
@@ -271,7 +439,7 @@ func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
 		s.rebuildHostedRoutes()
 		return nil
 	case "update_service_files":
-		svc, err := s.store.GetServiceByName(op.Target)
+		svc, err := s.opService(op.Target)
 		if err != nil {
 			return err
 		}
@@ -799,24 +967,11 @@ func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, claims *
 	} else if u, err := s.userFromSubject(subjectForUser(&db.User{ID: f.CreatedBy})); err == nil {
 		owner = u
 	}
-	if err := s.validateUpdateOps(manifest.Ops, archiveDir, owner, claims); err != nil {
-		return fail("validate", err)
-	}
-	if err := emit(UpdateEvent{Event: "validate", Step: "validate", Ops: len(manifest.Ops), Status: "ok"}); err != nil {
-		return err
-	}
-
-	// ops — in manifest order; each overwrites, so a retry from op 0 is safe.
-	for i, op := range manifest.Ops {
-		if err := emit(UpdateEvent{Event: "op", Index: i, Action: op.Action, Target: op.Target, Status: "start"}); err != nil {
+	if step, err := s.runUpdateOps(manifest.Ops, archiveDir, applyPolicy{owner: owner, claims: claims}, emit); err != nil {
+		if ctx.Err() != nil {
 			return err
 		}
-		if err := s.executeUpdateOp(op, archiveDir); err != nil {
-			return fail("op", fmt.Errorf("op %d (%s %s): %w", i, op.Action, op.Target, err))
-		}
-		if err := emit(UpdateEvent{Event: "op", Index: i, Action: op.Action, Target: op.Target, Status: "done"}); err != nil {
-			return err
-		}
+		return fail(step, err)
 	}
 
 	// stamp — full success only.
@@ -868,18 +1023,50 @@ func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []st
 			return ctx.Err()
 		}
 	}
+	plain, version, err := s.packArchive(actor, apps, services, version, false, emit)
+	if err != nil {
+		return "", err
+	}
+	archive, err := encryptArchive(key, plain)
+	if err != nil {
+		return "", cerr(http.StatusInternalServerError, "encrypt: %v", err)
+	}
+	_ = emit(UpdateEvent{Event: "encrypt", Step: "encrypt", Status: "ok"})
+	ref := utils.GenNonce()
+	s.putPendingArchive(feed.ID, ref, archive)
+	// Plain admin-authenticated URL — no act-token. The consumer is the
+	// control panel SPA, which already holds a bearer token; act-tokens are
+	// for credential-less fetchers (see design/remote-updates.md Reuse Map).
+	downloadURL := "/api/updates/" + feed.ID + "/archive?ref=" + ref
+	_ = emit(UpdateEvent{Event: "done", Step: "done", Version: version, DownloadURL: downloadURL})
+	return downloadURL, nil
+}
+
+// packArchive assembles a tar.gz (unencrypted) of the selected apps
+// (current staging slot, dev fallback) and services (definition files),
+// with its manifest, streaming progress. forImport adds what an import
+// needs to create each target it doesn't have: names, gates by auth
+// record name, owner and members by email. A feed's archive leaves that
+// out — feeds never create, and it would put those emails in a file
+// hosted out in the world.
+func (s *Server) packArchive(actor *db.User, apps, services []string, version string, forImport bool, emit func(UpdateEvent) error) (data []byte, _ string, err error) {
 	_ = emit(UpdateEvent{Event: "collect", Step: "collect", Apps: len(apps), Services: len(services), Status: "ok"})
 
 	var manifest UpdateManifest
 	var buf bytes.Buffer
 	gzw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gzw)
-
-	for _, nonce := range apps {
-		if _, err := s.store.GetApp(nonce); err != nil {
+	defer func() {
+		if err != nil {
 			tw.Close()
 			gzw.Close()
-			return "", cerr(http.StatusNotFound, "app not found: %s", nonce)
+		}
+	}()
+
+	for _, nonce := range apps {
+		app, err := s.store.GetApp(nonce)
+		if err != nil {
+			return nil, "", cerr(http.StatusNotFound, "app not found: %s", nonce)
 		}
 		sourceSlot := "staging"
 		srcDir := filepath.Join(s.config.DataDir, "apps", nonce, "staging")
@@ -889,7 +1076,7 @@ func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []st
 		}
 		arcRoot := "apps/" + nonce
 		added := false
-		err := filepath.Walk(srcDir, func(path string, fi os.FileInfo, err error) error {
+		err = filepath.Walk(srcDir, func(path string, fi os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
@@ -904,66 +1091,70 @@ func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []st
 			return nil
 		})
 		if err != nil {
-			tw.Close()
-			gzw.Close()
-			return "", cerr(http.StatusInternalServerError, "collect app %s: %v", nonce, err)
+			return nil, "", cerr(http.StatusInternalServerError, "collect app %s: %v", nonce, err)
 		}
 		if !added {
-			tw.Close()
-			gzw.Close()
-			return "", cerr(http.StatusBadRequest, "app %s has no files to package (deploy to staging or upload to dev first)", nonce)
+			return nil, "", cerr(http.StatusBadRequest, "app %s has no files to package (deploy to staging or upload to dev first)", nonce)
 		}
 		if err := emit(UpdateEvent{Event: "app", Nonce: nonce, SourceSlot: sourceSlot, Status: "added"}); err != nil {
-			tw.Close()
-			gzw.Close()
-			return "", err
+			return nil, "", err
 		}
-		manifest.Ops = append(manifest.Ops, UpdateOp{
-			Action: "update_app_files", Target: nonce, Source: arcRoot, Slot: "staging",
-		})
+		op := UpdateOp{Action: "update_app_files", Target: nonce, Source: arcRoot, Slot: "staging"}
+		if forImport {
+			op.Create = &CreateSpec{
+				Name:        app.Name,
+				URL:         app.URL,
+				Environment: app.Environment,
+				Gate:        s.authNameByID(app.ProtectedBy),
+				Owner:       s.userEmail(app.OwnerID),
+			}
+			if ids, err := s.store.ListAppMembers(nonce); err == nil {
+				op.Create.Members = s.userEmails(ids)
+			}
+		}
+		manifest.Ops = append(manifest.Ops, op)
 	}
 
 	for _, name := range services {
 		svc, err := s.store.GetServiceByName(name)
 		if err != nil {
-			tw.Close()
-			gzw.Close()
-			return "", cerr(http.StatusNotFound, "service not found: %s", name)
+			return nil, "", cerr(http.StatusNotFound, "service not found: %s", name)
 		}
 		if svc.Descriptor.Type != "tasks" && svc.Descriptor.Type != "virtual" {
-			tw.Close()
-			gzw.Close()
-			return "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
+			return nil, "", cerr(http.StatusBadRequest, "service type %q does not support file publishing", svc.Descriptor.Type)
 		}
 		if err := s.gateTaskService(actor, svc.Descriptor.Type); err != nil {
-			tw.Close()
-			gzw.Close()
-			return "", err
+			return nil, "", err
 		}
 		data, err := os.ReadFile(serviceDefinitionPath(s.config.DataDir, svc))
 		if err != nil {
-			tw.Close()
-			gzw.Close()
-			return "", cerr(http.StatusBadRequest, "service %s has no definition file to package", name)
+			return nil, "", cerr(http.StatusBadRequest, "service %s has no definition file to package", name)
 		}
 		arcName := "services/" + name + ".txt"
 		if err := tarWriteFile(tw, arcName, data); err != nil {
-			tw.Close()
-			gzw.Close()
-			return "", cerr(http.StatusInternalServerError, "package service %s: %v", name, err)
+			return nil, "", cerr(http.StatusInternalServerError, "package service %s: %v", name, err)
 		}
 		if err := emit(UpdateEvent{Event: "service", Name: name, Status: "added"}); err != nil {
-			tw.Close()
-			gzw.Close()
-			return "", err
+			return nil, "", err
 		}
-		manifest.Ops = append(manifest.Ops, UpdateOp{Action: "update_service_files", Target: name})
+		op := UpdateOp{Action: "update_service_files", Target: svc.URL, Source: arcName}
+		if forImport {
+			d := svc.Descriptor
+			op.Create = &CreateSpec{
+				Name:       svc.Name,
+				Descriptor: &d,
+				Gate:       s.authNameByID(svc.ProtectedBy),
+				ActsAs:     s.authNameByID(svc.ActsAs),
+			}
+			if ids, err := s.store.ListServiceMembers(svc.ID); err == nil {
+				op.Create.Members = s.userEmails(ids)
+			}
+		}
+		manifest.Ops = append(manifest.Ops, op)
 	}
 
 	if len(manifest.Ops) == 0 {
-		tw.Close()
-		gzw.Close()
-		return "", cerr(http.StatusBadRequest, "nothing selected: pass apps and/or services")
+		return nil, "", cerr(http.StatusBadRequest, "nothing selected: pass apps and/or services")
 	}
 	if version == "" {
 		version = time.Now().UTC().Format("2006.01.02T15:04Z")
@@ -971,30 +1162,220 @@ func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []st
 	manifest.Version = version
 	mb, _ := json.MarshalIndent(manifest, "", "  ")
 	if err := tarWriteFile(tw, "manifest.json", mb); err != nil {
-		tw.Close()
-		gzw.Close()
-		return "", cerr(http.StatusInternalServerError, "manifest: %v", err)
+		return nil, "", cerr(http.StatusInternalServerError, "manifest: %v", err)
 	}
 	if err := tw.Close(); err != nil {
-		return "", cerr(http.StatusInternalServerError, "tar close: %v", err)
+		return nil, "", cerr(http.StatusInternalServerError, "tar close: %v", err)
 	}
 	if err := gzw.Close(); err != nil {
-		return "", cerr(http.StatusInternalServerError, "gzip close: %v", err)
+		return nil, "", cerr(http.StatusInternalServerError, "gzip close: %v", err)
 	}
 	_ = emit(UpdateEvent{Event: "manifest", Step: "manifest", Version: version, Ops: len(manifest.Ops), Status: "ok"})
-	archive, err := encryptArchive(key, buf.Bytes())
-	if err != nil {
-		return "", cerr(http.StatusInternalServerError, "encrypt: %v", err)
+	return buf.Bytes(), version, nil
+}
+
+// authNameByID is the name of the auth record with this id, or "".
+func (s *Server) authNameByID(id *int64) string {
+	if id == nil {
+		return ""
 	}
-	_ = emit(UpdateEvent{Event: "encrypt", Step: "encrypt", Status: "ok"})
-	ref := utils.GenNonce()
-	s.putPendingArchive(feed.ID, ref, archive)
-	// Plain admin-authenticated URL — no act-token. The consumer is the
-	// control panel SPA, which already holds a bearer token; act-tokens are
-	// for credential-less fetchers (see design/remote-updates.md Reuse Map).
-	downloadURL := "/api/updates/" + feed.ID + "/archive?ref=" + ref
-	_ = emit(UpdateEvent{Event: "done", Step: "done", Version: version, DownloadURL: downloadURL})
-	return downloadURL, nil
+	if rec, err := s.store.GetAuthRecord(*id); err == nil {
+		return rec.Name
+	}
+	return ""
+}
+
+// userEmail is the email of the user with this id, or "".
+func (s *Server) userEmail(id *int64) string {
+	if id == nil {
+		return ""
+	}
+	if u, err := s.store.GetUser(*id); err == nil {
+		return u.Email
+	}
+	return ""
+}
+
+func (s *Server) userEmails(ids []int64) []string {
+	var out []string
+	for _, id := range ids {
+		if e := s.userEmail(&id); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ── Import & transfer ───────────────────────────────────────────────
+
+// coreImportArchive applies a transfer from another server: a plain tar.gz
+// (it came through the tunnel, sent by a signed-in Admin, so there's no
+// feed key to check) run through the same validation and ops as a feed.
+// It acts as actor, and creates the apps and services it doesn't find.
+func (s *Server) coreImportArchive(ctx context.Context, actor *db.User, data []byte, progress chan<- UpdateEvent) error {
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return err
+	}
+	emit := func(e UpdateEvent) error {
+		select {
+		case progress <- e:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	fail := func(step string, err error) error {
+		_ = emit(UpdateEvent{Event: "feed_error", Step: step, Message: err.Error()})
+		return err
+	}
+
+	dir, err := os.MkdirTemp("", "fb-import-*")
+	if err != nil {
+		return fail("extract", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := extractArchive(data, dir); err != nil {
+		return fail("extract", err)
+	}
+	mb, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return fail("extract", fmt.Errorf("manifest.json not found in archive"))
+	}
+	var manifest UpdateManifest
+	if err := json.Unmarshal(mb, &manifest); err != nil {
+		return fail("extract", fmt.Errorf("parse manifest: %w", err))
+	}
+	if err := emit(UpdateEvent{Event: "extract", Step: "extract", Status: "ok"}); err != nil {
+		return err
+	}
+
+	if step, err := s.runUpdateOps(manifest.Ops, dir, applyPolicy{owner: actor, importing: true}, emit); err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		return fail(step, err)
+	}
+	s.audit(actor, "imported a transfer", fmt.Sprintf("%d app(s)/service(s)", len(manifest.Ops)))
+	return emit(UpdateEvent{Event: "done", Version: manifest.Version, Applied: len(manifest.Ops)})
+}
+
+// coreTransfer moves apps and services between this server and a remote,
+// as the remote user whose token the browser holds (this server never
+// keeps it). A push packs them here and sends them to the remote's import,
+// whose progress events come back into this stream. A pull fetches the
+// remote's export and imports it here, as actor. Either way the importing
+// side matches and creates the same way.
+func (s *Server) coreTransfer(ctx context.Context, actor *db.User, remoteID, token string, pull bool, apps, services []string, progress chan<- UpdateEvent) error {
+	emit := func(e UpdateEvent) error {
+		select {
+		case progress <- e:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	fail := func(step string, err error) error {
+		_ = emit(UpdateEvent{Event: "feed_error", Step: step, Message: err.Error()})
+		return err
+	}
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		return fail("collect", err)
+	}
+	remote, err := s.store.GetRemote(remoteID)
+	if err != nil {
+		return fail("collect", cerr(http.StatusNotFound, "remote not found"))
+	}
+
+	if pull {
+		if err := emit(UpdateEvent{Event: "fetch", Step: "fetch", Name: remote.Name, Status: "start"}); err != nil {
+			return err
+		}
+		req, _ := json.Marshal(map[string][]string{"apps": apps, "services": services})
+		resp, err := s.callRemote(ctx, remote, token, "/api/updates/export", "application/json", req)
+		s.audit(actor, "fetched from remote", fmt.Sprintf("%s: %d app(s), %d service(s)", remote.Name, len(apps), len(services)))
+		if err != nil {
+			return fail("fetch", err)
+		}
+		defer resp.Body.Close()
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize+1))
+		if err != nil {
+			return fail("fetch", fmt.Errorf("download: %w", err))
+		}
+		if len(data) > maxArchiveSize {
+			return fail("fetch", fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
+		}
+		if err := emit(UpdateEvent{Event: "fetch", Step: "fetch", Name: remote.Name, Status: "ok"}); err != nil {
+			return err
+		}
+		return s.coreImportArchive(ctx, actor, data, progress)
+	}
+
+	plain, _, err := s.packArchive(actor, apps, services, "", true, emit)
+	if err != nil {
+		return fail("collect", err)
+	}
+	if err := emit(UpdateEvent{Event: "send", Step: "send", Name: remote.Name, Status: "ok"}); err != nil {
+		return err
+	}
+	resp, err := s.callRemote(ctx, remote, token, "/api/updates/import", "application/gzip", plain)
+	s.audit(actor, "transferred to remote", fmt.Sprintf("%s: %d app(s), %d service(s)", remote.Name, len(apps), len(services)))
+	if err != nil {
+		return fail("send", err)
+	}
+	defer resp.Body.Close()
+	return relayUpdateEvents(resp.Body, emit)
+}
+
+// callRemote POSTs body to path on a remote, through its tunnel, as the
+// remote user token belongs to. Anything but a 200 is an error worth
+// showing; the caller closes a 200's body.
+func (s *Server) callRemote(ctx context.Context, remote *db.Remote, token, path, contentType string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost"+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(token, "Bearer "))
+	resp, err := s.remoteConns.get(remote).client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("could not reach %q: %w", remote.Name, err)
+	}
+	if resp.StatusCode == http.StatusOK {
+		return resp, nil
+	}
+	defer resp.Body.Close()
+	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("%q turned down your sign-in there; sign in to it again", remote.Name)
+	}
+	return nil, fmt.Errorf("%q answered %d: %s", remote.Name, resp.StatusCode, strings.TrimSpace(string(msg)))
+}
+
+// relayUpdateEvents reads another server's update event stream and emits
+// each event into this one.
+func relayUpdateEvents(r io.Reader, emit func(UpdateEvent) error) error {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	var name, data string
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			name = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			data += strings.TrimPrefix(line, "data: ")
+		case line == "" && name != "":
+			var e UpdateEvent
+			if err := json.Unmarshal([]byte(data), &e); err == nil {
+				e.Event = name
+				if err := emit(e); err != nil {
+					return err
+				}
+			}
+			name, data = "", ""
+		}
+	}
+	return sc.Err()
 }
 
 // ── Pending archive store ───────────────────────────────────────────

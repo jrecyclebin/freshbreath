@@ -50,6 +50,7 @@ provider redirect → provider calls `callback` → "legs" are completed in sequ
 | `/service/apikey-auth` | GET/POST | API-key gate form & POST `{state, api_key}` |
 | `/service/logout` | GET/POST | Clears browser login state |
 | `/service/passphrase` | GET/POST | Invite/reset link page: token in link is credential; POST sets passphrase |
+| `/service/direct` | POST | **Tunnel only.** Headless sign-in: `{email, passphrase}` → the built-in SSH record's token pair `{access_token, refresh_token, expires_in, auth_id}`; refresh at `/oauth/token/{auth_id}`. Session label `direct` |
 
 ## 3. Service proxy & direct calls
 
@@ -208,6 +209,10 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/onboarding/skip` | POST | superuser | Skip onboarding |
 | `/api/tls` | POST | superuser | Local HTTPS setup |
 | `/api/tls/ca.pem` | GET | superuser | Local CA cert |
+| `/api/tunnel` | GET/PUT | superuser | Tailcat tunnel status / `PUT {enabled, reset}` |
+| `/api/remotes` | GET/POST | admin+ | List remotes / `POST {name, address}` adds one (tailcat address, sealed; never returned, a `fingerprint` stands in). Names are unique ignoring case: a clash is 409 |
+| `/api/remotes/{id}` | PUT/DELETE | admin+ | `PUT {name}` renames (an `address` is refused: a new address is a new remote; another remote's name is 409) / delete |
+| `/api/remotes/{id}/{rest}` | any | admin+ | Proxied to `/{rest}` on the remote, through its tunnel. Send the remote's access token as `X-Tunnel-Token`; it leaves as the remote's `Authorization`. `Cookie`, `Origin`, `X-App-Nonce` and this server's `Authorization` stay here. No path filter: the remote's own gates decide. Pair with `{rest}` = `service/direct`, refresh with `oauth/token/{auth_id}`. Streams (SSE) flow through. Every answer from the remote carries `X-Frbr-Remote: 1`, so a client can tell the remote's 401 from this server's. Writes are audited here; reads and refreshes aren't |
 
 ### Global databases (alias mount)
 
@@ -256,6 +261,9 @@ once the handler stashes the verified user in context.
 | `/api/updates/{id}/archive` | GET | admin+ | Download update archive |
 | `/api/updates/check` | GET | **anonymous** (rate-limited) | `coreCheckAllUpdateFeeds` — apps pull their own updates |
 | `/api/updates/apply` | POST | **anonymous** (rate-limited) | `{ids?}`; SSE progress while applying |
+| `/api/updates/import` | POST | admin+ | A transfer from another server: the body is a plain tar.gz with a manifest; SSE progress. Matches like a feed (apps by nonce, services by URL) and creates what's missing: gates by auth record name, owner and members by email, no match left empty. Task services need a Superuser |
+| `/api/updates/export` | POST | admin+ | `{apps, services}` → the plain tar.gz an import takes (with what it needs to create each). The far end of a pull. Task services need a Superuser |
+| `/api/transfer` | POST | admin+ | `{remote, direction, apps, services}` with the remote's token in `X-Tunnel-Token`. `push` (default) packs ours and sends them to the remote's `/api/updates/import`, relaying its progress; `pull` fetches the remote's `/api/updates/export` (apps and services as the remote names them) and imports it here as the caller. SSE progress |
 
 `/api/updates/check` and `/api/updates/apply` are deliberately mounted bare —
 the point is that a hosted app can check/apply without holding a role token.

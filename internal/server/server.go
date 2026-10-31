@@ -62,6 +62,7 @@ type Server struct {
 	hostedHosts       map[string]hostedApp // host name → app served at its own remote URL
 	handoffs          handoffTickets       // finished page-gate logins on their way to an app's host
 	tunnel            tunnel               // the tailcat tunnel, when activated
+	remoteConns       remoteConns          // open tailcat clients to remotes
 	hostedMu          sync.RWMutex
 	actTickets        actTickets                         // /api/act capability tickets (in-memory only)
 	pendingElicits    pendingElicits                     // virtual-tool elicitation suspend/resume state (in-memory only)

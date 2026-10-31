@@ -37,6 +37,7 @@ const Icon = ({ name, size = 16 }) => {
     key:     <><circle cx="8" cy="15" r="4"/><path d="M10.9 12.1L20 3"/><path d="M17 6l2.5 2.5"/><path d="M14.5 8.5L17 11"/></>,
     mail:    <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></>,
     cog:     <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></>,
+    transfer:<><path d="M4 8h14l-4-4"/><path d="M20 16H6l4 4"/></>,
     plug:    <><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></>,
     signout: <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></>,
     menu:    <><path d="M3 6h18M3 12h18M3 18h18"/></>,
@@ -726,6 +727,7 @@ function TopBar({ user, onNav, onLogout }) {
             <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
               {dark ? 'Light mode' : 'Dark mode'}
             </MenuItem>
+            {isAdmin && <MenuItem icon="plug" onClick={() => onNav('remotes')}>Remotes</MenuItem>}
             {isSuperuser && <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>}
             {user && user.id && <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>}
             <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
@@ -3307,6 +3309,268 @@ function TunnelSettings({ session }) {
   );
 }
 
+// ── Remotes ────────────────────────────────────────────────────────────
+
+const REMOTE_TRUST = 'A remote becomes part of this server. What it sends back is trusted like this server\'s own content, so it can act with the access of anyone using this panel, up to Superuser. Only add servers you trust as much as this one.';
+
+// Other Fresh Breaths this one drives through their tunnel addresses. The
+// list is this server's; each sign-in on a remote is this browser's own,
+// kept by frbr.js, so the status column reads the store, not the server.
+function RemotesView({ session, apps, services, onRefresh }) {
+  const [remotes, setRemotes] = useState(null);
+  const [transferTo, setTransferTo] = useState(null); // the remote the Transfer modal is for
+  const [name, setName] = useState('');
+  const [address, setAddress] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(null); // id of the remote showing details
+  const [, setStoreTick] = useState(0);   // a sign-in changed the store: re-read it
+  const storeChanged = () => setStoreTick(t => t + 1);
+  const toast = useToast();
+
+  const load = () => frbr(session, 'GET', '/api/remotes')
+    .then(d => setRemotes(d.remotes || []))
+    .catch(e => toast(e.message, true));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const add = async () => {
+    if (!confirm(REMOTE_TRUST + '\n\nAdd "' + name.trim() + '"?')) return;
+    setBusy(true);
+    try {
+      await frbr(session, 'POST', '/api/remotes', { name, address });
+      setName(''); setAddress('');
+      toast('Remote added');
+      load();
+    } catch (e) { toast(e.message, true); }
+    finally { setBusy(false); }
+  };
+
+  const rename = async (r) => {
+    const next = prompt(`Rename "${r.name}" to:`, r.name);
+    if (!next || next.trim() === r.name) return;
+    try { await frbr(session, 'PUT', '/api/remotes/' + r.id, { name: next }); load(); }
+    catch (e) { toast(e.message, true); }
+  };
+
+  const remove = async (r) => {
+    if (!confirm(`Delete remote "${r.name}"? Your sign-in on it is forgotten too.`)) return;
+    try {
+      await frbr(session, 'DELETE', '/api/remotes/' + r.id);
+      FrBr.remote(r).forget();
+      toast('Remote deleted');
+      load();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const signIn = async (r) => {
+    try {
+      if (await FrBr.login('remote://' + encodeURIComponent(r.name))) setOpen(r.id);
+    } catch (e) { toast(e.message, true); }
+    storeChanged();
+  };
+
+  const forget = (r) => {
+    FrBr.remote(r).forget();
+    if (open === r.id) setOpen(null);
+    storeChanged();
+  };
+
+  // A transfer goes as the remote's user, so sign in there first if need be.
+  const transfer = async (r) => {
+    if (!FrBr.remote(r).signedIn) await signIn(r);
+    if (FrBr.remote(r).signedIn) setTransferTo(r);
+  };
+
+  return (
+    <>
+      <PageHead title="Remotes" sub="Other Fresh Breath servers this one reaches through their tunnels."/>
+      {remotes === null ? <span className="muted">Loading…</span> : remotes.length === 0 ? (
+        <div className="feed-card feed-empty muted">No remotes yet.</div>
+      ) : (
+        <div className="feed-card" style={{marginBottom:24}}>
+          {remotes.map(r => {
+            const rs = FrBr.remote(r);
+            return (
+              <div key={r.id} className="remote-item">
+                <div className="feed-row">
+                  <div className="feed-id">
+                    <div className="feed-name">{r.name}</div>
+                    <div className="feed-url mono" title="Fingerprint: the remote's relay region and key, which a name can't fake">{r.fingerprint}</div>
+                  </div>
+                  <div className="feed-status">
+                    {rs.signedIn
+                      ? <>Signed in as {rs.email || rs.user_name || 'someone'}</>
+                      : <span className="muted">not signed in</span>}
+                  </div>
+                  <div className="feed-actions">
+                    {rs.signedIn ? <>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setOpen(open === r.id ? null : r.id)}>{open === r.id ? 'Hide' : 'Look'}</button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => forget(r)}>Forget</button>
+                    </> : (
+                      <button className="btn btn-ghost btn-sm" onClick={() => signIn(r)}><Icon name="key" size={13}/> Sign in</button>
+                    )}
+                    <button className="btn btn-ghost btn-sm" onClick={() => transfer(r)} title="Transfer apps and services to this remote"><Icon name="transfer" size={13}/></button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => rename(r)} title="Rename"><Icon name="edit" size={13}/></button>
+                    <button className="btn btn-ghost btn-sm" style={{color:'var(--tone-red)'}} onClick={() => remove(r)} title="Delete remote"><Icon name="trash" size={13}/></button>
+                  </div>
+                </div>
+                {open === r.id && rs.signedIn && <RemoteGlance rs={rs} onSignedOut={storeChanged}/>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {transferTo && (
+        <TransferModal session={session} remote={transferTo} apps={apps} services={services}
+          onClose={() => { setTransferTo(null); storeChanged(); onRefresh?.(); }}/>
+      )}
+
+      <div style={{borderTop:remotes && remotes.length ? '1px solid var(--line-soft)' : undefined,paddingTop:20}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <div className="field" style={{width:180}}>
+            <label>Name</label>
+            <input className="input" name="remote_name" {...NO_FILL} value={name} onChange={e => setName(e.target.value)} placeholder="prod"/>
+          </div>
+          <div className="field" style={{flex:1,minWidth:260}}>
+            <label>Tunnel address</label>
+            <input className="input mono" name="remote_address" {...NO_FILL} style={{fontSize:12}} value={address} onChange={e => setAddress(e.target.value)}
+              placeholder="from the remote's Settings → Tunnel"/>
+          </div>
+          <div className="field" style={{alignSelf:'flex-end'}}>
+            <button className="btn btn-primary" disabled={busy || !name.trim() || !address.trim()} onClick={add}>
+              <Icon name="plus" size={14}/> Add remote
+            </button>
+          </div>
+        </div>
+        <div className="remote-warning">⚠ {REMOTE_TRUST}</div>
+        <span className="help">The address can't be changed later: it's the remote's identity. A new address means a new remote.</span>
+      </div>
+    </>
+  );
+}
+
+// Move apps and services between here and a remote: the Build archive
+// picker, listing ours to send or the remote's to fetch, each row tagged
+// by what the receiving side will do with it. The receiver matches the way
+// an update feed does — apps by nonce, services by URL — and creates what
+// it doesn't have; the tags are that rule, read off its lists beforehand.
+function TransferModal({ session, remote, apps, services, onClose }) {
+  const rs = FrBr.remote(remote);
+  const [mode, setMode] = useState('send'); // or 'fetch'
+  const [sel, setSel] = useState({ apps: [], services: [] });
+  const [theirs, setTheirs] = useState(null); // the remote's {apps, services}
+  const [log, setLog] = useState(null);
+  const toast = useToast();
+
+  useEffect(() => {
+    Promise.all([frbr(rs, 'GET', '/api/apps'), frbr(rs, 'GET', '/api/services')])
+      .then(([a, sv]) => setTheirs({ apps: a.apps || [], services: sv.services || [] }))
+      .catch(e => toast(e.message, true));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const switchTo = (m) => { setMode(m); setSel({ apps: [], services: [] }); setLog(null); };
+
+  // What the picker lists, and what the receiving side already has.
+  const fetching = mode === 'fetch';
+  const listed = fetching ? theirs : { apps, services };
+  const receiver = fetching ? { apps, services } : theirs;
+  const trimSlash = (u = '') => u.replace(/\/+$/, '');
+  const tag = (kind, item) => {
+    if (!receiver) return null;
+    const has = kind === 'app'
+      ? receiver.apps.some(a => a.nonce === item.nonce)
+      : receiver.services.some(sv => trimSlash(sv.url) === trimSlash(item.url));
+    return <Badge tone={has ? 'blue' : 'green'}>{has ? 'update' : 'new'}</Badge>;
+  };
+
+  const run = async () => {
+    setLog({ events: [] });
+    try {
+      await rs.check(); // the token rides along as-is, so make sure it's fresh
+      const headers = new Headers();
+      rs.addAuth(headers);
+      await FrBr.sseStream('/api/transfer', {
+        session, headers,
+        body: { remote: remote.id, direction: fetching ? 'pull' : 'push', apps: sel.apps, services: sel.services },
+        onEvent: (ev, data) => setLog(prev => prev && { events: [...prev.events, { event: ev, data }] }),
+      });
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const tab = (m, label) => (
+    <button className={'btn btn-sm ' + (mode === m ? 'btn-primary' : 'btn-ghost')} onClick={() => switchTo(m)}>{label}</button>
+  );
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:520}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+          <h3 style={{flex:1,margin:0}}>{fetching ? `Fetch from ${remote.name}` : `Transfer to ${remote.name}`}</h3>
+          {tab('send', 'Send')}
+          {tab('fetch', 'Fetch')}
+        </div>
+        <p className="muted" style={{fontSize:13,marginBottom:16}}>
+          {fetching ? <>
+            Copy the selected apps (their staging slot — dev if none yet) and service definitions from “{remote.name}”
+            to this server, as you. Ones this server has are updated in their staging slots; new ones are created here,
+            with gates matched by auth record name and owners and members by email.
+          </> : <>
+            Send the selected apps (current staging slot — dev if none yet) and service definitions to “{remote.name}”,
+            as {rs.email || 'your account there'}. Ones it already has are updated in their staging slots; new ones are
+            created there, with gates matched by auth record name and owners and members by email.
+          </>}
+        </p>
+        {fetching && (
+          <div className="remote-warning" style={{marginTop:0,marginBottom:16}}>
+            ⚠ What you fetch becomes this server's own: its pages are served here, and its task scripts run here.
+            Fetch only what you'd install yourself.
+          </div>
+        )}
+        {listed
+          ? <ArchivePicker apps={listed.apps} services={listed.services} sel={sel} setSel={setSel} tag={tag}/>
+          : <span className="muted">Loading the remote's apps and services…</span>}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+          <button className="btn btn-primary" disabled={sel.apps.length + sel.services.length === 0} onClick={run}>
+            <Icon name="transfer" size={14}/> {fetching ? 'Fetch' : 'Transfer'}
+          </button>
+        </div>
+        {log && <UpdateProgress events={log.events}/>}
+      </div>
+    </div>
+  );
+}
+
+// A read-only look at a remote, as the user signed in there: who they are
+// and its apps. Mostly proof the pipe works end to end.
+function RemoteGlance({ rs, onSignedOut }) {
+  const [me, setMe] = useState(null);
+  const [apps, setApps] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    Promise.all([frbr(rs, 'GET', '/api/me'), frbr(rs, 'GET', '/api/apps')])
+      .then(([m, a]) => { setMe(m.user); setApps(a.apps || []); })
+      .catch(e => {
+        setError(e.message);
+        if (e instanceof FrBr.RemoteExpired) onSignedOut();
+      });
+  }, [rs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div className="remote-glance">
+      {error ? <span style={{color:'var(--tone-red)'}}>⚠ {error}</span>
+        : !me ? <span className="muted">Loading…</span>
+        : <>
+            <div style={{marginBottom:6}}>{me.name} <Badge tone={roleTone(me.role)}>{me.role}</Badge></div>
+            <div className="muted">
+              {apps.length === 0 ? 'No apps.' : `Apps: ${apps.map(a => a.name).join(', ')}`}
+            </div>
+          </>}
+    </div>
+  );
+}
+
 // ── Profile ────────────────────────────────────────────────────────────
 
 // The signed-in user's own page: their name and email, and their SSH key.
@@ -3469,6 +3733,50 @@ function PassphraseModal({ title, blurb, onClose, onSubmit }) {
 // hosted apps) and is exposed on window.FrBr.
 
 // UpdateProgress renders the live apply/build event stream as a log.
+// The apps and services checklists shared by Build archive and Transfer.
+// Only task and virtual services travel: they're the ones with a
+// definition file. tag(kind, item), when given, labels each row (Transfer
+// says whether the remote has it already).
+function ArchivePicker({ apps, services, sel, setSel, tag }) {
+  const pubServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
+  const toggle = (kind, val) => setSel(s => ({
+    ...s,
+    [kind]: s[kind].includes(val) ? s[kind].filter(v => v !== val) : [...s[kind], val],
+  }));
+  const row = { display:'flex', gap:8, alignItems:'center', padding:'3px 0', fontSize:13, cursor:'pointer' };
+  const box = { overflowY:'auto', border:'1px solid var(--line)', borderRadius:8, padding:'6px 10px' };
+  return (
+    <>
+      <div className="field">
+        <label>Apps ({sel.apps.length} selected)</label>
+        <div style={{...box, maxHeight:140}}>
+          {apps.length === 0 && <span className="muted" style={{fontSize:13}}>no apps</span>}
+          {apps.map(a => (
+            <label key={a.nonce} style={row}>
+              <input type="checkbox" name="apps" value={a.nonce} checked={sel.apps.includes(a.nonce)} onChange={() => toggle('apps', a.nonce)} />
+              {a.name} <span className="muted" style={{fontSize:11}}>{a.nonce}</span>
+              {tag?.('app', a)}
+            </label>
+          ))}
+        </div>
+      </div>
+      <div className="field">
+        <label>Services ({sel.services.length} selected)</label>
+        <div style={{...box, maxHeight:120}}>
+          {pubServices.length === 0 && <span className="muted" style={{fontSize:13}}>no tasks/virtual services</span>}
+          {pubServices.map(s => (
+            <label key={s.id} style={row}>
+              <input type="checkbox" name="services" value={s.name} checked={sel.services.includes(s.name)} onChange={() => toggle('services', s.name)} />
+              {s.name} <span className="muted" style={{fontSize:11}}>{s.descriptor?.type}</span>
+              {tag?.('service', s)}
+            </label>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 function UpdateProgress({ events, onClose }) {
   const ref = useRef(null);
   useEffect(() => { ref.current?.scrollTo(0, ref.current.scrollHeight); }, [events]);
@@ -3476,13 +3784,17 @@ function UpdateProgress({ events, onClose }) {
     const d = e.data || {};
     let text;
     switch (e.event) {
-      case 'fetch': case 'decrypt': case 'validate': case 'manifest': case 'encrypt':
+      case 'fetch':
+        text = d.name ? (d.status === 'start' ? `fetching from ${d.name}…` : `fetched from ${d.name}`) : 'fetch…'; break;
+      case 'decrypt': case 'validate': case 'manifest': case 'encrypt': case 'extract':
         text = `${e.event}…${d.ops ? ` (${d.ops} ops)` : ''}`; break;
       case 'collect': text = `collecting ${d.apps ?? 0} app(s), ${d.services ?? 0} service(s)`; break;
       case 'app': text = `packaged app ${d.nonce} (from ${d.source_slot})`; break;
       case 'service': text = `packaged service ${d.name}`; break;
+      case 'send': text = `sending to ${d.name}…`; break;
       case 'op':
-        text = d.status === 'start' ? `op ${d.index}: ${d.action} → ${d.target}` : `op ${d.index}: done`;
+        text = d.status === 'start' ? `op ${d.index}: ${d.action} → ${d.target}`
+          : d.status === 'created' ? `op ${d.index}: created ${d.name}` : `op ${d.index}: done`;
         break;
       case 'skip': text = `skipped — already applied${d.version ? ` (${d.version})` : ''}`; break;
       case 'done': text = d.download_url ? `built ${d.version} — downloading archive…` : `applied ${d.version} (${d.applied ?? '?'} ops)`; break;
@@ -3617,13 +3929,6 @@ function RemoteUpdates({ session, apps, services }) {
     })();
   }, [buildLog?.done]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const toggleSel = (kind, val) => setBuildSel(s => ({
-    ...s,
-    [kind]: s[kind].includes(val) ? s[kind].filter(v => v !== val) : [...s[kind], val],
-  }));
-
-  const pubServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
-
   return (
     <div>
       {/* feed list — one bordered card, a row per feed (frbr-concept layout):
@@ -3733,30 +4038,7 @@ function RemoteUpdates({ session, apps, services }) {
               <label>Version</label>
               <input className="input mono" name="build_version" {...NO_FILL} style={{fontSize:12}} value={buildVersion} onChange={e => setBuildVersion(e.target.value)} placeholder="blank = timestamp" />
             </div>
-            <div className="field">
-              <label>Apps ({buildSel.apps.length} selected)</label>
-              <div style={{maxHeight:140,overflowY:'auto',border:'1px solid var(--line)',borderRadius:8,padding:'6px 10px'}}>
-                {apps.length === 0 && <span className="muted" style={{fontSize:13}}>no apps</span>}
-                {apps.map(a => (
-                  <label key={a.nonce} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
-                    <input type="checkbox" name="apps" value={a.nonce} checked={buildSel.apps.includes(a.nonce)} onChange={() => toggleSel('apps', a.nonce)} />
-                    {a.name} <span className="muted" style={{fontSize:11}}>{a.nonce}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="field">
-              <label>Services ({buildSel.services.length} selected)</label>
-              <div style={{maxHeight:120,overflowY:'auto',border:'1px solid var(--line)',borderRadius:8,padding:'6px 10px'}}>
-                {pubServices.length === 0 && <span className="muted" style={{fontSize:13}}>no tasks/virtual services</span>}
-                {pubServices.map(s => (
-                  <label key={s.id} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
-                    <input type="checkbox" name="services" value={s.name} checked={buildSel.services.includes(s.name)} onChange={() => toggleSel('services', s.name)} />
-                    {s.name} <span className="muted" style={{fontSize:11}}>{s.descriptor?.type}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+            <ArchivePicker apps={apps} services={services} sel={buildSel} setSel={setBuildSel}/>
             <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
               <button className="btn btn-ghost" onClick={() => setBuildFor(null)}>Cancel</button>
               <button className="btn btn-primary" disabled={buildSel.apps.length + buildSel.services.length === 0} onClick={runBuild}>
@@ -3812,6 +4094,7 @@ const fmtShortTime = (iso) => {
 //   /control/apps/:nonce/edit-tools           -> the app's own service's tools editor
 //   /control/auth/new · /control/auth/:id     -> auth record page
 //   /control/users|roles|audit|settings       -> the user area and settings
+//   /control/remotes                          -> other servers, through their tunnels
 //   /control/profile                          -> the signed-in user's own page
 const parseRoute = () => {
   const parts = window.location.pathname.replace(/^\/control\/?/, '').split('/').filter(Boolean);
@@ -3831,7 +4114,7 @@ const parseRoute = () => {
     if (b === 'new') return { page: 'authrecord', params: { isNew: true } };
     if (b) return { page: 'authrecord', params: { authId: b } };
   }
-  if (!b && ['users', 'roles', 'audit', 'settings', 'profile'].includes(a)) return { page: a, params: {} };
+  if (!b && ['users', 'roles', 'audit', 'settings', 'profile', 'remotes'].includes(a)) return { page: a, params: {} };
   return { page: 'home', params: {} };
 };
 
@@ -3919,7 +4202,7 @@ function AppShell() {
 
   // Pages a role can't use fall back to home rather than a wall of 403s.
   const page =
-    (route.page === 'users' && !isAdmin) || (route.page === 'settings' && !isSuperuser) ? 'home' : route.page;
+    (['users', 'remotes'].includes(route.page) && !isAdmin) || (route.page === 'settings' && !isSuperuser) ? 'home' : route.page;
 
   return (
     <div className="app-shell">
@@ -3947,6 +4230,7 @@ function AppShell() {
         {page==='roles'     && <RolesView roles={roles}/>}
         {page==='audit'     && <AuditView audit={audit} isAdmin={isAdmin}/>}
         {page==='profile'   && <ProfileView session={session}/>}
+        {page==='remotes'   && <RemotesView session={session} apps={apps} services={services} onRefresh={load}/>}
         {page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} onRefresh={load}/>}
       </main>
     </div>

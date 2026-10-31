@@ -270,6 +270,52 @@ main address it's an SSH sign-in like any other: it opens the panel only
 when the panel uses SSH sign-in. There are no cookies or browser pages
 through the tunnel.
 
+Through the tunnel the server answers as itself whatever `Host` a client
+sends, so apps served at their own host name aren't reachable there. Apps
+at a slug (`/blog/`) are.
+
+## Remotes
+
+Once a server has a tunnel, another Fresh Breath can drive it. Paste its
+tunnel address into **Remotes** (in your avatar menu, for Admins) and give it
+a name. Then sign in to it with your account *on that server*: its email
+and passphrase pass through this server and neither one keeps them. The
+remote's tokens live in your browser only, so each person signs in for
+themselves, and a sign-in lasts as long as the remote's refresh family (14
+days).
+
+> ⚠️ A remote becomes part of this server. What it sends back is trusted
+> like this server's own content, so it can act with the access of anyone
+> using the panel, up to Superuser. Only add servers you trust as much as
+> this one.
+
+From code it's one more kind of `login()`:
+
+```js
+const prod = await login("remote://prod");   // prompts the first time
+const r = await api(prod, "/api/apps");       // the remote's own API
+```
+
+The ⇄ button on a remote **transfers** apps and services to it: pick them
+as you would for an update archive, and each is marked *new* or *update*.
+The remote matches them the way an update feed does (apps by their nonce,
+services by their URL), updates the ones it has in their staging slots, and
+creates the rest. It can't know your auth records or users by their ids, so
+a new app's gate is the record with the same name there, and its owner and
+members are the users with the same emails. Anything with no match is left
+empty, so the gate falls back to the remote's panel gate.
+
+The same modal's **Fetch** switch runs it the other way: it lists the
+remote's apps and services, and copies the ones you pick here, by the same
+rules. What you fetch becomes this server's own, so its task scripts need a
+Superuser here to land.
+
+Names are unique (ignoring case) and can be changed. The address can't: it's
+the remote's identity, so a new address means a new remote. The fingerprint
+shown beside each one is a short form of that identity, and the sign-in
+prompt shows it too, so you can tell the server you're typing your
+passphrase into is the one you meant.
+
 ## Remote updates
 
 I've started using Fresh Breath for projects I do for others. Give them a
@@ -280,6 +326,10 @@ Remote updates are a way for one Fresh Breath instance to
 *pull* updates for its apps and services from an encrypted archive, hosted
 online. You add the URL in the Settings area and Fresh Breath will notify
 the user when there's an update available.
+
+An update only ever updates: it matches apps by their nonce and services by
+their URL, and an archive naming something the receiver doesn't have is
+turned down whole. (Creating things is what a transfer to a remote is for.)
 
 App updates go to the Staging slot - so you can either let the user test it
 and deploy to Production, or you can set the app's default environment to

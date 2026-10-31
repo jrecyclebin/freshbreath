@@ -125,6 +125,18 @@ type UpdateFeed struct {
 	LastErrorAt        *time.Time `json:"last_error_at"`
 }
 
+// Remote is another Fresh Breath this one can reach through its tailcat
+// tunnel. Address is the secret tailcat address, never sent to clients;
+// Fingerprint is a short, safe-to-show tag for telling remotes apart.
+type Remote struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Address     string    `json:"-"`
+	Fingerprint string    `json:"fingerprint"`
+	CreatedBy   int64     `json:"created_by"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // ServiceDescriptor describes what a service IS. Auth lives elsewhere: the
 // protected_by / acts_as columns reference auth_records
 // (design/decoupled-auth.md).

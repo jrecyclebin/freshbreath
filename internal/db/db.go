@@ -178,6 +178,17 @@ func (s *Store) Migrate() error {
       last_error_at        TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_update_feeds_mode ON update_feeds(mode);
+    CREATE TABLE IF NOT EXISTS remotes (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      address     TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      created_by  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    -- Names are how people pick a remote (login("remote://<name>")), so two
+    -- can't share one, whatever the case.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_remotes_name ON remotes(name COLLATE NOCASE);
   `)
 	if err != nil {
 		return err
@@ -421,6 +432,14 @@ func (s *Store) ensureAutoincrement(table string) error {
 // explicit choice either way (empty would mean inherit-admin, which is the
 // wrong default for a fresh dashboard).
 func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protectedBy *int64) (string, error) {
+	return s.CreateAppWithNonce("", name, env, url, ownerID, protectedBy)
+}
+
+// CreateAppWithNonce is CreateApp keeping a nonce the app already has
+// elsewhere (an import from another server), so later imports and update
+// feeds match it. "" picks a fresh one.
+func (s *Store) CreateAppWithNonce(nonce, name, env string, url string, ownerID *int64, protectedBy *int64) (string, error) {
+	keep := nonce != ""
 	if env == "" {
 		env = "Development"
 	}
@@ -430,7 +449,9 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 	// silently pin every new app to open-to-the-LAN, which the control panel
 	// no longer offers as the default; an explicit Anonymous record is the
 	// opt-in. Kept nullable so the round-trip matches UpdateApp.
-	nonce := utils.GenNonce()
+	if !keep {
+		nonce = utils.GenNonce()
+	}
 	for {
 		_, err := s.db.Exec(
 			"INSERT INTO apps (nonce, name, environment, url, owner_id, protected_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, "+nowSQL+")",
@@ -438,7 +459,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 		if err == nil {
 			return nonce, nil
 		}
-		if isUnique(err) {
+		if isUnique(err) && !keep {
 			nonce = utils.GenNonce()
 			continue
 		}
@@ -1784,5 +1805,84 @@ func (s *Store) SetUpdateFeedError(id, msg string) error {
 		"UPDATE update_feeds SET last_error = ?, last_error_at = ? WHERE id = ?",
 		msg, time.Now().UTC().Format(time.RFC3339), id,
 	)
+	return err
+}
+
+// ── Remotes ──
+//
+// Another Fresh Breath reached through its tailcat address. The address is
+// a secret (it carries the remote's pre-shared key), so it is sealed at
+// rest like any other stored secret, and it never changes once stored: it
+// is the remote's identity.
+
+const remoteCols = `id, name, address, fingerprint, created_by, created_at`
+
+func (s *Store) scanRemote(row interface{ Scan(...any) error }) (*Remote, error) {
+	r := &Remote{}
+	var sealed, createdAt string
+	if err := row.Scan(&r.ID, &r.Name, &sealed, &r.Fingerprint, &r.CreatedBy, &createdAt); err != nil {
+		return nil, err
+	}
+	addr, err := s.openField(sealed)
+	if err != nil {
+		return nil, fmt.Errorf("remote %s address: %w", r.ID, err)
+	}
+	r.Address = addr
+	r.CreatedAt = parseTime(createdAt)
+	return r, nil
+}
+
+// ErrRemoteNameTaken is what CreateRemote and RenameRemote return for a
+// name another remote already has (ignoring case).
+var ErrRemoteNameTaken = errors.New("another remote already has that name")
+
+func (s *Store) CreateRemote(r *Remote) error {
+	_, err := s.db.Exec(
+		`INSERT INTO remotes (id, name, address, fingerprint, created_by) VALUES (?, ?, ?, ?, ?)`,
+		r.ID, r.Name, s.sealField(r.Address), r.Fingerprint, r.CreatedBy,
+	)
+	if isUnique(err) {
+		return ErrRemoteNameTaken
+	}
+	return err
+}
+
+func (s *Store) ListRemotes() ([]*Remote, error) {
+	rows, err := s.db.Query(`SELECT ` + remoteCols + ` FROM remotes ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Remote
+	for rows.Next() {
+		r, err := s.scanRemote(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetRemote(id string) (*Remote, error) {
+	r, err := s.scanRemote(s.db.QueryRow(`SELECT `+remoteCols+` FROM remotes WHERE id = ?`, id))
+	if err == sql.ErrNoRows {
+		return nil, errors.New("remote not found")
+	}
+	return r, err
+}
+
+// RenameRemote changes a remote's name, the only thing about it that can
+// change.
+func (s *Store) RenameRemote(id, name string) error {
+	_, err := s.db.Exec(`UPDATE remotes SET name = ? WHERE id = ?`, name, id)
+	if isUnique(err) {
+		return ErrRemoteNameTaken
+	}
+	return err
+}
+
+func (s *Store) DeleteRemote(id string) error {
+	_, err := s.db.Exec(`DELETE FROM remotes WHERE id = ?`, id)
 	return err
 }
