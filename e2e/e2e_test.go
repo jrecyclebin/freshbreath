@@ -285,11 +285,11 @@ func TestRegatedAppPromptsForNewGate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(browser, 45*time.Second)
 	defer cancel()
 	q := url.Values{"scenario": {"regate"}, "service": {svc.URL}}
-	err := chromedp.Run(ctx,
+	err := chromedp.Do(ctx,
 		chromedp.Navigate(fb.URL+a.Route+"?"+q.Encode()),
-		chromedp.WaitReady("#run", chromedp.ByID),
-		chromedp.Click("#run", chromedp.ByID),
-		chromedp.WaitVisible(`#out[data-ready]`, chromedp.ByQuery),
+		chromedp.WaitReady(chromedp.ID("run")),
+		chromedp.Click(chromedp.ID("run")),
+		chromedp.WaitVisible(chromedp.CSS(`#out[data-ready]`)),
 	)
 	if err != nil {
 		t.Fatalf("first call: %v", err)
@@ -298,14 +298,15 @@ func TestRegatedAppPromptsForNewGate(t *testing.T) {
 	fb.api("PUT", "/api/apps/"+a.Nonce, map[string]any{"name": "e2e-regate", "protected_by": newGate}, nil)
 
 	var out string
-	err = chromedp.Run(ctx,
-		chromedp.Click("#again", chromedp.ByID),
-		chromedp.WaitVisible(`#out[data-done]`, chromedp.ByQuery),
-		chromedp.Text("#out", &out, chromedp.ByID),
+	err = chromedp.Do(ctx,
+		chromedp.Click(chromedp.ID("again")),
+		chromedp.WaitVisible(chromedp.CSS(`#out[data-done]`)),
 	)
+	if err == nil {
+		out, err = chromedp.Run(ctx, chromedp.Text(chromedp.ID("out")))
+	}
 	if err != nil {
-		var html string
-		chromedp.Run(browser, chromedp.OuterHTML("body", &html, chromedp.ByQuery))
+		html, _ := chromedp.Run(browser, chromedp.OuterHTML(chromedp.CSS("body")))
 		t.Fatalf("calls after the gate moved: %v\n%s", err, html)
 	}
 	var res struct {
