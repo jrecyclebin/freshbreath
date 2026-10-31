@@ -19,7 +19,7 @@ import (
 // The DNS names, besides its own, that this server answers to. Apps are
 // published under them one level down (https://<host>/<slug>), and apps
 // sharing a host share an origin, so they share creds on purpose. Admins
-// keep the list, on the Remotes page. See design/hosts-todo.md.
+// keep the list, on the Remotes & Hosts page. See design/hosts-todo.md.
 
 // hostInput is everything about a host that can be set.
 type hostInput struct {

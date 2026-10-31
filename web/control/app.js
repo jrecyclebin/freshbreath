@@ -727,7 +727,7 @@ function TopBar({ user, onNav, onLogout }) {
             <MenuItem icon={dark ? 'sun' : 'moon'} onClick={toggleTheme}>
               {dark ? 'Light mode' : 'Dark mode'}
             </MenuItem>
-            {isAdmin && <MenuItem icon="plug" onClick={() => onNav('remotes')}>Remotes</MenuItem>}
+            {isAdmin && <MenuItem icon="plug" onClick={() => onNav('remotes')}>Remotes &amp; Hosts</MenuItem>}
             {isSuperuser && <MenuItem icon="cog" onClick={() => onNav('settings')}>Settings</MenuItem>}
             {user && user.id && <MenuItem icon="signout" tone="red" onClick={onLogout}>Sign out</MenuItem>}
             <div className="menu-foot" title={window.__HOMESLICE_CONFIG?.commit || 'none'}>
@@ -1602,8 +1602,8 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
       <div className="field-row">
         <div className="field"><label>Name</label><input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
         <div className="field"><label>URL</label>
-          <input className="input" name="app_url" {...NO_FILL} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="blog, or https://blog.example.com"/>
-          <span className="help">A path on this server (<code>blog</code> serves at <code>/blog/</code>), or a full URL. With a full URL, files you upload are served at that host — point its DNS here.</span>
+          <input className="input" name="app_url" {...NO_FILL} value={form.url} onChange={e=>setForm(f=>({...f,url:e.target.value}))} placeholder="blog, or https://blog.example.com/notes"/>
+          <span className="help">A path on this server (<code>blog</code> serves at <code>/blog/</code>), or one level down on a listed host (<code>https://blog.example.com/notes</code>) to be served there. Any other full URL says where the app runs elsewhere.</span>
         </div>
       </div>
       {app && app.nonce && (
@@ -3426,7 +3426,7 @@ const REMOTE_TRUST = 'A remote becomes part of this server. What it sends back i
 // Other Fresh Breaths this one drives through their tunnel addresses. The
 // list is this server's; each sign-in on a remote is this browser's own,
 // kept by frbr.js, so the status column reads the store, not the server.
-function RemotesView({ session, apps, services, onRefresh }) {
+function RemotesView({ session, apps, services, users, auth, adminAuthID, onRefresh }) {
   const [remotes, setRemotes] = useState(null);
   const [transferTo, setTransferTo] = useState(null); // the remote the Transfer modal is for
   const [name, setName] = useState('');
@@ -3492,7 +3492,8 @@ function RemotesView({ session, apps, services, onRefresh }) {
 
   return (
     <>
-      <PageHead title="Remotes" sub="Other Fresh Breath servers this one reaches through their tunnels."/>
+      <PageHead title="Remotes & Hosts" sub="Other Fresh Breath servers this one reaches through their tunnels, and the host names its apps live under."/>
+      <h2 className="section-title">Remotes</h2>
       {remotes === null ? <span className="muted">Loading…</span> : remotes.length === 0 ? (
         <div className="feed-card feed-empty muted">No remotes yet.</div>
       ) : (
@@ -3555,6 +3556,154 @@ function RemotesView({ session, apps, services, onRefresh }) {
         <div className="remote-warning">⚠ {REMOTE_TRUST}</div>
         <span className="help">The address can't be changed later: it's the remote's identity. A new address means a new remote.</span>
       </div>
+
+      <HostsSection session={session} apps={apps} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={onRefresh}/>
+    </>
+  );
+}
+
+// The host names this server answers to besides its own. Apps live one
+// level down on them (https://<host>/<slug>), and those sharing a host
+// share an origin, sign-ins and all. Each host has an owner (who owns the
+// apps its Members create), a gate its apps inherit, a default app its
+// root redirects to, and Members, who can create apps there.
+const HOST_BLANK = { name: '', owner_id: null, protected_by: null, default_app: '', members: [] };
+
+function HostsSection({ session, apps, users, auth, adminAuthID, onRefresh }) {
+  const [hosts, setHosts] = useState(null);
+  const [editing, setEditing] = useState(null); // a host's id, 'new', or null
+  const [form, setForm] = useState(HOST_BLANK);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+
+  const load = () => frbr(session, 'GET', '/api/hosts')
+    .then(d => setHosts(d.hosts || []))
+    .catch(e => toast(e.message, true));
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const owners = users.filter(u => ['Admin', 'Superuser'].includes(u.role));
+  const userName = (id) => users.find(u => u.id === id)?.name || `user ${id}`;
+  const onHost = (name) => apps.filter(a => appHostOf(a.url, [{ name }]));
+
+  const edit = (h) => {
+    setEditing(h ? h.id : 'new');
+    setForm(h ? { name: h.name, owner_id: h.owner_id, protected_by: h.protected_by, default_app: h.default_app, members: h.members || [] }
+              : { ...HOST_BLANK, owner_id: owners[0]?.id ?? null });
+  };
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      if (editing === 'new') await frbr(session, 'POST', '/api/hosts', form);
+      else await frbr(session, 'PUT', '/api/hosts/' + editing, form);
+      toast(editing === 'new' ? 'Host added' : 'Host saved');
+      setEditing(null);
+      load();
+      onRefresh?.();
+    } catch (e) { toast(e.message, true); }
+    finally { setBusy(false); }
+  };
+
+  const remove = async (h) => {
+    if (!confirm(`Delete host "${h.name}"? This server stops answering to it.`)) return;
+    try {
+      await frbr(session, 'DELETE', '/api/hosts/' + h.id);
+      toast('Host deleted');
+      load();
+      onRefresh?.();
+    } catch (e) { toast(e.message, true); }
+  };
+
+  const editor = (
+    <div className="host-editor">
+      <div className="field-row">
+        <div className="field"><label>Host name</label>
+          <input className="input mono" name="host_name" {...NO_FILL} value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="blog.example.com"/>
+          <span className="help">A DNS name pointed at this server. No scheme, port or path.</span>
+        </div>
+        <div className="field"><label>Owner</label>
+          <select className="input" name="host_owner" value={form.owner_id ?? ''} onChange={e => setForm(f => ({ ...f, owner_id: e.target.value ? Number(e.target.value) : null }))}>
+            <option value="">Pick an owner</option>
+            {owners.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+          <span className="help">Owns the apps this host's Members create.</span>
+        </div>
+      </div>
+      <div className="field-row">
+        <AuthSlot
+          label="Gate"
+          placeholder="— admin auth —"
+          help="Apps on this host that leave their own gate blank answer to this one."
+          records={auth}
+          value={form.protected_by}
+          onChange={v => setForm(f => ({ ...f, protected_by: v }))}
+        />
+        <div className="field"><label>Default app</label>
+          <select className="input" name="host_default_app" value={form.default_app} onChange={e => setForm(f => ({ ...f, default_app: e.target.value }))}>
+            <option value="">None (the root is a 404)</option>
+            {onHost(form.name.trim().toLowerCase()).map(a => <option key={a.nonce} value={a.nonce}>{a.name}</option>)}
+          </select>
+          <span className="help">Where the host's root redirects. One of the apps on it.</span>
+        </div>
+      </div>
+      <div className="field">
+        <label>Members</label>
+        <span className="help">Member accounts who can create apps on this host. They keep the access they have elsewhere.</span>
+        <MultiSelect
+          options={users.filter(u => u.role === 'Member').map(u => ({ value: u.id, label: u.name }))}
+          value={form.members}
+          onChange={v => setForm(f => ({ ...f, members: v }))}
+          placeholder="No members"
+        />
+      </div>
+      <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+        <button className="btn btn-ghost" onClick={() => setEditing(null)}>Cancel</button>
+        <button className="btn btn-primary" disabled={busy || !form.name.trim() || form.owner_id == null} onClick={save}>
+          {editing === 'new' ? 'Add host' : 'Save host'}
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <h2 className="section-title" style={{marginTop:32}}>Hosts</h2>
+      <p className="muted" style={{fontSize:13,marginBottom:12}}>
+        The names besides its own this server answers to. Apps live one level down
+        (<code>https://blog.example.com/notes</code>), and apps sharing a host share its sign-ins.
+      </p>
+      {hosts === null ? <span className="muted">Loading…</span> : hosts.length === 0 && editing !== 'new' ? (
+        <div className="feed-card feed-empty muted">No hosts yet.</div>
+      ) : (
+        <div className="feed-card" style={{marginBottom:16}}>
+          {hosts.map(h => (
+            <div key={h.id} className="remote-item">
+              <div className="feed-row">
+                <div className="feed-id">
+                  <div className="feed-name mono">{h.name}</div>
+                  <div className="feed-url">
+                    {h.owner_id ? userName(h.owner_id) : <span style={{color:'var(--tone-red)'}}>no owner</span>}
+                    {' · '}{onHost(h.name).length} app{onHost(h.name).length === 1 ? '' : 's'}
+                    {h.members?.length > 0 && <> · {h.members.map(userName).join(', ')}</>}
+                  </div>
+                </div>
+                <div className="feed-status">
+                  <GateCell slot={h.protected_by} auth={auth} adminAuthID={adminAuthID}/>
+                </div>
+                <div className="feed-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => editing === h.id ? setEditing(null) : edit(h)} title="Edit"><Icon name="edit" size={13}/></button>
+                  <button className="btn btn-ghost btn-sm" style={{color:'var(--tone-red)'}} onClick={() => remove(h)} title="Delete host"><Icon name="trash" size={13}/></button>
+                </div>
+              </div>
+              {editing === h.id && editor}
+            </div>
+          ))}
+          {editing === 'new' && <div className="remote-item">{editor}</div>}
+        </div>
+      )}
+      {editing !== 'new' && (
+        <button className="btn btn-primary" onClick={() => edit(null)}><Icon name="plus" size={14}/> Add host</button>
+      )}
     </>
   );
 }
@@ -4347,7 +4496,7 @@ function AppShell() {
         {page==='roles'     && <RolesView roles={roles}/>}
         {page==='audit'     && <AuditView audit={audit} isAdmin={isAdmin}/>}
         {page==='profile'   && <ProfileView session={session}/>}
-        {page==='remotes'   && <RemotesView session={session} apps={apps} services={services} onRefresh={load}/>}
+        {page==='remotes'   && <RemotesView session={session} apps={apps} services={services} users={users} auth={auth} adminAuthID={adminAuthID} onRefresh={load}/>}
         {page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} onRefresh={load}/>}
       </main>
     </div>

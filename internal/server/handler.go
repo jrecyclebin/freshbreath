@@ -34,7 +34,7 @@ import (
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.hostAllowed(r.Host) {
-		http.Error(w, fmt.Sprintf("Fresh Breath does not answer to host %q. Add it to Hosts on the Remotes page (or set FRBR_BASE_URL to it) to allow it.", r.Host), http.StatusMisdirectedRequest)
+		http.Error(w, fmt.Sprintf("Fresh Breath does not answer to host %q. Add it to Hosts on the Remotes & Hosts page (or set FRBR_BASE_URL to it) to allow it.", r.Host), http.StatusMisdirectedRequest)
 		return
 	}
 	// A listed host belongs to its apps: none of the panel, the admin API
@@ -210,7 +210,7 @@ func normalizedHostName(hostport string) string {
 // and then call it as same-origin, so only names the operator controls
 // pass: IP literals and localhost (a page can't make those its origin),
 // the FRBR_BASE_URL host, this machine's hostname, and the listed hosts
-// (the Hosts list on the Remotes page).
+// (the Hosts list on the Remotes & Hosts page).
 func (s *Server) hostAllowed(hostport string) bool {
 	host := normalizedHostName(hostport)
 	if net.ParseIP(host) != nil || host == "localhost" || strings.HasSuffix(host, ".localhost") {

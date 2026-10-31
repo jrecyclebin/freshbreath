@@ -231,8 +231,8 @@ An app's **URL** decides where it's served:
   make a `blog` app and publish into its `admin` folder instead. `api`,
   `control`, `mcp`, `service` and `oauth` are Fresh Breath's own.
 - **A full URL on a listed host** — `https://blog.example.com/notes`, where
-  `blog.example.com` is on the Hosts list (Remotes page; point its DNS at
-  this server). Apps sit one level down, never at the root; slots are
+  `blog.example.com` is on the Hosts list (see [Hosts](#hosts); point its
+  DNS at this server). Apps sit one level down, never at the root; slots are
   `https://blog.example.com/notes@staging/` and so on, and the root
   redirects to the host's default app. A host answers only for its own
   apps: the control panel and admin API aren't there, and sign-ins and
@@ -282,7 +282,7 @@ at a slug (`/blog/`) are.
 ## Remotes
 
 Once a server has a tunnel, another Fresh Breath can drive it. Paste its
-tunnel address into **Remotes** (in your avatar menu, for Admins) and give it
+tunnel address into **Remotes & Hosts** (in your avatar menu, for Admins) and give it
 a name. Then sign in to it with your account *on that server*: its email
 and passphrase pass through this server and neither one keeps them. The
 remote's tokens live in your browser only, so each person signs in for
@@ -320,6 +320,40 @@ the remote's identity, so a new address means a new remote. The fingerprint
 shown beside each one is a short form of that identity, and the sign-in
 prompt shows it too, so you can tell the server you're typing your
 passphrase into is the one you meant.
+
+## Hosts
+
+Besides its own name (the `FRBR_BASE_URL` host and the machine's
+hostname), IP addresses and `localhost`, this server answers only to the
+names on its **Hosts** list, kept by Admins on the **Remotes & Hosts** page.
+Any other `Host` gets a 421. That's what stops a DNS-rebinding attack: a
+web page that points a name of its own at a local install can't then call
+it as its own origin.
+
+A host is a DNS name pointed at this server, and apps live one level down
+on it: `https://blog.example.com/notes`, `https://blog.example.com/shop`.
+Think of it as a town square with the apps as its shops. They share a well
+(one origin, so one set of sign-ins and stored sessions), and that's on
+purpose: apps on a host are meant to share credentials. The panel and the
+admin API never answer on a host.
+
+Each host has:
+
+- **An owner** (an Admin or Superuser). Apps its Members create belong to
+  them.
+- **A gate**, optional. An app on the host that leaves its own gate blank
+  answers to this one; with none, it falls through to admin auth.
+- **A default app**, optional. The host's root redirects there; without
+  one the root is a 404.
+- **Members**, optional, from the Member accounts. A Member listed here can
+  create apps on the host. Each new app takes the host's owner and gate,
+  and its creator becomes its member. They can't change the app's
+  settings after that, but like any member of an app they can link the
+  services *they're* members of into it, and unlink them. Links an Admin
+  made to other services are left alone.
+
+A host can't be renamed or deleted while apps are on it. An app saved at
+a host's root, or deeper than one level, isn't served.
 
 ## Remote updates
 
