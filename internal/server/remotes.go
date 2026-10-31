@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tailscale/tailcat"
+	"tailscale.com/tailcfg"
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/utils"
@@ -30,17 +31,53 @@ import (
 
 // remoteFingerprint is a short tag for telling remotes apart without
 // showing their address: the relay region and the start of the remote's
-// path-discovery key, which travels in the clear anyway.
-func remoteFingerprint(ci tailcat.ConnInfo) string {
+// path-discovery key, which travels in the clear anyway. An address
+// doesn't carry region codes, so the relay's hosts are looked up in dm
+// (nyc); with no match the first host's label stands in (tc301a).
+func remoteFingerprint(ci tailcat.ConnInfo, dm *tailcfg.DERPMap) string {
 	region := fmt.Sprintf("r%d", ci.RegionID)
-	if len(ci.Region) > 0 && ci.Region[0].RegionCode != "" {
-		region = ci.Region[0].RegionCode
+	if len(ci.Region) > 0 && len(ci.Region[0].Nodes) > 0 {
+		host := ci.Region[0].Nodes[0].HostName
+		region, _, _ = strings.Cut(host, ".")
+		if code := derpRegionCode(dm, host); code != "" {
+			region = code
+		}
 	}
 	disco := strings.TrimPrefix(ci.ServerDiscoPublic.String(), "discokey:")
 	if len(disco) > 8 {
 		disco = disco[:8]
 	}
 	return region + "-" + disco
+}
+
+// derpRegionCode is the code of the region in dm with a node at host.
+func derpRegionCode(dm *tailcfg.DERPMap, host string) string {
+	if dm == nil || host == "" {
+		return ""
+	}
+	for _, r := range dm.Regions {
+		for _, n := range r.Nodes {
+			if strings.EqualFold(n.HostName, host) {
+				return r.RegionCode
+			}
+		}
+	}
+	return ""
+}
+
+// remoteDERPMap is tailcat's relay map, for naming ci's relay, or nil if
+// there's nothing to name or the map can't be had quickly.
+func remoteDERPMap(ci tailcat.ConnInfo) *tailcfg.DERPMap {
+	if len(ci.Region) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dm, err := tailcat.FetchDERPMap(ctx)
+	if err != nil {
+		return nil
+	}
+	return dm
 }
 
 func (s *Server) coreCreateRemote(actor *db.User, name, address string) (*db.Remote, error) {
@@ -59,7 +96,7 @@ func (s *Server) coreCreateRemote(actor *db.User, name, address string) (*db.Rem
 		ID:          utils.GenNonce(),
 		Name:        name,
 		Address:     address,
-		Fingerprint: remoteFingerprint(ci),
+		Fingerprint: remoteFingerprint(ci, remoteDERPMap(ci)),
 		CreatedBy:   actor.ID,
 	}
 	if err := s.store.CreateRemote(r); err != nil {
