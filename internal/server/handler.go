@@ -453,7 +453,7 @@ func (s *Server) SetupRoutes() {
 	// (design/remotes-todo.md).
 	s.mux.HandleFunc("/api/remotes", s.authWrap(pipeline(s.handleRemotes, adminPlus)))
 	s.mux.HandleFunc("/api/remotes/", s.authWrap(pipeline(s.handleRemoteDetail, adminPlus)))
-	s.mux.HandleFunc("/api/hosts", s.authWrap(pipeline(s.handleHosts, adminPlus)))
+	s.mux.HandleFunc("/api/hosts", s.authWrap(pipeline(s.handleHosts, anyRole))) // core narrows: Members see their own, create is Admin+
 	s.mux.HandleFunc("/api/hosts/", s.authWrap(pipeline(s.handleHostDetail, adminPlus)))
 	s.mux.HandleFunc("/api/tls/ca.pem", s.authWrap(pipeline(s.handleLocalCA, superuser)))
 

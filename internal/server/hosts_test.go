@@ -23,15 +23,18 @@ func addHost(t *testing.T, srv *Server, as *db.User, body string) *db.Host {
 	return &h
 }
 
-// Admins keep the list; Members can't see or touch it.
+// Admins keep the list; Members can't change it, and see only the hosts
+// they're members of (none, here).
 func TestHostsAreForAdmins(t *testing.T) {
 	srv := newTestServer(t)
 	admin := mustUser(t, srv, "Ada", "Admin", "Active")
 	member := mustUser(t, srv, "Mo", "Member", "Active")
 	h := addHost(t, srv, admin, fmt.Sprintf(`{"name":"blog.example.com","owner_id":%d}`, admin.ID))
 
+	if rr := requestAs(t, srv, member, "GET", "/api/hosts", ""); rr.Code != 200 || strings.Contains(rr.Body.String(), "blog.example.com") {
+		t.Errorf("Member lists hosts: %d %s, want 200 with none of them", rr.Code, rr.Body.String())
+	}
 	for _, c := range []struct{ method, path, body string }{
-		{"GET", "/api/hosts", ""},
 		{"POST", "/api/hosts", fmt.Sprintf(`{"name":"x.example.com","owner_id":%d}`, admin.ID)},
 		{"PUT", "/api/hosts/" + h.ID, fmt.Sprintf(`{"name":"y.example.com","owner_id":%d}`, admin.ID)},
 		{"DELETE", "/api/hosts/" + h.ID, ""},
@@ -170,5 +173,103 @@ func TestOnlyListedHostsAreAnswered(t *testing.T) {
 	}
 	if rr := hostRequest(srv, "GET", "https://blog.example.com/", nil); rr.Code != http.StatusMisdirectedRequest {
 		t.Errorf("after delete: %d, want 421", rr.Code)
+	}
+}
+
+// ── Members creating apps on their hosts ──
+
+// memberHostSetup lists blog.example.org, owned by Olga (Admin), gated by
+// a key, with Mo as its member; shop.example.org has no members.
+func memberHostSetup(t *testing.T, srv *Server) (owner, mo *db.User, gate *db.AuthRecord) {
+	t.Helper()
+	admin := mustUser(t, srv, "Ada", "Admin", "Active")
+	owner = mustUser(t, srv, "Olga", "Admin", "Active")
+	mo = mustUser(t, srv, "Mo", "Member", "Active")
+	gate = newAuthRecord(t, srv, "Readers", db.AuthAPIKey, db.AuthDescriptor{Key: "k"})
+	addHost(t, srv, admin, fmt.Sprintf(`{"name":"blog.example.org","owner_id":%d,"protected_by":%d,"members":[%d]}`, owner.ID, gate.ID, mo.ID))
+	addHost(t, srv, admin, fmt.Sprintf(`{"name":"shop.example.org","owner_id":%d}`, admin.ID))
+	return owner, mo, gate
+}
+
+// A Member creates an app one level down on their host. It takes the
+// host's owner and inherits the host's gate, whatever they asked for, and
+// they become its member.
+func TestMemberCreatesAppOnTheirHost(t *testing.T) {
+	srv := newTestServer(t)
+	owner, mo, gate := memberHostSetup(t, srv)
+	anon := builtinAuth(t, srv, db.AuthAnonymous)
+
+	body := fmt.Sprintf(`{"name":"Notes","url":"https://blog.example.org/notes","owner_id":%d,"protected_by":%d}`, mo.ID, anon.ID)
+	rr := requestAs(t, srv, mo, "POST", "/api/apps", body)
+	if rr.Code != 200 {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	var res map[string]string
+	json.Unmarshal(rr.Body.Bytes(), &res)
+	app, err := srv.store.GetApp(res["nonce"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.OwnerID == nil || *app.OwnerID != owner.ID {
+		t.Errorf("owner = %v, want the host's owner %d", app.OwnerID, owner.ID)
+	}
+	if app.ProtectedBy != nil {
+		t.Errorf("protected_by = %v, want nil (inherit)", *app.ProtectedBy)
+	}
+	if rec, _ := srv.resolveAppGate(app); rec == nil || rec.ID != gate.ID {
+		t.Errorf("gate in force = %+v, want the host's %q", rec, gate.Name)
+	}
+	if ok, _ := srv.store.IsAppMember(app.Nonce, mo.ID); !ok {
+		t.Error("the Member isn't a member of the app they created")
+	}
+	if rr := requestAs(t, srv, mo, "GET", "/api/apps", ""); !strings.Contains(rr.Body.String(), app.Nonce) {
+		t.Error("the Member can't see the app they created")
+	}
+}
+
+func TestMemberCreatesAppsOnlyOnTheirHosts(t *testing.T) {
+	srv := newTestServer(t)
+	_, mo, _ := memberHostSetup(t, srv)
+	stranger := mustUser(t, srv, "Sam", "Member", "Active")
+	ro := mustUser(t, srv, "Rita", "Read-only", "Active")
+
+	for _, c := range []struct {
+		why  string
+		as   *db.User
+		url  string
+		want int
+	}{
+		{"someone else's host", mo, "https://shop.example.org/notes", 403},
+		{"a slug here", mo, "notes", 403},
+		{"blank", mo, "", 403},
+		{"runs elsewhere", mo, "https://myapp.netlify.app", 403},
+		{"the host's root", mo, "https://blog.example.org", 400},
+		{"on no host at all", stranger, "https://blog.example.org/notes", 403},
+		{"Read-only", ro, "https://blog.example.org/notes", 403},
+	} {
+		rr := requestAs(t, srv, c.as, "POST", "/api/apps", `{"name":"X","url":"`+c.url+`"}`)
+		if rr.Code != c.want {
+			t.Errorf("%s: %d %s, want %d", c.why, rr.Code, rr.Body.String(), c.want)
+		}
+	}
+	if apps, _ := srv.store.ListHostedApps(); len(apps) != 0 {
+		t.Errorf("refused creates left %d apps behind", len(apps))
+	}
+}
+
+// A Member sees just their own hosts, and can't add one.
+func TestMemberSeesTheirHosts(t *testing.T) {
+	srv := newTestServer(t)
+	_, mo, _ := memberHostSetup(t, srv)
+	rr := requestAs(t, srv, mo, "GET", "/api/hosts", "")
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "blog.example.org") || strings.Contains(rr.Body.String(), "shop.example.org") {
+		t.Errorf("Member's hosts: %d %s, want blog only", rr.Code, rr.Body.String())
+	}
+	ro := mustUser(t, srv, "Rita", "Read-only", "Active")
+	if rr := requestAs(t, srv, ro, "GET", "/api/hosts", ""); rr.Code != 403 {
+		t.Errorf("Read-only hosts: %d, want 403", rr.Code)
+	}
+	if rr := requestAs(t, srv, mo, "POST", "/api/hosts", fmt.Sprintf(`{"name":"mine.example.org","owner_id":%d}`, mo.ID)); rr.Code != 403 {
+		t.Errorf("Member adds a host: %d, want 403", rr.Code)
 	}
 }

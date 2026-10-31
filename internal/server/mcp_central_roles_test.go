@@ -52,7 +52,8 @@ allAppTools := []string{
 	}
 	// get_app_members is admin+ with the other member tools: the roster is
 	// not shown to members, on MCP any more than in the panel.
-	allAppManageTools := []string{"create_app", "update_app", "delete_app", "get_app_members", "set_app_members", "set_app_services"}
+	allAppManageTools := []string{"update_app", "delete_app", "get_app_members", "set_app_members", "set_app_services"}
+	allAppCreateTools := []string{"create_app"} // Member+; core holds a Member to their hosts
 	allServiceTools := []string{"list_services", "get_service", "get_service_apps", "list_service_files", "read_service_file", "write_service_file", "delete_service_file"} // all-roles; files gated per service
 	allServiceManageTools := []string{"create_service", "update_service", "delete_service", "set_service_members"}
 	allUserTools := []string{"list_users", "get_user", "create_user", "update_user", "delete_user", "get_user_apps", "set_user_apps", "get_user_ssh_key", "generate_user_ssh_key", "delete_user_ssh_key", "create_user_passphrase_link"}
@@ -64,9 +65,10 @@ allAppTools := []string{
 	allSettingsTools := []string{"get_settings", "update_settings"}
 	allDBTools := []string{"db_list_databases", "db_schema", "db_query", "db_execute"} // all roles; gateDBTarget decides per call
 
-	wantSuperuser := concat(allAppTools, allAppManageTools, allServiceTools, allServiceManageTools, allAuthTools, allAuthManageTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allSettingsTools, allDBTools)
-	wantAdmin := concat(allAppTools, allAppManageTools, allServiceTools, allServiceManageTools, allAuthTools, allAuthManageTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
-	wantMember := concat(allAppTools, allServiceTools, allAuthTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
+	wantSuperuser := concat(allAppTools, allAppCreateTools, allAppManageTools, allServiceTools, allServiceManageTools, allAuthTools, allAuthManageTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allSettingsTools, allDBTools)
+	wantAdmin := concat(allAppTools, allAppCreateTools, allAppManageTools, allServiceTools, allServiceManageTools, allAuthTools, allAuthManageTools, allUserTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
+	wantMember := concat(allAppTools, allAppCreateTools, allServiceTools, allAuthTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
+	wantReadOnly := concat(allAppTools, allServiceTools, allAuthTools, allRoleTools, allAuditTools, allPersonalTools, allDBTools)
 
 	cases := []struct {
 		role     string
@@ -76,9 +78,9 @@ allAppTools := []string{
 	}{
 		{"Superuser", wantSuperuser, []string{"get_settings", "update_settings", "create_app", "delete_user", "list_services", "create_auth", "db_query", "db_execute"}, nil},
 		{"Admin", wantAdmin, []string{"create_app", "list_users", "list_services", "delete_service", "create_auth", "delete_auth", "db_query", "db_execute"}, []string{"get_settings", "update_settings"}},
-		{"Member", wantMember, []string{"list_apps", "get_app", "get_app_services", "list_services", "list_auth", "write_service_file", "list_roles", "list_audit", "get_me", "update_me", "get_my_ssh_key", "db_query"},
-			[]string{"create_app", "update_app", "delete_app", "get_app_members", "set_app_members", "set_app_services", "create_service", "set_service_members", "create_auth", "list_users", "create_user", "delete_user", "create_user_passphrase_link", "get_settings", "update_settings"}},
-		{"Read-only", wantMember, []string{"list_apps", "get_me", "list_roles", "list_services", "list_auth", "db_query"},
+		{"Member", wantMember, []string{"create_app", "list_apps", "get_app", "get_app_services", "list_services", "list_auth", "write_service_file", "list_roles", "list_audit", "get_me", "update_me", "get_my_ssh_key", "db_query"},
+			[]string{"update_app", "delete_app", "get_app_members", "set_app_members", "set_app_services", "create_service", "set_service_members", "create_auth", "list_users", "create_user", "delete_user", "create_user_passphrase_link", "get_settings", "update_settings"}},
+		{"Read-only", wantReadOnly, []string{"list_apps", "get_me", "list_roles", "list_services", "list_auth", "db_query"},
 			[]string{"create_app", "delete_app", "list_users", "create_auth", "delete_service", "get_settings"}},
 	}
 

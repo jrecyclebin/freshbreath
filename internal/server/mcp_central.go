@@ -464,15 +464,15 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	})
 
 	// create_app
-	addToolIf(roleIn(role, rolesAdminPlus), mcps, &mcp.Tool{
+	addToolIf(roleIn(role, rolesMemberPlus), mcps, &mcp.Tool{
 		Name:        "create_app",
-		Description: "Create a new app. Admin+ only.",
+		Description: "Create a new app. Admin+, or a Member on one of the hosts they're a member of: the url must then be one level down on that host (https://<host>/<slug>), the app takes the host's owner and gate (owner_email and protected_by are ignored), and the Member becomes its member.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"name":         map[string]interface{}{"type": "string", "description": "App name"},
 				"environment":  map[string]interface{}{"type": "string", "description": "Environment (Development, Staging, Production)"},
-				"url":          map[string]interface{}{"type": "string", "description": "Where the app is hosted: a slug on this server ('blog' serves at /blog/; no subdirectories; api, control, mcp, service and oauth are reserved), or a full https:// URL for an app reached at its own host name (point its DNS at this server to have it serve the app's files there). Blank: mounted at the slug of its name, or run from disk."},
+				"url":          map[string]interface{}{"type": "string", "description": "Where the app is hosted: a slug on this server ('blog' serves at /blog/; no subdirectories; api, control, mcp, service and oauth are reserved), or a full URL: one level down on a listed host (https://<host>/<slug>) to be served there, or anywhere else for an app that runs elsewhere and calls in. Blank: mounted at the slug of its name, or run from disk."},
 				"owner_email":  map[string]interface{}{"type": "string", "description": "Owner email address (optional)"},
 				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 or omitted = Anonymous (open)"},
 			},
@@ -516,7 +516,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 				"nonce":        map[string]interface{}{"type": "string", "description": "App nonce"},
 				"name":         map[string]interface{}{"type": "string", "description": "New name"},
 				"environment":  map[string]interface{}{"type": "string", "description": "New environment"},
-				"url":          map[string]interface{}{"type": "string", "description": "Where the app is hosted: a slug on this server ('blog' serves at /blog/; no subdirectories; api, control, mcp, service and oauth are reserved), or a full https:// URL for an app reached at its own host name (point its DNS at this server to have it serve the app's files there). Blank: mounted at the slug of its name, or run from disk."},
+				"url":          map[string]interface{}{"type": "string", "description": "Where the app is hosted: a slug on this server ('blog' serves at /blog/; no subdirectories; api, control, mcp, service and oauth are reserved), or a full URL: one level down on a listed host (https://<host>/<slug>) to be served there, or anywhere else for an app that runs elsewhere and calls in. Blank: mounted at the slug of its name, or run from disk."},
 				"owner_email":  map[string]interface{}{"type": "string", "description": "New owner email address (optional)"},
 				"protected_by": map[string]interface{}{"type": "integer", "description": "Auth record id gating the app; 0 clears to inherit-admin, omitted keeps the current gate"},
 			},

@@ -145,18 +145,48 @@ func (s *Server) appsOnHost(host string) ([]string, error) {
 	return names, nil
 }
 
+// coreListHosts lists every host for an Admin, and a Member's own hosts
+// (the ones they can create apps on) for a Member.
 func (s *Server) coreListHosts(actor *db.User) ([]*db.Host, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gate(actor, rolesMemberPlus); err != nil {
 		return nil, err
 	}
 	hosts, err := s.store.ListHosts()
 	if err != nil {
 		return nil, cerr(http.StatusInternalServerError, "%v", err)
 	}
-	if hosts == nil {
-		hosts = []*db.Host{}
+	out := []*db.Host{}
+	for _, h := range hosts {
+		if roleIn(actor.Role, rolesAdminPlus) || slices.Contains(h.Members, actor.ID) {
+			out = append(out, h)
+		}
 	}
-	return hosts, nil
+	return out, nil
+}
+
+// memberHostFor is the host a Member may create an app at url on: a listed
+// host they're a member of, with the app one level down.
+func (s *Server) memberHostFor(actor *db.User, url string) (*db.Host, error) {
+	mine, err := s.coreListHosts(actor)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(mine))
+	for i, h := range mine {
+		names[i] = h.Name
+	}
+	if len(mine) == 0 {
+		return nil, cerr(http.StatusForbidden, "forbidden: you aren't a member of any host, so you can't create apps")
+	}
+	host, slug := appHostMount(&db.App{URL: url})
+	if slug != "" {
+		for _, h := range mine {
+			if strings.EqualFold(h.Name, host) {
+				return h, nil
+			}
+		}
+	}
+	return nil, cerr(http.StatusForbidden, "forbidden: you can create apps only one level down on your hosts (%s), like https://%s/my-app", strings.Join(names, ", "), names[0])
 }
 
 func (s *Server) coreCreateHost(actor *db.User, in hostInput) (*db.Host, error) {

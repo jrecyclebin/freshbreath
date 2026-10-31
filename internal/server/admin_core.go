@@ -101,6 +101,10 @@ var (
 	rolesAdminPlus = []string{"Superuser", "Admin"}
 	rolesSuperuser = []string{"Superuser"}
 
+	// rolesMemberPlus can act on their own patch: a Member creates apps on
+	// the hosts they're members of. Core narrows a Member down further.
+	rolesMemberPlus = []string{"Superuser", "Admin", "Member"}
+
 	// assignableMemberRoles are the roles an app or service member may hold.
 	// Member and Read-only accounts are staffed by the member lists; Admins
 	// and Superusers already reach everything, so having them on a list
@@ -475,8 +479,12 @@ func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *i
 
 // coreCreateAppWithNonce creates an app under a nonce it already has on
 // another server (an import), or a fresh one for "".
+//
+// A Member may create an app only on one of their hosts. It takes the
+// host's owner and inherits its gate (whatever they asked for), and they
+// become its member — the same footing as any app they've been given.
 func (s *Server) coreCreateAppWithNonce(actor *db.User, nonce, name, env, url string, ownerID *int64, protectedBy *int64) (string, error) {
-	if err := s.gate(actor, rolesAdminPlus); err != nil {
+	if err := s.gate(actor, rolesMemberPlus); err != nil {
 		return "", err
 	}
 	if name == "" {
@@ -486,7 +494,14 @@ func (s *Server) coreCreateAppWithNonce(actor *db.User, nonce, name, env, url st
 	if err != nil {
 		return "", err
 	}
-	if err := s.validateOwner(ownerID, nil); err != nil {
+	member := !roleIn(actor.Role, rolesAdminPlus) // fails safe: anyone below Admin is held to their hosts
+	if member {
+		host, err := s.memberHostFor(actor, url)
+		if err != nil {
+			return "", err
+		}
+		ownerID, protectedBy = host.OwnerID, nil
+	} else if err := s.validateOwner(ownerID, nil); err != nil {
 		return "", err
 	}
 	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
@@ -495,6 +510,11 @@ func (s *Server) coreCreateAppWithNonce(actor *db.User, nonce, name, env, url st
 	nonce, err = s.store.CreateAppWithNonce(nonce, name, env, url, ownerID, protectedBy)
 	if err != nil {
 		return "", cerr(http.StatusInternalServerError, "%v", err)
+	}
+	if member {
+		if err := s.store.SetAppMembers(nonce, []int64{actor.ID}); err != nil {
+			return "", cerr(http.StatusInternalServerError, "%v", err)
+		}
 	}
 	s.rebuildHostedRoutes()
 	s.syncAppServiceMount(nonce)

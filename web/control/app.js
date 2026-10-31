@@ -1097,7 +1097,13 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
       <div className="home-section">
         <div className="home-section-head">
           <h2>{activeView.label}</h2>
-          {isAdmin && <NewEntityMenu navigate={navigate}/>}
+          {isAdmin
+            ? <NewEntityMenu navigate={navigate}/>
+            : hosts.length > 0 && (
+                <button className="btn btn-primary btn-sm" onClick={() => navigate('app', { isNew: true })}>
+                  <Icon name="plus" size={14}/> New app
+                </button>
+              )}
         </div>
         <div className="entity-wrap">
           <div className="entity-rail">
@@ -1643,10 +1649,47 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
   );
 }
 
+// A Member's new app: a name and a place one level down on one of their
+// hosts. The server gives it the host's owner and gate, and makes them
+// its member, so there's nothing else to pick.
+function MemberNewAppFields({ form, setForm, hosts }) {
+  const slugPlaceholder = slugify(form.name) || 'my-app';
+  return (
+    <>
+      <div className="field-row">
+        <div className="field"><label>Name</label>
+          <input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/>
+        </div>
+        <div className="field"><label>Default environment</label>
+          <select className="input" name="environment" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
+            <option>Production</option><option>Staging</option><option>Development</option>
+          </select>
+        </div>
+      </div>
+      <div className="field"><label>Where it lives</label>
+        <div style={{display:'flex',alignItems:'center',gap:6}}>
+          <span className="muted">https://</span>
+          <select className="input" name="host" style={{flex:'0 1 auto'}} value={form.host} onChange={e=>setForm(f=>({...f,host:e.target.value}))}>
+            {hosts.map(h => <option key={h.id} value={h.name}>{h.name}</option>)}
+          </select>
+          <span className="muted">/</span>
+          <input className="input" name="slug" {...NO_FILL} value={form.slug} onChange={e=>setForm(f=>({...f,slug:e.target.value.toLowerCase()}))} placeholder={slugPlaceholder}/>
+        </div>
+        <span className="help">One of your hosts. The app is owned by the host's owner and sits behind its gate. An Admin can change either later.</span>
+      </div>
+    </>
+  );
+}
+
+// The URL a Member's new-app form adds up to.
+const memberAppURL = (form) => `https://${form.host}/${form.slug || slugify(form.name)}`;
+
 // The app settings page — what the edit drawer used to be, full-page now.
 function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuthID, hosts, onRefresh, navigate }) {
   const app = isNew ? null : apps.find(a => a.nonce === nonce);
   const { isAdmin } = useRoles();
+  // A Member with hosts can create apps there; the rest stays Admin-only.
+  const memberCreating = !isAdmin && !app && hosts.length > 0;
   const [form, setForm] = useState({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],protected_by:null});
   const [creatingGate, setCreatingGate] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -1678,11 +1721,20 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
       // internal tool behind the panel's own sign-in, and an explicit gate
       // is the exception, so the default is "inherit" (null), not Anonymous.
       setForm({name:'',environment:'Development',url:'',owner_id:'',services:[],members:[],
-               protected_by: null});
+               protected_by: null, host: hosts[0]?.name || '', slug: ''});
     }
   }, [app ? app.nonce : null, isNew]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const save = async () => {
+    if (memberCreating) {
+      try {
+        const resp = await frbr(session, 'POST','/api/apps',{name:form.name,environment:form.environment,url:memberAppURL(form)});
+        toast('App created');
+        onRefresh();
+        navigate('app', { nonce: resp.nonce });
+      } catch(e) { toast(e.message,true); }
+      return;
+    }
     const payload = {name:form.name,environment:form.environment,url:form.url,owner_id:form.owner_id?Number(form.owner_id):null,protected_by:form.protected_by};
     try {
       let savedNonce;
@@ -1731,14 +1783,16 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
           {isAdmin && app && <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>}
-          {isAdmin && <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>}
+          {(isAdmin || memberCreating) && <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>}
         </>}
       />
       <div className={'page-form' + (app && !loading ? ' page-cols' : '')}>
         <div className="page-col">
-          <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
-                         auth={auth} adminAuthID={adminAuthID} hosts={hosts} loading={loading}
-                         onCreateGate={()=>setCreatingGate(true)}/>
+          {memberCreating
+            ? <MemberNewAppFields form={form} setForm={setForm} hosts={hosts}/>
+            : <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
+                             auth={auth} adminAuthID={adminAuthID} hosts={hosts} loading={loading}
+                             onCreateGate={()=>setCreatingGate(true)}/>}
         </div>
         {app && !loading && (
           <div className="page-col">
@@ -4208,8 +4262,9 @@ function AppShell() {
         isSuperuser
           ? frbr(session, 'GET','/api/settings').catch(()=>({}))
           : Promise.resolve({admin_auth_service: window.__HOMESLICE_CONFIG?.authRecordID || null}),
-        // Hosts name the gate their apps inherit.
-        isAdmin ? frbr(session, 'GET','/api/hosts') : Promise.resolve({hosts: []}),
+        // Hosts name the gate their apps inherit; a Member gets the hosts
+        // they can create apps on.
+        isAdmin || user?.role === 'Member' ? frbr(session, 'GET','/api/hosts') : Promise.resolve({hosts: []}),
       ]);
       setUsers(u.users||[]); setApps(a.apps||[]); setServices(s.services||[]);
       setRoles(r.roles||[]); setAudit(au.audit||[]); setAuth(ar.auth||[]);
