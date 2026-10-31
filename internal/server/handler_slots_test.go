@@ -82,6 +82,30 @@ func TestDeployToStaging(t *testing.T) {
 	}
 }
 
+// An app at its own address gets "/@slot" after its origin; without the
+// slash, the origin's host would read as a username.
+func TestDeployRouteAfterAnOrigin(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "deployorigin")
+	cleanupSlotApp(t, srv, nonce)
+	createSlotFile(t, srv, nonce, "web", "index.html", []byte("<h1>dev</h1>"))
+	for url, want := range map[string]string{
+		"https://domain.example:9009/": "https://domain.example:9009/@staging",
+		"https://domain.example":       "https://domain.example/@staging",
+		"http://localhost:9009":        "http://localhost:9009/@staging",
+	} {
+		if err := srv.store.UpdateApp(nonce, "deployorigin", "", url, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		rr := deploySlot(t, srv, nonce, `{"target":"staging"}`)
+		var res map[string]string
+		json.Unmarshal(rr.Body.Bytes(), &res)
+		if res["route"] != want {
+			t.Errorf("%s: route = %q, want %q", url, res["route"], want)
+		}
+	}
+}
+
 func TestDeployToProduction(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "deployprod")

@@ -1657,10 +1657,12 @@ func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (st
 	}
 	s.rebuildHostedRoutes()
 	s.audit(actor, "deployed "+source+" → "+target, app.Name)
-	if appHostName(app) != "" {
-		return appLocation(app) + "/@" + target, nil
+	// An origin with "@prod" right after it would read as a username.
+	loc := appLocation(app)
+	if strings.Contains(loc, "://") {
+		loc += "/"
 	}
-	return appLocation(app) + "@" + target, nil
+	return loc + "@" + target, nil
 }
 
 // copyDir recursively copies the contents of src into dst, preserving file

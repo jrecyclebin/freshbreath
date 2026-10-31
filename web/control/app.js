@@ -860,6 +860,10 @@ function hostRoute(app) {
   return '/' + slug;
 }
 
+// A slot's address: <route>@dev, or <origin>/@dev for an app at its own
+// address (an origin with "@dev" right after it would read as a username).
+const slotRoute = (route, slot) => route + (route.includes('://') ? '/@' : '@') + slot;
+
 // An app is hosted when any deployment slot has content: the dev upload or a
 // staging/production deploy. Slots live at <route>@dev|@staging|@prod; the
 // bare route serves the app's default environment.
@@ -2157,7 +2161,7 @@ function HostUpload({ session, app, onRefresh }) {
     try {
       const res = await frbr(session, 'POST', '/api/apps/' + app.nonce + '/deploy', { target });
       setDeployed(d => ({...d, [target]: new Date().toISOString()}));
-      toast('Deployed to ' + (res.route || route + '@' + target));
+      toast('Deployed to ' + (res.route || slotRoute(route, target)));
       onRefresh();
     } catch(e) {
       toast(e.message, true);
@@ -2167,9 +2171,9 @@ function HostUpload({ session, app, onRefresh }) {
   };
 
   const slots = [
-    { name:'Development', suffix:'@dev', when: uploadedAt, verb:'uploaded', empty:'not uploaded' },
-    { name:'Staging', suffix:'@staging', when: deployed.staging, verb:'deployed', empty:'not deployed', target:'staging' },
-    { name:'Production', suffix:'@prod', when: deployed.prod, verb:'deployed', empty:'not deployed', target:'prod' },
+    { name:'Development', slot:'dev', when: uploadedAt, verb:'uploaded', empty:'not uploaded' },
+    { name:'Staging', slot:'staging', when: deployed.staging, verb:'deployed', empty:'not deployed', target:'staging' },
+    { name:'Production', slot:'prod', when: deployed.prod, verb:'deployed', empty:'not deployed', target:'prod' },
   ];
 
   return (
@@ -2195,7 +2199,7 @@ function HostUpload({ session, app, onRefresh }) {
         </span>
         <div className="slot-card">
           {slots.map(s=>(
-            <div key={s.suffix} className="slot-row">
+            <div key={s.slot} className="slot-row">
               <div className="slot-top">
                 <Badge tone={envTone(s.name)}><span className="env-full">{s.name}</span><span className="env-short">{envShort(s.name)}</span></Badge>
                 <span className="slot-when" title={s.when ? s.verb + ' ' + fmtAuditTime(s.when) : undefined}>{s.when ? fmtShortTime(s.when) : s.empty}</span>
@@ -2212,9 +2216,9 @@ function HostUpload({ session, app, onRefresh }) {
                 )}
               </div>
               {s.when ? (
-                <a className="slot-url" href={route + s.suffix} target="_blank" rel="noopener noreferrer">{route + s.suffix}</a>
+                <a className="slot-url" href={slotRoute(route, s.slot)} target="_blank" rel="noopener noreferrer">{slotRoute(route, s.slot)}</a>
               ) : (
-                <span className="slot-url muted">{route + s.suffix}</span>
+                <span className="slot-url muted">{slotRoute(route, s.slot)}</span>
               )}
             </div>
           ))}
