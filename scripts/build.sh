@@ -99,12 +99,12 @@ mv dist/app.compiled.js "$staging/web/control/app.compiled.js"
 # which would swallow the first -e as its argument. Redirect + mv is portable.
 sed \
   -e '/Dev mode:/d' \
-  -e '/babel-standalone-7.29.0.min.js/d' \
+  -e '/babel-standalone-7.29.12.min.js/d' \
   -e 's|<script type="text/babel" src="/control/app.js"></script>|<script type="module" src="/control/app.compiled.js"></script>|' \
   "$staging/web/control.html" > "$staging/web/control.html.tmp"
 mv "$staging/web/control.html.tmp" "$staging/web/control.html"
 grep -q 'app.compiled.js' "$staging/web/control.html" || { echo "✗ control.html swap failed"; exit 1; }
-rm -rf "$staging/web/control/app.js" "$staging/web/control/vendor/babel-standalone-7.29.0.min.js"
+rm -rf "$staging/web/control/app.js" "$staging/web/control/vendor/babel-standalone-7.29.12.min.js"
 
 if [ "$GOOS" = "windows" ]; then
   archive="freshbreath-${VERSION}-${GOOS}-${arch}.zip"

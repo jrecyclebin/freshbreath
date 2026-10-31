@@ -14,7 +14,7 @@
  * SameSite=Strict), so it keeps its own rotating refresh token in its
  * entry instead.
  */
-import { McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.29.0.js";
+import { McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.32.2.js";
 
 const CFG = window.__HOMESLICE_CONFIG ?? {};
 const API = CFG.apiBase ?? "";

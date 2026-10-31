@@ -316,7 +316,7 @@ func newBrowser(t *testing.T) context.Context {
 	// Close Chromium gracefully rather than killing it: a killed browser
 	// leaves helpers still writing the profile while TempDir removes it.
 	t.Cleanup(func() { chromedp.Cancel(ctx); cancel(); cancelAlloc() })
-	if err := chromedp.Run(ctx); err != nil {
+	if err := chromedp.Do(ctx); err != nil {
 		t.Fatalf("start browser: %v", err)
 	}
 	return ctx
@@ -342,13 +342,15 @@ func runScenario(t *testing.T, browser context.Context, pageURL, name string, pa
 		q.Set(k, v)
 	}
 	var out string
-	err := chromedp.Run(ctx,
+	err := chromedp.Do(ctx,
 		chromedp.Navigate(pageURL+"?"+q.Encode()),
-		chromedp.WaitReady("#run", chromedp.ByID),
-		chromedp.Click("#run", chromedp.ByID),
-		chromedp.WaitVisible(`#out[data-done]`, chromedp.ByQuery),
-		chromedp.Text("#out", &out, chromedp.ByID),
+		chromedp.WaitReady(chromedp.ID("run")),
+		chromedp.Click(chromedp.ID("run")),
+		chromedp.WaitVisible(chromedp.CSS(`#out[data-done]`)),
 	)
+	if err == nil {
+		out, err = chromedp.Run(ctx, chromedp.Text(chromedp.ID("out")))
+	}
 	if err != nil {
 		t.Fatalf("scenario %s: %v", name, err)
 	}
@@ -399,15 +401,14 @@ func connectMCP(t *testing.T, browser context.Context, endpoint string) *mcp.Cli
 			defer closeTab()
 			// The authorize page asks before it signs anyone in; the
 			// user here is the test, so it allows.
-			if err := chromedp.Run(tab, chromedp.Navigate(args.URL), chromedp.Click("#allow", chromedp.ByQuery)); err != nil {
+			if err := chromedp.Do(tab, chromedp.Navigate(args.URL), chromedp.Click(chromedp.CSS("#allow"))); err != nil {
 				return nil, fmt.Errorf("open authorize page: %w", err)
 			}
 			select {
 			case res := <-codes:
 				return res, nil
 			case <-time.After(20 * time.Second):
-				var html string
-				chromedp.Run(tab, chromedp.OuterHTML("html", &html, chromedp.ByQuery))
+				html, _ := chromedp.Run(tab, chromedp.OuterHTML(chromedp.CSS("html")))
 				return nil, fmt.Errorf("no redirect back from the authorize page; it shows: %s", html)
 			case <-ctx.Done():
 				return nil, ctx.Err()

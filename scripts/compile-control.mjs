@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const Babel = require("../web/control/vendor/babel-standalone-7.29.0.min.js");
+const Babel = require("../web/control/vendor/babel-standalone-7.29.12.min.js");
 
 const SRC = "web/control/app.js";
 const OUT = "dist/app.compiled.js";

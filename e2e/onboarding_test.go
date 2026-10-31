@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
 
@@ -23,35 +22,36 @@ func TestOnboardingThenSignIn(t *testing.T) {
 	defer cancel()
 
 	newPass := `(//input[@type="password"])`
-	err := chromedp.Run(ctx,
+	err := chromedp.Do(ctx,
 		chromedp.Navigate(fb.URL+"/control"),
-		chromedp.WaitVisible(`//h1[text()="Welcome to Fresh Breath"]`, chromedp.BySearch),
-		chromedp.SendKeys(`input[name="name"]`, "Ada Lovelace", chromedp.ByQuery),
-		chromedp.SendKeys(`input[name="email"]`, "ada@example.com", chromedp.ByQuery),
-		chromedp.SendKeys(newPass+`[1]`, "analytical engine", chromedp.BySearch),
-		chromedp.SendKeys(newPass+`[2]`, "analytical engine", chromedp.BySearch),
-		chromedp.Click(`form button[type="submit"]`, chromedp.ByQuery),
-		chromedp.WaitVisible(`//h1[text()="You're all set"]`, chromedp.BySearch),
+		chromedp.WaitVisible(`//h1[text()="Welcome to Fresh Breath"]`),
+		chromedp.SendKeys(chromedp.CSS(`input[name="name"]`), "Ada Lovelace"),
+		chromedp.SendKeys(chromedp.CSS(`input[name="email"]`), "ada@example.com"),
+		chromedp.SendKeys(newPass+`[1]`, "analytical engine"),
+		chromedp.SendKeys(newPass+`[2]`, "analytical engine"),
+		chromedp.Click(chromedp.CSS(`form button[type="submit"]`)),
+		chromedp.WaitVisible(`//h1[text()="You're all set"]`),
 		// The panel is gated now, so the reload sends the whole tab to the
 		// SSH sign-in page and back.
-		chromedp.Click(`//button[contains(., "Continue to sign in")]`, chromedp.BySearch),
-		chromedp.WaitVisible(`#e`, chromedp.ByID),
-		chromedp.SendKeys(`#e`, "ada@example.com", chromedp.ByID),
-		chromedp.SendKeys(`#p`, "analytical engine", chromedp.ByID),
-		chromedp.Click(`#btn`, chromedp.ByID),
+		chromedp.Click(`//button[contains(., "Continue to sign in")]`),
+		chromedp.WaitVisible(chromedp.ID("e")),
+		chromedp.SendKeys(chromedp.ID("e"), "ada@example.com"),
+		chromedp.SendKeys(chromedp.ID("p"), "analytical engine"),
+		chromedp.Click(chromedp.ID("btn")),
 	)
 	if err != nil {
 		t.Fatalf("onboarding: %v", err)
 	}
 
-	var me struct {
+	type meResult struct {
 		User struct{ Email, Role string }
 	}
-	err = chromedp.Run(ctx,
-		chromedp.WaitVisible(`.app-shell`, chromedp.ByQuery),
-		chromedp.Evaluate(`FrBr.api(FrBr.currentSession(), "/api/me").then(r => r.json())`, &me,
-			func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }),
-	)
+	var me meResult
+	err = chromedp.Do(ctx, chromedp.WaitVisible(chromedp.CSS(`.app-shell`)))
+	if err == nil {
+		me, err = chromedp.Run(ctx, chromedp.Evaluate[meResult](
+			`FrBr.api(FrBr.currentSession(), "/api/me").then(r => r.json())`, chromedp.EvalAwaitPromise))
+	}
 	if err != nil {
 		t.Fatalf("panel after sign-in: %v", err)
 	}
@@ -69,22 +69,26 @@ func TestOnboardingIssuesLocalCertificate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(browser, 45*time.Second)
 	defer cancel()
 
-	var continueURL string
+	var continueLink chromedp.AttributeResult
 	var caPEM string
-	err := chromedp.Run(ctx,
+	err := chromedp.Do(ctx,
 		chromedp.Navigate(fb.URL+"/control"),
-		chromedp.WaitVisible(`//h1[text()="Secure the connection"]`, chromedp.BySearch),
-		chromedp.Click(`//button[contains(., "Generate a certificate")]`, chromedp.BySearch),
-		chromedp.WaitVisible(`//h1[text()="Certificate ready"]`, chromedp.BySearch),
-		chromedp.AttributeValue(`//a[contains(., "Continue at")]`, "href", &continueURL, nil, chromedp.BySearch),
-		chromedp.Evaluate(`fetch("/api/tls/ca.pem").then(r => r.text())`, &caPEM,
-			func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }),
+		chromedp.WaitVisible(`//h1[text()="Secure the connection"]`),
+		chromedp.Click(`//button[contains(., "Generate a certificate")]`),
+		chromedp.WaitVisible(`//h1[text()="Certificate ready"]`),
 	)
+	if err == nil {
+		continueLink, err = chromedp.Run(ctx, chromedp.AttributeValue(`//a[contains(., "Continue at")]`, "href"))
+	}
+	if err == nil {
+		caPEM, err = chromedp.Run(ctx, chromedp.Evaluate[string](
+			`fetch("/api/tls/ca.pem").then(r => r.text())`, chromedp.EvalAwaitPromise))
+	}
 	if err != nil {
 		t.Fatalf("certificate step: %v", err)
 	}
-	if want := strings.Replace(fb.URL, "http://", "https://", 1) + "/control"; continueURL != want {
-		t.Errorf("continue link = %q, want %q", continueURL, want)
+	if want := strings.Replace(fb.URL, "http://", "https://", 1) + "/control"; continueLink.Value != want {
+		t.Errorf("continue link = %q, want %q", continueLink.Value, want)
 	}
 	if !strings.HasPrefix(caPEM, "-----BEGIN CERTIFICATE-----") {
 		t.Errorf("CA download = %.40q", caPEM)
@@ -95,10 +99,10 @@ func TestOnboardingIssuesLocalCertificate(t *testing.T) {
 	}
 
 	// Skipping instead goes straight on to the account.
-	err = chromedp.Run(ctx,
+	err = chromedp.Do(ctx,
 		chromedp.Navigate(fb.URL+"/control"),
-		chromedp.Click(`//button[contains(., "Skip — stay on HTTP")]`, chromedp.BySearch),
-		chromedp.WaitVisible(`//h1[text()="Welcome to Fresh Breath"]`, chromedp.BySearch),
+		chromedp.Click(`//button[contains(., "Skip — stay on HTTP")]`),
+		chromedp.WaitVisible(`//h1[text()="Welcome to Fresh Breath"]`),
 	)
 	if err != nil {
 		t.Fatalf("skipping the certificate: %v", err)

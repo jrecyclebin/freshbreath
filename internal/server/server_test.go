@@ -1801,7 +1801,7 @@ func TestControlScriptPolicy(t *testing.T) {
 		t.Errorf("built policy allows inline script: %q", policy)
 	}
 
-	dev := controlCSP([]byte(`<script src="/control/vendor/babel-standalone-7.29.0.min.js"></script>`))
+	dev := controlCSP([]byte(`<script src="/control/vendor/babel-standalone-7.29.12.min.js"></script>`))
 	if !strings.Contains(dev, "script-src 'self' 'unsafe-inline' 'unsafe-eval'") || !strings.Contains(dev, "frame-ancestors 'none'") {
 		t.Errorf("dev policy = %q", dev)
 	}
