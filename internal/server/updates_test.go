@@ -8,6 +8,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -872,6 +873,16 @@ func TestUpdateBuild(t *testing.T) {
 	if manifest.Version != "2026.09.01" || len(manifest.Ops) != 2 {
 		t.Errorf("manifest = %+v", manifest)
 	}
+	// Services go by URL. A feed never creates, so it carries no create
+	// spec (and no emails out into the world).
+	if op := manifest.Ops[1]; op.Target != "tasks://buildsvc" || op.Source != "services/buildsvc.txt" {
+		t.Errorf("service op = %+v, want target tasks://buildsvc", op)
+	}
+	for _, op := range manifest.Ops {
+		if op.Create != nil {
+			t.Errorf("feed op %s carries a create spec", op.Target)
+		}
+	}
 
 	// Build on a receive feed is rejected.
 	rxID, _ := createUpdateFeed(t, srv, "https://x", "receive", "", "")
@@ -1034,7 +1045,7 @@ func TestUpdateTaskServiceNeedsSuperuserOwner(t *testing.T) {
 		{ID: 2, Role: "Admin"}:     false,
 		nil:                        false,
 	} {
-		err := srv.validateUpdateOps(ops, archiveDir, owner, nil)
+		err := srv.validateUpdateOps(ops, archiveDir, applyPolicy{owner: owner})
 		if (err == nil) != ok {
 			t.Errorf("owner %+v: validate = %v, want ok=%v", owner, err, ok)
 		}
@@ -1321,5 +1332,220 @@ func TestUpdateApplyBacksUpReplacedFiles(t *testing.T) {
 	}
 	if got, err := os.ReadFile(svcPath + ".bak"); err != nil || string(got) != "old def" {
 		t.Errorf("service file backup = %q (err %v), want the old def", got, err)
+	}
+}
+
+// ── Import ──────────────────────────────────────────────────────────
+
+// importAs sends an archive to /api/updates/import as user.
+func importAs(t *testing.T, srv *Server, user *db.User, archive []byte) (*httptest.ResponseRecorder, []sseEvent) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/updates/import", bytes.NewReader(archive))
+	req = req.WithContext(context.WithValue(req.Context(), userKey, user))
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	return rr, parseSSE(rr.Body.String())
+}
+
+// importArchive is a plain tar.gz with m as its manifest.
+func importArchive(t *testing.T, m UpdateManifest, files map[string][]byte) []byte {
+	t.Helper()
+	mb, _ := json.Marshal(m)
+	files["manifest.json"] = mb
+	return plainTarGZ(t, files)
+}
+
+func lastEvent(events []sseEvent) sseEvent {
+	if len(events) == 0 {
+		return sseEvent{}
+	}
+	return events[len(events)-1]
+}
+
+// An import creates what it doesn't find: the app under the nonce it had
+// on the other server, the service at its URL. Gates match by auth record
+// name and people by email; whatever has no match here stays empty.
+func TestImportCreatesWhatsMissing(t *testing.T) {
+	srv := newTestServer(t)
+	ada := mustUser(t, srv, "Ada", "Admin", "Active")
+	mustUser(t, srv, "Mo", "Member", "Active")
+	anon := builtinAuth(t, srv, db.AuthAnonymous)
+	const nonce = "imported-app-nonce-1"
+	t.Cleanup(func() {
+		os.RemoveAll(filepath.Join(srv.config.DataDir, "apps", nonce))
+		os.Remove(filepath.Join(srv.config.DataDir, "virtual", "greeter.txt"))
+	})
+
+	m := UpdateManifest{Version: "v1", Ops: []UpdateOp{
+		{Action: "update_app_files", Target: nonce, Source: "apps/" + nonce, Create: &CreateSpec{
+			Name: "Blog", Gate: anon.Name, Owner: "ada@example.com",
+			Members: []string{"MO@example.com", "ghost@nowhere.example"},
+		}},
+		{Action: "update_service_files", Target: "/mcp/greeter", Source: "services/greeter.txt", Create: &CreateSpec{
+			Name: "greeter", Descriptor: &db.ServiceDescriptor{Type: "virtual"},
+			Gate: "No Such Record", Members: []string{"mo@example.com"},
+		}},
+	}}
+	rr, events := importAs(t, srv, ada, importArchive(t, m, map[string][]byte{
+		"apps/" + nonce + "/index.html": []byte("<h1>hi</h1>"),
+		"services/greeter.txt":          []byte("greeter def"),
+	}))
+	if rr.Code != 200 || lastEvent(events).Event != "done" {
+		t.Fatalf("import: %d %s", rr.Code, rr.Body.String())
+	}
+	created := 0
+	for _, e := range events {
+		if e.Event == "op" && e.Data["status"] == "created" {
+			created++
+		}
+	}
+	if created != 2 {
+		t.Errorf("created events = %d, want 2", created)
+	}
+
+	app, err := srv.store.GetApp(nonce)
+	if err != nil {
+		t.Fatalf("app not created under its nonce: %v", err)
+	}
+	if app.Name != "Blog" || app.ProtectedBy == nil || *app.ProtectedBy != anon.ID || app.OwnerID == nil || *app.OwnerID != ada.ID {
+		t.Errorf("app = %+v, want gate %d and owner %d", app, anon.ID, ada.ID)
+	}
+	if ids, _ := srv.store.ListAppMembers(nonce); len(ids) != 1 {
+		t.Errorf("app members = %v, want just Mo", ids)
+	}
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "<h1>hi</h1>" {
+		t.Errorf("staging = %q", got)
+	}
+
+	svc, err := srv.store.GetServiceByURL("/mcp/greeter")
+	if err != nil {
+		t.Fatalf("service not created at its URL: %v", err)
+	}
+	if svc.Name != "greeter" || svc.ProtectedBy != nil {
+		t.Errorf("service = %+v, want an empty gate (no record by that name)", svc)
+	}
+	if ids, _ := srv.store.ListServiceMembers(svc.ID); len(ids) != 1 {
+		t.Errorf("service members = %v, want just Mo", ids)
+	}
+	if got, _ := os.ReadFile(serviceDefinitionPath(srv.config.DataDir, svc)); string(got) != "greeter def" {
+		t.Errorf("service file = %q", got)
+	}
+}
+
+// An owner must be an Admin or above, so a Member with the owner's email
+// doesn't become one: the app is left without an owner instead.
+func TestImportOwnerMustBeAnAdmin(t *testing.T) {
+	srv := newTestServer(t)
+	ada := mustUser(t, srv, "Ada", "Admin", "Active")
+	mustUser(t, srv, "Mo", "Member", "Active")
+	const nonce = "imported-app-nonce-2"
+	t.Cleanup(func() { os.RemoveAll(filepath.Join(srv.config.DataDir, "apps", nonce)) })
+	m := UpdateManifest{Version: "v1", Ops: []UpdateOp{{Action: "update_app_files", Target: nonce, Source: "apps/" + nonce,
+		Create: &CreateSpec{Name: "Blog", Owner: "mo@example.com"}}}}
+	if _, events := importAs(t, srv, ada, importArchive(t, m, map[string][]byte{"apps/" + nonce + "/a.txt": []byte("a")})); lastEvent(events).Event != "done" {
+		t.Fatalf("import: %v", events)
+	}
+	if app, _ := srv.store.GetApp(nonce); app == nil || app.OwnerID != nil {
+		t.Errorf("app = %+v, want no owner", app)
+	}
+}
+
+// What an import finds, it updates: same files-only op a feed runs, no
+// new row, the existing gate and name left alone.
+func TestImportUpdatesWhatItFinds(t *testing.T) {
+	srv := newTestServer(t)
+	ada := mustUser(t, srv, "Ada", "Admin", "Active")
+	nonce := createApp(t, srv, "existing")
+	cleanupSlotApp(t, srv, nonce)
+	m := UpdateManifest{Version: "v1", Ops: []UpdateOp{{Action: "update_app_files", Target: nonce, Source: "apps/" + nonce,
+		Create: &CreateSpec{Name: "Renamed elsewhere"}}}}
+	_, events := importAs(t, srv, ada, importArchive(t, m, map[string][]byte{"apps/" + nonce + "/index.html": []byte("new")}))
+	if lastEvent(events).Event != "done" {
+		t.Fatalf("import: %v", events)
+	}
+	for _, e := range events {
+		if e.Data["status"] == "created" {
+			t.Errorf("created an app that was already here")
+		}
+	}
+	if app, _ := srv.store.GetApp(nonce); app.Name != "existing" {
+		t.Errorf("name = %q, want it left alone", app.Name)
+	}
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "new" {
+		t.Errorf("staging = %q", got)
+	}
+}
+
+// Services match by URL, so a service with the same name at another URL
+// is someone else's: an import refuses rather than overwrite it, and
+// touches nothing.
+func TestImportRefusesANameAtAnotherURL(t *testing.T) {
+	srv := newTestServer(t)
+	ada := mustUser(t, srv, "Ada", "Admin", "Active")
+	registerService(t, srv, "greeter", "/mcp/greeter-here", db.ServiceDescriptor{Type: "virtual"})
+	const nonce = "imported-app-nonce-3"
+	m := UpdateManifest{Version: "v1", Ops: []UpdateOp{
+		{Action: "update_app_files", Target: nonce, Source: "apps/" + nonce, Create: &CreateSpec{Name: "Blog"}},
+		{Action: "update_service_files", Target: "/mcp/greeter", Source: "services/greeter.txt",
+			Create: &CreateSpec{Name: "greeter", Descriptor: &db.ServiceDescriptor{Type: "virtual"}}},
+	}}
+	_, events := importAs(t, srv, ada, importArchive(t, m, map[string][]byte{
+		"apps/" + nonce + "/a.txt": []byte("a"), "services/greeter.txt": []byte("x"),
+	}))
+	last := lastEvent(events)
+	if last.Event != "feed_error" || !strings.Contains(fmt.Sprint(last.Data["message"]), "already exists here at another URL") {
+		t.Fatalf("last event = %+v", last)
+	}
+	if _, err := srv.store.GetApp(nonce); err == nil {
+		t.Error("the app was created although validation failed")
+	}
+}
+
+// Task scripts take a Superuser: an Admin can import apps and virtual
+// services, not tasks. Members can't import at all.
+func TestImportRoles(t *testing.T) {
+	srv := newTestServer(t)
+	ada := mustUser(t, srv, "Ada", "Admin", "Active")
+	mo := mustUser(t, srv, "Mo", "Member", "Active")
+	m := UpdateManifest{Version: "v1", Ops: []UpdateOp{{Action: "update_service_files", Target: "tasks://jobs", Source: "services/jobs.txt",
+		Create: &CreateSpec{Name: "jobs", Descriptor: &db.ServiceDescriptor{Type: "tasks"}}}}}
+	archive := importArchive(t, m, map[string][]byte{"services/jobs.txt": []byte("x")})
+
+	if rr, _ := importAs(t, srv, mo, archive); rr.Code != http.StatusForbidden {
+		t.Errorf("Member import: %d, want 403", rr.Code)
+	}
+	_, events := importAs(t, srv, ada, archive)
+	if last := lastEvent(events); last.Event != "feed_error" || !strings.Contains(fmt.Sprint(last.Data["message"]), "Superuser") {
+		t.Errorf("Admin importing tasks: %+v", last)
+	}
+}
+
+// Feeds stay update-only: a create spec in a feed's archive doesn't make
+// a missing target appear.
+func TestFeedNeverCreates(t *testing.T) {
+	srv := newTestServer(t)
+	err := srv.validateUpdateOps([]UpdateOp{{Action: "update_app_files", Target: "nope-nonce", Create: &CreateSpec{Name: "x"}}},
+		t.TempDir(), applyPolicy{owner: &db.User{ID: 1, Role: "Superuser"}})
+	if err == nil || !strings.Contains(err.Error(), "app not found") {
+		t.Errorf("validate = %v, want app not found", err)
+	}
+}
+
+// A feed finds a service by its URL, and still by its name in an archive
+// built before services went by URL.
+func TestFeedMatchesServicesByURL(t *testing.T) {
+	srv := newTestServer(t)
+	registerService(t, srv, "vals", "/mcp/vals", db.ServiceDescriptor{Type: "virtual"})
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "services"), 0755)
+	os.WriteFile(filepath.Join(dir, "services", "vals.txt"), []byte("x"), 0644)
+	p := applyPolicy{owner: &db.User{ID: 1, Role: "Superuser"}}
+	for _, op := range []UpdateOp{
+		{Action: "update_service_files", Target: "/mcp/vals", Source: "services/vals.txt"},
+		{Action: "update_service_files", Target: "vals"},
+	} {
+		if err := srv.validateUpdateOps([]UpdateOp{op}, dir, p); err != nil {
+			t.Errorf("target %q: %v", op.Target, err)
+		}
 	}
 }

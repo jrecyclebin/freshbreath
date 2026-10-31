@@ -37,6 +37,7 @@ const Icon = ({ name, size = 16 }) => {
     key:     <><circle cx="8" cy="15" r="4"/><path d="M10.9 12.1L20 3"/><path d="M17 6l2.5 2.5"/><path d="M14.5 8.5L17 11"/></>,
     mail:    <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></>,
     cog:     <><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3 1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8 1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></>,
+    transfer:<><path d="M4 8h14l-4-4"/><path d="M20 16H6l4 4"/></>,
     plug:    <><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></>,
     signout: <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></>,
     menu:    <><path d="M3 6h18M3 12h18M3 18h18"/></>,
@@ -3315,8 +3316,9 @@ const REMOTE_TRUST = 'A remote becomes part of this server. What it sends back i
 // Other Fresh Breaths this one drives through their tunnel addresses. The
 // list is this server's; each sign-in on a remote is this browser's own,
 // kept by frbr.js, so the status column reads the store, not the server.
-function RemotesView({ session }) {
+function RemotesView({ session, apps, services }) {
   const [remotes, setRemotes] = useState(null);
+  const [transferTo, setTransferTo] = useState(null); // the remote the Transfer modal is for
   const [name, setName] = useState('');
   const [address, setAddress] = useState('');
   const [busy, setBusy] = useState(false);
@@ -3372,6 +3374,12 @@ function RemotesView({ session }) {
     storeChanged();
   };
 
+  // A transfer goes as the remote's user, so sign in there first if need be.
+  const transfer = async (r) => {
+    if (!FrBr.remote(r).signedIn) await signIn(r);
+    if (FrBr.remote(r).signedIn) setTransferTo(r);
+  };
+
   return (
     <>
       <PageHead title="Remotes" sub="Other Fresh Breath servers this one reaches through their tunnels."/>
@@ -3400,6 +3408,7 @@ function RemotesView({ session }) {
                     </> : (
                       <button className="btn btn-ghost btn-sm" onClick={() => signIn(r)}><Icon name="key" size={13}/> Sign in</button>
                     )}
+                    <button className="btn btn-ghost btn-sm" onClick={() => transfer(r)} title="Transfer apps and services to this remote"><Icon name="transfer" size={13}/></button>
                     <button className="btn btn-ghost btn-sm" onClick={() => rename(r)} title="Rename"><Icon name="edit" size={13}/></button>
                     <button className="btn btn-ghost btn-sm" style={{color:'var(--tone-red)'}} onClick={() => remove(r)} title="Delete remote"><Icon name="trash" size={13}/></button>
                   </div>
@@ -3409,6 +3418,11 @@ function RemotesView({ session }) {
             );
           })}
         </div>
+      )}
+
+      {transferTo && (
+        <TransferModal session={session} remote={transferTo} apps={apps} services={services}
+          onClose={() => { setTransferTo(null); storeChanged(); }}/>
       )}
 
       <div style={{borderTop:remotes && remotes.length ? '1px solid var(--line-soft)' : undefined,paddingTop:20}}>
@@ -3432,6 +3446,70 @@ function RemotesView({ session }) {
         <span className="help">The address can't be changed later: it's the remote's identity. A new address means a new remote.</span>
       </div>
     </>
+  );
+}
+
+// Send apps and services to a remote: the Build archive picker, with each
+// row tagged by what the remote will do with it. The remote matches the
+// same way an update feed does — apps by nonce, services by URL — and
+// creates what it doesn't have; the tags here are that rule, read off its
+// own lists beforehand.
+function TransferModal({ session, remote, apps, services, onClose }) {
+  const rs = FrBr.remote(remote);
+  const [sel, setSel] = useState({ apps: [], services: [] });
+  const [there, setThere] = useState(null); // {nonces, urls} the remote already has
+  const [log, setLog] = useState(null);
+  const toast = useToast();
+
+  const trimSlash = (u = '') => u.replace(/\/+$/, '');
+  useEffect(() => {
+    Promise.all([frbr(rs, 'GET', '/api/apps'), frbr(rs, 'GET', '/api/services')])
+      .then(([a, sv]) => setThere({
+        nonces: new Set((a.apps || []).map(x => x.nonce)),
+        urls: new Set((sv.services || []).map(x => trimSlash(x.url))),
+      }))
+      .catch(e => toast(e.message, true));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const tag = (kind, item) => {
+    if (!there) return null;
+    const has = kind === 'app' ? there.nonces.has(item.nonce) : there.urls.has(trimSlash(item.url));
+    return <Badge tone={has ? 'blue' : 'green'}>{has ? 'update' : 'new'}</Badge>;
+  };
+
+  const run = async () => {
+    setLog({ events: [] });
+    try {
+      await rs.check(); // the token rides along as-is, so make sure it's fresh
+      const headers = new Headers();
+      rs.addAuth(headers);
+      await FrBr.sseStream('/api/transfer', {
+        session, headers,
+        body: { remote: remote.id, apps: sel.apps, services: sel.services },
+        onEvent: (ev, data) => setLog(prev => prev && { events: [...prev.events, { event: ev, data }] }),
+      });
+    } catch (e) { toast(e.message, true); }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{maxWidth:520}}>
+        <h3 style={{marginBottom:12}}>Transfer to {remote.name}</h3>
+        <p className="muted" style={{fontSize:13,marginBottom:16}}>
+          Send the selected apps (current staging slot — dev if none yet) and service definitions to “{remote.name}”,
+          as {rs.email || 'your account there'}. Ones it already has are updated in their staging slots; new ones are
+          created there, with gates matched by auth record name and owners and members by email.
+        </p>
+        <ArchivePicker apps={apps} services={services} sel={sel} setSel={setSel} tag={tag}/>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
+          <button className="btn btn-ghost" onClick={onClose}>Close</button>
+          <button className="btn btn-primary" disabled={sel.apps.length + sel.services.length === 0} onClick={run}>
+            <Icon name="transfer" size={14}/> Transfer
+          </button>
+        </div>
+        {log && <UpdateProgress events={log.events}/>}
+      </div>
+    </div>
   );
 }
 
@@ -3627,6 +3705,50 @@ function PassphraseModal({ title, blurb, onClose, onSubmit }) {
 // hosted apps) and is exposed on window.FrBr.
 
 // UpdateProgress renders the live apply/build event stream as a log.
+// The apps and services checklists shared by Build archive and Transfer.
+// Only task and virtual services travel: they're the ones with a
+// definition file. tag(kind, item), when given, labels each row (Transfer
+// says whether the remote has it already).
+function ArchivePicker({ apps, services, sel, setSel, tag }) {
+  const pubServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
+  const toggle = (kind, val) => setSel(s => ({
+    ...s,
+    [kind]: s[kind].includes(val) ? s[kind].filter(v => v !== val) : [...s[kind], val],
+  }));
+  const row = { display:'flex', gap:8, alignItems:'center', padding:'3px 0', fontSize:13, cursor:'pointer' };
+  const box = { overflowY:'auto', border:'1px solid var(--line)', borderRadius:8, padding:'6px 10px' };
+  return (
+    <>
+      <div className="field">
+        <label>Apps ({sel.apps.length} selected)</label>
+        <div style={{...box, maxHeight:140}}>
+          {apps.length === 0 && <span className="muted" style={{fontSize:13}}>no apps</span>}
+          {apps.map(a => (
+            <label key={a.nonce} style={row}>
+              <input type="checkbox" name="apps" value={a.nonce} checked={sel.apps.includes(a.nonce)} onChange={() => toggle('apps', a.nonce)} />
+              {a.name} <span className="muted" style={{fontSize:11}}>{a.nonce}</span>
+              {tag?.('app', a)}
+            </label>
+          ))}
+        </div>
+      </div>
+      <div className="field">
+        <label>Services ({sel.services.length} selected)</label>
+        <div style={{...box, maxHeight:120}}>
+          {pubServices.length === 0 && <span className="muted" style={{fontSize:13}}>no tasks/virtual services</span>}
+          {pubServices.map(s => (
+            <label key={s.id} style={row}>
+              <input type="checkbox" name="services" value={s.name} checked={sel.services.includes(s.name)} onChange={() => toggle('services', s.name)} />
+              {s.name} <span className="muted" style={{fontSize:11}}>{s.descriptor?.type}</span>
+              {tag?.('service', s)}
+            </label>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 function UpdateProgress({ events, onClose }) {
   const ref = useRef(null);
   useEffect(() => { ref.current?.scrollTo(0, ref.current.scrollHeight); }, [events]);
@@ -3634,13 +3756,15 @@ function UpdateProgress({ events, onClose }) {
     const d = e.data || {};
     let text;
     switch (e.event) {
-      case 'fetch': case 'decrypt': case 'validate': case 'manifest': case 'encrypt':
+      case 'fetch': case 'decrypt': case 'validate': case 'manifest': case 'encrypt': case 'extract':
         text = `${e.event}…${d.ops ? ` (${d.ops} ops)` : ''}`; break;
       case 'collect': text = `collecting ${d.apps ?? 0} app(s), ${d.services ?? 0} service(s)`; break;
       case 'app': text = `packaged app ${d.nonce} (from ${d.source_slot})`; break;
       case 'service': text = `packaged service ${d.name}`; break;
+      case 'send': text = `sending to ${d.name}…`; break;
       case 'op':
-        text = d.status === 'start' ? `op ${d.index}: ${d.action} → ${d.target}` : `op ${d.index}: done`;
+        text = d.status === 'start' ? `op ${d.index}: ${d.action} → ${d.target}`
+          : d.status === 'created' ? `op ${d.index}: created ${d.name}` : `op ${d.index}: done`;
         break;
       case 'skip': text = `skipped — already applied${d.version ? ` (${d.version})` : ''}`; break;
       case 'done': text = d.download_url ? `built ${d.version} — downloading archive…` : `applied ${d.version} (${d.applied ?? '?'} ops)`; break;
@@ -3775,13 +3899,6 @@ function RemoteUpdates({ session, apps, services }) {
     })();
   }, [buildLog?.done]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const toggleSel = (kind, val) => setBuildSel(s => ({
-    ...s,
-    [kind]: s[kind].includes(val) ? s[kind].filter(v => v !== val) : [...s[kind], val],
-  }));
-
-  const pubServices = services.filter(s => s.descriptor?.type === 'tasks' || s.descriptor?.type === 'virtual');
-
   return (
     <div>
       {/* feed list — one bordered card, a row per feed (frbr-concept layout):
@@ -3891,30 +4008,7 @@ function RemoteUpdates({ session, apps, services }) {
               <label>Version</label>
               <input className="input mono" name="build_version" {...NO_FILL} style={{fontSize:12}} value={buildVersion} onChange={e => setBuildVersion(e.target.value)} placeholder="blank = timestamp" />
             </div>
-            <div className="field">
-              <label>Apps ({buildSel.apps.length} selected)</label>
-              <div style={{maxHeight:140,overflowY:'auto',border:'1px solid var(--line)',borderRadius:8,padding:'6px 10px'}}>
-                {apps.length === 0 && <span className="muted" style={{fontSize:13}}>no apps</span>}
-                {apps.map(a => (
-                  <label key={a.nonce} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
-                    <input type="checkbox" name="apps" value={a.nonce} checked={buildSel.apps.includes(a.nonce)} onChange={() => toggleSel('apps', a.nonce)} />
-                    {a.name} <span className="muted" style={{fontSize:11}}>{a.nonce}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="field">
-              <label>Services ({buildSel.services.length} selected)</label>
-              <div style={{maxHeight:120,overflowY:'auto',border:'1px solid var(--line)',borderRadius:8,padding:'6px 10px'}}>
-                {pubServices.length === 0 && <span className="muted" style={{fontSize:13}}>no tasks/virtual services</span>}
-                {pubServices.map(s => (
-                  <label key={s.id} style={{display:'flex',gap:8,alignItems:'center',padding:'3px 0',fontSize:13,cursor:'pointer'}}>
-                    <input type="checkbox" name="services" value={s.name} checked={buildSel.services.includes(s.name)} onChange={() => toggleSel('services', s.name)} />
-                    {s.name} <span className="muted" style={{fontSize:11}}>{s.descriptor?.type}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+            <ArchivePicker apps={apps} services={services} sel={buildSel} setSel={setBuildSel}/>
             <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
               <button className="btn btn-ghost" onClick={() => setBuildFor(null)}>Cancel</button>
               <button className="btn btn-primary" disabled={buildSel.apps.length + buildSel.services.length === 0} onClick={runBuild}>
@@ -4106,7 +4200,7 @@ function AppShell() {
         {page==='roles'     && <RolesView roles={roles}/>}
         {page==='audit'     && <AuditView audit={audit} isAdmin={isAdmin}/>}
         {page==='profile'   && <ProfileView session={session}/>}
-        {page==='remotes'   && <RemotesView session={session}/>}
+        {page==='remotes'   && <RemotesView session={session} apps={apps} services={services}/>}
         {page==='settings'  && <SettingsView session={session} services={services} apps={apps} auth={auth} onRefresh={load}/>}
       </main>
     </div>

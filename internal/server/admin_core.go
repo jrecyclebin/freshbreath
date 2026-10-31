@@ -433,6 +433,12 @@ func (s *Server) validateAuthSlot(slot string, id *int64) error {
 }
 
 func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *int64, protectedBy *int64) (string, error) {
+	return s.coreCreateAppWithNonce(actor, "", name, env, url, ownerID, protectedBy)
+}
+
+// coreCreateAppWithNonce creates an app under a nonce it already has on
+// another server (an import), or a fresh one for "".
+func (s *Server) coreCreateAppWithNonce(actor *db.User, nonce, name, env, url string, ownerID *int64, protectedBy *int64) (string, error) {
 	if err := s.gate(actor, rolesAdminPlus); err != nil {
 		return "", err
 	}
@@ -449,7 +455,7 @@ func (s *Server) coreCreateApp(actor *db.User, name, env, url string, ownerID *i
 	if err := s.validateAuthSlot("protected_by", protectedBy); err != nil {
 		return "", err
 	}
-	nonce, err := s.store.CreateApp(name, env, url, ownerID, protectedBy)
+	nonce, err = s.store.CreateAppWithNonce(nonce, name, env, url, ownerID, protectedBy)
 	if err != nil {
 		return "", cerr(http.StatusInternalServerError, "%v", err)
 	}

@@ -432,6 +432,14 @@ func (s *Store) ensureAutoincrement(table string) error {
 // explicit choice either way (empty would mean inherit-admin, which is the
 // wrong default for a fresh dashboard).
 func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protectedBy *int64) (string, error) {
+	return s.CreateAppWithNonce("", name, env, url, ownerID, protectedBy)
+}
+
+// CreateAppWithNonce is CreateApp keeping a nonce the app already has
+// elsewhere (an import from another server), so later imports and update
+// feeds match it. "" picks a fresh one.
+func (s *Store) CreateAppWithNonce(nonce, name, env string, url string, ownerID *int64, protectedBy *int64) (string, error) {
+	keep := nonce != ""
 	if env == "" {
 		env = "Development"
 	}
@@ -441,7 +449,9 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 	// silently pin every new app to open-to-the-LAN, which the control panel
 	// no longer offers as the default; an explicit Anonymous record is the
 	// opt-in. Kept nullable so the round-trip matches UpdateApp.
-	nonce := utils.GenNonce()
+	if !keep {
+		nonce = utils.GenNonce()
+	}
 	for {
 		_, err := s.db.Exec(
 			"INSERT INTO apps (nonce, name, environment, url, owner_id, protected_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, "+nowSQL+")",
@@ -449,7 +459,7 @@ func (s *Store) CreateApp(name, env string, url string, ownerID *int64, protecte
 		if err == nil {
 			return nonce, nil
 		}
-		if isUnique(err) {
+		if isUnique(err) && !keep {
 			nonce = utils.GenNonce()
 			continue
 		}

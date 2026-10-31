@@ -296,6 +296,15 @@ const prod = await login("remote://prod");   // prompts the first time
 const r = await api(prod, "/api/apps");       // the remote's own API
 ```
 
+The ⇄ button on a remote **transfers** apps and services to it: pick them
+as you would for an update archive, and each is marked *new* or *update*.
+The remote matches them the way an update feed does (apps by their nonce,
+services by their URL), updates the ones it has in their staging slots, and
+creates the rest. It can't know your auth records or users by their ids, so
+a new app's gate is the record with the same name there, and its owner and
+members are the users with the same emails. Anything with no match is left
+empty, so the gate falls back to the remote's panel gate.
+
 Names are unique (ignoring case) and can be changed. The address can't: it's
 the remote's identity, so a new address means a new remote. The fingerprint
 shown beside each one is a short form of that identity, and the sign-in
@@ -312,6 +321,10 @@ Remote updates are a way for one Fresh Breath instance to
 *pull* updates for its apps and services from an encrypted archive, hosted
 online. You add the URL in the Settings area and Fresh Breath will notify
 the user when there's an update available.
+
+An update only ever updates: it matches apps by their nonce and services by
+their URL, and an archive naming something the receiver doesn't have is
+turned down whole. (Creating things is what a transfer to a remote is for.)
 
 App updates go to the Staging slot - so you can either let the user test it
 and deploy to Production, or you can set the app's default environment to

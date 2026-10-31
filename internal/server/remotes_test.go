@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -389,5 +392,100 @@ func TestRemoteProxyFailuresAndCleanup(t *testing.T) {
 	}
 	if closed != 1 {
 		t.Errorf("client closed %d times on delete, want 1", closed)
+	}
+}
+
+// ── Transfer ──
+
+// A transfer packs apps and services here and imports them there, as the
+// remote user the browser signed in as. The remote's progress comes back in
+// the same stream, and a second transfer is an update, not a duplicate.
+func TestTransferToARemote(t *testing.T) {
+	a, b := newTestServer(t), newTestServer(t)
+	a.config.DataDir, b.config.DataDir = t.TempDir(), t.TempDir()
+	setAdminSSH(t, b)
+	passphraseUser(t, b, "Admin")
+	a.remoteConns.open = dialTo(t, b.tunnelHandler(), nil)
+	admin := mustUser(t, a, "Ada", "Admin", "Active")
+	remote := addRemote(t, a, admin, "Server B", testTailcatAddr(t))
+	p := pairRemote(t, a, admin, remote)
+
+	nonce, err := a.store.CreateApp("Blog", "", "", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createSlotFile(t, a, nonce, "web", "index.html", []byte("v1"))
+	registerService(t, a, "greeter", "/mcp/greeter", db.ServiceDescriptor{Type: "virtual"})
+	svc, _ := a.store.GetServiceByName("greeter")
+	os.MkdirAll(filepath.Dir(serviceDefinitionPath(a.config.DataDir, svc)), 0755)
+	os.WriteFile(serviceDefinitionPath(a.config.DataDir, svc), []byte("greeter def"), 0644)
+
+	transfer := func() []sseEvent {
+		t.Helper()
+		rr := remoteRequest(a, admin, "POST", "/api/transfer",
+			`{"remote":"`+remote.ID+`","apps":["`+nonce+`"],"services":["greeter"]}`,
+			map[string]string{"X-Tunnel-Token": p.Access})
+		if rr.Code != 200 {
+			t.Fatalf("transfer: %d %s", rr.Code, rr.Body.String())
+		}
+		return parseSSE(rr.Body.String())
+	}
+	events := transfer()
+	var seq []string
+	for _, e := range events {
+		if e.Event != "op" {
+			seq = append(seq, e.Event)
+		}
+	}
+	if want := "[collect app service manifest send extract validate done]"; fmt.Sprint(seq) != want {
+		t.Errorf("events = %v, want %s", seq, want)
+	}
+
+	if app, err := b.store.GetApp(nonce); err != nil || app.Name != "Blog" {
+		t.Fatalf("app on B: %+v %v", app, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(b.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v1" {
+		t.Errorf("B staging = %q", got)
+	}
+	bsvc, err := b.store.GetServiceByURL("/mcp/greeter")
+	if err != nil {
+		t.Fatalf("service on B: %v", err)
+	}
+	if got, _ := os.ReadFile(serviceDefinitionPath(b.config.DataDir, bsvc)); string(got) != "greeter def" {
+		t.Errorf("B service file = %q", got)
+	}
+
+	// Again, with new files: updated in place.
+	createSlotFile(t, a, nonce, "web", "index.html", []byte("v2"))
+	for _, e := range transfer() {
+		if e.Data["status"] == "created" {
+			t.Errorf("second transfer created %v again", e.Data["target"])
+		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(b.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v2" {
+		t.Errorf("B staging after the update = %q", got)
+	}
+	apps, _ := b.store.ListApps()
+	if len(apps) != 1 {
+		t.Errorf("B has %d apps, want 1", len(apps))
+	}
+}
+
+// A refused token ends the stream with a plain error, and without one the
+// transfer doesn't start.
+func TestTransferNeedsARemoteSignIn(t *testing.T) {
+	a, admin, remote := remoteSetup(t, "Admin")
+	a.config.DataDir = t.TempDir()
+	nonce, _ := a.store.CreateApp("Blog", "", "", nil, nil)
+	createSlotFile(t, a, nonce, "web", "index.html", []byte("v1"))
+	body := `{"remote":"` + remote.ID + `","apps":["` + nonce + `"]}`
+
+	if rr := remoteRequest(a, admin, "POST", "/api/transfer", body, nil); rr.Code != http.StatusBadRequest {
+		t.Errorf("no token: %d, want 400", rr.Code)
+	}
+	rr := remoteRequest(a, admin, "POST", "/api/transfer", body, map[string]string{"X-Tunnel-Token": "nonsense"})
+	events := parseSSE(rr.Body.String())
+	if last := events[len(events)-1]; last.Event != "feed_error" || !strings.Contains(fmt.Sprint(last.Data["message"]), "sign in to it again") {
+		t.Errorf("bad token: %+v", last)
 	}
 }

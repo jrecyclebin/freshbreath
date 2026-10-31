@@ -1218,9 +1218,10 @@ function parseSSEBlock(block) {
  * @param {Function}     [opts.onOpen]       — called on each successful connect
  * @param {Function}     [opts.onError]      — called per retryable failure while reconnecting
  * @param {AuthSession}  [opts.session]      — attaches this page's credential
+ * @param {HeadersInit}  [opts.headers]      — more headers (a remote's X-Tunnel-Token, say)
  */
 export async function sseStream(path, {
-  method = 'POST', body, session, onEvent,
+  method = 'POST', body, session, headers: extraHeaders, onEvent,
   reconnect = false, signal, onOpen, onError, lastEventId = null,
 } = {}) {
   let attempt = 0;
@@ -1235,7 +1236,8 @@ export async function sseStream(path, {
     const openedAt = Date.now();
 
     try {
-      const headers = new Headers({ 'Accept': 'text/event-stream' });
+      const headers = new Headers(extraHeaders);
+      headers.set('Accept', 'text/event-stream');
       const opts = { method, headers, signal };
       if (body) { headers.set('Content-Type', 'application/json'); opts.body = JSON.stringify(body); }
       session?.addAuth(headers);

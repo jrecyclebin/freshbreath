@@ -12,6 +12,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -292,5 +293,65 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 
 	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
 		return s.coreApplyUpdateFeeds(r.Context(), claims, body.IDs, ch)
+	})
+}
+
+// handleUpdateImport serves POST /api/updates/import — a transfer from
+// another server: the body is the archive (a plain tar.gz), the answer an
+// SSE stream like apply's. Admin+, by its mount.
+func (s *Server) handleUpdateImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := actorFromContext(r)
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		writeErr(w, err)
+		return
+	}
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxArchiveSize))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("archive too large or unreadable: %v", err), http.StatusBadRequest)
+		return
+	}
+	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
+		return s.coreImportArchive(r.Context(), actor, data, ch)
+	})
+}
+
+// handleTransfer serves POST /api/transfer {remote, apps, services} — send
+// apps and services to a remote, as the remote user whose token rides in
+// X-Tunnel-Token (as for the proxy). Admin+, SSE progress: this server's
+// packing, then the remote's import.
+func (s *Server) handleTransfer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor := actorFromContext(r)
+	if err := s.gate(actor, rolesAdminPlus); err != nil {
+		writeErr(w, err)
+		return
+	}
+	var body struct {
+		Remote   string   `json:"remote"`
+		Apps     []string `json:"apps"`
+		Services []string `json:"services"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.store.GetRemote(body.Remote); err != nil {
+		http.Error(w, "remote not found", http.StatusNotFound)
+		return
+	}
+	token := strings.TrimSpace(r.Header.Get("X-Tunnel-Token"))
+	if token == "" {
+		http.Error(w, "sign in to the remote first (no X-Tunnel-Token)", http.StatusBadRequest)
+		return
+	}
+	s.writeUpdateStream(w, r, func(ch chan<- UpdateEvent) error {
+		return s.coreTransfer(r.Context(), actor, body.Remote, token, body.Apps, body.Services, ch)
 	})
 }
