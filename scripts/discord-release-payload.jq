@@ -19,7 +19,7 @@ release_parts($body; $commit) as {$heading, $lead}
 # Same manual-Docker door as the Slack note. The <angle brackets> stop
 # Discord unfurling the Actions page into a big useless preview card.
 | (if ($docker_url | length) > 0
-   then "\n[Build the Docker images →](<\($docker_url)>)" else "" end) as $docker
+   then "\nDocker images updated at [ghcr.io](https://github.com/jrecyclebin/freshbreath/pkgs/container/freshbreath) and [Docker Hub](https://hub.docker.com/r/jrecyclebin/freshbreath)" else "" end) as $docker
 
 # allowed_mentions with an empty parse list: a release note that happens to
 # say @everyone (or <@&role>) is text, not a page to the whole server.
