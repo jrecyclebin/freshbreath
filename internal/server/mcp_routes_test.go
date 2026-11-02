@@ -1,8 +1,12 @@
 package server
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -59,5 +63,51 @@ func TestMCPRoutingBareTrailingSlash(t *testing.T) {
 	_, pattern := srv.mux.Handler(req)
 	if pattern == "/mcp" || pattern == "/mcp/{name}" {
 		t.Fatalf("/mcp/ unexpectedly matched MCP pattern %q; expected fall-through to /", pattern)
+	}
+}
+
+// TestMCPHostGuard covers the DNS-rebinding check on loopback connections.
+// A tunnel (cloudflared → localhost) arrives on loopback carrying the
+// public Host; a signed-in client there must get through, not a 403.
+func TestMCPHostGuard(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.PublicBaseURL = "https://Tunnel.Example.dev"
+	srv.SetupRoutes()
+	rec := fakeGitHubIdP(t, srv)
+	makeAdminAuth(t, srv, rec)
+	user := knownUser(t, srv)
+	tok, err := srv.mintFreshbreathToken(fmt.Sprintf("frbr:%d", user.ID), user.Email, "", user.Name, rec.ID, nil, nil)
+	if err != nil {
+		t.Fatalf("mint token: %v", err)
+	}
+
+	loopback := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9009}
+	lan := &net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 9009}
+	cases := []struct {
+		name  string
+		local net.Addr
+		host  string
+		want  int
+	}{
+		{"public host via tunnel", loopback, "tunnel.example.dev", http.StatusOK},
+		{"public host with port", loopback, "tunnel.example.dev:443", http.StatusOK},
+		{"localhost", loopback, "localhost:9009", http.StatusOK},
+		{"ipv6 loopback", loopback, "[::1]:9009", http.StatusOK},
+		{"rebinding domain", loopback, "evil.example.com", http.StatusForbidden},
+		{"lan connection, any host", lan, "evil.example.com", http.StatusOK},
+	}
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+		req.Host = c.host
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, c.local))
+		rr := httptest.NewRecorder()
+		srv.centralMCPHandler.ServeHTTP(rr, req)
+		if rr.Code != c.want {
+			t.Errorf("%s: got %d, want %d (%s)", c.name, rr.Code, c.want, strings.TrimSpace(rr.Body.String()))
+		}
 	}
 }

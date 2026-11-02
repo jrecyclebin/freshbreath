@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -71,15 +74,16 @@ func (r *mcpMountRegistry) add(s *Server, svc *db.Service) {
 		// stateless sessions outright. SessionTimeout reaps abandoned
 		// sessions; the idle timer pauses while a request is in flight, so
 		// a suspended run inside an open tools/call can't be reaped.
-		Stateless:      false,
-		SessionTimeout: 30 * time.Minute,
+		Stateless:                  false,
+		SessionTimeout:             30 * time.Minute,
+		DisableLocalhostProtection: true, // mcpHostGuard does this job
 	})
 
 	r.mu.Lock()
 	r.entries[slug] = &mcpMountEntry{
 		svc:     svc,
 		mcps:    mcps,
-		handler: s.requireMCPGate(svc, handler),
+		handler: s.mcpHostGuard(s.requireMCPGate(svc, handler)),
 	}
 	r.mu.Unlock()
 }
@@ -133,6 +137,45 @@ func (s *Server) requireMCPGate(svc *db.Service, next http.Handler) http.Handler
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// mcpHostGuard stands in for the SDK's DNS-rebinding check, which refuses
+// any non-localhost Host on a loopback connection — and so every request
+// through a tunnel or local reverse proxy. A rebinding page carries its own
+// domain in Host, so also admitting the public base URL's host keeps the
+// protection without locking out our own front door.
+func (s *Server) mcpHostGuard(next http.Handler) http.Handler {
+	publicHost := ""
+	if u, err := url.Parse(s.config.PublicBaseURL); err == nil {
+		publicHost = u.Hostname()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		local, _ := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+		if local != nil && isLoopbackHost(local.String()) && !isLoopbackHost(r.Host) {
+			host := r.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			if publicHost == "" || !strings.EqualFold(host, publicHost) {
+				http.Error(w, fmt.Sprintf("Forbidden: invalid Host header %q", r.Host), http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isLoopbackHost reports whether a host or host:port names this machine.
+func isLoopbackHost(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = strings.Trim(addr, "[]")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 // ── MCP Server Factory ───────────────────────────────────────────────

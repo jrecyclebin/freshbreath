@@ -428,7 +428,7 @@ or `%LOCALAPPDATA%\freshbreath` on Windows.
 | `FRBR_DIR` | auto-detected | Install directory containing `web/` control panel |
 | `FRBR_DATA_DIR` | auto-detected | Data directory for `apps/`, `virtual/`, `tasks/` and database |
 | `FRBR_DB_PATH` | `./freshbreath.db` | SQLite database file |
-| `FRBR_BASE_URL` | auto-detected | Defaults to `http://localhost:9009` or `https://localhost:9009` depending on TLS. Set this when the public URL differs — behind a reverse proxy or a cloud load balancer that terminates TLS. Its scheme is authoritative for its own host: requests arriving with that `Host` are treated as its scheme, even when the TLS ends at a front-end the server cannot name (so no `FRBR_TRUSTED_PROXIES` list is needed for it). |
+| `FRBR_BASE_URL` | auto-detected | Defaults to `http://localhost:9009` or `https://localhost:9009` depending on TLS. Set this when the public URL differs — behind a reverse proxy or a cloud load balancer that terminates TLS. Its scheme is authoritative for its own host: requests arriving with that `Host` are treated as its scheme, even when the TLS ends at a front-end the server cannot name (so no `FRBR_TRUSTED_PROXIES` list is needed for it). Its host is also the one non-localhost `Host` the MCP endpoints accept on a loopback connection, so a tunnel like cloudflared → `localhost:9009` gets through their DNS-rebinding check. |
 | `FRBR_LISTEN_ADDR` | `:9009` | HTTP bind address |
 | `FRBR_TLS_CERT` | *(none)* | Path to TLS certificate (PEM) |
 | `FRBR_TLS_KEY` | *(none)* | Path to TLS private key (PEM) |

@@ -2372,13 +2372,16 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 func (s *Server) setupCentralMCP() {
 	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return s.centralMCPServerForRole(roleFromRequest(r))
-	}, &mcp.StreamableHTTPOptions{Stateless: true})
+	}, &mcp.StreamableHTTPOptions{
+		Stateless:                  true,
+		DisableLocalhostProtection: true, // mcpHostGuard does this job
+	})
 
 	prm := s.buildCentralMCPPRM()
 	prmURL := s.config.PublicBaseURL + "/.well-known/oauth-protected-resource/mcp"
-	s.centralMCPHandler = auth.RequireBearerToken(s.centralMCPTokenVerifier(), &auth.RequireBearerTokenOptions{
+	s.centralMCPHandler = s.mcpHostGuard(auth.RequireBearerToken(s.centralMCPTokenVerifier(), &auth.RequireBearerTokenOptions{
 		ResourceMetadataURL: prmURL,
-	})(handler)
+	})(handler))
 	s.centralMCPPRMVal = prm
 }
 
