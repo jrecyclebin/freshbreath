@@ -212,29 +212,53 @@ jobs:
           gh release upload "$TAG" --repo "$REPO" --clobber \
             dist/*.tar.gz dist/*.zip dist/*-setup.*
 
-  # Say it out loud in Slack. Only after `release`, so the ping means the
-  # binaries are actually attached — a notification that fires on a release
-  # with nothing in it is worse than silence, because you believe it.
+  # Say it out loud in Slack and Discord. Only after `release`, so the ping
+  # means the binaries are actually attached — a notification that fires on a
+  # release with nothing in it is worse than silence, because you believe it.
   notify:
     needs: release
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+      RELEASE_NAME: ${{ github.event.release.name }}
+      RELEASE_URL: ${{ github.event.release.html_url }}
+      # The Docker images are a manual follow-up — built from the tarballs
+      # this release just attached, once someone has looked at them. The
+      # note carries the link so nobody has to go hunting through Actions.
+      DOCKER_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/docker.yml
+      NOTES_DIR: ${{ runner.temp }}/release-notes
     steps:
       - uses: actions/checkout@v5
+
+      # Fetched once, read by every channel below. Parked in files rather
+      # than step outputs so multi-line prose never has to survive a
+      # round-trip through $GITHUB_OUTPUT's heredoc syntax.
+      - name: Gather release notes
+        id: notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$NOTES_DIR"
+
+          # Read the body back over the API rather than out of the event
+          # payload: the payload froze at publish time, and a release whose
+          # notes were written into a draft beforehand deserves to have them
+          # read. If there is no prose either way, the formatter falls back
+          # to the tag's commit message.
+          gh api "repos/$REPO/releases/tags/$TAG" --jq '.body // ""' > "$NOTES_DIR/body"
+
+          # The commits endpoint takes any ref, so the tag resolves to its
+          # commit whether it was made annotated or lightweight.
+          gh api "repos/$REPO/commits/$TAG" --jq '.commit.message' > "$NOTES_DIR/commit"
 
       - name: Post to Slack
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.event.release.tag_name }}
-          RELEASE_NAME: ${{ github.event.release.name }}
-          RELEASE_URL: ${{ github.event.release.html_url }}
-          # The Docker images are a manual follow-up — built from the tarballs
-          # this release just attached, once someone has looked at them. The
-          # note carries the link so nobody has to go hunting through Actions.
-          DOCKER_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/docker.yml
         run: |
           set -euo pipefail
 
@@ -245,25 +269,14 @@ jobs:
             exit 0
           fi
 
-          # Read the body back over the API rather than out of the event
-          # payload: the payload froze at publish time, and a release whose
-          # notes were written into a draft beforehand deserves to have them
-          # read. If there is no prose either way, the formatter falls back
-          # to the tag's commit message.
-          body=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.body // ""')
-
-          # The commits endpoint takes any ref, so the tag resolves to its
-          # commit whether it was made annotated or lightweight.
-          commit=$(gh api "repos/$REPO/commits/$TAG" --jq '.commit.message')
-
-          # Everything arrives through env rather than being pasted into the
-          # script by interpolation, and the text is assembled by jq, never printf.
-          # Release notes are prose someone typed; they should not be able to
-          # become shell, or JSON, or markup.
-          payload=$(jq -n \
+          # Everything arrives through env and files rather than being pasted
+          # into the script by interpolation, and the text is assembled by jq,
+          # never printf. Release notes are prose someone typed; they should
+          # not be able to become shell, or JSON, or markup.
+          payload=$(jq -n -L scripts \
             --arg name "${RELEASE_NAME:-$TAG}" \
-            --arg body "$body" \
-            --arg commit "$commit" \
+            --rawfile body "$NOTES_DIR/body" \
+            --rawfile commit "$NOTES_DIR/commit" \
             --arg url "$RELEASE_URL" \
             --arg docker_url "$DOCKER_URL" \
             -f scripts/slack-release-payload.jq)
@@ -273,3 +286,48 @@ jobs:
             -d "$payload" \
             "$SLACK_WEBHOOK_URL"
           echo "→ posted $TAG to Slack"
+
+      # Runs even if Slack fell over — one flaky webhook shouldn't silence
+      # the other platform — but not if there are no notes to send.
+      - name: Post to Discord
+        if: ${{ !cancelled() && steps.notes.outcome == 'success' }}
+        shell: bash
+        env:
+          # One webhook URL per line, one line per channel.
+          DISCORD_WEBHOOK_URLS: ${{ secrets.DISCORD_WEBHOOK_URLS }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DISCORD_WEBHOOK_URLS:-}" ]; then
+            echo "→ no DISCORD_WEBHOOK_URLS secret set; skipping the Discord post"
+            exit 0
+          fi
+
+          payload=$(jq -n -L scripts \
+            --arg name "${RELEASE_NAME:-$TAG}" \
+            --rawfile body "$NOTES_DIR/body" \
+            --rawfile commit "$NOTES_DIR/commit" \
+            --arg url "$RELEASE_URL" \
+            --arg docker_url "$DOCKER_URL" \
+            -f scripts/discord-release-payload.jq)
+
+          # Try every channel before judging: a dead webhook in one shouldn't
+          # keep the news from the other. Channels are numbered, never named
+          # by URL — the URL *is* the credential.
+          n=0 failed=0
+          while IFS= read -r hook; do
+            hook=$(printf '%s' "$hook" | tr -d '[:space:]')
+            [ -z "$hook" ] && continue
+            n=$((n + 1))
+            if curl -sS --fail-with-body -X POST \
+                 -H 'Content-Type: application/json' \
+                 -d "$payload" \
+                 "$hook"; then
+              echo "→ posted $TAG to Discord channel #$n"
+            else
+              echo "::error::Discord channel #$n rejected the post"
+              failed=$((failed + 1))
+            fi
+          done <<< "$DISCORD_WEBHOOK_URLS"
+
+          [ "$failed" -eq 0 ]
