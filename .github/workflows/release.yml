@@ -227,7 +227,6 @@ jobs:
       # this release just attached, once someone has looked at them. The
       # note carries the link so nobody has to go hunting through Actions.
       DOCKER_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/docker.yml
-      NOTES_DIR: ${{ runner.temp }}/release-notes
     steps:
       - uses: actions/checkout@v5
 
@@ -242,6 +241,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          # The `runner` context isn't available in job-level env, so the
+          # path is minted here and handed to later steps through GITHUB_ENV.
+          NOTES_DIR="$RUNNER_TEMP/release-notes"
+          echo "NOTES_DIR=$NOTES_DIR" >> "$GITHUB_ENV"
           mkdir -p "$NOTES_DIR"
 
           # Read the body back over the API rather than out of the event
