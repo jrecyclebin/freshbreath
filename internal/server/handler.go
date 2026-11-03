@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"mime"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -770,7 +772,8 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 	// A directory with its own index.html gets the same trailing-slash
 	// redirect as the app root, so its relative asset paths resolve.
 	var f *os.File
-	for dir := clean; ; dir = filepath.Dir(dir) {
+	var dir string
+	for dir = clean; ; dir = filepath.Dir(dir) {
 		if f, err = os.Open(filepath.Join(webDir, dir, "index.html")); err == nil {
 			if dir == clean && dir != "." && !strings.HasSuffix(r.URL.Path, "/") {
 				f.Close()
@@ -791,7 +794,79 @@ func (s *Server) handleHostedApp(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	fi, _ := f.Stat()
 	setRevalidateHeaders(w, fi)
+
+	// A page served for a deeper URL (/tools/email/review/1 → email/index.html)
+	// would resolve its relative URLs against the wrong folder, so it gets a
+	// <base> pointing at its own — slot prefix and all, as requested.
+	reqDir := clean
+	if !strings.HasSuffix(r.URL.Path, "/") {
+		reqDir = filepath.Dir(clean)
+	}
+	if reqDir != dir {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			http.Error(w, "read failed", http.StatusInternalServerError)
+			return
+		}
+		first, _, _ := strings.Cut(strings.TrimPrefix(r.URL.EscapedPath(), "/"), "/")
+		href := "/" + first + "/"
+		if dir != "." {
+			for _, seg := range strings.Split(filepath.ToSlash(dir), "/") {
+				href += url.PathEscape(seg) + "/"
+			}
+		}
+		http.ServeContent(w, r, "index.html", fi.ModTime(), bytes.NewReader(htmlWithBase(data, href)))
+		return
+	}
 	http.ServeContent(w, r, "index.html", fi.ModTime(), f)
+}
+
+// htmlWithBase adds <base href> to a page as its first head element, so it
+// comes before any relative URL. A page with its own <base> is left alone.
+// With no <head> tag it goes right after <html> or the doctype (the parser
+// opens the head for it), or failing both, at the very start.
+func htmlWithBase(page []byte, href string) []byte {
+	lower := bytes.ToLower(page)
+	head := lower
+	if end := bytes.Index(lower, []byte("</head")); end >= 0 {
+		head = lower[:end]
+	}
+	if tagEnd(head, "base") >= 0 {
+		return page
+	}
+	at := tagEnd(lower, "head")
+	if at < 0 {
+		at = tagEnd(lower, "html")
+	}
+	if at < 0 {
+		at = tagEnd(lower, "!doctype")
+	}
+	if at < 0 {
+		at = 0
+	}
+	tag := `<base href="` + html.EscapeString(href) + `">`
+	return slices.Concat(page[:at], []byte(tag), page[at:])
+}
+
+// tagEnd finds the first <name ...> tag in lowercased HTML and returns the
+// index just past its '>', or -1. The name must end at a space, '/' or '>',
+// so "head" doesn't match <header>.
+func tagEnd(lower []byte, name string) int {
+	open := []byte("<" + name)
+	for i := 0; ; {
+		j := bytes.Index(lower[i:], open)
+		if j < 0 {
+			return -1
+		}
+		start := i + j + len(open)
+		if start < len(lower) && strings.IndexByte(" \t\r\n/>", lower[start]) >= 0 {
+			if k := bytes.IndexByte(lower[start:], '>'); k >= 0 {
+				return start + k + 1
+			}
+			return -1
+		}
+		i = start
+	}
 }
 
 // setRevalidateHeaders makes the browser check back on every use of a hosted

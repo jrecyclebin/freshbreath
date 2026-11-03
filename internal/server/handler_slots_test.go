@@ -430,8 +430,9 @@ func TestHostedAppRevalidates(t *testing.T) {
 }
 
 // TestHostedAppNestedIndex pins that the nearest index.html at or above a
-// path handles it, and that a directory with its own index.html is
-// redirected to its trailing-slash form like the app root.
+// path handles it (with a <base> for its own folder when the URL is
+// deeper), and that a directory with its own index.html is redirected to
+// its trailing-slash form like the app root.
 func TestHostedAppNestedIndex(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "nestapp")
@@ -445,10 +446,10 @@ func TestHostedAppNestedIndex(t *testing.T) {
 		"/nestapp/":                "root",
 		"/nestapp/missing":         "root",
 		"/nestapp/blog/":           "blog",
-		"/nestapp/blog/post/1":     "blog",
+		"/nestapp/blog/post/1":     `<base href="/nestapp/blog/">blog`,
 		"/nestapp/blog/x.js":       "blog",
-		"/nestapp/docs/":           "root",
-		"/nestapp/docs/a/b":        "root",
+		"/nestapp/docs/":           `<base href="/nestapp/">root`,
+		"/nestapp/docs/a/b":        `<base href="/nestapp/">root`,
 		"/nestapp/docs/guide.html": "guide",
 	} {
 		rr := testRequest(t, srv, http.MethodGet, path, nil, nil)
@@ -465,5 +466,50 @@ func TestHostedAppNestedIndex(t *testing.T) {
 	rr = testRequest(t, srv, http.MethodGet, "/nestapp/docs", nil, nil)
 	if rr.Code != http.StatusOK || rr.Body.String() != "root" {
 		t.Errorf("/nestapp/docs: status = %d body = %q, want 200 root", rr.Code, rr.Body.String())
+	}
+}
+
+// TestHostedAppBaseTag pins the <base> a deep-route fallback gets: it names
+// the served page's folder under the slot prefix as requested, lands as
+// the first thing in the head, and stays out of pages served for their own
+// folder and pages that brought their own.
+func TestHostedAppBaseTag(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "tools")
+	cleanupSlotApp(t, srv, nonce)
+	page := `<!DOCTYPE html><html><head><meta charset="utf-8"><script src="app.js"></script></head><body><header>x</header></body></html>`
+	createSlotFile(t, srv, nonce, "web", "index.html", []byte(page))
+	createSlotFile(t, srv, nonce, "web", "email/index.html", []byte(page))
+	createSlotFile(t, srv, nonce, "web", "my notes/index.html", []byte("<HEAD lang=en>notes</HEAD>"))
+	createSlotFile(t, srv, nonce, "web", "own/index.html", []byte(`<html><head><base href="/elsewhere/"></head></html>`))
+	createSlotFile(t, srv, nonce, "web", "bare/index.html", []byte("<!doctype html><title>t</title>"))
+	srv.rebuildHostedRoutes()
+
+	get := func(path string) string {
+		t.Helper()
+		rr := testRequest(t, srv, http.MethodGet, path, nil, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", path, rr.Code)
+		}
+		return rr.Body.String()
+	}
+	withBase := func(href string) string {
+		return strings.Replace(page, "<head>", `<head><base href="`+href+`">`, 1)
+	}
+
+	for path, want := range map[string]string{
+		"/tools/":                    page,
+		"/tools/email/":              page,
+		"/tools/email/review/42":     withBase("/tools/email/"),
+		"/tools@dev/email/review/42": withBase("/tools@dev/email/"),
+		"/tools@dev/email/review/":   withBase("/tools@dev/email/"),
+		"/tools/missing/deep":        withBase("/tools/"),
+		"/tools/my%20notes/a/b":      `<HEAD lang=en><base href="/tools/my%20notes/">notes</HEAD>`,
+		"/tools/own/a/b":             `<html><head><base href="/elsewhere/"></head></html>`,
+		"/tools/bare/a/b":            `<!doctype html><base href="/tools/bare/"><title>t</title>`,
+	} {
+		if got := get(path); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", path, got, want)
+		}
 	}
 }

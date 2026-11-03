@@ -70,6 +70,20 @@ to `blog/index.html` if there is one, otherwise the root `index.html`. You can
 use common routers without needing to stick to hash paths, and give a
 subdirectory its own app.
 
+**Write the app's own files as relative URLs (`app.js`, `css/site.css`) and
+don't add a `<base>` tag or any script that builds one.** The same files are
+served under `/{slug}/`, `/{slug}@dev/`, `/{slug}@staging/` and
+`/{slug}@prod/`, so a root path like `/app.js` misses, and a hardcoded base
+names one slot. When a page is served for a deeper URL — `/tools/email/review/42`
+answered by `email/index.html` — the server adds
+`<base href="/tools/email/">` (with the slot as requested, e.g.
+`/tools@dev/email/`) as the page's first head element, so its relative URLs
+resolve against its own folder at any depth, in every slot. A page served for
+its own folder gets nothing added, and a page that brings its own `<base>` is
+left alone. One thing that follows: on those deeper URLs a bare `#section`
+link resolves against the base too, so routers should navigate with absolute
+paths. Server-wide paths such as `/frbr.js` and `/api/...` stay absolute.
+
 ---
 
 ## 2. Publish over MCP

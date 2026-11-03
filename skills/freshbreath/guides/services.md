@@ -93,6 +93,12 @@ to a page that names its app, and a script tag can only do that in the URL:
 `<script type="module" src="https://server/frbr.js?NONCE">`. For apps
 hosted on the server's own origin, `/frbr.js` is enough.
 
+On the server, keep `/frbr.js` and `/api/...` absolute but load the app's own
+files with relative URLs (`app.js`), and leave out any `<base>` tag or script
+that computes one: the server adds the right `<base>` itself when a page is
+served for a deeper route or slot (`/tools@dev/email/review/42`). See
+`guides/publishing.md`.
+
 An app whose URL names a web origin gets the same off-server treatment by
 declaration. Any other app is hosted exactly while it has a deployment
 slot — so a blank URL that isn't hosted is simply a page opened from disk,
