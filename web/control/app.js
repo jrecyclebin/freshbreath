@@ -2184,8 +2184,7 @@ function AppServiceTools({ session, app, navigate }) {
 // The app page's hosting panel. The drop zone wears the home page's clothes
 // (the same classes) but uploads straight into this app's Development
 // slot — no modal to ask what the file should become, since the page
-// already knows. Below it the three deployment slots, with hosting's
-// Remove link living on the Development line.
+// already knows.
 function HostUpload({ session, app, onRefresh }) {
   const [hosted, setHosted] = useState(!!(app.details?.last_uploaded));
   const [uploadedAt, setUploadedAt] = useState(app.details?.last_uploaded || null);
@@ -2222,22 +2221,6 @@ function HostUpload({ session, app, onRefresh }) {
       toast(e.message, true);
     } finally {
       setUploading(false);
-    }
-  };
-
-  const remove = async () => {
-    try {
-      const res = await fetch('/api/apps/' + app.nonce + '/web', {
-        method: 'DELETE',
-        headers: authHeaders(session),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setHosted(false);
-      setUploadedAt(null);
-      toast('Hosting removed');
-      onRefresh();
-    } catch(e) {
-      toast(e.message, true);
     }
   };
 
@@ -2319,9 +2302,6 @@ function HostUpload({ session, app, onRefresh }) {
                     onClick={restore}>
                     {deploying==='dev' ? 'Restoring…' : 'Restore'}
                   </button>
-                )}
-                {s.name === 'Development' && hosted && (
-                  <button className="btn btn-ghost slot-btn" style={{color:'var(--tone-red)'}} onClick={remove}>Remove</button>
                 )}
                 {s.target && (
                   <button className="btn btn-ghost slot-btn"
