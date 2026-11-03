@@ -335,9 +335,20 @@ token refresh.
 ```js
 const session = currentSession();
 const res = await api(session,
-  `/api/apps/${APP_NONCE}/web?file=${encodeURIComponent(path)}`,
+  `/api/apps/${APP_NONCE}/web/test/index.html`,
   {method: 'PUT', body});
 // check res.ok
+```
+
+App files live at `/api/apps/{nonce}/web/<path>` (or `/data/<path>`), and a
+plain path like `test/index.html` works as written. For a path you didn't
+write yourself, build the URL with `escapePath(path)`:
+it escapes the path and leaves the slashes alone.
+
+```js
+await api(session, `/api/apps/${APP_NONCE}/web/${escapePath(file.name)}`,
+  {method: 'PUT', body: file});
+const res = await api(session, `/api/apps/${APP_NONCE}/web/blog/2026`); // lists the folder
 ```
 
 An object or array `body` is sent as JSON (with `Content-Type:

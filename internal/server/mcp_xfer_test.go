@@ -50,6 +50,30 @@ func callCentralTool(t *testing.T, srv *Server, name string, args map[string]int
 	return res
 }
 
+// callOneAppFile runs a batch file tool (read_app_files, write_app_files)
+// on one file: the per-file keys in args move into files[0], and that
+// file's own result comes back as the tool's text, so single-file
+// assertions read it directly. A whole-call error comes back untouched.
+func callOneAppFile(t *testing.T, srv *Server, name string, args map[string]interface{}) *mcp.CallToolResult {
+	t.Helper()
+	file := map[string]interface{}{}
+	for _, k := range []string{"path", "offset", "limit", "new_text", "old_text", "encoding"} {
+		if v, ok := args[k]; ok {
+			file[k] = v
+			delete(args, k)
+		}
+	}
+	args["files"] = []interface{}{file}
+	res := callCentralTool(t, srv, name, args)
+	var out struct {
+		Files []json.RawMessage `json:"files"`
+	}
+	if json.Unmarshal([]byte(toolResultText(t, res)), &out) == nil && len(out.Files) == 1 {
+		res.Content = []mcp.Content{&mcp.TextContent{Text: string(out.Files[0])}}
+	}
+	return res
+}
+
 func toolResultText(t *testing.T, res *mcp.CallToolResult) string {
 	t.Helper()
 	if len(res.Content) == 0 {
@@ -189,8 +213,8 @@ func TestMCPAppDataArea(t *testing.T) {
 		return toolResultText(t, res)
 	}
 
-	call("write_app_file", map[string]interface{}{"area": "data", "path": "notes/a.txt", "new_text": "private note", "transport": "inline"})
-	if out := call("read_app_file", map[string]interface{}{"area": "data", "path": "notes/a.txt", "transport": "inline"}); !strings.Contains(out, "private note") {
+	call("write_app_files", map[string]interface{}{"area": "data", "files": []interface{}{map[string]interface{}{"path": "notes/a.txt", "new_text": "private note"}}, "transport": "inline"})
+	if out := call("read_app_files", map[string]interface{}{"area": "data", "files": []interface{}{"notes/a.txt"}, "transport": "inline"}); !strings.Contains(out, "private note") {
 		t.Errorf("read data = %s", out)
 	}
 	if out := call("list_app_files", map[string]interface{}{"area": "data"}); !strings.Contains(out, "notes/a.txt") {
@@ -207,10 +231,10 @@ func TestMCPAppDataArea(t *testing.T) {
 	}
 
 	// The http transport URL targets the data route and lands the bytes there.
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{"nonce": nonce, "area": "data", "path": "up.txt", "transport": "http"})
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{"nonce": nonce, "area": "data", "path": "up.txt", "transport": "http"})
 	url, _ := toolResultJSON(t, res)["url"].(string)
 	p := actTokenPayloadFromURL(t, srv, url)
-	if !strings.HasPrefix(p.Path, "/api/apps/"+nonce+"/data?file=") {
+	if !strings.HasPrefix(p.Path, "/api/apps/"+nonce+"/data/") {
 		t.Fatalf("act path = %q, want the data route", p.Path)
 	}
 	if rr := dispatchActPathAsAdmin(t, srv, "PUT", p.Path, bytes.NewReader([]byte("uploaded")), "text/plain"); rr.Code != http.StatusNoContent {
@@ -246,14 +270,14 @@ func TestSearchAppFilesScopesMembers(t *testing.T) {
 	createAppFile(t, srv, mine, "a.txt", []byte("secret"))
 	createAppFile(t, srv, theirs, "b.txt", []byte("secret"))
 
-	matches, _, err := srv.coreSearchAppFiles(member, "", "", "secret", false)
+	matches, _, err := srv.coreSearchAppFiles(member, "", "", "", "secret", false)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
 	if len(matches) != 1 || matches[0].Nonce != mine {
 		t.Errorf("matches = %+v, want only the member's app", matches)
 	}
-	if _, _, err := srv.coreSearchAppFiles(member, theirs, "", "secret", false); err == nil {
+	if _, _, err := srv.coreSearchAppFiles(member, theirs, "", "", "secret", false); err == nil {
 		t.Errorf("expected forbidden searching a non-member app")
 	}
 }
@@ -265,12 +289,12 @@ func TestSearchAppFilesLimits(t *testing.T) {
 	createAppFile(t, srv, nonce, "many.txt", []byte(strings.Repeat("x\n", searchMaxMatches+10)))
 	createAppFile(t, srv, nonce, "min.js", []byte(strings.Repeat("a", 1000)+"NEEDLE"+strings.Repeat("b", 1000)))
 
-	matches, truncated, err := srv.coreSearchAppFiles(su, nonce, "", "^x$", false)
+	matches, truncated, err := srv.coreSearchAppFiles(su, nonce, "", "", "^x$", false)
 	if err != nil || !truncated || len(matches) != searchMaxMatches {
 		t.Errorf("got %d matches, truncated=%v, err=%v; want %d, true", len(matches), truncated, err, searchMaxMatches)
 	}
 
-	matches, _, _ = srv.coreSearchAppFiles(su, nonce, "", "NEEDLE", false)
+	matches, _, _ = srv.coreSearchAppFiles(su, nonce, "", "", "NEEDLE", false)
 	if len(matches) != 1 || !strings.Contains(matches[0].Text, "NEEDLE") || len(matches[0].Text) > searchMaxLineText+2*len("…") {
 		t.Errorf("clipped line = %+v, want a short window around NEEDLE", matches)
 	}
@@ -284,13 +308,13 @@ func TestMCPReadAppFile(t *testing.T) {
 	}
 	createAppFile(t, srv, nonce, "index.html", []byte("<h1>hello world</h1>"))
 
-	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"transport": "inline",
 		"nonce":     nonce,
 		"path":      "index.html",
 	})
 	if res.IsError {
-		t.Fatalf("read_app_file failed: %s", toolResultText(t, res))
+		t.Fatalf("read_app_files failed: %s", toolResultText(t, res))
 	}
 	var readRes struct {
 		Content string `json:"content"`
@@ -303,7 +327,7 @@ func TestMCPReadAppFile(t *testing.T) {
 	}
 
 	// Chunk read.
-	res = callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res = callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"transport": "inline",
 		"nonce":     nonce,
 		"path":      "index.html",
@@ -326,13 +350,13 @@ func TestMCPReadAppFileBinary(t *testing.T) {
 	}
 	createAppFile(t, srv, nonce, "data.bin", []byte{0xff, 0xfe, 0xfd})
 
-	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"transport": "inline",
 		"nonce":     nonce,
 		"path":      "data.bin",
 	})
 	if res.IsError {
-		t.Fatalf("read_app_file failed: %s", toolResultText(t, res))
+		t.Fatalf("read_app_files failed: %s", toolResultText(t, res))
 	}
 	var readRes struct {
 		Content  string `json:"content"`
@@ -358,18 +382,18 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 	}
 
 	// Write whole file.
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"transport": "inline",
 		"nonce":     nonce,
 		"path":      "index.html",
 		"new_text":  "<h1>hello</h1>",
 	})
 	if res.IsError {
-		t.Fatalf("write_app_file failed: %s", toolResultText(t, res))
+		t.Fatalf("write_app_files failed: %s", toolResultText(t, res))
 	}
 
 	// Patch via old_text.
-	res = callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res = callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"transport": "inline",
 		"nonce":     nonce,
 		"path":      "index.html",
@@ -377,7 +401,7 @@ func TestMCPWriteAppFileWholeAndPatch(t *testing.T) {
 		"old_text":  "hello",
 	})
 	if res.IsError {
-		t.Fatalf("write_app_file patch failed: %s", toolResultText(t, res))
+		t.Fatalf("write_app_files patch failed: %s", toolResultText(t, res))
 	}
 
 	data, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "", "index.html", 0, 0)
@@ -397,7 +421,7 @@ func TestMCPWriteAppFileOldTextNotFound(t *testing.T) {
 	}
 	createAppFile(t, srv, nonce, "index.html", []byte("abc"))
 
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"transport": "inline",
 		"nonce":     nonce,
 		"path":      "index.html",
@@ -420,7 +444,7 @@ func TestMCPWriteAppFileOldTextNotUnique(t *testing.T) {
 	}
 	createAppFile(t, srv, nonce, "index.html", []byte("abc abc"))
 
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"transport": "inline",
 		"nonce":     nonce,
 		"path":      "index.html",
@@ -709,13 +733,13 @@ func makeAppWithFile(t *testing.T, srv *Server, name, file string, content []byt
 	return nonce
 }
 
-// ── read_app_file ──
+// ── read_app_files ──
 
 func TestMCPReadAppFileTransportHTTP(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := makeAppWithFile(t, srv, "xfer-app", "big.txt", bytes.Repeat([]byte("a"), 500))
 
-	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"nonce": nonce, "path": "big.txt", "transport": "http",
 	})
 	m := toolResultJSON(t, res)
@@ -733,8 +757,8 @@ func TestMCPReadAppFileTransportHTTP(t *testing.T) {
 		t.Fatalf("content_type = %q, want text/plain (sniffed)", ct)
 	}
 	p := actTokenPayloadFromURL(t, srv, url)
-	if p.Method != "GET" || p.Path != "/api/apps/"+nonce+"/web?file=big.txt" {
-		t.Fatalf("payload = %+v, want GET /api/apps/%s/web?file=big.txt", p, nonce)
+	if p.Method != "GET" || p.Path != "/api/apps/"+nonce+"/web/big.txt" {
+		t.Fatalf("payload = %+v, want GET /api/apps/%s/web/big.txt", p, nonce)
 	}
 	rr := dispatchActPathAsAdmin(t, srv, "GET", p.Path, nil, "")
 	if rr.Code != http.StatusOK || rr.Body.String() != strings.Repeat("a", 500) {
@@ -745,7 +769,7 @@ func TestMCPReadAppFileTransportHTTP(t *testing.T) {
 func TestMCPReadAppFileTransportHTTPRejectsChunked(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := makeAppWithFile(t, srv, "xfer-chunk", "f.txt", []byte("data"))
-	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"nonce": nonce, "path": "f.txt", "offset": 0, "limit": 10, "transport": "http",
 	})
 	if !res.IsError {
@@ -758,7 +782,7 @@ func TestMCPReadAppFileThresholdEscape(t *testing.T) {
 	body := bytes.Repeat([]byte("Z"), 12000)
 	nonce := makeAppWithFile(t, srv, "thresh-app", "big.bin", body)
 
-	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"transport": "inline", "nonce": nonce, "path": "big.bin",
 	})
 	m := toolResultJSON(t, res)
@@ -789,7 +813,7 @@ func TestMCPReadAppFileChunkedStaysInline(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := makeAppWithFile(t, srv, "chunk-app", "big.txt", bytes.Repeat([]byte("Q"), 12000))
 
-	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"transport": "inline", "nonce": nonce, "path": "big.txt", "offset": 0, "limit": 100,
 	})
 	m := toolResultJSON(t, res)
@@ -804,7 +828,7 @@ func TestMCPReadAppFileChunkedStaysInline(t *testing.T) {
 func TestMCPReadAppFileSmallStaysInline(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := makeAppWithFile(t, srv, "small-app", "s.txt", []byte("small"))
-	res := callCentralTool(t, srv, "read_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{
 		"transport": "inline", "nonce": nonce, "path": "s.txt",
 	})
 	m := toolResultJSON(t, res)
@@ -816,7 +840,7 @@ func TestMCPReadAppFileSmallStaysInline(t *testing.T) {
 	}
 }
 
-// ── write_app_file ──
+// ── write_app_files ──
 
 func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 	srv := newTestServer(t)
@@ -825,7 +849,7 @@ func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 		t.Fatalf("create app: %v", err)
 	}
 	// content is ignored on the http path — the client PUTs the real body later.
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"nonce": nonce, "path": "via-http.txt", "new_text": "ignored", "transport": "http",
 	})
 	m := toolResultJSON(t, res)
@@ -837,8 +861,8 @@ func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 		t.Fatalf("method = %v, want PUT", m["method"])
 	}
 	p := actTokenPayloadFromURL(t, srv, url)
-	if p.Method != "PUT" || !strings.HasPrefix(p.Path, "/api/apps/"+nonce+"/web?file=") {
-		t.Fatalf("payload = %+v, want PUT /api/apps/%s/web?file=...", p, nonce)
+	if p.Method != "PUT" || !strings.HasPrefix(p.Path, "/api/apps/"+nonce+"/web/") {
+		t.Fatalf("payload = %+v, want PUT /api/apps/%s/web/...", p, nonce)
 	}
 	rr := dispatchActPathAsAdmin(t, srv, "PUT", p.Path, bytes.NewReader([]byte("written over http\n")), "text/plain")
 	if rr.Code != http.StatusNoContent {
@@ -853,7 +877,7 @@ func TestMCPWriteAppFileTransportHTTP(t *testing.T) {
 func TestMCPWriteAppFileTransportHTTPRejectsPatch(t *testing.T) {
 	srv := newTestServer(t)
 	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "wpapp", "", "", nil, nil)
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"nonce": nonce, "path": "x.txt", "new_text": "new", "old_text": "old", "transport": "http",
 	})
 	if !res.IsError {
@@ -865,7 +889,7 @@ func TestMCPWriteAppFileLargeNoThreshold(t *testing.T) {
 	srv := newTestServer(t)
 	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "bigw", "", "", nil, nil)
 	big := bytes.Repeat([]byte("M"), 12000)
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"transport": "inline", "nonce": nonce, "path": "big.txt", "new_text": string(big), // default transport
 	})
 	m := toolResultJSON(t, res)
@@ -885,7 +909,7 @@ func TestMCPWriteAppFilePatchStaysInline(t *testing.T) {
 	srv := newTestServer(t)
 	nonce, _ := srv.coreCreateApp(&db.User{ID: 1, Role: "Superuser"}, "patchapp", "", "", nil, nil)
 	createAppFile(t, srv, nonce, "p.txt", []byte("hello old world"))
-	res := callCentralTool(t, srv, "write_app_file", map[string]interface{}{
+	res := callOneAppFile(t, srv, "write_app_files", map[string]interface{}{
 		"transport": "inline", "nonce": nonce, "path": "p.txt", "new_text": "new", "old_text": "old",
 	})
 	m := toolResultJSON(t, res)
@@ -1040,5 +1064,122 @@ func TestMCPWriteServiceFileLargeNoThreshold(t *testing.T) {
 	data, _, err := srv.coreReadServiceFile(&db.User{ID: 1, Role: "Superuser"}, id, 0, 0)
 	if err != nil || !bytes.Equal(data, big) {
 		t.Fatalf("readback len = %d err=%v, want %d", len(data), err, len(big))
+	}
+}
+
+// ── Folders and batches ──
+
+// list and search narrow to dir; paths stay relative to the area's root.
+func TestMCPListAndSearchInFolder(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := makeAppWithFile(t, srv, "mcp-blog", "blog/2026/jan.md", []byte("needle"))
+	createAppFile(t, srv, nonce, "blog/2025/dec.md", []byte("needle"))
+
+	res := callCentralTool(t, srv, "list_app_files", map[string]interface{}{"nonce": nonce, "dir": "/blog/2026/"})
+	if out := toolResultText(t, res); res.IsError || !strings.Contains(out, `"blog/2026/jan.md"`) || strings.Contains(out, "2025") {
+		t.Errorf("list in folder = %s", out)
+	}
+	res = callCentralTool(t, srv, "search_app_files", map[string]interface{}{"nonce": nonce, "dir": "blog/2025", "pattern": "needle"})
+	if out := toolResultText(t, res); res.IsError || !strings.Contains(out, `"blog/2025/dec.md"`) || strings.Contains(out, "2026") {
+		t.Errorf("search in folder = %s", out)
+	}
+	if res := callCentralTool(t, srv, "list_app_files", map[string]interface{}{"nonce": nonce, "dir": "../.."}); !res.IsError {
+		t.Errorf("escaping dir was allowed: %s", toolResultText(t, res))
+	}
+}
+
+// write_app_files lands every file under dir (text and base64 alike) and
+// leaves the folder's other files alone; read_app_files reads them back,
+// a bare path string standing in for {path}.
+func TestMCPWriteAndReadAppFilesBatch(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := makeAppWithFile(t, srv, "mcp-batch", "blog/2026/keep.md", []byte("kept"))
+
+	res := callCentralTool(t, srv, "write_app_files", map[string]interface{}{
+		"nonce": nonce, "dir": "blog/2026", "transport": "inline",
+		"files": []interface{}{
+			map[string]interface{}{"path": "jan.md", "new_text": "january"},
+			map[string]interface{}{"path": "img/dot.png", "new_text": base64.StdEncoding.EncodeToString([]byte{0x89, 0x50, 0x00}), "encoding": "base64"},
+		},
+	})
+	if res.IsError {
+		t.Fatalf("write_app_files: %s", toolResultText(t, res))
+	}
+	if out := toolResultText(t, res); !strings.Contains(out, `"blog/2026/jan.md"`) || !strings.Contains(out, `"blog/2026/img/dot.png"`) {
+		t.Errorf("written paths = %s, want them relative to the area's root", out)
+	}
+	su := &db.User{ID: 1, Role: "Superuser"}
+	if data, _ := srv.coreReadAppFile(su, nonce, "web", "blog/2026/img/dot.png", 0, 0); !bytes.Equal(data, []byte{0x89, 0x50, 0x00}) {
+		t.Errorf("base64 file = %v", data)
+	}
+	if data, _ := srv.coreReadAppFile(su, nonce, "web", "blog/2026/keep.md", 0, 0); string(data) != "kept" {
+		t.Errorf("sibling = %q, want it left alone", data)
+	}
+
+	res = callCentralTool(t, srv, "read_app_files", map[string]interface{}{
+		"nonce": nonce, "transport": "inline",
+		"files": []interface{}{"blog/2026/jan.md", map[string]interface{}{"path": "blog/2026/keep.md", "limit": 2}},
+	})
+	var out struct {
+		Files []map[string]interface{} `json:"files"`
+	}
+	json.Unmarshal([]byte(toolResultText(t, res)), &out)
+	if res.IsError || len(out.Files) != 2 || out.Files[0]["content"] != "january" || out.Files[1]["content"] != "ke" {
+		t.Errorf("read_app_files = %s", toolResultText(t, res))
+	}
+}
+
+// One bad file doesn't sink the batch, but the call is flagged an error
+// so it can't be mistaken for a clean run. A bad path stops a write
+// before anything lands.
+func TestMCPAppFilesBatchFailures(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := makeAppWithFile(t, srv, "mcp-fail", "a.txt", []byte("aaa"))
+
+	res := callCentralTool(t, srv, "read_app_files", map[string]interface{}{
+		"nonce": nonce, "transport": "inline", "files": []interface{}{"a.txt", "missing.txt"},
+	})
+	if out := toolResultText(t, res); !res.IsError || !strings.Contains(out, `"content":"aaa"`) || !strings.Contains(out, "not found") {
+		t.Errorf("read with one missing = IsError %v, %s", res.IsError, out)
+	}
+
+	res = callCentralTool(t, srv, "write_app_files", map[string]interface{}{
+		"nonce": nonce, "transport": "inline",
+		"files": []interface{}{
+			map[string]interface{}{"path": "b.txt", "new_text": "bbb"},
+			map[string]interface{}{"path": "a.txt", "new_text": "x", "old_text": "nope"},
+		},
+	})
+	if out := toolResultText(t, res); !res.IsError || !strings.Contains(out, `"status":"written"`) || !strings.Contains(out, "old_text not found") {
+		t.Errorf("write with one bad patch = IsError %v, %s", res.IsError, out)
+	}
+
+	res = callCentralTool(t, srv, "write_app_files", map[string]interface{}{
+		"nonce": nonce, "transport": "inline",
+		"files": []interface{}{
+			map[string]interface{}{"path": "c.txt", "new_text": "ccc"},
+			map[string]interface{}{"path": "../escape.txt", "new_text": "e"},
+		},
+	})
+	if !res.IsError {
+		t.Errorf("escaping path was allowed: %s", toolResultText(t, res))
+	}
+	if _, err := srv.coreReadAppFile(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "c.txt", 0, 0); err == nil {
+		t.Errorf("c.txt written despite a rejected sibling")
+	}
+}
+
+// Act-token URLs carry the file path in the URL path, so odd names must
+// survive the trip: escaped going in, the same file coming out.
+func TestMCPAppFileActPathEscapes(t *testing.T) {
+	srv := newTestServer(t)
+	name := "notes/my draft #2?.txt"
+	nonce := makeAppWithFile(t, srv, "mcp-odd", name, []byte("odd"))
+	res := callOneAppFile(t, srv, "read_app_files", map[string]interface{}{"nonce": nonce, "path": name, "transport": "http"})
+	url, _ := toolResultJSON(t, res)["url"].(string)
+	p := actTokenPayloadFromURL(t, srv, url)
+	rr := dispatchActPathAsAdmin(t, srv, "GET", p.Path, nil, "")
+	if rr.Code != http.StatusOK || rr.Body.String() != "odd" {
+		t.Fatalf("act GET %s = %d %q, want the file", p.Path, rr.Code, rr.Body.String())
 	}
 }

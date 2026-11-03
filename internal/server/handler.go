@@ -2020,9 +2020,16 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sub-route: /api/apps/{nonce}/web
-	if len(parts) >= 4 && parts[3] == "web" {
-		s.handleAppWeb(w, r, nonce)
+	// Sub-routes: /api/apps/{nonce}/{web|data}[/<path>] — the hosted dev
+	// slot, and private files the web server never hosts
+	if len(parts) >= 4 && (parts[3] == "web" || parts[3] == "data") {
+		s.handleAppFiles(w, r, nonce, parts[3], strings.Join(parts[4:], "/"))
+		return
+	}
+
+	// Sub-route: /api/apps/{nonce}/download — the dev slot as a zip
+	if len(parts) == 4 && parts[3] == "download" {
+		s.handleAppDownload(w, r, nonce)
 		return
 	}
 
@@ -2030,12 +2037,6 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 	// virtual service, as /api/services/{id}/… serves a registered one.
 	if len(parts) >= 5 && parts[3] == "service" {
 		s.handleAppService(w, r, nonce, parts[4])
-		return
-	}
-
-	// Sub-route: /api/apps/{nonce}/data — private files the web server never hosts
-	if len(parts) >= 4 && parts[3] == "data" {
-		s.handleAppData(w, r, nonce)
 		return
 	}
 
@@ -2168,27 +2169,46 @@ func (s *Server) handleAppServices(w http.ResponseWriter, r *http.Request, nonce
 	}
 }
 
-func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce string) {
+// handleAppFiles serves an app's web or data area, addressed by path:
+//
+//	GET    /{area}[/<path>]  a folder (or the root) lists {files:[{path,size}]};
+//	                         a file returns its bytes
+//	PUT    /{area}/<file>    replaces the file with the raw body
+//	DELETE /{area}/<file>    deletes the file; a bare DELETE /web clears the
+//	                         whole dev slot
+//	POST   /{area}[/<dir>]   multipart bulk upload into the folder: web
+//	                         replaces it (the root means the whole slot), data
+//	                         adds to it
+//
+// A bare GET also takes ?search= to filter the listing.
+func (s *Server) handleAppFiles(w http.ResponseWriter, r *http.Request, nonce, area, p string) {
 	actor := userFromContext(r.Context())
-
-	// ?file=<relpath> selects single-file GET/PUT/DELETE on the web dir;
-	// without it the bulk archive ops below run unchanged. PUT is only
-	// valid with ?file= — it's a full-file raw-body replace; patches stay
-	// MCP-only (no PATCH verb over HTTP).
-	if file := r.URL.Query().Get("file"); file != "" {
-		s.handleAppFile(w, r, nonce, "web", file)
-		return
-	}
-
 	switch r.Method {
 	case http.MethodGet:
-		data, slug, err := s.coreDownloadAppWeb(actor, nonce)
+		var files []appFile
+		var data []byte
+		var err error
+		if search := r.URL.Query().Get("search"); search != "" {
+			files, err = s.coreListAppFiles(actor, nonce, area, p, search)
+		} else {
+			files, data, err = s.coreGetAppPath(actor, nonce, area, p)
+		}
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", `attachment; filename="`+slug+`.zip"`)
+		if files != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
+			return
+		}
+		w.Header().Set("Content-Type", http.DetectContentType(data))
+		if area == "data" {
+			// Data files are untrusted uploads: never let one run script on
+			// this origin, whatever its sniffed type.
+			w.Header().Set("Content-Security-Policy", "sandbox; frame-ancestors 'none'")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
 		w.Write(data)
 
 	case http.MethodPost:
@@ -2197,16 +2217,51 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 			writeErr(w, err)
 			return
 		}
-		route, err := s.coreUploadAppWeb(actor, nonce, files)
+		w.Header().Set("Content-Type", "application/json")
+		if area == "data" {
+			paths, err := s.coreUploadAppData(actor, nonce, p, files)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"files": paths})
+			return
+		}
+		route, err := s.coreUploadAppWeb(actor, nonce, p, files)
 		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"route": route})
 
+	case http.MethodPut:
+		if p == "" {
+			http.Error(w, "PUT needs a file path", http.StatusMethodNotAllowed)
+			return
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read failed", http.StatusInternalServerError)
+			return
+		}
+		if err := s.coreWriteAppFile(actor, nonce, area, p, data, ""); err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
 	case http.MethodDelete:
-		if err := s.coreDeleteAppWeb(actor, nonce); err != nil {
+		var err error
+		switch {
+		case p != "":
+			err = s.coreDeleteAppFile(actor, nonce, area, p)
+		case area == "web":
+			err = s.coreDeleteAppWeb(actor, nonce)
+		default:
+			http.Error(w, "DELETE needs a file path", http.StatusMethodNotAllowed)
+			return
+		}
+		if err != nil {
 			writeErr(w, err)
 			return
 		}
@@ -2215,6 +2270,23 @@ func (s *Server) handleAppWeb(w http.ResponseWriter, r *http.Request, nonce stri
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleAppDownload serves the dev slot as a zip.
+// GET /api/apps/{nonce}/download
+func (s *Server) handleAppDownload(w http.ResponseWriter, r *http.Request, nonce string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, slug, err := s.coreDownloadAppWeb(userFromContext(r.Context()), nonce)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+slug+`.zip"`)
+	w.Write(data)
 }
 
 // handleAppService serves an app's own virtual service: "files" is its
@@ -2237,42 +2309,6 @@ func (s *Server) handleAppService(w http.ResponseWriter, r *http.Request, nonce,
 	default:
 		http.NotFound(w, r)
 	}
-}
-
-// handleAppData serves an app's private data area: ?file=<relpath> selects
-// single-file GET/PUT/DELETE (as on /web); a bare GET lists the files as
-// {files:[{path,size}]}, and a multipart POST adds one or more files.
-func (s *Server) handleAppData(w http.ResponseWriter, r *http.Request, nonce string) {
-	if file := r.URL.Query().Get("file"); file != "" {
-		s.handleAppFile(w, r, nonce, "data", file)
-		return
-	}
-	if r.Method == http.MethodPost {
-		files, err := readUploadFiles(w, r)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		paths, err := s.coreUploadAppData(userFromContext(r.Context()), nonce, files)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"files": paths})
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	files, err := s.coreListAppFiles(userFromContext(r.Context()), nonce, "data", "")
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"files": files})
 }
 
 // uploadMaxBytes caps one upload request — every file in it together.
@@ -2319,50 +2355,9 @@ func readUploadFiles(w http.ResponseWriter, r *http.Request) ([]uploadFile, erro
 	return files, nil
 }
 
-// handleAppFile is single-file GET/PUT/DELETE in an app's web or data area.
-// PUT is a full-file raw-body replace; patches stay MCP-only.
-func (s *Server) handleAppFile(w http.ResponseWriter, r *http.Request, nonce, area, file string) {
-	actor := userFromContext(r.Context())
-	switch r.Method {
-	case http.MethodGet:
-		data, err := s.coreReadAppFile(actor, nonce, area, file, 0, 0)
-		if err != nil {
-			writeErr(w, err)
-			return
-		}
-		w.Header().Set("Content-Type", http.DetectContentType(data))
-		if area == "data" {
-			// Data files are untrusted uploads: never let one run script on
-			// this origin, whatever its sniffed type.
-			w.Header().Set("Content-Security-Policy", "sandbox; frame-ancestors 'none'")
-			w.Header().Set("X-Content-Type-Options", "nosniff")
-		}
-		w.Write(data)
-	case http.MethodPut:
-		data, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "read failed", http.StatusInternalServerError)
-			return
-		}
-		if err := s.coreWriteAppFile(actor, nonce, area, file, data, ""); err != nil {
-			writeErr(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	case http.MethodDelete:
-		if err := s.coreDeleteAppFile(actor, nonce, area, file); err != nil {
-			writeErr(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
 // handleSearchAppFiles greps app web files — the HTTP twin of the
 // search_app_files MCP tool.
-// GET /api/apps/search?pattern=<regex>[&nonce=<nonce>][&area=web|data][&ignore_case=true]
+// GET /api/apps/search?pattern=<regex>[&nonce=<nonce>][&area=web|data][&dir=<folder>][&ignore_case=true]
 func (s *Server) handleSearchAppFiles(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -2370,7 +2365,7 @@ func (s *Server) handleSearchAppFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	ignoreCase, _ := strconv.ParseBool(q.Get("ignore_case"))
-	matches, truncated, err := s.coreSearchAppFiles(userFromContext(r.Context()), q.Get("nonce"), q.Get("area"), q.Get("pattern"), ignoreCase)
+	matches, truncated, err := s.coreSearchAppFiles(userFromContext(r.Context()), q.Get("nonce"), q.Get("area"), q.Get("dir"), q.Get("pattern"), ignoreCase)
 	if err != nil {
 		writeErr(w, err)
 		return

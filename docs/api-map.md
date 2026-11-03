@@ -82,10 +82,10 @@ superuser so an agent can bootstrap the server.
 | `delete_app` | admin+ | Delete |
 | `get_app_members` / `set_app_members` | admin+ / admin+ | Member list (Member/Read-only accounts only; non-members are pruned on rewrite) |
 | `get_app_services` / `set_app_services` | admin+ / all (read) | Which services an app may use |
-| `list_app_files` | all | `{nonce, area: web\|data\|dev\|staging\|production}` |
-| `search_app_files` | all | Grep app files (regex, `ignore_case`, `area`) |
-| `read_app_file` | all | Read one file; `transport: inline` or `http` (act-token URL) |
-| `write_app_file` | admin+ (or web dir member) | `transport: inline` or `http`; also `{mode, paths}` for chmod/rm-style ops |
+| `list_app_files` | all | `{nonce, area: web\|data, dir?, search?}` |
+| `search_app_files` | all | Grep app files (regex, `ignore_case`, `area`, `dir`) |
+| `read_app_files` | all | Read files (`files`: paths or `{path, offset, limit}`); `transport: inline` or `http` (act-token URLs) |
+| `write_app_files` | admin+ (or app member) | Write/patch files under `dir` (`files`: `{path, new_text, old_text, encoding}`); `transport: inline` or `http` |
 | `delete_app_file` | admin+ | Delete |
 
 **Service tools** (`registerServiceTools`): `list_services`, `get_service`,
@@ -169,12 +169,13 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/apps/{nonce}` | GET/PUT/DELETE | any | Detail / update (204; owner must be Admin+ or the current owner) / delete (204) |
 | `/api/apps/{nonce}/members` | GET/PUT | admin+ | App member list (Member/Read-only accounts; rewrites prune the rest) |
 | `/api/apps/{nonce}/services` | GET/PUT | GET: any with access to the app; PUT: admin+, member of the app | Approved services for the app / `PUT {services}` rewrites them. An Admin sets the whole list. A Member sets only their share: services they're a member of are linked or unlinked as listed, links to any other service stay, and listing a new one of those is 403 |
-| `/api/apps/{nonce}/web` | GET/POST/DELETE, ±`?file=path` | any canAccessApp | Web files. Bare GET = zip download; POST = multipart upload (100 MB cap); `?file=` = single-file GET/PUT/DELETE |
-| `/api/apps/{nonce}/data` | GET/POST/DELETE, ±`?file=path` | any canAccessApp | Private (unhosted) files; GET served with `CSP: sandbox`, `nosniff` |
+| `/api/apps/{nonce}/web[/<path>]` | GET/PUT/POST/DELETE | any canAccessApp | Web files. GET = folder listing `{files}` (`?search=`) or file bytes; PUT = replace a file; POST = multipart upload replacing the folder (bare = whole slot; 100 MB cap); DELETE = a file, or bare = clear the slot |
+| `/api/apps/{nonce}/data[/<path>]` | GET/PUT/POST/DELETE | any canAccessApp | Private (unhosted) files, as `/web` but POST adds to the folder and there's no bare DELETE; GET served with `CSP: sandbox`, `nosniff` |
+| `/api/apps/{nonce}/download` | GET | any canAccessApp | The dev slot as a zip |
 | `/api/apps/{nonce}/service/files` or `/tools` | GET etc. | any canAccessApp | The app's own virtual service (files = definition; tools = summaries) |
 | `/api/apps/{nonce}/db` | GET/POST | any-auth (gate is `gateDBTarget`) | List / query the app's databases |
 | `/api/apps/{nonce}/deploy` | POST | any canAccessApp | `{source: dev\|staging, target: staging\|prod}` → copy slot, returns route |
-| `/api/apps/search` | GET | any | `?pattern=<regex>&nonce=&area=web\|data&ignore_case=` |
+| `/api/apps/search` | GET | any | `?pattern=<regex>&nonce=&area=web\|data&dir=&ignore_case=` |
 
 ### Services
 

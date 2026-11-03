@@ -313,19 +313,19 @@ func TestGateApp(t *testing.T) {
 		op     func() error
 		wantOK bool
 	}{
-		{"list: admin", admin, func() error { _, e := srv.coreListAppFiles(admin, nonce, "", ""); return e }, true},
-		{"list: member", member, func() error { _, e := srv.coreListAppFiles(member, nonce, "", ""); return e }, true},
-		{"list: outsider", outsider, func() error { _, e := srv.coreListAppFiles(outsider, nonce, "", ""); return e }, false},
+		{"list: admin", admin, func() error { _, e := srv.coreListAppFiles(admin, nonce, "", "", ""); return e }, true},
+		{"list: member", member, func() error { _, e := srv.coreListAppFiles(member, nonce, "", "", ""); return e }, true},
+		{"list: outsider", outsider, func() error { _, e := srv.coreListAppFiles(outsider, nonce, "", "", ""); return e }, false},
 		{"upload: admin", admin, func() error {
-			_, e := srv.coreUploadAppWeb(admin, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
+			_, e := srv.coreUploadAppWeb(admin, nonce, "", []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
 			return e
 		}, true},
 		{"upload: member", member, func() error {
-			_, e := srv.coreUploadAppWeb(member, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
+			_, e := srv.coreUploadAppWeb(member, nonce, "", []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
 			return e
 		}, true},
 		{"upload: outsider", outsider, func() error {
-			_, e := srv.coreUploadAppWeb(outsider, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
+			_, e := srv.coreUploadAppWeb(outsider, nonce, "", []uploadFile{{Name: "index.html", Data: []byte("<h1>x</h1>")}})
 			return e
 		}, false},
 		{"download: admin", admin, func() error { _, _, e := srv.coreDownloadAppWeb(admin, nonce); return e }, true},
@@ -360,7 +360,7 @@ func TestUploadZipExtractCap(t *testing.T) {
 	cleanupSlotApp(t, srv, nonce)
 
 	// Establish the current web dir.
-	if _, err := srv.coreUploadAppWeb(su, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>old</h1>")}}); err != nil {
+	if _, err := srv.coreUploadAppWeb(su, nonce, "", []uploadFile{{Name: "index.html", Data: []byte("<h1>old</h1>")}}); err != nil {
 		t.Fatalf("initial upload: %v", err)
 	}
 
@@ -380,7 +380,7 @@ func TestUploadZipExtractCap(t *testing.T) {
 	}
 	zw.Close()
 
-	_, err := srv.coreUploadAppWeb(su, nonce, []uploadFile{{Name: "bomb.zip", Data: buf.Bytes()}})
+	_, err := srv.coreUploadAppWeb(su, nonce, "", []uploadFile{{Name: "bomb.zip", Data: buf.Bytes()}})
 	if err == nil || !strings.Contains(err.Error(), "cap") {
 		t.Fatalf("bomb upload err = %v, want the cap refusal", err)
 	}

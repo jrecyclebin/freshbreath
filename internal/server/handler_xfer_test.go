@@ -3,6 +3,8 @@ package server
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -14,19 +16,19 @@ import (
 	"poggers.institute/freshbreath/internal/db"
 )
 
-// ── App ?file= single-file ops ──
+// ── App files by path ──
 //
-// /api/apps/{nonce}/web grows a ?file=<relpath> query that selects single-file
-// GET/PUT/DELETE on the web dir; without ?file= the existing bulk archive ops
-// (zip GET, multipart POST, nuke DELETE) run unchanged. PUT is only valid
-// with ?file= — it's a full-file raw-body replace; patches stay MCP-only.
+// /api/apps/{nonce}/web/<path> addresses one file (GET/PUT/DELETE) or folder
+// (GET lists, POST bulk-uploads into it). The bare /web lists the root,
+// takes a whole-slot upload and a whole-slot DELETE; the zip lives at
+// /download. PUT is a full-file raw-body replace; patches stay MCP-only.
 
 func TestAppWebFileGet(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "getapp")
 	createAppFile(t, srv, nonce, "index.html", []byte("<html><body>hi</body></html>"))
 
-	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=index.html", nil, nil)
+	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/index.html", nil, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%q", rr.Code, rr.Body.String())
 	}
@@ -78,7 +80,7 @@ func TestAppWebFileGetNested(t *testing.T) {
 	nonce := createApp(t, srv, "nested")
 	createAppFile(t, srv, nonce, "css/site.css", []byte("body{color:red}"))
 
-	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=css/site.css", nil, nil)
+	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/css/site.css", nil, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%q", rr.Code, rr.Body.String())
 	}
@@ -90,7 +92,7 @@ func TestAppWebFileGetNested(t *testing.T) {
 func TestAppWebFileGetMissing(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "miss")
-	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=nope.html", nil, nil)
+	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/nope.html", nil, nil)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 for missing file", rr.Code)
 	}
@@ -99,22 +101,28 @@ func TestAppWebFileGetMissing(t *testing.T) {
 func TestAppWebFileGetBadPath(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "badpath")
-	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=../etc/passwd", nil, nil)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 for traversal (cleanAppFilePath)", rr.Code)
+	// The mux cleans ".." out of a path before it reaches us (a redirect)...
+	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/../etc/passwd", nil, nil)
+	if rr.Code == http.StatusOK {
+		t.Fatalf("status = %d, want the traversal turned away", rr.Code)
+	}
+	// ...and the core refuses one on its own, whatever route reaches it.
+	su := &db.User{ID: 1, Role: "Superuser"}
+	if _, _, err := srv.coreGetAppPath(su, nonce, "web", "../etc/passwd"); err == nil {
+		t.Fatal("coreGetAppPath allowed a traversal")
 	}
 }
 
 func TestAppWebFilePut(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "putapp")
-	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/web?file=notes.txt",
+	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/web/notes.txt",
 		bytes.NewReader([]byte("hello put\n")), map[string]string{"Content-Type": "text/plain"})
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body=%q", rr.Code, rr.Body.String())
 	}
-	// read back through the same ?file= GET path — round-trips
-	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=notes.txt", nil, nil)
+	// read back through the same path GET — round-trips
+	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/notes.txt", nil, nil)
 	if rr2.Code != http.StatusOK || rr2.Body.String() != "hello put\n" {
 		t.Fatalf("readback = %d %q", rr2.Code, rr2.Body.String())
 	}
@@ -123,12 +131,12 @@ func TestAppWebFilePut(t *testing.T) {
 func TestAppWebFilePutCreatesMissingDirs(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "putdirs")
-	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/web?file=new/deep/page.html",
+	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/web/new/deep/page.html",
 		bytes.NewReader([]byte("<p>ok</p>")), map[string]string{"Content-Type": "text/html"})
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body=%q", rr.Code, rr.Body.String())
 	}
-	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=new/deep/page.html", nil, nil)
+	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/new/deep/page.html", nil, nil)
 	if rr2.Code != http.StatusOK || rr2.Body.String() != "<p>ok</p>" {
 		t.Fatalf("readback = %d %q", rr2.Code, rr2.Body.String())
 	}
@@ -139,11 +147,11 @@ func TestAppWebFileDelete(t *testing.T) {
 	nonce := createApp(t, srv, "delapp")
 	createAppFile(t, srv, nonce, "gone.txt", []byte("bye"))
 
-	rr := testRequest(t, srv, http.MethodDelete, "/api/apps/"+nonce+"/web?file=gone.txt", nil, nil)
+	rr := testRequest(t, srv, http.MethodDelete, "/api/apps/"+nonce+"/web/gone.txt", nil, nil)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rr.Code)
 	}
-	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=gone.txt", nil, nil)
+	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/gone.txt", nil, nil)
 	if rr2.Code != http.StatusNotFound {
 		t.Fatalf("readback status = %d, want 404 after delete", rr2.Code)
 	}
@@ -152,7 +160,7 @@ func TestAppWebFileDelete(t *testing.T) {
 func TestAppWebFileDeleteMissing(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "delmiss")
-	rr := testRequest(t, srv, http.MethodDelete, "/api/apps/"+nonce+"/web?file=absent.txt", nil, nil)
+	rr := testRequest(t, srv, http.MethodDelete, "/api/apps/"+nonce+"/web/absent.txt", nil, nil)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 for deleting a missing file", rr.Code)
 	}
@@ -163,23 +171,22 @@ func TestAppWebPutWithoutFile(t *testing.T) {
 	nonce := createApp(t, srv, "putnofile")
 	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/web", bytes.NewReader([]byte("x")), nil)
 	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want 405 (PUT only valid with ?file=)", rr.Code)
+		t.Fatalf("status = %d, want 405 (PUT needs a file path)", rr.Code)
 	}
 }
 
-// TestAppWebGetWithoutFileStillZip pins the bulk-download path: ?file= unset
-// keeps returning a zip, so the single-file branch can't have disturbed it.
-func TestAppWebGetWithoutFileStillZip(t *testing.T) {
+// TestAppDownloadZip pins the bulk download at /download.
+func TestAppDownloadZip(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "zipapp")
 	createAppFile(t, srv, nonce, "a.txt", []byte("aaa"))
 
-	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web", nil, nil)
+	rr := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/download", nil, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
 	if ct := rr.Header().Get("Content-Type"); ct != "application/zip" {
-		t.Fatalf("Content-Type = %q, want application/zip (bulk path unchanged)", ct)
+		t.Fatalf("Content-Type = %q, want application/zip", ct)
 	}
 }
 
@@ -231,7 +238,7 @@ func TestServiceFilesPutNonPublishable(t *testing.T) {
 
 // ── Act-token equivalence ──
 //
-// These are the deferred Phase-1 dispatch tests: the ?file=/PUT path must
+// These are the deferred Phase-1 dispatch tests: the file-path PUT must
 // behave the same whether the request comes in directly (auth-off synthetic
 // superuser here) or via an act-token dispatch (real Admin user Ada). Same
 // handler, same authz gates, same bytes — the act token is just a second way
@@ -243,11 +250,11 @@ func TestActTokenAppFileGet(t *testing.T) {
 	createAppFile(t, srv, nonce, "index.html", []byte("<h1>act</h1>"))
 	ada := createActUser(t, srv)
 
-	tok, err := srv.mintActToken(ada, http.MethodGet, "/api/apps/"+nonce+"/web?file=index.html", 5*time.Minute)
+	tok, err := srv.mintActToken(ada, http.MethodGet, "/api/apps/"+nonce+"/web/index.html", 5*time.Minute)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	direct := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=index.html", nil, nil)
+	direct := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/index.html", nil, nil)
 	viaAct := testRequest(t, srv, http.MethodGet, "/api/act/"+tok, nil, nil)
 
 	if viaAct.Code != direct.Code {
@@ -266,7 +273,7 @@ func TestActTokenAppFilePut(t *testing.T) {
 	nonce := createApp(t, srv, "actput")
 	ada := createActUser(t, srv)
 
-	tok, err := srv.mintActToken(ada, http.MethodPut, "/api/apps/"+nonce+"/web?file=via-act.txt", 5*time.Minute)
+	tok, err := srv.mintActToken(ada, http.MethodPut, "/api/apps/"+nonce+"/web/via-act.txt", 5*time.Minute)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -276,7 +283,7 @@ func TestActTokenAppFilePut(t *testing.T) {
 		t.Fatalf("act PUT status = %d, want 204; body=%q", rr.Code, rr.Body.String())
 	}
 	// read back via a direct GET — proves the bytes landed on disk
-	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=via-act.txt", nil, nil)
+	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/via-act.txt", nil, nil)
 	if rr2.Code != http.StatusOK || rr2.Body.String() != "written via act token\n" {
 		t.Fatalf("readback = %d %q", rr2.Code, rr2.Body.String())
 	}
@@ -288,7 +295,7 @@ func TestActTokenAppFileDelete(t *testing.T) {
 	createAppFile(t, srv, nonce, "killme.txt", []byte("doomed"))
 	ada := createActUser(t, srv)
 
-	tok, err := srv.mintActToken(ada, http.MethodDelete, "/api/apps/"+nonce+"/web?file=killme.txt", 5*time.Minute)
+	tok, err := srv.mintActToken(ada, http.MethodDelete, "/api/apps/"+nonce+"/web/killme.txt", 5*time.Minute)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -296,7 +303,7 @@ func TestActTokenAppFileDelete(t *testing.T) {
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("act DELETE status = %d, want 204; body=%q", rr.Code, rr.Body.String())
 	}
-	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web?file=killme.txt", nil, nil)
+	rr2 := testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/web/killme.txt", nil, nil)
 	if rr2.Code != http.StatusNotFound {
 		t.Fatalf("readback = %d, want 404 after act-token delete", rr2.Code)
 	}
@@ -378,7 +385,7 @@ func TestSearchAppFilesHTTP(t *testing.T) {
 
 // ── App data area ──
 //
-// /api/apps/{nonce}/data mirrors /web's ?file= ops for files the web server
+// /api/apps/{nonce}/data mirrors /web's path ops for files the web server
 // never hosts; a bare GET lists them.
 
 func TestAppDataFileRoundTrip(t *testing.T) {
@@ -386,12 +393,12 @@ func TestAppDataFileRoundTrip(t *testing.T) {
 	nonce := createApp(t, srv, "dataapp")
 	createAppFile(t, srv, nonce, "index.html", []byte("<h1>site</h1>"))
 
-	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/data?file=uploads/evil.html", bytes.NewReader([]byte("<script>alert(1)</script>")), nil)
+	rr := testRequest(t, srv, http.MethodPut, "/api/apps/"+nonce+"/data/uploads/evil.html", bytes.NewReader([]byte("<script>alert(1)</script>")), nil)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("PUT status = %d, want 204; body=%q", rr.Code, rr.Body.String())
 	}
 
-	rr = testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/data?file=uploads/evil.html", nil, nil)
+	rr = testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/data/uploads/evil.html", nil, nil)
 	if rr.Code != http.StatusOK || rr.Body.String() != "<script>alert(1)</script>" {
 		t.Fatalf("GET = %d %q, want the stored bytes", rr.Code, rr.Body.String())
 	}
@@ -405,7 +412,7 @@ func TestAppDataFileRoundTrip(t *testing.T) {
 	if got := strings.TrimSpace(rr.Body.String()); got != want {
 		t.Fatalf("list = %s, want %s", got, want)
 	}
-	webFiles, _ := srv.coreListAppFiles(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "")
+	webFiles, _ := srv.coreListAppFiles(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "", "")
 	if len(webFiles) != 1 || webFiles[0].Path != "index.html" {
 		t.Errorf("web files = %+v, want only index.html", webFiles)
 	}
@@ -418,11 +425,11 @@ func TestAppDataFileRoundTrip(t *testing.T) {
 		}
 	}
 
-	rr = testRequest(t, srv, http.MethodDelete, "/api/apps/"+nonce+"/data?file=uploads/evil.html", nil, nil)
+	rr = testRequest(t, srv, http.MethodDelete, "/api/apps/"+nonce+"/data/uploads/evil.html", nil, nil)
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("DELETE status = %d, want 204", rr.Code)
 	}
-	rr = testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/data?file=uploads/evil.html", nil, nil)
+	rr = testRequest(t, srv, http.MethodGet, "/api/apps/"+nonce+"/data/uploads/evil.html", nil, nil)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("GET after delete = %d, want 404", rr.Code)
 	}
@@ -435,7 +442,7 @@ func TestAppDataSurvivesWebReplace(t *testing.T) {
 	if err := srv.coreWriteAppFile(su, nonce, "data", "keep.txt", []byte("kept"), ""); err != nil {
 		t.Fatalf("write data: %v", err)
 	}
-	if _, err := srv.coreUploadAppWeb(su, nonce, []uploadFile{{Name: "index.html", Data: []byte("<h1>v2</h1>")}}); err != nil {
+	if _, err := srv.coreUploadAppWeb(su, nonce, "", []uploadFile{{Name: "index.html", Data: []byte("<h1>v2</h1>")}}); err != nil {
 		t.Fatalf("upload web: %v", err)
 	}
 	if err := srv.coreDeleteAppWeb(su, nonce); err != nil {
@@ -481,7 +488,7 @@ func zipBytes(t *testing.T, files map[string]string) []byte {
 
 func webFileSet(t *testing.T, srv *Server, nonce string) map[string]bool {
 	t.Helper()
-	files, err := srv.coreListAppFiles(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "")
+	files, err := srv.coreListAppFiles(&db.User{ID: 1, Role: "Superuser"}, nonce, "web", "", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -573,7 +580,7 @@ func TestAppDataBulkUpload(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	files, _ := srv.coreListAppFiles(su, nonce, "data", "")
+	files, _ := srv.coreListAppFiles(su, nonce, "data", "", "")
 	got := map[string]int64{}
 	for _, f := range files {
 		got[f.Path] = f.Size
@@ -588,5 +595,136 @@ func TestAppDataBulkUpload(t *testing.T) {
 	}
 	if _, err := srv.coreReadAppFile(su, nonce, "data", "ok.txt", 0, 0); err == nil {
 		t.Errorf("ok.txt written despite a rejected sibling; uploads should be all-or-nothing on path checks")
+	}
+}
+
+// ── Narrowing to a folder ──
+
+// A GET answers for whatever the path is: a folder lists (paths stay
+// relative to the area's root), a file returns its bytes, and the bare
+// area lists everything.
+func TestAppFilesGetFolderOrFile(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "blog")
+	createAppFile(t, srv, nonce, "index.html", []byte("home"))
+	createAppFile(t, srv, nonce, "blog/2026/jan.md", []byte("january"))
+	createAppFile(t, srv, nonce, "blog/2026/feb.md", []byte("february"))
+	createAppFile(t, srv, nonce, "blog/2025/dec.md", []byte("december"))
+
+	list := func(path string) []string {
+		t.Helper()
+		rr := testRequest(t, srv, http.MethodGet, path, nil, nil)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %s", path, rr.Code, rr.Body.String())
+		}
+		var out struct{ Files []appFile }
+		if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+			t.Fatalf("GET %s: not a listing: %s", path, rr.Body.String())
+		}
+		var paths []string
+		for _, f := range out.Files {
+			paths = append(paths, f.Path)
+		}
+		return paths
+	}
+	base := "/api/apps/" + nonce + "/web"
+	if got := fmt.Sprint(list(base + "/blog/2026")); got != "[blog/2026/feb.md blog/2026/jan.md]" {
+		t.Errorf("folder listing = %s", got)
+	}
+	if got := list(base); len(got) != 4 {
+		t.Errorf("root listing = %v, want all 4 files", got)
+	}
+	if got := fmt.Sprint(list(base + "/blog?search=dec")); got != "[blog/2025/dec.md]" {
+		t.Errorf("searched listing = %s", got)
+	}
+
+	rr := testRequest(t, srv, http.MethodGet, base+"/blog/2026/jan.md", nil, nil)
+	if rr.Code != http.StatusOK || rr.Body.String() != "january" {
+		t.Errorf("file GET = %d %q, want january", rr.Code, rr.Body.String())
+	}
+	if rr := testRequest(t, srv, http.MethodGet, base+"/blog/2024", nil, nil); rr.Code != http.StatusNotFound {
+		t.Errorf("missing folder = %d, want 404", rr.Code)
+	}
+	if rr := testRequest(t, srv, http.MethodDelete, base+"/blog/2026", nil, nil); rr.Code != http.StatusBadRequest {
+		t.Errorf("DELETE on a folder = %d, want 400", rr.Code)
+	}
+}
+
+// A web upload into a folder replaces just that folder: no index.html
+// needed, siblings and the rest of the slot untouched.
+func TestAppWebUploadIntoFolder(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "blog")
+	createAppFile(t, srv, nonce, "index.html", []byte("home"))
+	createAppFile(t, srv, nonce, "blog/2026/stale.md", []byte("old"))
+	createAppFile(t, srv, nonce, "blog/2025/dec.md", []byte("december"))
+
+	rr := postFiles(t, srv, "/api/apps/"+nonce+"/web/blog/2026", map[string][]byte{
+		"jan.md":        []byte("january"),
+		"img/cover.png": []byte("png"),
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("upload = %d %s", rr.Code, rr.Body.String())
+	}
+	got := webFileSet(t, srv, nonce)
+	want := []string{"index.html", "blog/2025/dec.md", "blog/2026/jan.md", "blog/2026/img/cover.png"}
+	if len(got) != len(want) {
+		t.Errorf("files = %v, want %v (stale.md cleared, the rest kept)", got, want)
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing %s in %v", w, got)
+		}
+	}
+
+	// A folder that's really a file is refused, and nothing is touched.
+	rr = postFiles(t, srv, "/api/apps/"+nonce+"/web/index.html", map[string][]byte{"x.md": []byte("x")})
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("upload onto a file = %d, want 400", rr.Code)
+	}
+}
+
+// A data upload into a folder adds under it, leaving what's there.
+func TestAppDataUploadIntoFolder(t *testing.T) {
+	srv := newTestServer(t)
+	su := &db.User{ID: 1, Role: "Superuser"}
+	nonce := createApp(t, srv, "uploads")
+	if err := srv.coreWriteAppFile(su, nonce, "data", "photos/2026/old.jpg", []byte("old"), ""); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rr := postFiles(t, srv, "/api/apps/"+nonce+"/data/photos/2026", map[string][]byte{"new.jpg": []byte("new")})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("upload = %d %s", rr.Code, rr.Body.String())
+	}
+	var out struct{ Files []string }
+	json.Unmarshal(rr.Body.Bytes(), &out)
+	if fmt.Sprint(out.Files) != "[photos/2026/new.jpg]" {
+		t.Errorf("written = %v, want root-relative paths", out.Files)
+	}
+	files, _ := srv.coreListAppFiles(su, nonce, "data", "photos/2026", "")
+	if len(files) != 2 {
+		t.Errorf("data folder = %v, want old.jpg kept beside new.jpg", files)
+	}
+}
+
+// Search narrows to a folder; one app asked for by name 404s on a folder
+// it doesn't have, while an all-apps search just skips those apps.
+func TestSearchAppFilesInFolder(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "blog")
+	createAppFile(t, srv, nonce, "blog/2026/jan.md", []byte("needle in 2026"))
+	createAppFile(t, srv, nonce, "blog/2025/dec.md", []byte("needle in 2025"))
+
+	rr := testRequest(t, srv, http.MethodGet, "/api/apps/search?nonce="+nonce+"&dir=blog/2026&pattern=needle", nil, nil)
+	var out struct{ Matches []appFileMatch }
+	json.Unmarshal(rr.Body.Bytes(), &out)
+	if rr.Code != http.StatusOK || len(out.Matches) != 1 || out.Matches[0].Path != "blog/2026/jan.md" {
+		t.Errorf("search = %d %s, want only blog/2026/jan.md", rr.Code, rr.Body.String())
+	}
+	if rr := testRequest(t, srv, http.MethodGet, "/api/apps/search?nonce="+nonce+"&dir=nope&pattern=needle", nil, nil); rr.Code != http.StatusNotFound {
+		t.Errorf("missing folder in one app = %d, want 404", rr.Code)
+	}
+	if rr := testRequest(t, srv, http.MethodGet, "/api/apps/search?dir=nope&pattern=needle", nil, nil); rr.Code != http.StatusOK {
+		t.Errorf("missing folder across apps = %d, want 200 (skipped)", rr.Code)
 	}
 }

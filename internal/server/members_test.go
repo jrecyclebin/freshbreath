@@ -346,9 +346,9 @@ func TestReadOnlyMemberCannotWrite(t *testing.T) {
 		method, path, body string
 		want               int
 	}{
-		{"GET", base + "/web?file=index.html", "", http.StatusOK},
-		{"PUT", base + "/web?file=index.html", "<script></script>", http.StatusForbidden},
-		{"DELETE", base + "/web?file=index.html", "", http.StatusForbidden},
+		{"GET", base + "/web/index.html", "", http.StatusOK},
+		{"PUT", base + "/web/index.html", "<script></script>", http.StatusForbidden},
+		{"DELETE", base + "/web/index.html", "", http.StatusForbidden},
 		{"DELETE", base + "/web", "", http.StatusForbidden},
 		{"POST", base + "/deploy", `{"target":"prod"}`, http.StatusForbidden},
 		{"PUT", "/api/apps/" + nonce + "/service/files", "[t] x\nGET https://x.example\n", http.StatusForbidden},

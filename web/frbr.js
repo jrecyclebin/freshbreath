@@ -86,6 +86,12 @@ export async function api(session, path, opts = {}) {
   return authedFetch(session, `${session?.current.base ?? API}${path}`, jsonInit(opts));
 }
 
+// Escape paths for placement in api calls.
+export function escapePath(str) {
+  const segs = String(str).split("/").filter(Boolean).map(encodeURIComponent);
+  return segs.length ? segs.join("/") : "";
+}
+
 // Only objects and arrays are stringified. Strings, binary bodies
 // (Blob/File, ArrayBuffer, typed arrays, ReadableStream) and pre-encoded
 // forms pass through untouched — JSON.stringify(file) yields "{}", and a
@@ -1589,7 +1595,7 @@ export default ServiceProxy;
 // Expose to window for non-module consumers (e.g. the admin panel)
 if (typeof window !== 'undefined') {
   window.FreshBreath = window.FrBr = {
-    api, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
+    api, escapePath, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
     remote, RemoteExpired,
     sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
   };

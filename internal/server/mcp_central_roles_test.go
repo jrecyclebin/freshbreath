@@ -48,7 +48,7 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 	// Mirrors the HTTP routes in handler.go's requireAnyRole groups.
 allAppTools := []string{
 		"list_apps", "get_app", "get_app_services", // all-roles
-		"list_app_files", "search_app_files", "read_app_file", "write_app_file", "delete_app_file", // all-roles
+		"list_app_files", "search_app_files", "read_app_files", "write_app_files", "delete_app_file", // all-roles
 	}
 	// get_app_members is admin+ with the other member tools: the roster is
 	// not shown to members, on MCP any more than in the panel.
@@ -88,8 +88,15 @@ allAppTools := []string{
 		t.Run(tc.role, func(t *testing.T) {
 			got := toolNamesViaInMemory(t, srv.buildCentralMCPServerForRole(tc.role))
 
-			if len(got) != len(tc.want) {
-				t.Errorf("%s: got %d tools, want %d", tc.role, len(got), len(tc.want))
+			for _, name := range tc.want {
+				if !slices.Contains(got, name) {
+					t.Errorf("%s: missing tool %q", tc.role, name)
+				}
+			}
+			for _, name := range got {
+				if !slices.Contains(tc.want, name) {
+					t.Errorf("%s: unexpected tool %q", tc.role, name)
+				}
 			}
 			for _, name := range tc.mustHave {
 				if !slices.Contains(got, name) {

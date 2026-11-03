@@ -1265,11 +1265,29 @@ type appFile struct {
 	Size int64  `json:"size"` // bytes
 }
 
-// coreListAppFiles lists the files in an app's web or data area, sorted by path.
-// An app with no uploaded files lists empty (not an error). If search is
-// non-empty, only files whose path or content contains the term (case-
-// insensitive) are returned.
-func (s *Server) coreListAppFiles(actor *db.User, nonce, area, search string) ([]appFile, error) {
+// cleanAppDir cleans a folder inside an app file area. Empty, "." and "/"
+// all mean the area's root (""); a leading slash is forgiven.
+func cleanAppDir(dir string) (string, error) {
+	dir = strings.Trim(dir, "/")
+	if dir == "" || dir == "." {
+		return "", nil
+	}
+	rel, err := cleanAppFilePath(dir)
+	if err != nil {
+		return "", cerr(http.StatusBadRequest, "dir: %v", err)
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return rel, nil
+}
+
+// coreListAppFiles lists the files in an app's web or data area, sorted by
+// path. dir narrows it to one folder (paths stay relative to the area's
+// root). An app with no files lists empty, but a dir that isn't there is
+// not found. If search is non-empty, only files whose path or content
+// contains the term (case-insensitive) are returned.
+func (s *Server) coreListAppFiles(actor *db.User, nonce, area, dir, search string) ([]appFile, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
 		return nil, err
 	}
@@ -1280,11 +1298,18 @@ func (s *Server) coreListAppFiles(actor *db.User, nonce, area, search string) ([
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(webDir); os.IsNotExist(err) {
-		return []appFile{}, nil
+	sub, err := cleanAppDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := os.Stat(filepath.Join(webDir, sub)); err != nil || !fi.IsDir() {
+		if sub == "" && os.IsNotExist(err) {
+			return []appFile{}, nil
+		}
+		return nil, cerr(http.StatusNotFound, "folder not found: %s", filepath.ToSlash(sub))
 	}
 	files := []appFile{}
-	err = filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+	err = filepath.Walk(filepath.Join(webDir, sub), func(path string, fi os.FileInfo, err error) error {
 		if err != nil || fi.IsDir() {
 			return err
 		}
@@ -1320,13 +1345,17 @@ const (
 )
 
 // coreSearchAppFiles greps an app file area (web or data) for a regular expression (RE2
-// syntax), returning matching lines with 1-based line numbers, like rg. With
-// a nonce it searches that app; without one it searches every app the actor
+// syntax), returning matching lines with 1-based line numbers, like rg. dir
+// narrows it to one folder in each app. With a nonce it searches that app; without one it searches every app the actor
 // can list (all apps for admin+, their own apps otherwise). Binary files are
 // skipped, long lines are clipped, and results stop at searchMaxMatches with
 // truncated=true.
-func (s *Server) coreSearchAppFiles(actor *db.User, nonce, area, pattern string, ignoreCase bool) ([]appFileMatch, bool, error) {
+func (s *Server) coreSearchAppFiles(actor *db.User, nonce, area, dir, pattern string, ignoreCase bool) ([]appFileMatch, bool, error) {
 	if _, err := s.appFileDir(nonce, area); err != nil {
+		return nil, false, err
+	}
+	sub, err := cleanAppDir(dir)
+	if err != nil {
 		return nil, false, err
 	}
 	if pattern == "" {
@@ -1374,11 +1403,16 @@ func (s *Server) coreSearchAppFiles(actor *db.User, nonce, area, pattern string,
 	matches := []appFileMatch{}
 	for _, app := range apps {
 		webDir, _ := s.appFileDir(app.nonce, area)
-		if _, err := os.Stat(webDir); os.IsNotExist(err) {
+		if fi, err := os.Stat(filepath.Join(webDir, sub)); err != nil || !fi.IsDir() {
+			// One app asked for by name answers for its folder; across
+			// apps, those without it are just skipped.
+			if nonce != "" && sub != "" {
+				return nil, false, cerr(http.StatusNotFound, "folder not found: %s", filepath.ToSlash(sub))
+			}
 			continue
 		}
 		var paths []string
-		err := filepath.Walk(webDir, func(path string, fi os.FileInfo, err error) error {
+		err := filepath.Walk(filepath.Join(webDir, sub), func(path string, fi os.FileInfo, err error) error {
 			if err != nil || fi.IsDir() {
 				return err
 			}
@@ -1551,9 +1585,10 @@ func gatherUploadEntries(files []uploadFile) ([]uploadEntry, error) {
 // place. The whole set is treated like one zip — a single top-level folder
 // shared by every file is unwrapped, and if there's no index.html the first
 // .html alphabetically becomes it — so a lone page, a zip, a pile of files
-// and a dropped folder all publish the same way. Everything is validated
-// before the old files are cleared.
-func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFile) (string, error) {
+// and a dropped folder all publish the same way. With a dir, only that
+// folder is replaced (and it needs no index.html); the rest of the slot is
+// left alone. Everything is validated before the old files are cleared.
+func (s *Server) coreUploadAppWeb(actor *db.User, nonce, dir string, files []uploadFile) (string, error) {
 	if err := s.gateAppWrite(actor, nonce); err != nil {
 		return "", err
 	}
@@ -1563,6 +1598,10 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 	}
 	if len(files) == 0 {
 		return "", cerr(http.StatusBadRequest, "no files uploaded")
+	}
+	sub, err := cleanAppDir(dir)
+	if err != nil {
+		return "", err
 	}
 
 	entries, err := gatherUploadEntries(files)
@@ -1587,6 +1626,7 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 	}
 
 	// Find the entry point: index.html, else the first .html alphabetically.
+	// A folder upload has no entry point to find.
 	var htmlFiles []string
 	hasIndex := false
 	for _, e := range entries {
@@ -1597,7 +1637,7 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 			htmlFiles = append(htmlFiles, e.path)
 		}
 	}
-	if !hasIndex {
+	if !hasIndex && sub == "" {
 		if len(htmlFiles) == 0 {
 			return "", cerr(http.StatusBadRequest, "no HTML file found in upload")
 		}
@@ -1609,7 +1649,10 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 		}
 	}
 
-	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
+	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web", sub)
+	if fi, err := os.Stat(webDir); err == nil && !fi.IsDir() {
+		return "", cerr(http.StatusBadRequest, "%s is a file, not a folder", filepath.ToSlash(sub))
+	}
 	if err := os.RemoveAll(webDir); err != nil {
 		return "", cerr(http.StatusInternalServerError, "failed to clear web dir")
 	}
@@ -1653,17 +1696,26 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce string, files []uploadFi
 		return "", cerr(http.StatusInternalServerError, "failed to save details")
 	}
 	s.rebuildHostedRoutes()
-	s.audit(actor, "uploaded web files", app.Name)
+	if sub == "" {
+		s.audit(actor, "uploaded web files", app.Name)
+	} else {
+		s.audit(actor, "uploaded web files", app.Name+"/"+filepath.ToSlash(sub))
+	}
 	return appLocation(app), nil
 }
 
 // coreUploadAppData adds uploaded files to an app's data area at their
-// relative paths, replacing same-named files and leaving the rest alone.
-// Files are stored as-is (zips are not expanded). All paths are checked
-// before anything is written. Returns the written paths.
-func (s *Server) coreUploadAppData(actor *db.User, nonce string, files []uploadFile) ([]string, error) {
+// relative paths (under dir, if given), replacing same-named files and
+// leaving the rest alone. Files are stored as-is (zips are not expanded).
+// All paths are checked before anything is written. Returns the written
+// paths, relative to the area's root.
+func (s *Server) coreUploadAppData(actor *db.User, nonce, dir string, files []uploadFile) ([]string, error) {
 	if len(files) == 0 {
 		return nil, cerr(http.StatusBadRequest, "no files uploaded")
+	}
+	sub, err := cleanAppDir(dir)
+	if err != nil {
+		return nil, err
 	}
 	paths := make([]string, len(files))
 	for i, f := range files {
@@ -1671,7 +1723,7 @@ func (s *Server) coreUploadAppData(actor *db.User, nonce string, files []uploadF
 		if err != nil {
 			return nil, cerr(http.StatusBadRequest, "%s: %v", f.Name, err)
 		}
-		paths[i] = filepath.ToSlash(rel)
+		paths[i] = filepath.ToSlash(filepath.Join(sub, rel))
 	}
 	for i, f := range files {
 		if err := s.coreWriteAppFile(actor, nonce, "data", paths[i], f.Data, ""); err != nil {
@@ -1877,9 +1929,41 @@ func (s *Server) coreReadAppFile(actor *db.User, nonce, area, filePath string, o
 	return sliceBytes(data, offset, limit), nil
 }
 
+// coreGetAppPath answers for one path in an app's web or data area: a
+// folder (or the root, for "") lists its files, a file returns its bytes.
+// Exactly one of the two results is non-nil.
+func (s *Server) coreGetAppPath(actor *db.User, nonce, area, p string) ([]appFile, []byte, error) {
+	if err := s.gateApp(actor, nonce); err != nil {
+		return nil, nil, err
+	}
+	if _, err := s.store.GetApp(nonce); err != nil {
+		return nil, nil, cerr(http.StatusNotFound, "app not found: %v", err)
+	}
+	sub, err := cleanAppDir(p)
+	if err != nil {
+		return nil, nil, err
+	}
+	dir, err := s.appFileDir(nonce, area)
+	if err != nil {
+		return nil, nil, err
+	}
+	if sub != "" {
+		fi, err := os.Stat(filepath.Join(dir, sub))
+		if err != nil {
+			return nil, nil, cerr(http.StatusNotFound, "not found: %s", filepath.ToSlash(sub))
+		}
+		if !fi.IsDir() {
+			data, err := s.coreReadAppFile(actor, nonce, area, sub, 0, 0)
+			return nil, data, err
+		}
+	}
+	files, err := s.coreListAppFiles(actor, nonce, area, sub, "")
+	return files, nil, err
+}
+
 // coreStatAppFile returns the size and sniffed content type of a file in an
 // app's web or data area without reading the whole file. Used by the MCP
-// read_app_file transport:"http" and threshold-escape paths to populate
+// read_app_files transport:"http" and threshold-escape paths to populate
 // {size, content_type} without loading a potentially large file into memory.
 func (s *Server) coreStatAppFile(actor *db.User, nonce, area, filePath string) (int64, string, error) {
 	if err := s.gateApp(actor, nonce); err != nil {
@@ -2017,6 +2101,9 @@ func (s *Server) coreDeleteAppFile(actor *db.User, nonce, area, filePath string)
 	dir, err := s.appFileDir(nonce, area)
 	if err != nil {
 		return err
+	}
+	if fi, err := os.Stat(filepath.Join(dir, rel)); err == nil && fi.IsDir() {
+		return cerr(http.StatusBadRequest, "%s is a folder, not a file", filepath.ToSlash(rel))
 	}
 	if err := os.Remove(filepath.Join(dir, rel)); err != nil {
 		if os.IsNotExist(err) {

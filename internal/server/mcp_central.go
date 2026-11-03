@@ -295,16 +295,21 @@ func (s *Server) mintActFileURL(user *db.User, method, pathQuery string) (string
 // appFileAreaDescription documents the area argument shared by the app file tools.
 const appFileAreaDescription = "Optional file area: \"web\" (default) is the Development slot the web server hosts; \"data\" is private storage (e.g. user uploads) that is never served over the web."
 
+// appDirDescription documents the dir argument shared by the app file tools.
+const appDirDescription = "Optional folder inside the area (e.g. \"blog/2026\") to narrow to; omit for the area's root."
+
 // appFileActPath builds the act-token target path for an app file:
-// /api/apps/{nonce}/{web|data}?file=<relpath>, with the file path
-// query-encoded. An empty area means web.
+// /api/apps/{nonce}/{web|data}/<relpath>, each path segment escaped. An
+// empty area means web.
 func appFileActPath(nonce, area, filePath string) string {
 	if area == "" {
 		area = "web"
 	}
-	q := url.Values{}
-	q.Set("file", filePath)
-	return "/api/apps/" + nonce + "/" + area + "?" + q.Encode()
+	segs := strings.Split(strings.Trim(filepath.ToSlash(filePath), "/"), "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return "/api/apps/" + nonce + "/" + area + "/" + strings.Join(segs, "/")
 }
 
 // serviceFileActPath builds the act-token target path for a service
@@ -337,6 +342,16 @@ func mcpToolResult(v interface{}) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
+// mcpToolResultFailed is mcpToolResult flagged as an error when failed —
+// for batch tools whose payload reports each item's own outcome.
+func mcpToolResultFailed(v interface{}, failed bool) (*mcp.CallToolResult, error) {
+	res, err := mcpToolResult(v)
+	if res != nil && failed {
+		res.IsError = true
+	}
+	return res, err
+}
+
 // mcpFileContent builds a result map for file read content. Valid UTF-8 is
 // returned as a plain string; binary data is returned base64-encoded.
 func mcpFileContent(data []byte) map[string]interface{} {
@@ -355,6 +370,76 @@ func int64Arg(args map[string]interface{}, key string) int64 {
 		return int64(v)
 	}
 	return 0
+}
+
+// mcpFileItems reads a files argument: a list whose entries are objects,
+// or bare path strings (taken as {path}).
+func mcpFileItems(v interface{}) []map[string]interface{} {
+	list, _ := v.([]interface{})
+	var out []map[string]interface{}
+	for _, item := range list {
+		switch it := item.(type) {
+		case string:
+			out = append(out, map[string]interface{}{"path": it})
+		case map[string]interface{}:
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// mcpReadAppFile reads one file for read_app_files: its content inline, an
+// act-token URL (asked for, or a whole-file inline read past
+// mcpInlineMaxBytes), or an error — always as a result map, so one bad
+// path doesn't sink the rest. ok is false when the read failed.
+func (s *Server) mcpReadAppFile(user *db.User, nonce, area, path string, offset, limit int64, transport string) (map[string]interface{}, bool) {
+	fail := func(err error) (map[string]interface{}, bool) {
+		return map[string]interface{}{"error": err.Error()}, false
+	}
+	urlResult := func(extra map[string]interface{}) (map[string]interface{}, bool) {
+		size, ct, err := s.coreStatAppFile(user, nonce, area, path)
+		if err != nil {
+			return fail(err)
+		}
+		u, err := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, area, path))
+		if err != nil {
+			return fail(err)
+		}
+		res := map[string]interface{}{"url": u, "method": http.MethodGet, "size": size, "content_type": ct}
+		for k, v := range extra {
+			res[k] = v
+		}
+		return res, true
+	}
+
+	chunked := offset != 0 || limit != 0
+	if transport == actTokenTransportHTTP {
+		if chunked {
+			return fail(fmt.Errorf("transport:\"http\" is incompatible with offset/limit (the URL targets the whole file)"))
+		}
+		return urlResult(nil)
+	}
+	if chunked {
+		data, err := s.coreReadAppFile(user, nonce, area, path, offset, limit)
+		if err != nil {
+			return fail(err)
+		}
+		return mcpFileContent(data), true
+	}
+	// Whole-file: bound the read so a huge file isn't loaded just to decide
+	// it's too big; escape to an act-token URL if it is. Not a failure: the
+	// url is the answer.
+	data, err := s.coreReadAppFile(user, nonce, area, path, 0, int64(mcpInlineMaxBytes)+1)
+	if err != nil {
+		return fail(err)
+	}
+	if int64(len(data)) > mcpInlineMaxBytes {
+		return urlResult(map[string]interface{}{
+			"error":            "file too large for inline MCP response - use \"http\" transport or read in chunks",
+			"max_inline_bytes": mcpInlineMaxBytes,
+		})
+	}
+	return mcpFileContent(data), true
 }
 
 // resolveOwnerEmail looks up a user by email and returns their ID. An empty
@@ -723,12 +808,13 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 	// list_app_files
 	mcps.AddTool(&mcp.Tool{
 		Name:        "list_app_files",
-		Description: "List an app's files (path + size) in its web or data area. Empty if nothing is there. Optionally search file paths and contents.",
+		Description: "List an app's files (path + size) in its web or data area, or in one folder of it. Paths are relative to the area's root. Empty if nothing is there. Optionally search file paths and contents.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"nonce":  map[string]interface{}{"type": "string", "description": "App nonce"},
 				"area":   map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
+				"dir":    map[string]interface{}{"type": "string", "description": appDirDescription},
 				"search": map[string]interface{}{"type": "string", "description": "Optional term to filter by path or content (case-insensitive)"},
 			},
 			"required": []string{"nonce"},
@@ -742,8 +828,9 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
 		area, _ := args["area"].(string)
+		dir, _ := args["dir"].(string)
 		search, _ := args["search"].(string)
-		files, err := s.coreListAppFiles(user, nonce, area, search)
+		files, err := s.coreListAppFiles(user, nonce, area, dir, search)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
@@ -760,6 +847,7 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 				"pattern":     map[string]interface{}{"type": "string", "description": "Regular expression (RE2 syntax) matched against each line"},
 				"nonce":       map[string]interface{}{"type": "string", "description": "Optional app nonce; omit to search all your apps"},
 				"area":        map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
+				"dir":         map[string]interface{}{"type": "string", "description": appDirDescription},
 				"ignore_case": map[string]interface{}{"type": "boolean", "description": "Optional case-insensitive match"},
 			},
 			"required": []string{"pattern"},
@@ -774,29 +862,40 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		pattern, _ := args["pattern"].(string)
 		nonce, _ := args["nonce"].(string)
 		area, _ := args["area"].(string)
+		dir, _ := args["dir"].(string)
 		ignoreCase, _ := args["ignore_case"].(bool)
-		matches, truncated, err := s.coreSearchAppFiles(user, nonce, area, pattern, ignoreCase)
+		matches, truncated, err := s.coreSearchAppFiles(user, nonce, area, dir, pattern, ignoreCase)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]interface{}{"matches": matches, "truncated": truncated})
 	})
 
-	// read_app_file
+	// read_app_files
 	mcps.AddTool(&mcp.Tool{
-		Name:        "read_app_file",
-		Description: "Read all or part of a file from an app's web or data area. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded. With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
+		Name:        "read_app_files",
+		Description: "Read one or more files (all or part of each) from an app's web or data area. Each result carries its path and either content, an http url, or an error. Valid UTF-8 content is returned as a string; binary content is returned base64-encoded (encoding:\"base64\"). With transport:\"inline\", whole-file reads over 10 KB auto-escape to an http URL — pass offset/limit to read in chunks, or set transport:\"http\" up front.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":     map[string]interface{}{"type": "string", "description": "App nonce"},
-				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the area's root"},
-				"area":      map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
-				"offset":    map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
-				"limit":     map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return an act-token URL to fetch over HTTP sidechannel — for saving as files)"},
+				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+				"area":  map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
+				"files": map[string]interface{}{
+					"type":        "array",
+					"description": "Files to read: each a path relative to the area's root, or {path, offset, limit}",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"path":   map[string]interface{}{"type": "string", "description": "File path relative to the area's root"},
+							"offset": map[string]interface{}{"type": "number", "description": "Optional zero-based byte offset"},
+							"limit":  map[string]interface{}{"type": "number", "description": "Optional maximum bytes to read"},
+						},
+						"required": []string{"path"},
+					},
+				},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"inline", "http"}, "description": "How to transfer bytes: \"inline\" (directly into context) or \"http\" (return act-token URLs to fetch over HTTP sidechannel — for saving as files)"},
 			},
-			"required": []string{"nonce", "path", "transport"},
+			"required": []string{"nonce", "files", "transport"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -806,87 +905,54 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		path, _ := args["path"].(string)
 		area, _ := args["area"].(string)
-		offset := int64Arg(args, "offset")
-		limit := int64Arg(args, "limit")
 		transport, _ := args["transport"].(string)
-		chunked := offset != 0 || limit != 0
-
-		switch transport {
-		case actTokenTransportInline:
-			if chunked {
-				data, err := s.coreReadAppFile(user, nonce, area, path, offset, limit)
-				if err != nil {
-					return mcpToolError("%v", err), nil
-				}
-				return mcpToolResult(mcpFileContent(data))
-			}
-			// Whole-file: bound the read so a huge file isn't loaded just to
-			// decide it's too big; escape to an act-token URL if it is.
-			data, err := s.coreReadAppFile(user, nonce, area, path, 0, int64(mcpInlineMaxBytes)+1)
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			if int64(len(data)) > mcpInlineMaxBytes {
-				size, ct, serr := s.coreStatAppFile(user, nonce, area, path)
-				if serr != nil {
-					return mcpToolError("%v", serr), nil
-				}
-				u, merr := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, area, path))
-				if merr != nil {
-					return mcpToolError("%v", merr), nil
-				}
-				return mcpToolResult(map[string]interface{}{
-					"error":            "file too large for inline MCP response - use \"http\" transport or read in chunks",
-					"url":              u,
-					"method":           http.MethodGet,
-					"size":             size,
-					"content_type":     ct,
-					"max_inline_bytes": mcpInlineMaxBytes,
-				})
-			}
-			return mcpToolResult(mcpFileContent(data))
-
-		case actTokenTransportHTTP:
-			if chunked {
-				return mcpToolError("transport:\"http\" is incompatible with offset/limit (the URL targets the whole file)"), nil
-			}
-			size, ct, err := s.coreStatAppFile(user, nonce, area, path)
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			u, err := s.mintActFileURL(user, http.MethodGet, appFileActPath(nonce, area, path))
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]interface{}{
-				"url":          u,
-				"method":       http.MethodGet,
-				"size":         size,
-				"content_type": ct,
-			})
-
-		default:
+		if transport != actTokenTransportInline && transport != actTokenTransportHTTP {
 			return mcpToolError("transport must be \"inline\" or \"http\", got %q", transport), nil
 		}
+		items := mcpFileItems(args["files"])
+		if len(items) == 0 {
+			return mcpToolError("files is required: a list of paths or {path, offset, limit}"), nil
+		}
+		results := make([]map[string]interface{}, 0, len(items))
+		failed := false
+		for _, it := range items {
+			path, _ := it["path"].(string)
+			res, ok := s.mcpReadAppFile(user, nonce, area, path, int64Arg(it, "offset"), int64Arg(it, "limit"), transport)
+			res["path"] = path
+			results = append(results, res)
+			failed = failed || !ok
+		}
+		return mcpToolResultFailed(map[string]interface{}{"files": results}, failed)
 	})
 
-	// write_app_file
+	// write_app_files
 	mcps.AddTool(&mcp.Tool{
-		Name:        "write_app_file",
-		Description: "Write or patch a file in an app's web or data area. Without old_text the entire file is replaced with new_text. With old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span). An error is returned if old_text is not found or appears more than once. Inline content rides in the tool call itself (no server-side size limit, but keep it modest); for large files, use transport:\"http\" with something like curl to PUT the bytes out of band.",
+		Name:        "write_app_files",
+		Description: "Write or patch one or more files in an app's web or data area, optionally under one folder (dir). For each file: without old_text the entire file is replaced with new_text; with old_text, the single occurrence of old_text is replaced with new_text (omit new_text to delete the span), and it's an error if old_text is missing or appears more than once. Set encoding:\"base64\" to send binary content as new_text (whole-file only). Other files in the folder are left alone. Every path is checked before anything is written; each file then reports written or its error. Inline content rides in the tool call itself (keep it modest); for large files, use transport:\"http\" and PUT the bytes out of band to the returned URLs.",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"nonce":     map[string]interface{}{"type": "string", "description": "App nonce"},
-				"path":      map[string]interface{}{"type": "string", "description": "File path relative to the area's root"},
-				"area":      map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
-				"new_text":  map[string]interface{}{"type": "string", "description": "Inline file content for the inline transport. Full file content when old_text is absent (whole-file replace), or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
-				"old_text":  map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
-				"transport": map[string]interface{}{"type": "string", "enum": []string{"http", "inline"}, "description": "How to transfer bytes: \"http\" (return an act-token URL to PUT over HTTP sidechannel — for sending files) or \"inline\" (directly from context)."},
+				"nonce": map[string]interface{}{"type": "string", "description": "App nonce"},
+				"area":  map[string]interface{}{"type": "string", "enum": []string{"web", "data"}, "description": appFileAreaDescription},
+				"dir":   map[string]interface{}{"type": "string", "description": "Optional folder inside the area (e.g. \"blog/2026\"); file paths are relative to it."},
+				"files": map[string]interface{}{
+					"type":        "array",
+					"description": "Files to write",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"path":     map[string]interface{}{"type": "string", "description": "File path, relative to dir (or the area's root)"},
+							"new_text": map[string]interface{}{"type": "string", "description": "Inline content: the full file when old_text is absent, or the replacement text when old_text is given. May be empty with old_text to delete the span. Ignored for http."},
+							"old_text": map[string]interface{}{"type": "string", "description": "Optional existing text to replace (must appear exactly once)"},
+							"encoding": map[string]interface{}{"type": "string", "enum": []string{"text", "base64"}, "description": "Optional: \"base64\" when new_text is base64-encoded binary"},
+						},
+						"required": []string{"path"},
+					},
+				},
+				"transport": map[string]interface{}{"type": "string", "enum": []string{"http", "inline"}, "description": "How to transfer bytes: \"http\" (return act-token URLs to PUT over HTTP sidechannel — for sending files) or \"inline\" (directly from context)."},
 			},
-			"required": []string{"nonce", "path", "transport"},
+			"required": []string{"nonce", "files", "transport"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -896,43 +962,86 @@ func (s *Server) registerAppTools(mcps *mcp.Server, role string) {
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
 		nonce, _ := args["nonce"].(string)
-		path, _ := args["path"].(string)
-		content, _ := args["new_text"].(string)
-		oldText, _ := args["old_text"].(string)
 		area, _ := args["area"].(string)
+		dir, _ := args["dir"].(string)
 		transport, _ := args["transport"].(string)
+		if transport != actTokenTransportInline && transport != actTokenTransportHTTP {
+			return mcpToolError("transport must be \"http\" or \"inline\", got %q", transport), nil
+		}
+		sub, err := cleanAppDir(dir)
+		if err != nil {
+			return mcpToolError("%v", err), nil
+		}
+		if _, err := s.appFileDir(nonce, area); err != nil {
+			return mcpToolError("%v", err), nil
+		}
 
-		switch transport {
-		case actTokenTransportInline:
-			if content == "" && oldText == "" {
-				return mcpToolError("transport:\"inline\" requires new_text or old_text"), nil
+		// Check every file before writing any.
+		type write struct {
+			path    string
+			data    []byte
+			oldText string
+		}
+		var writes []write
+		for i, it := range mcpFileItems(args["files"]) {
+			p, _ := it["path"].(string)
+			rel, err := cleanAppFilePath(p)
+			if err != nil {
+				return mcpToolError("files[%d] %q: %v", i, p, err), nil
 			}
-			if err := s.coreWriteAppFile(user, nonce, area, path, []byte(content), oldText); err != nil {
-				return mcpToolError("%v", err), nil
+			newText, _ := it["new_text"].(string)
+			oldText, _ := it["old_text"].(string)
+			encoding, _ := it["encoding"].(string)
+			w := write{path: filepath.ToSlash(filepath.Join(sub, rel)), data: []byte(newText), oldText: oldText}
+			if transport == actTokenTransportHTTP {
+				if oldText != "" {
+					return mcpToolError("files[%d] %q: transport:\"http\" is incompatible with old_text (patches stay inline)", i, p), nil
+				}
+			} else {
+				if newText == "" && oldText == "" {
+					return mcpToolError("files[%d] %q: transport:\"inline\" requires new_text or old_text", i, p), nil
+				}
+				if encoding == "base64" {
+					if oldText != "" {
+						return mcpToolError("files[%d] %q: encoding:\"base64\" is whole-file only (no old_text)", i, p), nil
+					}
+					if w.data, err = base64.StdEncoding.DecodeString(newText); err != nil {
+						return mcpToolError("files[%d] %q: new_text is not valid base64: %v", i, p, err), nil
+					}
+				}
 			}
-			return mcpToolResult(map[string]string{"status": "written"})
+			writes = append(writes, w)
+		}
+		if len(writes) == 0 {
+			return mcpToolError("files is required: a list of {path, new_text, old_text}"), nil
+		}
 
-		case actTokenTransportHTTP:
-			if oldText != "" {
-				return mcpToolError("transport:\"http\" is incompatible with old_text (patches stay inline)"), nil
-			}
-			// Gate at mint time so a non-member gets a clear error instead of a
-			// URL that 403s at dispatch. coreWriteAppFile gates on the mcp path.
+		results := make([]map[string]interface{}, 0, len(writes))
+		if transport == actTokenTransportHTTP {
+			// Gate at mint time so a non-member gets a clear error instead of
+			// URLs that 403 at dispatch. coreWriteAppFile gates inline writes.
 			if err := s.gateAppWrite(user, nonce); err != nil {
 				return mcpToolError("%v", err), nil
 			}
-			if _, err := s.appFileDir(nonce, area); err != nil {
-				return mcpToolError("%v", err), nil
+			for _, w := range writes {
+				u, err := s.mintActFileURL(user, http.MethodPut, appFileActPath(nonce, area, w.path))
+				if err != nil {
+					return mcpToolError("%v", err), nil
+				}
+				results = append(results, map[string]interface{}{"path": w.path, "url": u, "method": http.MethodPut})
 			}
-			u, err := s.mintActFileURL(user, http.MethodPut, appFileActPath(nonce, area, path))
-			if err != nil {
-				return mcpToolError("%v", err), nil
-			}
-			return mcpToolResult(map[string]string{"url": u, "method": http.MethodPut})
-
-		default:
-			return mcpToolError("transport must be \"http\" or \"inline\", got %q", transport), nil
+			return mcpToolResult(map[string]interface{}{"files": results})
 		}
+		failed := false
+		for _, w := range writes {
+			if err := s.coreWriteAppFile(user, nonce, area, w.path, w.data, w.oldText); err != nil {
+				results = append(results, map[string]interface{}{"path": w.path, "error": err.Error()})
+				failed = true
+				continue
+			}
+			results = append(results, map[string]interface{}{"path": w.path, "status": "written"})
+		}
+		return mcpToolResultFailed(map[string]interface{}{"files": results}, failed)
 	})
 
 	// delete_app_file
