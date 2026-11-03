@@ -481,8 +481,8 @@ func TestTransferToARemote(t *testing.T) {
 	if app, err := b.store.GetApp(nonce); err != nil || app.Name != "Blog" {
 		t.Fatalf("app on B: %+v %v", app, err)
 	}
-	if got, _ := os.ReadFile(filepath.Join(b.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v1" {
-		t.Errorf("B staging = %q", got)
+	if got, _ := os.ReadFile(filepath.Join(b.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "v1" {
+		t.Errorf("B dev = %q", got)
 	}
 	bsvc, err := b.store.GetServiceByURL("/mcp/greeter")
 	if err != nil {
@@ -499,8 +499,8 @@ func TestTransferToARemote(t *testing.T) {
 			t.Errorf("second transfer created %v again", e.Data["target"])
 		}
 	}
-	if got, _ := os.ReadFile(filepath.Join(b.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v2" {
-		t.Errorf("B staging after the update = %q", got)
+	if got, _ := os.ReadFile(filepath.Join(b.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "v2" {
+		t.Errorf("B dev after the update = %q", got)
 	}
 	apps, _ := b.store.ListApps()
 	if len(apps) != 1 {
@@ -541,7 +541,7 @@ func TestTransferPullsFromARemote(t *testing.T) {
 	p := pairRemote(t, a, admin, remote)
 
 	nonce, _ := b.store.CreateApp("Their Blog", "", "", nil, nil)
-	createSlotFile(t, b, nonce, "staging", "index.html", []byte("v1"))
+	createSlotFile(t, b, nonce, "web", "index.html", []byte("v1"))
 	if _, err := b.store.RegisterService("greeter", "/mcp/greeter", db.ServiceDescriptor{Type: "virtual"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -572,8 +572,8 @@ func TestTransferPullsFromARemote(t *testing.T) {
 	if app, err := a.store.GetApp(nonce); err != nil || app.Name != "Their Blog" {
 		t.Fatalf("app here: %+v %v", app, err)
 	}
-	if got, _ := os.ReadFile(filepath.Join(a.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v1" {
-		t.Errorf("staging here = %q", got)
+	if got, _ := os.ReadFile(filepath.Join(a.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "v1" {
+		t.Errorf("dev here = %q", got)
 	}
 	asvc, err := a.store.GetServiceByURL("/mcp/greeter")
 	if err != nil {
@@ -583,14 +583,14 @@ func TestTransferPullsFromARemote(t *testing.T) {
 		t.Errorf("service file here = %q", got)
 	}
 
-	createSlotFile(t, b, nonce, "staging", "index.html", []byte("v2"))
+	createSlotFile(t, b, nonce, "web", "index.html", []byte("v2"))
 	for _, e := range pull() {
 		if e.Data["status"] == "created" {
 			t.Errorf("second pull created %v again", e.Data["target"])
 		}
 	}
-	if got, _ := os.ReadFile(filepath.Join(a.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v2" {
-		t.Errorf("staging after the second pull = %q", got)
+	if got, _ := os.ReadFile(filepath.Join(a.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "v2" {
+		t.Errorf("dev after the second pull = %q", got)
 	}
 }
 

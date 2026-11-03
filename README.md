@@ -304,8 +304,9 @@ const r = await api(prod, "/api/apps");       // the remote's own API
 The ⇄ button on a remote **transfers** apps and services to it: pick them
 as you would for an update archive, and each is marked *new* or *update*.
 The remote matches them the way an update feed does (apps by their nonce,
-services by their URL), updates the ones it has in their staging slots, and
-creates the rest. It can't know your auth records or users by their ids, so
+services by their URL), updates the ones it has, and creates the rest. App
+files go dev to dev: what ships is your dev slot, and it lands in the
+remote's dev slot, ready to deploy from there. It can't know your auth records or users by their ids, so
 a new app's gate is the record with the same name there, and its owner and
 members are the users with the same emails. Anything with no match is left
 empty, so the gate falls back to the remote's panel gate.
@@ -370,9 +371,10 @@ An update only ever updates: it matches apps by their nonce and services by
 their URL, and an archive naming something the receiver doesn't have is
 turned down whole. (Creating things is what a transfer to a remote is for.)
 
-App updates go to the Staging slot - so you can either let the user test it
-and deploy to Production, or you can set the app's default environment to
-Staging so they can use it right away.
+App updates go to the Dev slot, the same slot they were built from - so
+promote them with a deploy (by hand or through `/api/apps/{nonce}/deploy`)
+when they're ready for Staging and Production. The dev files they replaced
+wait at `web.bak`, one manual copy away if an update goes sideways.
 
 # Setup and Config
 

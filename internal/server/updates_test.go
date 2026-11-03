@@ -491,10 +491,10 @@ func TestUpdateApplyHappyPath(t *testing.T) {
 		t.Errorf("summary = %v", summary.Data)
 	}
 
-	// Files landed in staging.
+	// Files landed in dev.
 	for _, p := range []string{"index.html", "css/x.css"} {
-		if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", p)); err != nil {
-			t.Errorf("staging/%s missing: %v", p, err)
+		if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", nonce, "web", p)); err != nil {
+			t.Errorf("web/%s missing: %v", p, err)
 		}
 	}
 	st := feedState(t, srv, id)
@@ -602,7 +602,7 @@ func TestUpdateApplyValidationFailures(t *testing.T) {
 		{"unknown service", []UpdateOp{{Action: "update_service_files", Target: "no-such-svc"}}, "service not found"},
 		{"wrong service type", []UpdateOp{{Action: "update_service_files", Target: "valsapi"}}, "does not support file publishing"},
 		{"missing source", []UpdateOp{{Action: "update_app_files", Target: nonce, Source: "apps/ghost"}}, "not found in archive"},
-		{"slot not staging", []UpdateOp{{Action: "update_app_files", Target: nonce, Slot: "production"}}, "staging only"},
+		{"slot not dev", []UpdateOp{{Action: "update_app_files", Target: nonce, Slot: "production"}}, "dev only"},
 		{"unknown action", []UpdateOp{{Action: "delete_everything"}}, "unknown action"},
 	}
 	for _, tc := range cases {
@@ -709,7 +709,7 @@ func TestUpdateApplyPartialFailureOtherFeedsContinue(t *testing.T) {
 
 	// Bad feed: op 0 is on disk (partial apply), version NOT stamped,
 	// last_error recorded — retriable from op 0, idempotent.
-	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); err != nil {
+	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); err != nil {
 		t.Errorf("partial apply: op 0 should be on disk: %v", err)
 	}
 	stBad := feedState(t, srv, idBad)
@@ -769,8 +769,8 @@ func TestUpdateApplyFetchFailureAndSelfHealing(t *testing.T) {
 	if st.LastError != "" || st.LastErrorAt != nil {
 		t.Errorf("last_error not cleared after success: %q", st.LastError)
 	}
-	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); got != "healed" {
-		t.Errorf("staging content = %q, want healed", got)
+	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); got != "healed" {
+		t.Errorf("dev content = %q, want healed", got)
 	}
 }
 
@@ -819,8 +819,9 @@ func TestUpdateBuild(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(srv.config.DataDir, "tasks", "buildsvc.txt"), []byte("svc def"), 0644)
 
-	// No staging yet → build falls back to dev and says so.
+	// Builds ship dev, even with a staging slot sitting there.
 	createSlotFile(t, srv, nonce, "web", "index.html", []byte("built from dev"))
+	createSlotFile(t, srv, nonce, "staging", "index.html", []byte("stale staging"))
 
 	id, key := createUpdateFeed(t, srv, "https://selfhost.example/feed.enc", "publish", "my feed", "")
 	body := map[string]interface{}{"apps": []string{nonce}, "services": []string{"buildsvc"}, "version": "2026.09.01"}
@@ -839,7 +840,7 @@ func TestUpdateBuild(t *testing.T) {
 			seq = append(seq, e.Event)
 		}
 		if e.Event == "app" && e.Data["source_slot"] != "dev" {
-			t.Errorf("app event source_slot = %v, want dev (staging absent)", e.Data["source_slot"])
+			t.Errorf("app event source_slot = %v, want dev", e.Data["source_slot"])
 		}
 		if e.Event == "done" {
 			downloadURL = fmt.Sprint(e.Data["download_url"])
@@ -903,7 +904,7 @@ func TestUpdateRoundTrip(t *testing.T) {
 	registerService(t, srv, "rtsvc", "tasks://rtsvc", db.ServiceDescriptor{Type: "tasks"})
 	t.Cleanup(func() { os.Remove(filepath.Join(srv.config.DataDir, "tasks", "rtsvc.txt")) })
 
-	// Publisher's app lives in dev (no staging yet → build falls back),
+	// Publisher's app lives in dev, which is what builds ship,
 	// service definition on disk.
 	createSlotFile(t, srv, nonce, "web", "index.html", []byte("<h1>round trip</h1>"))
 	createSlotFile(t, srv, nonce, "web", "js/app.js", []byte("console.log(1)"))
@@ -952,18 +953,18 @@ func TestUpdateRoundTrip(t *testing.T) {
 		t.Fatalf("check = %+v, want rx feed available", ups)
 	}
 
-	// 5. Apply → staging slot + service definition updated, version stamped.
+	// 5. Apply → dev slot + service definition updated, version stamped.
 	// Tamper with the service definition first so the restore is observable.
 	os.WriteFile(filepath.Join(srv.config.DataDir, "tasks", "rtsvc.txt"), []byte("tampered"), 0644)
 	events := applyUpdates(t, srv, `{"ids":["`+rxID+`"]}`)
 	if events[len(events)-2].Event != "done" {
 		t.Fatalf("apply events = %+v", events)
 	}
-	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); got != "<h1>round trip</h1>" {
-		t.Errorf("staging index.html = %q", got)
+	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); got != "<h1>round trip</h1>" {
+		t.Errorf("dev index.html = %q", got)
 	}
-	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "js/app.js")); got != "console.log(1)" {
-		t.Errorf("staging js/app.js = %q", got)
+	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "apps", nonce, "web", "js/app.js")); got != "console.log(1)" {
+		t.Errorf("dev js/app.js = %q", got)
 	}
 	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "tasks", "rtsvc.txt")); got != "old def" {
 		t.Errorf("tasks/rtsvc.txt = %q", got)
@@ -1108,8 +1109,8 @@ func TestUpdateOpSourceCannotEscapeArchive(t *testing.T) {
 	if !strings.Contains(verr, "escapes the archive") {
 		t.Errorf("validate error = %q, want the escape refusal", verr)
 	}
-	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", nonce, "staging")); !os.IsNotExist(err) {
-		t.Errorf("staging slot was written: %v", err)
+	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", nonce, "web")); !os.IsNotExist(err) {
+		t.Errorf("dev slot was written: %v", err)
 	}
 }
 
@@ -1208,8 +1209,8 @@ func TestUpdateApplyGatedByTargetDoor(t *testing.T) {
 	if gatedErr == "" || !strings.Contains(gatedErr, "log in through it") {
 		t.Errorf("gated feed_error = %q, want the log-in refusal", gatedErr)
 	}
-	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", gated, "staging")); !os.IsNotExist(err) {
-		t.Errorf("gated staging was written: %v", err)
+	if _, err := os.Stat(filepath.Join(srv.config.DataDir, "apps", gated, "web")); !os.IsNotExist(err) {
+		t.Errorf("gated dev slot was written: %v", err)
 	}
 	summary := events[len(events)-1]
 	if summary.Data["applied"] != float64(1) || summary.Data["failed"] != float64(1) {
@@ -1277,8 +1278,8 @@ func TestUpdateApplyRefusesDowngrade(t *testing.T) {
 	if st := feedState(t, srv, id); st.LastAppliedVersion != "2" {
 		t.Errorf("stamp moved to %q on a downgrade", st.LastAppliedVersion)
 	}
-	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "v:2" {
-		t.Errorf("staging = %q, want v:2 (the v1 files must not land)", got)
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "v:2" {
+		t.Errorf("dev = %q, want v:2 (the v1 files must not land)", got)
 	}
 	// /check agrees: nothing actionable.
 	if ups := checkUpdates(t, srv); len(ups) != 0 {
@@ -1291,7 +1292,9 @@ func TestUpdateApplyBacksUpReplacedFiles(t *testing.T) {
 	srv := newTestServer(t)
 	nonce := createApp(t, srv, "backup")
 	cleanupSlotApp(t, srv, nonce)
-	createSlotFile(t, srv, nonce, "staging", "index.html", []byte("<h1>old</h1>"))
+	createSlotFile(t, srv, nonce, "web", "index.html", []byte("<h1>old</h1>"))
+	// A backup from an earlier update gives way to the new one.
+	createSlotFile(t, srv, nonce, "web.bak", "index.html", []byte("<h1>older</h1>"))
 
 	registerService(t, srv, "vsvc", "/mcp/vsvc", db.ServiceDescriptor{Type: "virtual"})
 	svcPath := filepath.Join(srv.config.DataDir, "virtual", "vsvc.txt")
@@ -1321,11 +1324,11 @@ func TestUpdateApplyBacksUpReplacedFiles(t *testing.T) {
 		t.Fatalf("apply: %v", events)
 	}
 
-	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "<h1>new</h1>" {
-		t.Errorf("staging = %q, want the new file", got)
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "<h1>new</h1>" {
+		t.Errorf("dev = %q, want the new file", got)
 	}
-	if got, err := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging.bak", "index.html")); err != nil || string(got) != "<h1>old</h1>" {
-		t.Errorf("staging.bak = %q (err %v), want the old file", got, err)
+	if got, err := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "web.bak", "index.html")); err != nil || string(got) != "<h1>old</h1>" {
+		t.Errorf("web.bak = %q (err %v), want the old file", got, err)
 	}
 	if got, _ := os.ReadFile(svcPath); string(got) != "new def" {
 		t.Errorf("service file = %q, want the new def", got)
@@ -1413,8 +1416,8 @@ func TestImportCreatesWhatsMissing(t *testing.T) {
 	if ids, _ := srv.store.ListAppMembers(nonce); len(ids) != 1 {
 		t.Errorf("app members = %v, want just Mo", ids)
 	}
-	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "<h1>hi</h1>" {
-		t.Errorf("staging = %q", got)
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "<h1>hi</h1>" {
+		t.Errorf("dev = %q", got)
 	}
 
 	svc, err := srv.store.GetServiceByURL("/mcp/greeter")
@@ -1471,8 +1474,32 @@ func TestImportUpdatesWhatItFinds(t *testing.T) {
 	if app, _ := srv.store.GetApp(nonce); app.Name != "existing" {
 		t.Errorf("name = %q, want it left alone", app.Name)
 	}
-	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "new" {
-		t.Errorf("staging = %q", got)
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "new" {
+		t.Errorf("dev = %q", got)
+	}
+}
+
+// Archives from before payloads moved to dev name the staging slot; they
+// land in dev all the same, and the staging slot is left alone. Dev counts
+// as freshly uploaded.
+func TestImportLandsOldStagingArchivesInDev(t *testing.T) {
+	srv := newTestServer(t)
+	ada := mustUser(t, srv, "Ada", "Admin", "Active")
+	nonce := createApp(t, srv, "older")
+	cleanupSlotApp(t, srv, nonce)
+	createSlotFile(t, srv, nonce, "staging", "index.html", []byte("reviewed"))
+	m := UpdateManifest{Version: "v1", Ops: []UpdateOp{{Action: "update_app_files", Target: nonce, Source: "apps/" + nonce, Slot: "staging"}}}
+	if _, events := importAs(t, srv, ada, importArchive(t, m, map[string][]byte{"apps/" + nonce + "/index.html": []byte("incoming")})); lastEvent(events).Event != "done" {
+		t.Fatalf("import: %v", events)
+	}
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); string(got) != "incoming" {
+		t.Errorf("dev = %q, want incoming", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, "staging", "index.html")); string(got) != "reviewed" {
+		t.Errorf("staging = %q, want it left alone", got)
+	}
+	if app, _ := srv.store.GetApp(nonce); app.Details == nil || app.Details.LastUploaded == nil {
+		t.Errorf("last uploaded not stamped: %+v", app.Details)
 	}
 }
 

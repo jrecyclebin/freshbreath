@@ -2,7 +2,7 @@ package server
 
 // Remote update feeds — see design/remote-updates.md. Two modes share one row
 // shape and one per-feed AES key: "receive" pulls a key-authenticated archive
-// from a remote URL and lands its manifest ops in staging; "publish" builds
+// from a remote URL and lands its manifest ops in dev; "publish" builds
 // the same archive from selected apps/services and hands it back for the
 // admin to self-host. The encryption is integrity, not confidentiality: the
 // remote host never holds the key, so it can't forge a valid archive.
@@ -76,7 +76,7 @@ type UpdateOp struct {
 	// matched by URL name the service instead; that still works.
 	Target string `json:"target"`
 	Source string `json:"source,omitempty"` // path inside the tarball; defaulted per action
-	Slot   string `json:"slot,omitempty"`   // v1: staging only
+	Slot   string `json:"slot,omitempty"`   // always lands in dev; older archives say "staging"
 	// What an import needs to create the target where it's missing. Feeds
 	// never create, so their archives leave it out.
 	Create *CreateSpec `json:"create,omitempty"`
@@ -239,7 +239,7 @@ func gateAllowsApply(gate *db.AuthRecord, claims *freshbreathClaims) bool {
 // validateUpdateOps pre-flights every op against the store, the extracted
 // archive and the caller's reach before the first one executes: targets
 // must exist (or, importing, be creatable), sources must be in the
-// tarball, slots default to staging, and a feed's caller must clear each
+// tarball, slots are dev, and a feed's caller must clear each
 // target's gate (an open one needs no proof). A validation failure touches
 // nothing — "feed refused before it started" beats "half-applied feed."
 func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, p applyPolicy) error {
@@ -260,12 +260,10 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, p applyPol
 			} else if gate, err := s.resolveAppGate(app); !p.importing && err == nil && !gateAllowsApply(gate, p.claims) {
 				return fmt.Errorf("op %d: app %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
 			}
-			slot := op.Slot
-			if slot == "" {
-				slot = "staging"
-			}
-			if slot != "staging" {
-				return fmt.Errorf("op %d: slot %q not supported (v1: staging only)", i, slot)
+			// Payloads land in dev, and deploys promote them from there.
+			// Archives built before that say "staging"; they land in dev too.
+			if op.Slot != "" && op.Slot != "dev" && op.Slot != "staging" {
+				return fmt.Errorf("op %d: slot %q not supported (dev only)", i, op.Slot)
 			}
 		case "update_service_files":
 			svc, err := s.opService(op.Target)
@@ -424,17 +422,30 @@ func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
 	}
 	switch op.Action {
 	case "update_app_files":
-		dst := filepath.Join(s.config.DataDir, "apps", op.Target, "staging")
-		// Rollback protection: the replaced slot stays one rename away at
-		// staging.bak — recovery is a manual copy back, nothing fancier. It
+		dst := filepath.Join(s.config.DataDir, "apps", op.Target, "web")
+		// Rollback protection: the replaced dev slot stays one rename away
+		// at web.bak — recovery is a manual copy back, nothing fancier. Only
+		// the latest backup is kept (a rename can't land on a full dir). It
 		// fails the op rather than losing the only copy of the old files.
 		if _, err := os.Stat(dst); err == nil {
+			if err := os.RemoveAll(dst + ".bak"); err != nil {
+				return fmt.Errorf("failed to clear old dev backup: %w", err)
+			}
 			if err := os.Rename(dst, dst+".bak"); err != nil {
-				return fmt.Errorf("failed to back up staging slot: %w", err)
+				return fmt.Errorf("failed to back up dev slot: %w", err)
 			}
 		}
 		if err := copyDir(src, dst); err != nil {
 			return fmt.Errorf("copy failed: %w", err)
+		}
+		if app, err := s.store.GetApp(op.Target); err == nil {
+			details := app.Details
+			if details == nil {
+				details = &db.AppDetails{}
+			}
+			now := time.Now().UTC()
+			details.LastUploaded = &now
+			_ = s.store.UpdateAppDetails(op.Target, details)
 		}
 		s.rebuildHostedRoutes()
 		return nil
@@ -997,7 +1008,7 @@ type pendingArchive struct {
 }
 
 // coreBuildArchive assembles an encrypted tar.gz from the selected apps
-// (current staging slot, dev fallback) and services (definition files),
+// (their dev slots) and services (definition files),
 // mints a short-lived act-token download URL, and streams progress. The
 // archive is never retained after download in v1.
 func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []string, version string, ctx context.Context, progress chan<- UpdateEvent) (string, error) {
@@ -1043,7 +1054,7 @@ func (s *Server) coreBuildArchive(actor *db.User, id string, apps, services []st
 }
 
 // packArchive assembles a tar.gz (unencrypted) of the selected apps
-// (current staging slot, dev fallback) and services (definition files),
+// (their dev slots) and services (definition files),
 // with its manifest, streaming progress. forImport adds what an import
 // needs to create each target it doesn't have: names, gates by auth
 // record name, owner and members by email. A feed's archive leaves that
@@ -1068,15 +1079,13 @@ func (s *Server) packArchive(actor *db.User, apps, services []string, version st
 		if err != nil {
 			return nil, "", cerr(http.StatusNotFound, "app not found: %s", nonce)
 		}
-		sourceSlot := "staging"
-		srcDir := filepath.Join(s.config.DataDir, "apps", nonce, "staging")
-		if fi, err := os.Stat(srcDir); err != nil || !fi.IsDir() {
-			sourceSlot = "dev"
-			srcDir = filepath.Join(s.config.DataDir, "apps", nonce, "web")
-		}
+		srcDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
 		arcRoot := "apps/" + nonce
 		added := false
 		err = filepath.Walk(srcDir, func(path string, fi os.FileInfo, err error) error {
+			if os.IsNotExist(err) && path == srcDir {
+				return nil // no dev files; reported below
+			}
 			if err != nil {
 				return err
 			}
@@ -1094,12 +1103,12 @@ func (s *Server) packArchive(actor *db.User, apps, services []string, version st
 			return nil, "", cerr(http.StatusInternalServerError, "collect app %s: %v", nonce, err)
 		}
 		if !added {
-			return nil, "", cerr(http.StatusBadRequest, "app %s has no files to package (deploy to staging or upload to dev first)", nonce)
+			return nil, "", cerr(http.StatusBadRequest, "app %s has no files to package (upload to dev first)", nonce)
 		}
-		if err := emit(UpdateEvent{Event: "app", Nonce: nonce, SourceSlot: sourceSlot, Status: "added"}); err != nil {
+		if err := emit(UpdateEvent{Event: "app", Nonce: nonce, SourceSlot: "dev", Status: "added"}); err != nil {
 			return nil, "", err
 		}
-		op := UpdateOp{Action: "update_app_files", Target: nonce, Source: arcRoot, Slot: "staging"}
+		op := UpdateOp{Action: "update_app_files", Target: nonce, Source: arcRoot, Slot: "dev"}
 		if forImport {
 			op.Create = &CreateSpec{
 				Name:        app.Name,

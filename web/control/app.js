@@ -3338,7 +3338,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
 
         <SettingSection
           title="Update feeds"
-          desc="Track remote feeds of encrypted app/service updates (they land in staging), or publish your own for other Freshbreath instances. Archives are AES-GCM encrypted with a per-feed key — the host can't tamper with them."
+          desc="Track remote feeds of encrypted app/service updates (they land in dev), or publish your own for other Freshbreath instances. Archives are AES-GCM encrypted with a per-feed key — the host can't tamper with them."
         >
           <RemoteUpdates session={session} apps={apps} services={services}/>
         </SettingSection>
@@ -3770,12 +3770,12 @@ function TransferModal({ session, remote, apps, services, onClose }) {
         </div>
         <p className="muted" style={{fontSize:13,marginBottom:16}}>
           {fetching ? <>
-            Copy the selected apps (their staging slot — dev if none yet) and service definitions from “{remote.name}”
-            to this server, as you. Ones this server has are updated in their staging slots; new ones are created here,
+            Copy the selected apps (their dev slot) and service definitions from “{remote.name}”
+            to this server, as you. Ones this server has get their dev slots updated; new ones are created here,
             with gates matched by auth record name and owners and members by email.
           </> : <>
-            Send the selected apps (current staging slot — dev if none yet) and service definitions to “{remote.name}”,
-            as {rs.email || 'your account there'}. Ones it already has are updated in their staging slots; new ones are
+            Send the selected apps (their dev slot) and service definitions to “{remote.name}”,
+            as {rs.email || 'your account there'}. Ones it already has get their dev slots updated; new ones are
             created there, with gates matched by auth record name and owners and members by email.
           </>}
         </p>
@@ -4081,7 +4081,7 @@ function UpdateProgress({ events, onClose }) {
 }
 
 // RemoteUpdates is the settings-page section for update feeds: receive
-// feeds pull key-authenticated archives into staging; publish feeds build
+// feeds pull key-authenticated archives into dev; publish feeds build
 // them for self-hosting. See design/remote-updates.md.
 function RemoteUpdates({ session, apps, services }) {
   const [feeds, setFeeds] = useState(null);
@@ -4293,7 +4293,7 @@ function RemoteUpdates({ session, apps, services }) {
             <h3 style={{marginBottom:12}}>Build archive</h3>
             <p className="muted" style={{fontSize:13,marginBottom:16}}>
               Package the selected apps (current staging slot — dev if none yet) and service definitions into an
-              encrypted archive for “{buildFor.name || buildFor.url}”. Receivers land it in their staging slots.
+              encrypted archive for “{buildFor.name || buildFor.url}”. Receivers land it in their dev slots.
             </p>
             <div className="field">
               <label>Version</label>
