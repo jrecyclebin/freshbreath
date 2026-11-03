@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -506,6 +507,35 @@ func TestResolveURLQueryEscapeSpecialChars(t *testing.T) {
 	}
 	if result != "https://graph.microsoft.com/v1.0/sites/abc/search?query=hello+%26+goodbye" {
 		t.Errorf("result = %q", result)
+	}
+}
+
+func TestResolveURLStructuredValues(t *testing.T) {
+	// Big floats stay plain, arrays comma-join (nested arrays and objects
+	// as JSON), objects become JSON — never Go's map[...] / [...] / 1e+06.
+	lookup := map[string]interface{}{
+		"big": float64(1000000),
+		"ids": []interface{}{float64(1), "two", []interface{}{float64(3)}, map[string]interface{}{"a": true}},
+		"obj": map[string]interface{}{"b": "x y", "a": float64(2.5)},
+	}
+	result, err := resolveTemplate(
+		"https://api.example/items/$big?ids=$ids&f=$obj",
+		lookup, ResolveURL, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://api.example/items/1000000?ids=" +
+		url.QueryEscape(`1,two,[3],{"a":true}`) + "&f=" + url.QueryEscape(`{"a":2.5,"b":"x y"}`)
+	if result != want {
+		t.Errorf("result = %q\nwant     %q", result, want)
+	}
+	header, err := resolveTemplate("X-Filter: $obj", lookup, ResolveHeader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header != `X-Filter: {"a":2.5,"b":"x y"}` {
+		t.Errorf("header = %q", header)
 	}
 }
 
@@ -1378,6 +1408,41 @@ SELECT id FROM modules WHERE project_id = $project_id
 	}
 	if gotParams["project_id"] != float64(1) {
 		t.Errorf("second step params = %v, want project_id = 1", gotParams)
+	}
+}
+
+func TestExecuteSQLStepBindsStructuredAsJSON(t *testing.T) {
+	// Objects and arrays bind as JSON text (for json_each and friends);
+	// the $blob wrapper and scalars pass through untouched.
+	tools, err := ParseVirtualFile([]byte(`[load]
+$ids is array
+$filter is object
+
+SELECT id FROM items WHERE id IN (SELECT value FROM json_each($ids)) AND $filter ->> 'kind' = kind AND data = $blob AND n = $n
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	runner := func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
+		got = params
+		return map[string]interface{}{"rows": []interface{}{}, "columns": []interface{}{}}, nil
+	}
+	blob := map[string]interface{}{"$blob": "AAE="}
+	_, err = ExecuteVirtualTool(http.DefaultClient, tools, "load", map[string]interface{}{
+		"ids":    []interface{}{float64(1), float64(2)},
+		"filter": map[string]interface{}{"kind": "note"},
+		"blob":   blob,
+		"n":      float64(7),
+	}, VirtualAuth{}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["ids"] != "[1,2]" || got["filter"] != `{"kind":"note"}` || got["n"] != float64(7) {
+		t.Errorf("params = %#v", got)
+	}
+	if b, ok := got["blob"].(map[string]interface{}); !ok || b["$blob"] != "AAE=" {
+		t.Errorf("blob = %#v, want the $blob wrapper untouched", got["blob"])
 	}
 }
 

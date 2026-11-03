@@ -263,23 +263,9 @@ func jqNormalize(v any) any {
 	}
 }
 
-// jqToString coerces a jq value to a string for URL parsing. nil → "",
-// bool → its word, numbers/objects/arrays use fmt's %v rendering (good
-// enough for a URL that was stored as a string; a non-string input to
-// url() is almost certainly a mistake, but we don't hard-fail
-// to stay lenient like the old helpers).
+// jqToString coerces a jq value to a string for URL parsing, rendered the
+// same way a $var is in a URL template (see valueText). A non-string input
+// to url() is almost certainly a mistake, but we stay lenient.
 func jqToString(v any) string {
-	switch x := v.(type) {
-	case string:
-		return x
-	case nil:
-		return ""
-	case bool:
-		if x {
-			return "true"
-		}
-		return "false"
-	default:
-		return fmt.Sprintf("%v", v)
-	}
+	return valueText(v)
 }

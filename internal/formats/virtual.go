@@ -1073,13 +1073,64 @@ func encodeValue(val interface{}, mode ResolveMode, name string, rawPathNames ma
 	}
 	switch mode {
 	case resolveQuery:
-		return url.QueryEscape(fmt.Sprintf("%v", val))
+		return url.QueryEscape(valueText(val))
 	case resolvePathEscaped:
 		// One value, one segment: slashes, question marks and friends are
 		// percent-escaped, so a $var can't walk the path or fake a query.
-		return url.PathEscape(fmt.Sprintf("%v", val))
+		return url.PathEscape(valueText(val))
 	default: // resolvePath, ResolveURL, ResolveHeader
-		return fmt.Sprintf("%v", val)
+		return valueText(val)
+	}
+}
+
+// valueText renders a variable's value as text for a URL or header. Floats
+// never go scientific (1000000, not 1e+06), objects become JSON, and arrays
+// are comma-joined (ids=1,2,3), with any object elements as JSON. A tool that
+// wants a JSON array builds it with jq first: `$q = ($ids | tojson)`.
+func valueText(val interface{}) string {
+	switch v := val.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case []interface{}:
+		parts := make([]string, len(v))
+		for i, e := range v {
+			if _, isArr := e.([]interface{}); isArr {
+				b, _ := json.Marshal(e)
+				parts[i] = string(b)
+			} else {
+				parts[i] = valueText(e)
+			}
+		}
+		return strings.Join(parts, ",")
+	case map[string]interface{}:
+		b, _ := json.Marshal(v)
+		return string(b)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// sqlBindValue readies a value for a SQL bind. Objects and arrays become JSON
+// text, which is what SQLite's json_each/json_extract/->> expect; the driver
+// can't bind them otherwise. The {"$blob": "<base64>"} wrapper passes through
+// for the server to decode into bytes.
+func sqlBindValue(val interface{}) interface{} {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		if _, isBlob := v["$blob"].(string); isBlob && len(v) == 1 {
+			return v
+		}
+		b, _ := json.Marshal(v)
+		return string(b)
+	case []interface{}:
+		b, _ := json.Marshal(v)
+		return string(b)
+	default:
+		return val
 	}
 }
 
@@ -1647,11 +1698,11 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 				// Assigned vars and caller args are the $-variable set jq sees;
 				// SQL binds the same names (assigned vars shadow caller args).
 				if v, ok := vars[name]; ok {
-					params[name] = v
+					params[name] = sqlBindValue(v)
 					continue
 				}
 				if v, ok := args[name]; ok {
-					params[name] = v
+					params[name] = sqlBindValue(v)
 					continue
 				}
 				return nil, fmt.Errorf("step %d: unresolved $%s in SQL", stepIdx, name)

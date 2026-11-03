@@ -228,6 +228,12 @@ URL $verification_url "Visit to authorize"
 Query-string values are always escaped (`is path` changes nothing there —
 paths are the only whole-value position), and headers are never escaped.
 
+Non-string values become text before escaping: numbers print plainly
+(`1000000`, never `1e+06`), objects as JSON, and arrays comma-joined —
+`?ids=$ids` with `[1, 2, 3]` sends `ids=1,2,3`, the shape most REST APIs
+expect. If an API wants a JSON array instead, build it first:
+`$ids_json = ($ids | tojson)`.
+
 If multiple variables share a type, they can also share a definition:
 
 ```
@@ -522,6 +528,18 @@ data to them in 'user_id' columns in your database. If you need a string
 version, use `$token_email` or `$token_sub` instead. Especially if you are
 storing heterogenous users from different systems. (Like if you need to store
 data for users that don't have Fresh Breath accounts!)
+
+Objects and arrays bind as JSON text, ready for SQLite's JSON functions.
+An `IN` list is the classic case, with no string-building:
+
+```
+$ids is array
+SELECT * FROM notes
+  WHERE id IN (SELECT value FROM json_each($ids))
+```
+
+(The `{"$blob": "<base64>"}` wrapper is the exception: it still binds as
+bytes.)
 
 As for `?`-annotated optional parameters, any omitted bind as `NULL`,
 while an explicit empty string stays `""` — the difference between "not
