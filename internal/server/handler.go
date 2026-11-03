@@ -2451,7 +2451,8 @@ func (s *Server) handleSearchAppFiles(w http.ResponseWriter, r *http.Request) {
 
 // handleAppDeploy copies one deployment slot over another.
 // POST /api/apps/{nonce}/deploy with {"source": "dev|staging", "target":
-// "staging|prod"} (source defaults to dev).
+// "staging|prod"} (source defaults to dev). {"source": "staging", "target":
+// "dev"} restores the dev slot from staging.
 func (s *Server) handleAppDeploy(w http.ResponseWriter, r *http.Request, nonce string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

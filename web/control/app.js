@@ -2262,6 +2262,23 @@ function HostUpload({ session, app, onRefresh }) {
     }
   };
 
+  // Restore copies Staging back over the Development folder.
+  const restore = async () => {
+    if (!confirm('Replace the Development folder with a copy of Staging? Anything uploaded since the last staging deploy is lost.')) return;
+    setDeploying('dev');
+    try {
+      await frbr(session, 'POST', '/api/apps/' + app.nonce + '/deploy', { source: 'staging', target: 'dev' });
+      setHosted(true);
+      setUploadedAt(new Date().toISOString());
+      toast('Development restored from Staging');
+      onRefresh();
+    } catch(e) {
+      toast(e.message, true);
+    } finally {
+      setDeploying(null);
+    }
+  };
+
   const slots = [
     { name:'Development', slot:'dev', when: uploadedAt, verb:'uploaded', empty:'not uploaded' },
     { name:'Staging', slot:'staging', when: deployed.staging, verb:'deployed', empty:'not deployed', target:'staging' },
@@ -2287,7 +2304,7 @@ function HostUpload({ session, app, onRefresh }) {
       <div className="field">
         <label>Deployment slots</label>
         <span className="help">
-          Deploying copies the Development folder into a slot. The bare {route} URL serves the app's default environment; each slot also has its own URL.
+          Deploying copies the Development folder into a slot; Restore copies Staging back into Development. The bare {route} URL serves the app's default environment; each slot also has its own URL.
         </span>
         <div className="slot-card">
           {slots.map(s=>(
@@ -2295,6 +2312,14 @@ function HostUpload({ session, app, onRefresh }) {
               <div className="slot-top">
                 <Badge tone={envTone(s.name)}><span className="env-full">{s.name}</span><span className="env-short">{envShort(s.name)}</span></Badge>
                 <span className="slot-when" title={s.when ? s.verb + ' ' + fmtAuditTime(s.when) : undefined}>{s.when ? fmtShortTime(s.when) : s.empty}</span>
+                {s.name === 'Development' && (
+                  <button className="btn btn-ghost slot-btn"
+                    disabled={!deployed.staging || deploying==='dev'}
+                    title={deployed.staging ? 'Replace Development with a copy of Staging' : 'Deploy to Staging first'}
+                    onClick={restore}>
+                    {deploying==='dev' ? 'Restoring…' : 'Restore'}
+                  </button>
+                )}
                 {s.name === 'Development' && hosted && (
                   <button className="btn btn-ghost slot-btn" style={{color:'var(--tone-red)'}} onClick={remove}>Remove</button>
                 )}

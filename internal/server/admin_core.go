@@ -1770,7 +1770,8 @@ var deploySlotDirs = map[string]string{
 
 // coreDeployApp copies one deployment slot over another, replacing the target
 // entirely. Source may be dev or staging (dev when empty); target staging or
-// prod. Returns the deployed slot's URL route.
+// prod, or dev when restoring it from staging. Returns the deployed slot's
+// URL route.
 func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (string, error) {
 	if err := s.gateAppWrite(actor, nonce); err != nil {
 		return "", err
@@ -1783,8 +1784,13 @@ func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (st
 		return "", cerr(http.StatusBadRequest, "invalid source slot %q (dev or staging)", source)
 	}
 	dstName, ok := deploySlotDirs[target]
-	if !ok || target == "dev" {
-		return "", cerr(http.StatusBadRequest, "invalid target slot %q (staging or prod)", target)
+	if !ok {
+		return "", cerr(http.StatusBadRequest, "invalid target slot %q (dev, staging or prod)", target)
+	}
+	// Clearing the target first would delete the source too. (This also keeps
+	// dev's only source to staging, since prod is never a source.)
+	if source == target {
+		return "", cerr(http.StatusBadRequest, "can't deploy %s onto itself", source)
 	}
 	app, err := s.store.GetApp(nonce)
 	if err != nil {
@@ -1808,9 +1814,12 @@ func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (st
 	if details == nil {
 		details = &db.AppDetails{}
 	}
-	if target == "staging" {
+	switch target {
+	case "dev":
+		details.LastUploaded = &now
+	case "staging":
 		details.LastDeployedStaging = &now
-	} else {
+	default:
 		details.LastDeployedProduction = &now
 	}
 	if err := s.store.UpdateAppDetails(nonce, details); err != nil {

@@ -368,6 +368,9 @@ is, so a file's text arrives byte for byte.
 
 - **App nonce** comes from `/api/apps` — a 10-character random string.
 - **Service URL** must match a service registered *and linked to your app*.
+- **Tool names** are alphanumeric with dashes. Tool names may be marked with
+  an exclamation mark to indicate that the tool is app-only (not for MCP use).
+  The mark is not part of the actual name.
 - **`file://` apps**: the server must be running and assigned services must
   be proxied. No URL to set — an app with no deployment is treated as
   running from disk (an app whose URL names a web origin gets the same

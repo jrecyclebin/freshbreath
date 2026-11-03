@@ -149,6 +149,37 @@ func TestDeployFromStaging(t *testing.T) {
 	}
 }
 
+// TestRestoreDevFromStaging pins the Restore button: staging replaces the dev
+// folder outright and counts as a fresh upload.
+func TestRestoreDevFromStaging(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "restoredev")
+	cleanupSlotApp(t, srv, nonce)
+	createSlotFile(t, srv, nonce, "web", "broken.html", []byte("oops"))
+	createSlotFile(t, srv, nonce, "staging", "index.html", []byte("staged"))
+
+	rr := deploySlot(t, srv, nonce, `{"source":"staging","target":"dev"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", rr.Code, rr.Body.String())
+	}
+	var res map[string]string
+	json.Unmarshal(rr.Body.Bytes(), &res)
+	if res["route"] != "/restoredev@dev" {
+		t.Errorf("route = %q, want /restoredev@dev", res["route"])
+	}
+	webDir := filepath.Join(srv.config.DataDir, "apps", nonce, "web")
+	if data, _ := os.ReadFile(filepath.Join(webDir, "index.html")); string(data) != "staged" {
+		t.Errorf("web/index.html = %q, want the staged copy", data)
+	}
+	if _, err := os.Stat(filepath.Join(webDir, "broken.html")); !os.IsNotExist(err) {
+		t.Error("dev-only file survived restore; dev should be replaced, not merged")
+	}
+	app, _ := srv.store.GetApp(nonce)
+	if app.Details == nil || app.Details.LastUploaded == nil {
+		t.Error("expected last_uploaded to be set by the restore")
+	}
+}
+
 // TestDeployReplacesTarget pins that re-deploying wipes stale files from the
 // target slot rather than merging over them.
 func TestDeployReplacesTarget(t *testing.T) {
@@ -172,6 +203,7 @@ func TestDeployValidation(t *testing.T) {
 	nonce := createApp(t, srv, "deployval")
 	cleanupSlotApp(t, srv, nonce)
 	createSlotFile(t, srv, nonce, "web", "index.html", []byte("dev"))
+	createSlotFile(t, srv, nonce, "staging", "index.html", []byte("staged"))
 
 	cases := []struct {
 		name string
@@ -182,6 +214,7 @@ func TestDeployValidation(t *testing.T) {
 		{"bogus target", `{"target":"nightly"}`, http.StatusBadRequest},
 		{"target dev", `{"target":"dev"}`, http.StatusBadRequest},
 		{"bogus source", `{"source":"nightly","target":"prod"}`, http.StatusBadRequest},
+		{"staging onto itself", `{"source":"staging","target":"staging"}`, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -190,6 +223,12 @@ func TestDeployValidation(t *testing.T) {
 				t.Errorf("status = %d, want %d; body=%q", rr.Code, tc.want, rr.Body.String())
 			}
 		})
+	}
+	// A refused deploy leaves both slots as they were.
+	for dir, want := range map[string]string{"web": "dev", "staging": "staged"} {
+		if data, _ := os.ReadFile(filepath.Join(srv.config.DataDir, "apps", nonce, dir, "index.html")); string(data) != want {
+			t.Errorf("%s/index.html = %q after refused deploys, want %q", dir, data, want)
+		}
 	}
 }
 

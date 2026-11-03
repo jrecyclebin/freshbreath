@@ -193,7 +193,10 @@ Every hosted app gets three slots, each backed by its own folder:
 Uploads always go to Development. Deploying copies the current Development
 folder into Staging or Production (buttons in the app's hosting panel, or
 `POST /api/apps/{nonce}/deploy` with `{"target":"staging"}` — pass
-`"source":"staging"` to promote Staging straight to Production).
+`"source":"staging"` to promote Staging straight to Production). Going the
+other way, **Restore** on the Development row copies Staging back over the
+Development folder (`{"source":"staging","target":"dev"}`), handy when a dev
+upload goes sideways. Deploying a slot onto itself is refused.
 
 Each slot is reachable at its own URL, and the bare app URL serves whichever
 slot the app's **default environment** names (Development unless you change

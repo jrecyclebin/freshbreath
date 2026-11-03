@@ -837,6 +837,8 @@ and the tool continues.
 
 ### Limitations
 
+- Tool names marked with an exclamation mark are app-only (not for MCP use).
+  The mark is not considered part of the tool's name.
 - URL-mode elicitation cannot return data *through MCP* — data arrives only
   via the completion callback. URL steps are hand-off semantics.
 - Old-protocol hosts (pre-2026-07-28) are bridged by the SDK with a blocking
