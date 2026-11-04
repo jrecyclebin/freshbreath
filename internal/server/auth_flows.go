@@ -1084,6 +1084,10 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec := p.current()
+	if rec == nil {
+		http.Error(w, "This sign-in already finished — start it again from the app", http.StatusBadRequest)
+		return
+	}
 	if !authInteractive(rec) {
 		http.Error(w, "Unexpected callback for this auth kind", http.StatusBadRequest)
 		return

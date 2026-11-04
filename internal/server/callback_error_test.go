@@ -94,3 +94,17 @@ func TestErrorsAsThroughWrap(t *testing.T) {
 	}
 	_ = url.Values{}
 }
+
+// A provider callback replayed after its login finished is refused, not a
+// panic on the leg index: a state lives until it expires.
+func TestCallbackAfterLastLegIsRefused(t *testing.T) {
+	srv := newTestServer(t)
+	rec := newAuthRecord(t, srv, "sso", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.invalid", ClientID: "c"})
+	p := &pendingAuth{legs: []*db.AuthRecord{rec}, at: 1, bindID: "b", bindSecret: "secret"}
+	srv.putPending("replayed", p)
+	rr := testRequest(t, srv, "GET", "/service/callback?code=x&state=replayed", nil,
+		map[string]string{"Cookie": loginBindCookie + "b=secret"})
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "already finished") {
+		t.Errorf("replayed callback: %d %s", rr.Code, rr.Body.String())
+	}
+}

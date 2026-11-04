@@ -171,7 +171,15 @@ type pendingAuth struct {
 }
 
 // current returns the leg the flow is waiting on.
-func (p *pendingAuth) current() *db.AuthRecord { return p.legs[p.at] }
+// current is the leg awaiting completion, or nil once every leg is done —
+// a replayed callback or form post arrives after that, since a state lives
+// until it expires.
+func (p *pendingAuth) current() *db.AuthRecord {
+	if p.at < 0 || p.at >= len(p.legs) {
+		return nil
+	}
+	return p.legs[p.at]
+}
 
 // putPending registers a login-in-progress state, stamped with pendingAuthTTL.
 // State is only removed by expiry (or its own retrieval of an expired entry) —

@@ -263,8 +263,15 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, p applyPol
 				if _, err := s.normalizeAppURL(op.Create.URL, op.Target); err != nil {
 					return fmt.Errorf("op %d: %v", i, err)
 				}
-			} else if gate, err := s.resolveAppGate(app); !p.importing && err == nil && !gateAllowsApply(gate, p.claims) {
-				return fmt.Errorf("op %d: app %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
+			} else if !p.importing {
+				// A gate that can't be resolved refuses, like a closed one.
+				gate, err := s.resolveAppGate(app)
+				if err != nil {
+					return fmt.Errorf("op %d: app %q: resolving its gate: %v", i, op.Target, err)
+				}
+				if !gateAllowsApply(gate, p.claims) {
+					return fmt.Errorf("op %d: app %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
+				}
 			}
 			// Payloads land in dev, and deploys promote them from there.
 			// Archives built before that say "staging"; they land in dev too.
@@ -299,7 +306,11 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, p applyPol
 				return fmt.Errorf("op %d: task service %s can only be updated by a feed a Superuser owns", i, op.Target)
 			}
 			if svc.ID != 0 && !p.importing {
-				if gate, gerr := s.resolveServiceGate(svc); gerr == nil && !gateAllowsApply(gate, p.claims) {
+				gate, err := s.resolveServiceGate(svc)
+				if err != nil {
+					return fmt.Errorf("op %d: service %q: resolving its gate: %v", i, op.Target, err)
+				}
+				if !gateAllowsApply(gate, p.claims) {
 					return fmt.Errorf("op %d: service %q sits behind gate %q — log in through it to apply its updates", i, op.Target, gate.Name)
 				}
 			}

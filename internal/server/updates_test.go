@@ -1693,3 +1693,22 @@ func TestFeedMatchesServicesByURL(t *testing.T) {
 		}
 	}
 }
+
+// A gate that can't be resolved refuses a feed, like a closed one. It used
+// to be skipped, letting the feed through.
+func TestUpdateOpsRefuseUnresolvableGate(t *testing.T) {
+	srv := newTestServer(t)
+	missing := int64(9999)
+	nonce, err := srv.store.CreateApp("Orphan", "Development", "orphan", nil, &missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "apps"), 0755)
+	os.WriteFile(filepath.Join(dir, "apps", "index.html"), []byte("x"), 0644)
+	op := UpdateOp{Action: "update_app_files", Target: nonce, Source: "apps/index.html"}
+	err = srv.validateUpdateOps([]UpdateOp{op}, dir, applyPolicy{owner: &db.User{ID: 1, Role: "Superuser"}})
+	if err == nil || !strings.Contains(err.Error(), "resolving its gate") {
+		t.Errorf("want a gate-resolution refusal, got %v", err)
+	}
+}
