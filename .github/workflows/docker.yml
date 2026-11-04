@@ -136,20 +136,21 @@ jobs:
   # and by then dev may be carrying work nothing has been built from. Leaving
   # :latest alone means this isn't the new stable, so main stays put too.
   #
-  # A job of its own so that contents: write is never in reach of the Docker
-  # actions above. GitHub refuses a GITHUB_TOKEN push that changes anything in
-  # .github/workflows, so such a release needs the MAIN_PUSH_TOKEN secret.
+  # A job of its own so the key that moves main is never in reach of the Docker
+  # actions above. main's ruleset lets only a deploy key update it, and this
+  # one lives in the stable environment, so only a job naming it can read it.
   promote:
     needs: images
     if: inputs.latest
     runs-on: ubuntu-latest
+    environment: stable
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          token: ${{ secrets.MAIN_PUSH_TOKEN || github.token }}
+          ssh-key: ${{ secrets.MAIN_DEPLOY_KEY }}
 
       # Fast-forward only, and never forced: if main has commits dev doesn't,
       # the push fails and a person decides.
