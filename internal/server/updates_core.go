@@ -18,6 +18,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -731,7 +732,7 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 	}
 	req, err := http.NewRequest(http.MethodGet, f.URL, nil)
 	if err != nil {
-		return fail(fmt.Errorf("bad url: %w", err))
+		return fail(fetchErr(fmt.Errorf("bad url: %w", err)))
 	}
 	// Conditional GET only when the cached validators are interpretable: a
 	// 304 says "unchanged" about a response whose version we recorded in
@@ -748,7 +749,7 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return fail(fmt.Errorf("fetch: %w", err))
+		return fail(fetchErr(fmt.Errorf("fetch: %w", err)))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
@@ -764,14 +765,14 @@ func (s *Server) checkUpdateFeed(f *db.UpdateFeed) (status, version string, err 
 		return "up_to_date", f.LastAppliedVersion, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fail(fmt.Errorf("fetch: status %d", resp.StatusCode))
+		return fail(fetchErr(fmt.Errorf("fetch: status %d", resp.StatusCode)))
 	}
 	if resp.ContentLength > maxArchiveSize {
 		return fail(fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxArchiveSize+1))
 	if err != nil {
-		return fail(fmt.Errorf("download: %w", err))
+		return fail(fetchErr(fmt.Errorf("download: %w", err)))
 	}
 	if len(body) > maxArchiveSize {
 		return fail(fmt.Errorf("archive exceeds size limit (%d bytes)", maxArchiveSize))
@@ -812,10 +813,45 @@ type UpdateAvailable struct {
 	Name    string `json:"name,omitempty"`
 }
 
+// feedCheckRun is one coreCheckAllUpdateFeeds in flight; callers that
+// arrive while it runs wait for its answer instead of starting their own.
+type feedCheckRun struct {
+	done chan struct{}
+	out  []UpdateAvailable
+}
+
 // coreCheckAllUpdateFeeds checks every receive feed, sequentially (v1; N is
 // small), returning only feeds with an update available. Up-to-date and
 // failed feeds are omitted — the caller sees actionable results only.
+//
+// Anyone may ask, and a check can download a feed's whole archive, so
+// callers who ask at once share one run, and runs (and applies) take turns
+// on the network: one archive in memory at a time, however many ask.
 func (s *Server) coreCheckAllUpdateFeeds() []UpdateAvailable {
+	s.feedCheckMu.Lock()
+	if run := s.feedCheck; run != nil {
+		s.feedCheckMu.Unlock()
+		<-run.done
+		return run.out
+	}
+	run := &feedCheckRun{done: make(chan struct{})}
+	s.feedCheck = run
+	s.feedCheckMu.Unlock()
+	defer func() {
+		s.feedCheckMu.Lock()
+		s.feedCheck = nil
+		s.feedCheckMu.Unlock()
+		close(run.done)
+	}()
+
+	s.feedRunMu.Lock()
+	defer s.feedRunMu.Unlock()
+	run.out = s.checkReceiveFeeds()
+	return run.out
+}
+
+// checkReceiveFeeds is coreCheckAllUpdateFeeds' work, run with feedRunMu held.
+func (s *Server) checkReceiveFeeds() []UpdateAvailable {
 	feeds, err := s.store.ListUpdateFeedsByMode("receive")
 	if err != nil {
 		return nil
@@ -852,6 +888,9 @@ func (s *Server) coreApplyUpdateFeeds(ctx context.Context, claims *freshbreathCl
 			return ctx.Err()
 		}
 	}
+	s.feedRunMu.Lock()
+	defer s.feedRunMu.Unlock()
+	detailed := s.seesFeedErrors(claims)
 
 	var feeds []*db.UpdateFeed
 	if len(ids) > 0 {
@@ -873,7 +912,7 @@ func (s *Server) coreApplyUpdateFeeds(ctx context.Context, claims *freshbreathCl
 		status, _, err := s.checkUpdateFeed(f)
 		if err != nil {
 			failed++
-			if eerr := emit(UpdateEvent{Event: "feed_error", ID: f.ID, Step: "check", Message: err.Error()}); eerr != nil {
+			if eerr := emit(UpdateEvent{Event: "feed_error", ID: f.ID, Step: "check", Message: feedErrorText(err, detailed)}); eerr != nil {
 				return eerr
 			}
 			continue
@@ -885,7 +924,7 @@ func (s *Server) coreApplyUpdateFeeds(ctx context.Context, claims *freshbreathCl
 			}
 			continue
 		}
-		if err := s.applyUpdateFeed(ctx, f, claims, progress); err != nil {
+		if err := s.applyUpdateFeed(ctx, f, claims, detailed, progress); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -902,7 +941,7 @@ func (s *Server) coreApplyUpdateFeeds(ctx context.Context, claims *freshbreathCl
 // only moves forward: the stamp is a floor — re-runs and publisher
 // downgrades read up-to-date — and stamping early would silently strand a
 // half-applied feed.
-func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, claims *freshbreathClaims, progress chan<- UpdateEvent) error {
+func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, claims *freshbreathClaims, detailed bool, progress chan<- UpdateEvent) error {
 	emit := func(e UpdateEvent) error {
 		e.ID = f.ID
 		select {
@@ -914,7 +953,10 @@ func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, claims *
 	}
 	fail := func(step string, err error) error {
 		_ = s.store.SetUpdateFeedError(f.ID, step+": "+err.Error())
-		_ = emit(UpdateEvent{Event: "feed_error", ID: f.ID, Step: step, Message: err.Error()})
+		if step == "fetch" {
+			err = fetchErr(err)
+		}
+		_ = emit(UpdateEvent{Event: "feed_error", ID: f.ID, Step: step, Message: feedErrorText(err, detailed)})
 		return err
 	}
 
@@ -969,6 +1011,11 @@ func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, claims *
 	if err != nil {
 		return fail("decrypt", err)
 	}
+	// The archive was fetched again after the check, so what came back is
+	// judged again: an older one (a replayed archive, say) never lands.
+	if !versionGreaterThan(manifest.Version, f.LastAppliedVersion) {
+		return fail("decrypt", fmt.Errorf("archive version %q is not newer than applied %q", manifest.Version, f.LastAppliedVersion))
+	}
 	if err := emit(UpdateEvent{Event: "decrypt", Step: "decrypt", Status: "ok"}); err != nil {
 		return err
 	}
@@ -1001,6 +1048,42 @@ func (s *Server) applyUpdateFeed(ctx context.Context, f *db.UpdateFeed, claims *
 	}
 	s.audit(actor, "applied update feed", fmt.Sprintf("%s → %s", nameOrURL(f.Name, f.URL), manifest.Version))
 	return emit(UpdateEvent{Event: "done", ID: f.ID, Version: manifest.Version, Applied: len(manifest.Ops)})
+}
+
+// seesFeedErrors reports whether an apply's caller may read why a feed
+// couldn't be fetched: an Admin signed in at the admin gate. Anyone else
+// may be anonymous, and a fetch error names the feed's URL and the hosts
+// behind it.
+func (s *Server) seesFeedErrors(claims *freshbreathClaims) bool {
+	if claims == nil {
+		return false
+	}
+	rec, err := s.adminAuthRecord()
+	if err != nil || rec == nil || !claims.boundTo(rec.ID) {
+		return false
+	}
+	u, err := s.userFromSubject(claims.Subject)
+	return err == nil && u != nil && roleIn(u.Role, rolesAdminPlus)
+}
+
+// feedFetchError marks a failure to reach a feed's host — the kind whose
+// text names the feed's URL and what sits behind it.
+type feedFetchError struct{ err error }
+
+func (e *feedFetchError) Error() string { return e.err.Error() }
+func (e *feedFetchError) Unwrap() error { return e.err }
+
+func fetchErr(err error) error { return &feedFetchError{err} }
+
+// feedErrorText is what an apply's caller is told about a feed that failed.
+// A fetch failure's details go only to an admin; the full error is always
+// on the feed's row for the panel.
+func feedErrorText(err error, detailed bool) string {
+	var fe *feedFetchError
+	if detailed || !errors.As(err, &fe) {
+		return err.Error()
+	}
+	return "couldn't fetch this feed — an admin can see why on its page in the control panel"
 }
 
 // ── Build (publish mode) ────────────────────────────────────────────

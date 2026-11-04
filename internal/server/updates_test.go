@@ -1288,6 +1288,96 @@ func TestUpdateApplyRefusesDowngrade(t *testing.T) {
 	}
 }
 
+// The archive is fetched again after the check, and what comes back is
+// judged again: a host that answers the check with the new version and the
+// download with an old one (a replayed archive) lands nothing.
+func TestUpdateApplyRefusesAnOlderArchiveAtDownload(t *testing.T) {
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "replay")
+	cleanupSlotApp(t, srv, nonce)
+	key := strings.Repeat("99", 32)
+	mk := func(v string) []byte {
+		m := &UpdateManifest{Version: v, Ops: []UpdateOp{{Action: "update_app_files", Target: nonce}}}
+		return makeUpdateArchive(t, key, m, map[string][]byte{"apps/" + nonce + "/index.html": []byte("v:" + v)})
+	}
+	var answers [][]byte
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next := answers[0]
+		if len(answers) > 1 {
+			answers = answers[1:]
+		}
+		w.Write(next)
+	}))
+	defer ts.Close()
+	id, _ := createUpdateFeed(t, srv, ts.URL, "receive", "replay", key)
+
+	answers = [][]byte{mk("2")}
+	applyUpdates(t, srv, `{"ids":["`+id+`"]}`)
+	if st := feedState(t, srv, id); st.LastAppliedVersion != "2" {
+		t.Fatalf("v2 not applied: %+v", st)
+	}
+
+	answers = [][]byte{mk("3"), mk("1")} // the check sees v3, the download gets v1
+	events := applyUpdates(t, srv, `{"ids":["`+id+`"]}`)
+	if events[len(events)-1].Data["failed"] != float64(1) {
+		t.Errorf("events = %+v, want the feed to fail", events)
+	}
+	if got := readFileOr(t, filepath.Join(srv.config.DataDir, "apps", nonce, "web", "index.html")); got != "v:2" {
+		t.Errorf("dev = %q, want v:2 (the v1 files must not land)", got)
+	}
+}
+
+// An anonymous caller learns that a feed couldn't be fetched, not the
+// feed's URL or what's behind it; the row keeps the details for the panel.
+func TestUpdateApplyKeepsFetchErrorsFromAnonymousCallers(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer ts.Close()
+	id, _ := createUpdateFeed(t, srv, ts.URL+"/internal-feed", "receive", "", strings.Repeat("11", 32))
+	events := applyUpdates(t, srv, `{"ids":["`+id+`"]}`)
+	msg := fmt.Sprint(events[0].Data["message"])
+	if events[0].Event != "feed_error" || strings.Contains(msg, "502") || strings.Contains(msg, ts.URL) {
+		t.Errorf("anonymous feed_error = %+v", events[0])
+	}
+	if st := feedState(t, srv, id); !strings.Contains(st.LastError, "502") {
+		t.Errorf("last_error = %q, want the details", st.LastError)
+	}
+}
+
+// One apply runs at a time from the anonymous door; a second caller is
+// told to come back rather than starting another download.
+func TestUpdateApplyOneAtATime(t *testing.T) {
+	srv := newTestServer(t)
+	srv.feedApplyBusy.Store(true)
+	rr := testRequest(t, srv, http.MethodPost, "/api/updates/apply", strings.NewReader(`{}`), nil)
+	if rr.Code != http.StatusConflict {
+		t.Errorf("apply while one runs: %d, want 409", rr.Code)
+	}
+	srv.feedApplyBusy.Store(false)
+	if rr := testRequest(t, srv, http.MethodPost, "/api/updates/apply", strings.NewReader(`{}`), nil); rr.Code != http.StatusOK {
+		t.Errorf("apply after: %d", rr.Code)
+	}
+}
+
+// An IPv6 caller is counted by its /64, so fresh addresses don't buy
+// fresh limits.
+func TestRateLimitCountsIPv6ByPrefix(t *testing.T) {
+	srv := newTestServer(t)
+	for i := 0; i < 3; i++ {
+		if !srv.allowRate("t", fmt.Sprintf("2001:db8:1:2::%x", i+1), 3) {
+			t.Fatalf("request %d refused", i+1)
+		}
+	}
+	if srv.allowRate("t", "2001:db8:1:2:ffff::9", 3) {
+		t.Error("another address in the same /64 got a fresh limit")
+	}
+	if !srv.allowRate("t", "2001:db8:1:3::1", 3) {
+		t.Error("a different /64 shares the limit")
+	}
+}
+
 // An op that replaces files keeps the old ones one rename away.
 func TestUpdateApplyBacksUpReplacedFiles(t *testing.T) {
 	srv := newTestServer(t)
