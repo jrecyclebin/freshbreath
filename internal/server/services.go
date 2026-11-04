@@ -725,8 +725,8 @@ type freshbreathClaims struct {
 	// was cleared; a reused leg may speak for the user only when it is
 	// this one, or one login's weak provider could lend its email to
 	// another login's strong one.
-	IdentityAuth int64 `json:"id_auth,omitempty"`
-	Sealed    string  `json:"sealed,omitempty"`
+	IdentityAuth int64  `json:"id_auth,omitempty"`
+	Sealed       string `json:"sealed,omitempty"`
 
 	// AuthTime is when the user last signed in (unix seconds, as OIDC's
 	// auth_time). Refreshes carry it unchanged, so a refreshed token is no
@@ -891,9 +891,9 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID,
 			IssuedAt: josejwt.NewNumericDate(now),
 			Expiry:   josejwt.NewNumericDate(now.Add(accessTokenTTL)),
 		},
-		UserEmail: email,
-		UserRole:  role,
-		UserName:  name,
+		UserEmail:    email,
+		UserRole:     role,
+		UserName:     name,
 		AuthID:       authID,
 		Legs:         legs,
 		IdentityAuth: identityAuth,
@@ -980,13 +980,13 @@ type upstreamRefreshLeg struct {
 
 // freshbreathRefreshData is the payload sealed inside a refresh token.
 type freshbreathRefreshData struct {
-	Subject   string                        `json:"subject"`
-	UserEmail string                        `json:"user_email,omitempty"`
-	AuthID    int64                         `json:"auth_id"`
-	Legs      []int64                       `json:"legs,omitempty"`
-	Upstreams map[string]upstreamRefreshLeg `json:"upstreams,omitempty"` // provider → leg
-	AuthTime  int64                         `json:"auth_time,omitempty"` // the family's sign-in, carried to each access token
-	IdentityAuth int64                      `json:"id_auth,omitempty"`   // see freshbreathClaims.IdentityAuth
+	Subject      string                        `json:"subject"`
+	UserEmail    string                        `json:"user_email,omitempty"`
+	AuthID       int64                         `json:"auth_id"`
+	Legs         []int64                       `json:"legs,omitempty"`
+	Upstreams    map[string]upstreamRefreshLeg `json:"upstreams,omitempty"` // provider → leg
+	AuthTime     int64                         `json:"auth_time,omitempty"` // the family's sign-in, carried to each access token
+	IdentityAuth int64                         `json:"id_auth,omitempty"`   // see freshbreathClaims.IdentityAuth
 
 	// Token-family fields for rotation (stored in JWT claims, unsealed).
 	FamilyID string `json:"family_id,omitempty"`
