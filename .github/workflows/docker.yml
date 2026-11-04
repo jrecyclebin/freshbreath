@@ -29,6 +29,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      tag: ${{ steps.rel.outputs.tag }}
     env:
       # `secrets` is off-limits inside an `if:`, but it's fine in `env:` — so
       # the presence of a Docker Hub token becomes a plain string the mirror
@@ -128,3 +130,43 @@ jobs:
               echo "- Docker Hub skipped (no DOCKERHUB_TOKEN secret)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # main is the stable branch, so it moves once a release has its images. It
+  # moves to the release's commit, not dev's tip: this workflow runs by hand,
+  # and by then dev may be carrying work nothing has been built from. Leaving
+  # :latest alone means this isn't the new stable, so main stays put too.
+  #
+  # A job of its own so the key that moves main is never in reach of the Docker
+  # actions above. main's ruleset lets only a deploy key update it, and this
+  # one lives in the stable environment, so only a job naming it can read it.
+  promote:
+    needs: images
+    if: inputs.latest
+    runs-on: ubuntu-latest
+    environment: stable
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.MAIN_DEPLOY_KEY }}
+
+      # Fast-forward only, and never forced: if main has commits dev doesn't,
+      # the push fails and a person decides.
+      - name: Move main to the release
+        env:
+          TAG: ${{ needs.images.outputs.tag }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+          if ! git merge-base --is-ancestor "$commit" origin/dev; then
+            echo "::error::$TAG isn't on dev, so main stays put"
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$commit" origin/main; then
+            echo "→ main already has $TAG; nothing to do"
+            exit 0
+          fi
+          git push origin "$commit:refs/heads/main"
+          echo "- \`main\` moved to $TAG" >> "$GITHUB_STEP_SUMMARY"

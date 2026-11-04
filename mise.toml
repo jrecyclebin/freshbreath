@@ -113,8 +113,27 @@ description = "Run the locally built image on :9009 with a freshbreath-data volu
 depends = ["docker:build"]
 run = "docker run --rm -p 9009:9009 -v freshbreath-data:/data freshbreath:dev"
 
+# A tag has to be a commit dev really has, or the Docker workflow can't move
+# main to it once the images are out.
+[tasks."release:preflight"]
+description = "Check that this checkout is dev, level with origin"
+hide = true
+run = """
+BRANCH="$(git branch --show-current)"
+if [ "$BRANCH" != "dev" ]; then
+  echo "✗ Releases are cut from dev, and you're on ${BRANCH:-a detached HEAD}"
+  exit 1
+fi
+git fetch -q origin dev
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse FETCH_HEAD)" ]; then
+  echo "✗ dev isn't level with origin/dev — push or pull first"
+  exit 1
+fi
+"""
+
 [tasks.release]
 description = "Create a GitHub release (usage: mise run release v1.0)"
+depends = ["release:preflight"]
 usage = '''
 arg "<version>"
 '''
@@ -163,6 +182,7 @@ echo "✓ Release $VERSION retracted — you can re-run 'mise run release $VERSI
 
 [tasks."release:retry"]
 description = "Retract and re-cut a release (usage: mise run release:retry v1.0)"
+depends = ["release:preflight"]
 usage = '''
 arg "<version>"
 '''
