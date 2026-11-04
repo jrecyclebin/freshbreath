@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tailscale/tailcat"
 	"poggers.institute/freshbreath/internal/db"
@@ -121,7 +122,7 @@ func TestTunnelTakesPanelTokens(t *testing.T) {
 	setAdminAuth(t, srv)
 	u := passphraseUser(t, srv, "Superuser")
 	rec, _ := srv.adminAuthRecord()
-	panelTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, rec.ID, nil, nil)
+	panelTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, rec.ID, nil, nil, time.Now().Unix())
 	if rr := tunnelRequest(srv, "GET", "/api/me", "", bearer(panelTok)); rr.Code != 200 {
 		t.Errorf("panel token through the tunnel: %d %s", rr.Code, rr.Body.String())
 	}

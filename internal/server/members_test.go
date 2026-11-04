@@ -33,6 +33,7 @@ func mustUser(t *testing.T, srv *Server, name, role, status string) *db.User {
 	if err != nil {
 		t.Fatalf("create user %s: %v", name, err)
 	}
+	u.SignedInAt = time.Now() // acting as someone who just signed in
 	return u
 }
 
@@ -263,6 +264,7 @@ func TestAdminsCannotManageSuperusers(t *testing.T) {
 	member := mustUser(t, srv, "Mel", "Member", "Active")
 	srv.coreGenerateSSHKey(root, root, "rootpassword")
 	root, _ = srv.store.GetUser(root.ID)
+	root.SignedInAt = time.Now()
 
 	for name, op := range map[string]func() error{
 		"create a Superuser": func() error {
@@ -534,4 +536,53 @@ func containsInt64(list []int64, v int64) bool {
 		}
 	}
 	return false
+}
+
+// Changing what lets someone sign in needs a recent sign-in, judged by the
+// token's auth_time — which a refresh carries unchanged. A stale token gets
+// the 401 frbr.js answers with a fresh login; everything else still works.
+func TestCredentialChangesNeedARecentSignIn(t *testing.T) {
+	srv := newTestServer(t)
+	gate := builtinAuth(t, srv, db.AuthSSHKey)
+	makeAdminAuth(t, srv, gate)
+	u := knownUser(t, srv)
+	bearer := func(authTime time.Time) map[string]string {
+		tok, err := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, gate.ID, nil, nil, authTime.Unix())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return map[string]string{"Authorization": "Bearer " + tok, "Content-Type": "application/json"}
+	}
+	stale, fresh := bearer(time.Now().Add(-time.Hour)), bearer(time.Now())
+
+	put := func(h map[string]string, body string) *httptest.ResponseRecorder {
+		return testRequest(t, srv, "PUT", "/api/me", strings.NewReader(body), h)
+	}
+	if rr := put(stale, `{"name":"Renamed","email":"`+knownEmail+`"}`); rr.Code != http.StatusOK {
+		t.Errorf("name-only change with a stale sign-in: %d %s", rr.Code, rr.Body.String())
+	}
+	rr := put(stale, `{"name":"Renamed","email":"taken@evil.example"}`)
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Header().Get("WWW-Authenticate"), "insufficient_user_authentication") {
+		t.Errorf("email change with a stale sign-in: %d %q", rr.Code, rr.Header().Get("WWW-Authenticate"))
+	}
+	if rr := testRequest(t, srv, "POST", "/api/me/ssh-key", strings.NewReader(`{"passphrase":"attacker-chosen"}`), stale); rr.Code != http.StatusUnauthorized {
+		t.Errorf("SSH key with a stale sign-in: %d %s", rr.Code, rr.Body.String())
+	}
+	if got, _ := srv.store.GetUser(u.ID); got.Email != knownEmail || (got.Metadata != nil && got.Metadata.SSHKey != nil) {
+		t.Errorf("stale sign-in changed credentials: %+v", got)
+	}
+	if rr := put(fresh, `{"name":"Renamed","email":"new@example.com"}`); rr.Code != http.StatusOK {
+		t.Errorf("email change with a fresh sign-in: %d %s", rr.Code, rr.Body.String())
+	}
+
+	// A refresh never makes a sign-in fresher.
+	old := time.Now().Add(-time.Hour).Unix()
+	at, rd, err := srv.oauthSrv.refreshLegs(context.Background(), &freshbreathRefreshData{Subject: subjectForUser(u), AuthID: gate.ID, AuthTime: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := srv.verifyFreshbreathToken(at)
+	if err != nil || claims.AuthTime != old || rd.AuthTime != old {
+		t.Errorf("refresh moved auth_time: token %v, data %d, want %d (err %v)", claims.AuthTime, rd.AuthTime, old, err)
+	}
 }

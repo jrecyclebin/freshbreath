@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -97,6 +98,7 @@ func TestDeleteSSHKeyEndsSessions(t *testing.T) {
 	srv := newTestServer(t)
 	passphraseUser(t, srv, "Member")
 	u, _ := srv.store.GetUserByEmail(knownEmail)
+	u.SignedInAt = time.Now()
 	sshID, _ := srv.store.BuiltinAuthID(db.AuthSSHKey)
 	family, _, err := srv.newRefreshFamily(subjectForUser(u), sshID, "test")
 	if err != nil {
@@ -454,7 +456,7 @@ func TestDeletedUserSessionsDieWithIt(t *testing.T) {
 	makeAdminAuth(t, srv, gate)
 	root, _ := srv.store.CreateUser("Root", "root@x.com", "Superuser", "Active")
 	leaver, _ := srv.store.CreateUser("Leaver", "leaver@x.com", "Member", "Active")
-	tok, err := srv.mintFreshbreathToken(subjectForUser(leaver), leaver.Email, "Member", "", gate.ID, nil, nil)
+	tok, err := srv.mintFreshbreathToken(subjectForUser(leaver), leaver.Email, "Member", "", gate.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -530,7 +532,7 @@ func TestDeletedServiceAndRecordIDsStayDead(t *testing.T) {
 	}
 
 	old := newAuthRecord(t, srv, "Contractor SSO", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://a.example"})
-	tok, _ := srv.mintFreshbreathToken("ext:contractor:bob", "bob@contractor.example", "", "", old.ID, nil, nil)
+	tok, _ := srv.mintFreshbreathToken("ext:contractor:bob", "bob@contractor.example", "", "", old.ID, nil, nil, time.Now().Unix())
 	if err := srv.coreDeleteAuth(su, old.ID); err != nil {
 		t.Fatalf("delete record: %v", err)
 	}

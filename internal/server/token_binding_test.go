@@ -3,6 +3,7 @@ package server
 import (
 	"strconv"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -34,7 +35,7 @@ func TestTokenRecordBinding(t *testing.T) {
 	subject := subjectForUser(victim)
 
 	// A token minted under adminRec verifies against adminRec's gate.
-	tokAdmin, err := srv.mintFreshbreathToken(subject, victim.Email, "Superuser", "Vic Tim", adminRec.ID, nil, nil)
+	tokAdmin, err := srv.mintFreshbreathToken(subject, victim.Email, "Superuser", "Vic Tim", adminRec.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint admin-bound token: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestTokenRecordBinding(t *testing.T) {
 
 	// THE EXPLOIT: a token minted under otherRec (attacker-controlled) must
 	// be rejected at adminRec's gate.
-	tokOther, err := srv.mintFreshbreathToken(subject, victim.Email, "Superuser", "Vic Tim", otherRec.ID, nil, nil)
+	tokOther, err := srv.mintFreshbreathToken(subject, victim.Email, "Superuser", "Vic Tim", otherRec.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint other-bound token: %v", err)
 	}
@@ -73,7 +74,7 @@ func TestTokenRecordBinding(t *testing.T) {
 
 	// A token whose Legs include the admin record also passes — that's a
 	// multi-leg login that genuinely cleared the admin gate.
-	tokLegs, err := srv.mintFreshbreathToken(subject, victim.Email, "Superuser", "Vic Tim", otherRec.ID, []int64{adminRec.ID}, nil)
+	tokLegs, err := srv.mintFreshbreathToken(subject, victim.Email, "Superuser", "Vic Tim", otherRec.ID, []int64{adminRec.ID}, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint legs token: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestTokenRecordBinding(t *testing.T) {
 
 	// An ext: subject from the right record still isn't a user — the admin
 	// gate must refuse identities with no user row.
-	tokExt, err := srv.mintFreshbreathToken(extSubject("admin-idp", "12345"), "stranger@example.com", "", "", adminRec.ID, nil, nil)
+	tokExt, err := srv.mintFreshbreathToken(extSubject("admin-idp", "12345"), "stranger@example.com", "", "", adminRec.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint ext token: %v", err)
 	}

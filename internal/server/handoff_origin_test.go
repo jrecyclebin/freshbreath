@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -286,6 +287,7 @@ func TestLoginHandsOffServerAppsTheirRefreshToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ := srv.store.CreateUser("Ada", "ada@example.com", "Member", "Active")
+	u.SignedInAt = time.Now()
 	if _, err := srv.coreGenerateSSHKey(u, u, "correct horse battery"); err != nil {
 		t.Fatalf("ssh key: %v", err)
 	}

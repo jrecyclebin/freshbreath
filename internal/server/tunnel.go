@@ -282,7 +282,7 @@ func (s *Server) tunnelAuthorize(r *http.Request) error {
 		return errors.New("account is not active")
 	}
 	legs := append([]int64{claims.AuthID}, claims.Legs...)
-	tok, err := s.mintFreshbreathToken(claims.Subject, user.Email, user.Role, user.Name, admin.ID, legs, nil)
+	tok, err := s.mintFreshbreathToken(claims.Subject, user.Email, user.Role, user.Name, admin.ID, legs, nil, claims.AuthTime)
 	if err != nil {
 		return errors.New("tunnel sign-in failed")
 	}

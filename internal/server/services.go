@@ -721,6 +721,11 @@ type freshbreathClaims struct {
 	Legs      []int64 `json:"legs,omitempty"`
 	Sealed    string  `json:"sealed,omitempty"`
 
+	// AuthTime is when the user last signed in (unix seconds, as OIDC's
+	// auth_time). Refreshes carry it unchanged, so a refreshed token is no
+	// fresher a sign-in than the one that started its family.
+	AuthTime int64 `json:"auth_time,omitempty"`
+
 	// Unsealed credentials — populated by verifyFreshbreathToken, never serialized.
 	Creds sealedCreds `json:"-"`
 }
@@ -853,7 +858,7 @@ func (s *Server) deriveSubkey(label string) []byte {
 
 // ── Access token mint/verify ────────────────────────────────────────
 
-func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID int64, legs []int64, creds sealedCreds) (string, error) {
+func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID int64, legs []int64, creds sealedCreds, authTime int64) (string, error) {
 	sig, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
 		(&jose.SignerOptions{}).WithType("JWT"),
@@ -875,6 +880,7 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID 
 		UserName:  name,
 		AuthID:    authID,
 		Legs:      legs,
+		AuthTime:  authTime,
 	}
 	if len(creds) > 0 {
 		plain, err := json.Marshal(creds)
@@ -962,6 +968,7 @@ type freshbreathRefreshData struct {
 	AuthID    int64                         `json:"auth_id"`
 	Legs      []int64                       `json:"legs,omitempty"`
 	Upstreams map[string]upstreamRefreshLeg `json:"upstreams,omitempty"` // provider → leg
+	AuthTime  int64                         `json:"auth_time,omitempty"` // the family's sign-in, carried to each access token
 
 	// Token-family fields for rotation (stored in JWT claims, unsealed).
 	FamilyID string `json:"family_id,omitempty"`

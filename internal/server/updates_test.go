@@ -15,10 +15,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sort"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -1219,7 +1220,7 @@ func TestUpdateApplyGatedByTargetDoor(t *testing.T) {
 
 	// A token minted through the door applies the gated feed. (The feed is
 	// still on v1 and unstamped, so it counts as available.)
-	tok, err := srv.mintFreshbreathToken("frbr:7", "u@example.com", "Member", "U", door.ID, nil, nil)
+	tok, err := srv.mintFreshbreathToken("frbr:7", "u@example.com", "Member", "U", door.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}

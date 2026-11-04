@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
@@ -236,7 +237,7 @@ func TestAppDoorEmptyGateInheritsAdminYieldsFrbr(t *testing.T) {
 	if err := srv.store.SetAppServiceLinks(nonce, []int64{task.ID}); err != nil {
 		t.Fatalf("link task: %v", err)
 	}
-	stranger, err := srv.mintFreshbreathToken("ext:github:4242", "stranger@gmail.com", "", "Stranger", gh.ID, nil, nil)
+	stranger, err := srv.mintFreshbreathToken("ext:github:4242", "stranger@gmail.com", "", "Stranger", gh.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint stranger token: %v", err)
 	}

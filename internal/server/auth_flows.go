@@ -1438,10 +1438,11 @@ func (s *Server) mintDirectSession(user *db.User) (access, refresh string, sshID
 		return "", "", 0, err
 	}
 	subject := subjectForUser(user)
-	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, nil, nil); err != nil {
+	authTime := time.Now().Unix()
+	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, nil, nil, authTime); err != nil {
 		return "", "", 0, err
 	}
-	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID}
+	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID, AuthTime: authTime}
 	if rd.FamilyID, rd.JTI, err = s.newRefreshFamily(subject, sshID, "direct"); err != nil {
 		return "", "", 0, err
 	}

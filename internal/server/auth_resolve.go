@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -162,6 +163,9 @@ func (s *Server) verifyGateToken(rec *db.AuthRecord, raw string) (*freshbreathCl
 	user, err := s.userFromSubject(claims.Subject)
 	if err != nil {
 		return nil, nil, err
+	}
+	if user != nil && claims.AuthTime > 0 {
+		user.SignedInAt = time.Unix(claims.AuthTime, 0)
 	}
 	return claims, user, nil
 }
@@ -375,7 +379,8 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		}
 	}
 
-	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, legIDs, creds)
+	authTime := time.Now().Unix()
+	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, legIDs, creds, authTime)
 	if err != nil {
 		return "", rd, err
 	}
@@ -384,6 +389,7 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		UserEmail: email,
 		AuthID:    primaryID,
 		Legs:      legIDs,
+		AuthTime:  authTime,
 	}
 	if len(upstreams) > 0 {
 		rd.Upstreams = upstreams

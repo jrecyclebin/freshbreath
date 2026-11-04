@@ -1359,7 +1359,7 @@ func authTokenForUser(t *testing.T, srv *Server, email, name, role string) strin
 	if err != nil {
 		t.Fatalf("user %s must exist before minting: %v", email, err)
 	}
-	token, err := srv.mintFreshbreathToken(subjectForUser(user), email, role, name, rec.ID, nil, nil)
+	token, err := srv.mintFreshbreathToken(subjectForUser(user), email, role, name, rec.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint identity token: %v", err)
 	}

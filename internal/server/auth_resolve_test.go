@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 
@@ -56,7 +57,7 @@ func TestSlotEligibilityMatrix(t *testing.T) {
 			var presentedToken string
 			if authInteractive(protectedBy) || protectedBy.Kind == db.AuthSSHKey {
 				tok, err := srv.mintFreshbreathToken(extSubject(authProvider(protectedBy), "u1"), "", "", "",
-					protectedBy.ID, nil, sealedCreds{authProvider(protectedBy): {UpstreamToken: "gate-cred"}})
+					protectedBy.ID, nil, sealedCreds{authProvider(protectedBy): {UpstreamToken: "gate-cred"}}, time.Now().Unix())
 				if err != nil {
 					t.Fatalf("mint: %v", err)
 				}
@@ -450,7 +451,7 @@ func TestProviderSlugSharedAcrossRecords(t *testing.T) {
 func TestSealedMapMintVerifyUnwrap(t *testing.T) {
 	srv := newTestServer(t)
 	tok, err := srv.mintFreshbreathToken("ext:up:1", "", "", "", 7, nil,
-		sealedCreds{"up": {UpstreamToken: "secret-1"}})
+		sealedCreds{"up": {UpstreamToken: "secret-1"}}, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -470,7 +471,7 @@ func TestSealedMapAugmentedWithSecondLeg(t *testing.T) {
 		"gate": {UpstreamToken: "gate-cred"},
 		"acts": {UpstreamToken: "acts-cred"},
 	}
-	tok, err := srv.mintFreshbreathToken("ext:gate:1", "", "", "", 1, []int64{2}, creds)
+	tok, err := srv.mintFreshbreathToken("ext:gate:1", "", "", "", 1, []int64{2}, creds, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -485,7 +486,7 @@ func TestSealedMapAugmentedWithSecondLeg(t *testing.T) {
 
 func TestSealedMapRejectsForeignRecord(t *testing.T) {
 	srv := newTestServer(t)
-	tok, err := srv.mintFreshbreathToken("ext:up:1", "", "", "", 7, nil, sealedCreds{"up": {UpstreamToken: "x"}})
+	tok, err := srv.mintFreshbreathToken("ext:up:1", "", "", "", 7, nil, sealedCreds{"up": {UpstreamToken: "x"}}, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -517,7 +518,7 @@ func TestOutboundVerdictSSHKeyActsAsIsTheSessionToken(t *testing.T) {
 
 	// A caller whose login cleared that record: the session token goes
 	// upstream as a bearer — never the stored private key.
-	tok, err := srv.mintFreshbreathToken("frbr:1", "u@example.com", "Member", "U", rec.ID, nil, nil)
+	tok, err := srv.mintFreshbreathToken("frbr:1", "u@example.com", "Member", "U", rec.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -538,7 +539,7 @@ func TestOutboundVerdictSSHKeyActsAsIsTheSessionToken(t *testing.T) {
 		t.Errorf("no-claims verdict err = %v, want errNeedsLogin", err)
 	}
 	// A token that never cleared the record's leg → same.
-	other, err := srv.mintFreshbreathToken("frbr:2", "v@example.com", "Member", "V", rec.ID+1000, nil, nil)
+	other, err := srv.mintFreshbreathToken("frbr:2", "v@example.com", "Member", "V", rec.ID+1000, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint other: %v", err)
 	}
@@ -692,7 +693,7 @@ func TestAPIKeyGateAcceptsOwnToken(t *testing.T) {
 	}
 
 	// A token whose Legs include the gate record.
-	tok, err := srv.mintFreshbreathToken("ext:up:1", "", "", "", 99, []int64{gate.ID}, nil)
+	tok, err := srv.mintFreshbreathToken("ext:up:1", "", "", "", 99, []int64{gate.ID}, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -703,7 +704,7 @@ func TestAPIKeyGateAcceptsOwnToken(t *testing.T) {
 
 	// A token bound to an unrelated record satisfies neither the key check
 	// nor the legs check.
-	unrelated, _ := srv.mintFreshbreathToken("ext:up:1", "", "", "", 12345, nil, nil)
+	unrelated, _ := srv.mintFreshbreathToken("ext:up:1", "", "", "", 12345, nil, nil, time.Now().Unix())
 	h3 := http.Header{"Authorization": []string{"Bearer " + unrelated}}
 	if _, _, err := srv.verifyGateHeader(gate, h3); err == nil {
 		t.Error("unrelated token should not clear the api_key gate")
@@ -793,9 +794,9 @@ func TestProxyKeepsSessionTokenOnServer(t *testing.T) {
 	}
 	makeAdminAuth(t, srv, ssh) // after setup: the helpers above use the open API
 	u := knownUser(t, srv)
-	sshTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, "", ssh.ID, nil, nil)
+	sshTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, "", ssh.ID, nil, nil, time.Now().Unix())
 	ssoTok, _ := srv.mintFreshbreathToken("ext:ms:u1", u.Email, "", "", sso.ID, nil,
-		sealedCreds{"ms": {UpstreamToken: "graph-token"}})
+		sealedCreds{"ms": {UpstreamToken: "graph-token"}}, time.Now().Unix())
 
 	for _, c := range []struct {
 		name, app, service, bearer, want string

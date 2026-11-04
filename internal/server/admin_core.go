@@ -72,6 +72,7 @@ func mcpSlug(url string) string {
 type coreErr struct {
 	status int
 	msg    string
+	stepUp bool // only a fresh sign-in fixes it (see gateRecentSignIn)
 }
 
 func (e *coreErr) Error() string { return e.msg }
@@ -85,6 +86,10 @@ func cerr(status int, format string, a ...interface{}) *coreErr {
 func writeErr(w http.ResponseWriter, err error) {
 	var ce *coreErr
 	if errors.As(err, &ce) {
+		if ce.stepUp {
+			httpStepUp(w, ce.msg, recentSignIn)
+			return
+		}
 		http.Error(w, ce.msg, ce.status)
 		return
 	}
@@ -287,6 +292,28 @@ func (s *Server) gateSelfOrAdmin(actor, target *db.User) error {
 		return nil
 	}
 	return s.gateUserAccount(actor, target)
+}
+
+// recentSignIn is how recently the actor must have signed in to change
+// what lets someone sign in: an SSH key (the passphrase login), an email
+// (what SSO logins are matched on), a passphrase link. A stolen access
+// token lives minutes and refreshes never make a sign-in fresher, so this
+// keeps one from being traded for a way back in that outlasts it.
+const recentSignIn = 10 * time.Minute
+
+// gateRecentSignIn refuses an actor whose sign-in is older than
+// recentSignIn, or unknown (a token minted before auth_time existed).
+// Over HTTP it answers 401 insufficient_user_authentication, which
+// frbr.js meets with a fresh login and a retry; an MCP tool reports it.
+// The setup account has no sign-in to renew, so it passes.
+func (s *Server) gateRecentSignIn(actor *db.User) error {
+	if actor != nil && actor.ID < 0 {
+		return nil // setup mode: the panel's door is open anyway
+	}
+	if actor != nil && time.Since(actor.SignedInAt) <= recentSignIn {
+		return nil
+	}
+	return &coreErr{status: http.StatusUnauthorized, msg: "sign in again to make this change", stepUp: true}
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────
@@ -926,6 +953,11 @@ func (s *Server) coreUpdateUser(actor *db.User, id int64, name, email, role, sta
 	if err := s.gateRoleGrant(actor, role); err != nil {
 		return err
 	}
+	if !strings.EqualFold(strings.TrimSpace(email), target.Email) {
+		if err := s.gateRecentSignIn(actor); err != nil {
+			return err
+		}
+	}
 	if err := s.store.UpdateUser(id, name, email, role, status, meta); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
@@ -981,6 +1013,9 @@ func (s *Server) coreGenerateSSHKey(actor, target *db.User, passphrase string) (
 	if err := s.gateSelfOrAdmin(actor, target); err != nil {
 		return nil, err
 	}
+	if err := s.gateRecentSignIn(actor); err != nil {
+		return nil, err
+	}
 	if len(passphrase) < 8 {
 		return nil, cerr(http.StatusBadRequest, "passphrase must be at least 8 characters")
 	}
@@ -1005,6 +1040,9 @@ func (s *Server) coreGenerateSSHKey(actor, target *db.User, passphrase string) (
 
 func (s *Server) coreDeleteSSHKey(actor, target *db.User) error {
 	if err := s.gateSelfOrAdmin(actor, target); err != nil {
+		return err
+	}
+	if err := s.gateRecentSignIn(actor); err != nil {
 		return err
 	}
 	if target.Metadata == nil || target.Metadata.SSHKey == nil {
@@ -1044,6 +1082,11 @@ func (s *Server) coreUpdateProfile(actor *db.User, name, email string) (*db.User
 	if err != nil {
 		return nil, cerr(http.StatusNotFound, "%v", err)
 	}
+	if !strings.EqualFold(email, u.Email) {
+		if err := s.gateRecentSignIn(actor); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.store.UpdateUser(u.ID, name, email, u.Role, u.Status, u.Metadata); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, cerr(http.StatusConflict, "that name or email is already taken")
@@ -1076,6 +1119,9 @@ func hashLinkToken(token string) string {
 // earlier one, and returns its URL and expiry.
 func (s *Server) coreCreatePassphraseLink(actor, target *db.User) (string, time.Time, error) {
 	if err := s.gateUserAccount(actor, target); err != nil {
+		return "", time.Time{}, err
+	}
+	if err := s.gateRecentSignIn(actor); err != nil {
 		return "", time.Time{}, err
 	}
 	secret := make([]byte, 32)
