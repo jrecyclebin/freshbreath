@@ -779,17 +779,20 @@ func activeUser(u *db.User) error {
 }
 
 // mintSubject decides the token subject for a completed interactive login:
-// frbr:<id> when the leg is the admin auth gate AND its provider-asserted
-// email belongs to a Fresh Breath user (role/name come from that row, never
-// the provider) — and, with admin_require_verified_email on, the provider
-// marked that email verified; ext:<provider>:<sub> otherwise. A non-admin gate's email
-// never elevates to frbr — signing in to a service is not signing in to
-// Fresh Breath, so a service SSO can't mint a Fresh Breath user's identity
-// no matter what email it reports. SSH passphrase logins prove a user
+// frbr:<id> when the leg is the admin auth gate (or a record set to
+// require a Fresh Breath user) AND its provider-asserted email belongs to a
+// Fresh Breath user (role/name come from that row, never the provider) —
+// and, with admin_require_verified_email on, the provider marked that email
+// verified; ext:<provider>:<sub> otherwise. Any other gate's email never
+// elevates to frbr — signing in to a service is not signing in to Fresh
+// Breath, so a service SSO can't mint a Fresh Breath user's identity no
+// matter what email it reports, unless the operator said to trust it. A
+// frbr: token from a non-admin record still opens only that record's
+// doors: the admin API wants a token bound to the admin record. SSH passphrase logins prove a user
 // directly (leg.user) and never reach here, so they mint frbr by their own
 // trust path regardless of which record they clear.
 func (s *Server) mintSubject(rec *db.AuthRecord, email, providerSub string, emailVerified bool) (subject string, user *db.User) {
-	if email != "" && s.isAdminAuthRecord(rec) && (emailVerified || !s.adminRequiresVerifiedEmail()) {
+	if email != "" && (s.isAdminAuthRecord(rec) || rec.Descriptor.RequireUser) && (emailVerified || !s.adminRequiresVerifiedEmail()) {
 		if u, err := s.store.GetUserByEmail(email); err == nil {
 			return subjectForUser(u), u
 		}

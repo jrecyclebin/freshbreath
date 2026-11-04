@@ -149,6 +149,11 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 // MCP client — or "" when the login finished as a browser flow and the
 // postMessage page was written to w.
 func (s *Server) completeLeg(w http.ResponseWriter, r *http.Request, p *pendingAuth, leg *completedLeg) (string, error) {
+	if leg.rec.Descriptor.RequireUser {
+		if _, user := s.legIdentity(leg); user == nil {
+			return "", fmt.Errorf("%s signs in only people with an account on this server, and %s has none", leg.rec.Name, leg.email)
+		}
+	}
 	p.done = append(p.done, leg)
 	p.at++
 	if p.at < len(p.legs) {

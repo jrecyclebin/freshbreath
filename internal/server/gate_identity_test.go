@@ -196,6 +196,41 @@ func TestAppDoorNonAdminGateMatchingEmailYieldsExt(t *testing.T) {
 	}
 }
 
+// A non-admin record set to require a Fresh Breath user signs a matching
+// email in as that user, refuses one that matches nobody, and stops
+// honoring outside tokens it minted before the setting went on.
+func TestRequireUserRecord(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	gh := fakeGitHubIdP(t, srv)
+	nonce := appBehind(t, srv, "gh-app", &gh.ID)
+	old, err := srv.mintFreshbreathToken("ext:github:4242", knownEmail, "", "", gh.ID, nil, nil, time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gh.Descriptor.RequireUser = true
+	if err := srv.store.UpdateAuthRecord(gh.ID, gh.Name, gh.Kind, gh.Descriptor); err != nil {
+		t.Fatal(err)
+	}
+	gh, _ = srv.store.GetAuthRecord(gh.ID)
+
+	// Nobody here has the provider's email yet: refused.
+	leg, browser := beginInBrowser(t, srv, appLoginStart(t, srv, nonce))
+	rr := testRequest(t, srv, "GET", "/service/callback?code=c1&state="+leg.Query().Get("state"), nil, browser)
+	if strings.Contains(rr.Body.String(), "access_token") {
+		t.Fatalf("login with no matching user finished: %d %s", rr.Code, rr.Body.String())
+	}
+	if _, _, err := srv.verifyGateToken(gh, old); err == nil {
+		t.Error("outside token minted before the setting still clears the gate")
+	}
+
+	u := knownUser(t, srv)
+	if sub := appOAuthLogin(t, srv, nonce); sub != subjectForUser(u) {
+		t.Errorf("subject = %q, want %s", sub, subjectForUser(u))
+	}
+}
+
 func TestAppDoorAdminGateMatchingEmailYieldsFrbr(t *testing.T) {
 	srv := newTestServer(t)
 	gh := fakeGitHubIdP(t, srv)

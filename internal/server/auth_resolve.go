@@ -164,6 +164,10 @@ func (s *Server) verifyGateToken(rec *db.AuthRecord, raw string) (*freshbreathCl
 	if err != nil {
 		return nil, nil, err
 	}
+	// Tokens from before the record asked for an account don't slip by.
+	if user == nil && rec.Descriptor.RequireUser {
+		return nil, nil, fmt.Errorf("%s admits only Fresh Breath users", rec.Name)
+	}
 	if user != nil && claims.AuthTime > 0 {
 		user.SignedInAt = time.Unix(claims.AuthTime, 0)
 	}
