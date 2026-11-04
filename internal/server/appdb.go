@@ -936,22 +936,21 @@ func (s *Server) virtualDBTarget(svc *db.Service, headerNonce, argNonce string) 
 }
 
 // browserSQLRunner is the SQLRunner for the /service/call path. There is no
-// user here — the app↔service link is the whole grant. The header nonce's
-// link was verified upstream; an app_nonce naming a different app must carry
-// its own link or it's a 403, so a public page can't aim a linked service at
-// someone else's data.
+// user here — the calling page's app (the header nonce, whose link was
+// verified upstream) is the whole grant, so it is the only app whose data a
+// default-target tool may touch. An app_nonce naming any other app is a 403
+// even when that app is linked too: nonces are readable from any hosted
+// page, so a link alone proves nothing about who is calling. A service that
+// really should reach another app's data pins it with an app: target.
 func (s *Server) browserSQLRunner(svc *db.Service, headerNonce string, args map[string]interface{}) formats.SQLRunner {
 	return func(sqlText string, params map[string]interface{}) (map[string]interface{}, error) {
 		argNonce, _ := args["app_nonce"].(string)
+		if argNonce != "" && argNonce != headerNonce && svc.Descriptor.DatabaseTarget == "" {
+			return nil, cerr(http.StatusForbidden, "app_nonce %s is not the calling app", argNonce)
+		}
 		target, err := s.virtualDBTarget(svc, headerNonce, argNonce)
 		if err != nil {
 			return nil, err
-		}
-		if argNonce != "" && argNonce != headerNonce {
-			ok, err := s.store.IsServiceAllowedForApp(argNonce, svc.ID)
-			if err != nil || !ok {
-				return nil, cerr(http.StatusForbidden, "service is not linked to app %s", argNonce)
-			}
 		}
 		return s.execVirtualSQL(nil, target, svc.Descriptor.DatabaseName, sqlText, params, true)
 	}
