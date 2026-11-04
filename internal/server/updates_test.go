@@ -1435,6 +1435,32 @@ func TestImportCreatesWhatsMissing(t *testing.T) {
 	}
 }
 
+// An import's app target becomes a directory under DataDir/apps, so
+// anything but a nonce is refused before a file is written.
+func TestImportRefusesATargetThatIsNotANonce(t *testing.T) {
+	srv := newTestServer(t)
+	ada := mustUser(t, srv, "Ada", "Admin", "Active")
+	root := t.TempDir()
+	srv.config.DataDir = filepath.Join(root, "data")
+	os.MkdirAll(srv.config.DataDir, 0755)
+	const target = "../../escaped"
+	m := UpdateManifest{Version: "v1", Ops: []UpdateOp{{Action: "update_app_files", Target: target, Source: "payload",
+		Create: &CreateSpec{Name: "Escaped"}}}}
+	_, events := importAs(t, srv, ada, importArchive(t, m, map[string][]byte{"payload/index.html": []byte("x")}))
+	if lastEvent(events).Event == "done" {
+		t.Fatalf("import of target %q finished: %v", target, events)
+	}
+	if _, err := os.Stat(filepath.Join(root, "escaped")); err == nil {
+		t.Error("import wrote outside DataDir")
+	}
+	if _, err := srv.store.GetApp(target); err == nil {
+		t.Error("app created under a non-nonce")
+	}
+	if _, err := srv.coreCreateAppWithNonce(ada, target, "Escaped", "", "", nil, nil); err == nil {
+		t.Error("coreCreateAppWithNonce accepted a non-nonce")
+	}
+}
+
 // An owner must be an Admin or above, so a Member with the owner's email
 // doesn't become one: the app is left without an owner instead.
 func TestImportOwnerMustBeAnAdmin(t *testing.T) {

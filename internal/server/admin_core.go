@@ -491,6 +491,10 @@ func (s *Server) coreCreateAppWithNonce(actor *db.User, nonce, name, env, url st
 	if name == "" {
 		return "", cerr(http.StatusBadRequest, "name required")
 	}
+	// A kept nonce names the app's directory under DataDir/apps.
+	if nonce != "" && !nonceRe.MatchString(nonce) {
+		return "", cerr(http.StatusBadRequest, "invalid app nonce")
+	}
 	url, err := s.normalizeAppURL(url, nonce)
 	if err != nil {
 		return "", err

@@ -246,6 +246,11 @@ func (s *Server) validateUpdateOps(ops []UpdateOp, archiveDir string, p applyPol
 	for i, op := range ops {
 		switch op.Action {
 		case "update_app_files":
+			// The target becomes a path under DataDir/apps, so it must be a
+			// nonce and nothing else ("../" would land outside it).
+			if !nonceRe.MatchString(op.Target) {
+				return fmt.Errorf("op %d: %q is not an app nonce", i, op.Target)
+			}
 			app, err := s.store.GetApp(op.Target)
 			if err != nil {
 				if !p.importing || op.Create == nil {

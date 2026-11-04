@@ -355,13 +355,29 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 // the only origin originAllowed let start the login — or "*" when it runs
 // from disk, since file:// pages have no origin to name (there the nonce
 // is the whole credential). Hosted apps and the control panel get this
-// server's origin.
+// server's own origin (see servedOrigin).
 func (s *Server) loginOpenerOrigin(r *http.Request, app *db.App) string {
 	if s.appRunsElsewhere(app) {
 		if o := appRegisteredOrigin(app); o != "" {
 			return o
 		}
 		return "*"
+	}
+	return s.servedOrigin(r)
+}
+
+// servedOrigin is the origin of this server that a request reached, taken
+// only from names the operator configured: a listed app host, else the
+// FRBR_BASE_URL origin. Never the raw Host header — hostAllowed accepts
+// any IP literal, and a caller (curl, not a browser) can send any of them,
+// so a Host-derived origin would let an anonymous caller start a login
+// whose result is posted to a page at an IP they own.
+func (s *Server) servedOrigin(r *http.Request) string {
+	if _, ok := s.appHost(r.Host); ok {
+		return s.schemeOf(r) + "://" + r.Host
+	}
+	if u, err := url.Parse(s.config.PublicBaseURL); err == nil && u.Scheme != "" && u.Host != "" {
+		return u.Scheme + "://" + u.Host
 	}
 	return s.schemeOf(r) + "://" + r.Host
 }
@@ -654,7 +670,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		appNonce:  appNonce,
 		appState:  utils.GenNonce(),
 		returnTo:  withSigninStamp(withoutSigninStamp(r.URL), time.Now()),
-		opener:    s.schemeOf(r) + "://" + r.Host, // a page on this origin asked
+		opener:    s.servedOrigin(r), // a page on this origin asked
 		legs:      legs,
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
