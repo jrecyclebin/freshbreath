@@ -805,12 +805,37 @@ func activeUser(u *db.User) error {
 // directly (leg.user) and never reach here, so they mint frbr by their own
 // trust path regardless of which record they clear.
 func (s *Server) mintSubject(rec *db.AuthRecord, email, providerSub string, emailVerified bool) (subject string, user *db.User) {
-	if email != "" && (s.isAdminAuthRecord(rec) || rec.Descriptor.RequireUser) && (emailVerified || !s.adminRequiresVerifiedEmail()) {
-		if u, err := s.store.GetUserByEmail(email); err == nil {
-			return subjectForUser(u), u
-		}
+	ext := extSubject(authProvider(rec), providerSub)
+	if email == "" || !(s.isAdminAuthRecord(rec) || rec.Descriptor.RequireUser) || !(emailVerified || !s.adminRequiresVerifiedEmail()) {
+		return ext, nil
 	}
-	return extSubject(authProvider(rec), providerSub), nil
+	u, err := s.store.GetUserByEmail(email)
+	if err != nil {
+		return ext, nil
+	}
+	// The first provider account to sign in as this user is pinned to
+	// them; another account reporting the same email (a second tenant, a
+	// provider that lets users type their email) stays a stranger.
+	if providerSub == "" {
+		if u.Metadata != nil && u.Metadata.Identities[identityKey(rec)] != "" {
+			return ext, nil
+		}
+		return subjectForUser(u), u
+	}
+	pinned, err := s.store.PinUserIdentity(u.ID, identityKey(rec), providerSub)
+	if err != nil || pinned != providerSub {
+		if err == nil {
+			log.Printf("auth: %s signed in as %s with a different account than the one pinned to them; not linked", rec.Name, email)
+		}
+		return ext, nil
+	}
+	return subjectForUser(u), u
+}
+
+// identityKey names an auth record in UserMetadata.Identities. By ID, not
+// provider name, so renaming a record doesn't drop its pins.
+func identityKey(rec *db.AuthRecord) string {
+	return "auth:" + strconv.FormatInt(rec.ID, 10)
 }
 
 // ── AES-256-GCM seal/open ───────────────────────────────────────────

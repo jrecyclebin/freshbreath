@@ -953,13 +953,21 @@ func (s *Server) coreUpdateUser(actor *db.User, id int64, name, email, role, sta
 	if err := s.gateRoleGrant(actor, role); err != nil {
 		return err
 	}
-	if !strings.EqualFold(strings.TrimSpace(email), target.Email) {
+	emailChanged := !strings.EqualFold(strings.TrimSpace(email), target.Email)
+	if emailChanged {
 		if err := s.gateRecentSignIn(actor); err != nil {
 			return err
 		}
 	}
 	if err := s.store.UpdateUser(id, name, email, role, status, meta); err != nil {
 		return cerr(http.StatusInternalServerError, "%v", err)
+	}
+	// Pinned provider accounts belong to the old address; the new one
+	// links afresh on its first sign-in.
+	if emailChanged {
+		if err := s.store.ClearUserIdentities(id); err != nil {
+			return cerr(http.StatusInternalServerError, "%v", err)
+		}
 	}
 	s.audit(actor, "updated user", name)
 	return nil
