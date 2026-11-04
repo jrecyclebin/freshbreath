@@ -719,6 +719,13 @@ type freshbreathClaims struct {
 	UserName  string  `json:"user_name,omitempty"`
 	AuthID    int64   `json:"auth_id"`
 	Legs      []int64 `json:"legs,omitempty"`
+
+	// IdentityAuth is the record whose sign-in proved Subject and
+	// UserEmail. Being bound to a record (AuthID/Legs) only says its leg
+	// was cleared; a reused leg may speak for the user only when it is
+	// this one, or one login's weak provider could lend its email to
+	// another login's strong one.
+	IdentityAuth int64 `json:"id_auth,omitempty"`
 	Sealed    string  `json:"sealed,omitempty"`
 
 	// AuthTime is when the user last signed in (unix seconds, as OIDC's
@@ -734,6 +741,12 @@ type freshbreathClaims struct {
 // as one of its legs.
 func (c *freshbreathClaims) boundTo(recordID int64) bool {
 	return c.AuthID == recordID || slices.Contains(c.Legs, recordID)
+}
+
+// identityFrom reports whether rec is the record that proved the token's
+// subject.
+func (c *freshbreathClaims) identityFrom(recordID int64) bool {
+	return c.IdentityAuth != 0 && c.IdentityAuth == recordID
 }
 
 // subjectForUser is the canonical subject for a Fresh Breath user row.
@@ -861,7 +874,7 @@ func (s *Server) deriveSubkey(label string) []byte {
 
 // ── Access token mint/verify ────────────────────────────────────────
 
-func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID int64, legs []int64, creds sealedCreds, authTime int64) (string, error) {
+func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID, identityAuth int64, legs []int64, creds sealedCreds, authTime int64) (string, error) {
 	sig, err := jose.NewSigner(
 		jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
 		(&jose.SignerOptions{}).WithType("JWT"),
@@ -881,9 +894,10 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID 
 		UserEmail: email,
 		UserRole:  role,
 		UserName:  name,
-		AuthID:    authID,
-		Legs:      legs,
-		AuthTime:  authTime,
+		AuthID:       authID,
+		Legs:         legs,
+		IdentityAuth: identityAuth,
+		AuthTime:     authTime,
 	}
 	if len(creds) > 0 {
 		plain, err := json.Marshal(creds)
@@ -972,6 +986,7 @@ type freshbreathRefreshData struct {
 	Legs      []int64                       `json:"legs,omitempty"`
 	Upstreams map[string]upstreamRefreshLeg `json:"upstreams,omitempty"` // provider → leg
 	AuthTime  int64                         `json:"auth_time,omitempty"` // the family's sign-in, carried to each access token
+	IdentityAuth int64                      `json:"id_auth,omitempty"`   // see freshbreathClaims.IdentityAuth
 
 	// Token-family fields for rotation (stored in JWT claims, unsealed).
 	FamilyID string `json:"family_id,omitempty"`

@@ -547,7 +547,7 @@ func TestCredentialChangesNeedARecentSignIn(t *testing.T) {
 	makeAdminAuth(t, srv, gate)
 	u := knownUser(t, srv)
 	bearer := func(authTime time.Time) map[string]string {
-		tok, err := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, gate.ID, nil, nil, authTime.Unix())
+		tok, err := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, gate.ID, gate.ID, nil, nil, authTime.Unix())
 		if err != nil {
 			t.Fatal(err)
 		}

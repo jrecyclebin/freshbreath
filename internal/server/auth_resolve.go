@@ -322,6 +322,7 @@ type completedLeg struct {
 	sub           string              // provider subject (interactive kinds)
 	upstream      *sealedUpstreamData // interactive kinds; nil otherwise
 	presentedKey  string              // api_key gates: the key the caller typed
+	authTime      int64               // a leg reused from a token: that token's sign-in time
 }
 
 // identity resolves the subject and user row a leg proved.
@@ -392,8 +393,13 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		}
 	}
 
-	authTime := time.Now().Unix()
-	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, legIDs, creds, authTime)
+	// A reused identity leg keeps its original sign-in time, so stacking a
+	// new leg onto an old token doesn't make it look like a fresh sign-in.
+	authTime := idLeg.authTime
+	if authTime == 0 {
+		authTime = time.Now().Unix()
+	}
+	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, gateID, legIDs, creds, authTime)
 	if err != nil {
 		return "", rd, err
 	}
@@ -403,6 +409,8 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		AuthID:    primaryID,
 		Legs:      legIDs,
 		AuthTime:  authTime,
+
+		IdentityAuth: gateID,
 	}
 	if len(upstreams) > 0 {
 		rd.Upstreams = upstreams

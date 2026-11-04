@@ -267,8 +267,10 @@ func (s *Server) tunnelAuthorize(r *http.Request) error {
 	if admin != nil && claims.boundTo(admin.ID) {
 		return nil
 	}
+	// The SSH record must be the one that proved who this is, not just a
+	// leg some other login cleared along the way.
 	sshID, err := s.store.BuiltinAuthID(db.AuthSSHKey)
-	if err != nil || !claims.boundTo(sshID) {
+	if err != nil || !claims.identityFrom(sshID) {
 		return errors.New("token is not for this server's SSH sign-in")
 	}
 	if admin == nil {
@@ -282,7 +284,7 @@ func (s *Server) tunnelAuthorize(r *http.Request) error {
 		return errors.New("account is not active")
 	}
 	legs := append([]int64{claims.AuthID}, claims.Legs...)
-	tok, err := s.mintFreshbreathToken(claims.Subject, user.Email, user.Role, user.Name, admin.ID, legs, nil, claims.AuthTime)
+	tok, err := s.mintFreshbreathToken(claims.Subject, user.Email, user.Role, user.Name, admin.ID, sshID, legs, nil, claims.AuthTime)
 	if err != nil {
 		return errors.New("tunnel sign-in failed")
 	}

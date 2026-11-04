@@ -204,7 +204,7 @@ func TestRequireUserRecord(t *testing.T) {
 	setAdminAuth(t, srv)
 	gh := fakeGitHubIdP(t, srv)
 	nonce := appBehind(t, srv, "gh-app", &gh.ID)
-	old, err := srv.mintFreshbreathToken("ext:github:4242", knownEmail, "", "", gh.ID, nil, nil, time.Now().Unix())
+	old, err := srv.mintFreshbreathToken("ext:github:4242", knownEmail, "", "", gh.ID, gh.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestAppDoorEmptyGateInheritsAdminYieldsFrbr(t *testing.T) {
 	if err := srv.store.SetAppServiceLinks(nonce, []int64{task.ID}); err != nil {
 		t.Fatalf("link task: %v", err)
 	}
-	stranger, err := srv.mintFreshbreathToken("ext:github:4242", "stranger@gmail.com", "", "Stranger", gh.ID, nil, nil, time.Now().Unix())
+	stranger, err := srv.mintFreshbreathToken("ext:github:4242", "stranger@gmail.com", "", "Stranger", gh.ID, gh.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint stranger token: %v", err)
 	}

@@ -77,7 +77,7 @@ func TestMCPHostGuard(t *testing.T) {
 	rec := fakeGitHubIdP(t, srv)
 	makeAdminAuth(t, srv, rec)
 	user := knownUser(t, srv)
-	tok, err := srv.mintFreshbreathToken(fmt.Sprintf("frbr:%d", user.ID), user.Email, "", user.Name, rec.ID, nil, nil, time.Now().Unix())
+	tok, err := srv.mintFreshbreathToken(fmt.Sprintf("frbr:%d", user.ID), user.Email, "", user.Name, rec.ID, rec.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint token: %v", err)
 	}

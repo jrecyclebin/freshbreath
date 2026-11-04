@@ -73,9 +73,13 @@ func (s *Server) legsForLogin(ctx context.Context, gate *db.AuthRecord, svc *db.
 
 // legCovered reports whether an existing verified token already satisfies a
 // leg: bound to the record, and carrying its provider credential when the
-// kind is interactive.
-func legCovered(claims *freshbreathClaims, rec *db.AuthRecord) bool {
+// kind is interactive. The gate leg (gateID) decides who the caller is, so
+// it is covered only by a token whose identity that same record proved.
+func legCovered(claims *freshbreathClaims, rec *db.AuthRecord, gateID int64) bool {
 	if claims == nil || !claims.boundTo(rec.ID) {
+		return false
+	}
+	if rec.ID == gateID && !claims.identityFrom(rec.ID) {
 		return false
 	}
 	if authInteractive(rec) {
@@ -87,14 +91,19 @@ func legCovered(claims *freshbreathClaims, rec *db.AuthRecord) bool {
 
 // legFromClaims reconstructs a completed leg from an already-verified
 // token, so a login that shares records with a previous one re-runs only
-// its missing legs.
+// its missing legs. The token's identity rides along only when rec is the
+// record that proved it; any other leg brings its credential and nothing
+// else.
 func (s *Server) legFromClaims(rec *db.AuthRecord, claims *freshbreathClaims) *completedLeg {
-	leg := &completedLeg{rec: rec, email: claims.UserEmail, name: claims.UserName}
-	if u, _ := s.userFromSubject(claims.Subject); u != nil {
-		leg.user = u
-	}
-	if parts := strings.SplitN(claims.Subject, ":", 3); len(parts) == 3 && parts[0] == "ext" {
-		leg.sub = parts[2]
+	leg := &completedLeg{rec: rec}
+	if claims.identityFrom(rec.ID) {
+		leg.email, leg.name, leg.authTime = claims.UserEmail, claims.UserName, claims.AuthTime
+		if u, _ := s.userFromSubject(claims.Subject); u != nil {
+			leg.user = u
+		}
+		if parts := strings.SplitN(claims.Subject, ":", 3); len(parts) == 3 && parts[0] == "ext" {
+			leg.sub = parts[2]
+		}
 	}
 	if cred, ok := claims.Creds[authProvider(rec)]; ok {
 		c := cred
@@ -933,7 +942,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var done []*completedLeg
 	var todo []*db.AuthRecord
 	for _, rec := range legs {
-		if legCovered(claims, rec) {
+		if legCovered(claims, rec, legs[0].ID) {
 			done = append(done, s.legFromClaims(rec, claims))
 		} else {
 			todo = append(todo, rec)
@@ -1459,10 +1468,10 @@ func (s *Server) mintDirectSession(user *db.User) (access, refresh string, sshID
 	}
 	subject := subjectForUser(user)
 	authTime := time.Now().Unix()
-	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, nil, nil, authTime); err != nil {
+	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, sshID, nil, nil, authTime); err != nil {
 		return "", "", 0, err
 	}
-	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID, AuthTime: authTime}
+	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID, IdentityAuth: sshID, AuthTime: authTime}
 	if rd.FamilyID, rd.JTI, err = s.newRefreshFamily(subject, sshID, "direct"); err != nil {
 		return "", "", 0, err
 	}

@@ -479,7 +479,7 @@ INSERT INTO stamps (email, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := srv.mintFreshbreathToken(subjectForUser(kay), "kay@example.com", "Member", "Kay", idp.ID, nil, nil, time.Now().Unix())
+	tok, err := srv.mintFreshbreathToken(subjectForUser(kay), "kay@example.com", "Member", "Kay", idp.ID, idp.ID, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +697,7 @@ INSERT INTO keys (secret) VALUES ($api_key)
 // the upstream token an absolute-URL step would send (audit 202610-r3 #2).
 func TestVirtualAuthKeepsFreshBreathTokenAsSession(t *testing.T) {
 	srv := newAppDBServer(t)
-	fb, err := srv.mintFreshbreathToken("frbr:1", "", "", "", 1, nil, nil, time.Now().Unix())
+	fb, err := srv.mintFreshbreathToken("frbr:1", "", "", "", 1, 1, nil, nil, time.Now().Unix())
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}

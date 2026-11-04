@@ -470,7 +470,7 @@ func (os *oauthServer) handleAuthorizeContinue(w http.ResponseWriter, r *http.Re
 	for _, rec := range p.legs {
 		covered := false
 		for _, claims := range verified {
-			if legCovered(claims, rec) {
+			if legCovered(claims, rec, p.gateID) {
 				done = append(done, os.server.legFromClaims(rec, claims))
 				covered = true
 				break
@@ -1031,7 +1031,7 @@ func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefresh
 		}
 	}
 
-	accessToken, err := s.mintFreshbreathToken(data.Subject, email, role, name, data.AuthID, data.Legs, creds, data.AuthTime)
+	accessToken, err := s.mintFreshbreathToken(data.Subject, email, role, name, data.AuthID, data.IdentityAuth, data.Legs, creds, data.AuthTime)
 	if err != nil {
 		return "", freshbreathRefreshData{}, fmt.Errorf("mint access token: %w", err)
 	}
@@ -1041,6 +1041,8 @@ func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefresh
 		AuthID:    data.AuthID,
 		Legs:      data.Legs,
 		AuthTime:  data.AuthTime,
+
+		IdentityAuth: data.IdentityAuth,
 	}
 	if len(newUpstreams) > 0 {
 		newData.Upstreams = newUpstreams

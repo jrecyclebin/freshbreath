@@ -122,7 +122,7 @@ func TestTunnelTakesPanelTokens(t *testing.T) {
 	setAdminAuth(t, srv)
 	u := passphraseUser(t, srv, "Superuser")
 	rec, _ := srv.adminAuthRecord()
-	panelTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, rec.ID, nil, nil, time.Now().Unix())
+	panelTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, rec.ID, rec.ID, nil, nil, time.Now().Unix())
 	if rr := tunnelRequest(srv, "GET", "/api/me", "", bearer(panelTok)); rr.Code != 200 {
 		t.Errorf("panel token through the tunnel: %d %s", rr.Code, rr.Body.String())
 	}
@@ -341,5 +341,19 @@ func TestTunnelPinsTheHost(t *testing.T) {
 	srv.tunnelHandler().ServeHTTP(rr, req)
 	if !strings.Contains(rr.Body.String(), `"apiBase":"http://localhost:18080"`) {
 		t.Errorf("frbr.js through a forward should keep its port: %d", rr.Code)
+	}
+}
+
+// A token that merely cleared the SSH record as a side leg — its identity
+// proved by some other record — doesn't open the panel through the tunnel.
+func TestTunnelWantsSSHToProveTheUser(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	u := passphraseUser(t, srv, "Superuser")
+	sshID, _ := srv.store.BuiltinAuthID(db.AuthSSHKey)
+	other := newAuthRecord(t, srv, "require-user-sso", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.invalid", ClientID: "c", RequireUser: true})
+	sideLeg, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, other.ID, other.ID, []int64{sshID}, nil, time.Now().Unix())
+	if rr := tunnelRequest(srv, "GET", "/api/me", "", bearer(sideLeg)); rr.Code != 401 {
+		t.Errorf("SSH as a side leg through the tunnel: %d, want 401", rr.Code)
 	}
 }
