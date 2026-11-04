@@ -361,3 +361,25 @@ func TestLoginOpenerIgnoresForgedHost(t *testing.T) {
 		t.Errorf("callback page does not target this server's origin:\n%s", page)
 	}
 }
+
+// An app whose URL is a hosted slug is hosted before its files land too.
+// Treating it as a disk page while undeployed posted its logins to "*" and
+// let null-origin frames call as it.
+func TestUndeployedSlugAppIsStillHosted(t *testing.T) {
+	srv := newTestServer(t)
+	slug, _ := srv.store.CreateApp("Someday", "Development", "someday", nil, nil)
+	app, _ := srv.store.GetApp(slug)
+	if got := srv.loginOpenerOrigin(httptest.NewRequest("GET", "/", nil), app); got == "*" {
+		t.Errorf("undeployed slug app: opener %q, want this server's origin", got)
+	}
+	if rr := testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "null", "X-App-Nonce": slug}); rr.Code != 403 {
+		t.Errorf("null origin naming an undeployed slug app: %d, want 403", rr.Code)
+	}
+
+	// A blank URL with no slot is still a disk page, by design.
+	local, _ := srv.store.CreateApp("Local", "Development", "", nil, nil)
+	app, _ = srv.store.GetApp(local)
+	if got := srv.loginOpenerOrigin(httptest.NewRequest("GET", "/", nil), app); got != "*" {
+		t.Errorf("blank-URL disk app: opener %q, want *", got)
+	}
+}

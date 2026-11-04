@@ -256,10 +256,12 @@ func knownHostSet(cfg Config) map[string]bool {
 
 // appRunsElsewhere reports whether an app's pages are served from anywhere
 // but this server. An app whose URL names a location (https://…) declares
-// itself off-server outright. Every other app is hosted exactly while it
-// has a routable deployment slot — so a blank URL that isn't hosted is
-// simply a page opened from disk (file://), which is what an app in
-// development is; nothing has to be set for that. Only such an app may
+// itself off-server outright, and one whose URL is a path (a hosted slug)
+// declares itself hosted, deployed yet or not: until its files land it has
+// no pages at all, and treating it as a disk page would post its logins to
+// any opener. Only a blank URL is left to the deployment slot — hosted
+// while it has one, else a page opened from disk (file://), which is what
+// an app in development is; nothing has to be set for that. Only such an app may
 // be called cross-origin: its pages have no origin of ours to speak from
 // (file:// shares the opaque "null" with every sandboxed frame on the
 // web, and a registered web origin is only a declaration), so the app
@@ -271,6 +273,9 @@ func (s *Server) appRunsElsewhere(app *db.App) bool {
 	}
 	if strings.Contains(app.URL, "://") {
 		return true
+	}
+	if app.URL != "" {
+		return false
 	}
 	s.hostedMu.RLock()
 	defer s.hostedMu.RUnlock()
