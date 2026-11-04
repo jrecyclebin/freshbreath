@@ -491,9 +491,12 @@ var scriptUnsafe = strings.NewReplacer("<", `\u003c`, ">", `\u003e`, "\u2028", `
 // Backslashes are refused outright: browsers treat them as path
 // separators, so a return starting "/\" reads as protocol-relative to
 // another host — and a server-relative return path never legitimately
-// contains one anyway.
+// contains one anyway. So are whitespace and control characters: a
+// browser drops tabs and newlines from a URL before reading it, so
+// "/<tab>/evil.example" would become "//evil.example" — and a real
+// return path carries them percent-encoded.
 func returnAllowed(app *db.App, ret string) bool {
-	if strings.Contains(ret, `\`) {
+	if strings.Contains(ret, `\`) || strings.IndexFunc(ret, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
 		return false
 	}
 	if strings.HasPrefix(ret, "/") && !strings.HasPrefix(ret, "//") {
@@ -1235,16 +1238,13 @@ type loginFailures struct {
 	m  map[string]updateRateCount
 }
 
-// blocked reports whether ip has used up its failures for this window.
-func (f *loginFailures) blocked(ip string, now time.Time) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	c, ok := f.m[ip]
-	return ok && now.Sub(c.windowStart) < loginFailureWindow && c.count >= loginFailureLimit
-}
-
-// fail records one failed sign-in from ip, sweeping lapsed windows.
-func (f *loginFailures) fail(ip string, now time.Time) {
+// attempt books one sign-in attempt from ip, counted as a failure until
+// succeeded takes it back, and reports false once ip has used up its
+// failures for this window. Booking before the check, not after, is what
+// keeps a burst of concurrent attempts from all getting past the limit
+// while their checks queue. Lapsed windows are swept.
+func (f *loginFailures) attempt(ip string, now time.Time) bool {
+	ip = rateKeyIP(ip)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.m == nil {
@@ -1259,8 +1259,23 @@ func (f *loginFailures) fail(ip string, now time.Time) {
 	if !ok {
 		c = updateRateCount{windowStart: now}
 	}
+	if c.count >= loginFailureLimit {
+		return false
+	}
 	c.count++
 	f.m[ip] = c
+	return true
+}
+
+// succeeded takes back the attempt a successful sign-in booked.
+func (f *loginFailures) succeeded(ip string) {
+	ip = rateKeyIP(ip)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.m[ip]; ok && c.count > 0 {
+		c.count--
+		f.m[ip] = c
+	}
 }
 
 // tooManyLogins answers a client that has used up its failed sign-ins.
@@ -1338,7 +1353,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ip := s.requestIP(r)
-		if s.loginFailures.blocked(ip, time.Now()) {
+		if !s.loginFailures.attempt(ip, time.Now()) {
 			tooManyLogins(w)
 			return
 		}
@@ -1347,10 +1362,10 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 		user, err := s.store.GetUserByEmail(req.Email)
 		if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
 			!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
-			s.loginFailures.fail(ip, time.Now())
 			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 			return
 		}
+		s.loginFailures.succeeded(ip)
 		// Checked after the passphrase so an account's status isn't
 		// readable by anyone who knows its email.
 		if user.Status != "Active" {
@@ -1396,7 +1411,7 @@ func (s *Server) handleDirectLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := s.requestIP(r)
-	if s.loginFailures.blocked(ip, time.Now()) {
+	if !s.loginFailures.attempt(ip, time.Now()) {
 		tooManyLogins(w)
 		return
 	}
@@ -1404,10 +1419,10 @@ func (s *Server) handleDirectLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUserByEmail(req.Email)
 	if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
 		!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
-		s.loginFailures.fail(ip, time.Now())
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
+	s.loginFailures.succeeded(ip)
 	if user.Status != "Active" {
 		http.Error(w, "This account is "+strings.ToLower(user.Status)+" — ask an admin to activate it", http.StatusForbidden)
 		return
@@ -1502,16 +1517,16 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ip := s.requestIP(r)
-		if s.loginFailures.blocked(ip, time.Now()) {
+		if !s.loginFailures.attempt(ip, time.Now()) {
 			tooManyLogins(w)
 			return
 		}
 		rec := p.current()
 		if rec.Descriptor.Key == "" || !keysEqual(req.APIKey, rec.Descriptor.Key) {
-			s.loginFailures.fail(ip, time.Now())
 			http.Error(w, "Invalid API key", http.StatusUnauthorized)
 			return
 		}
+		s.loginFailures.succeeded(ip)
 
 		s.respondLeg(w, r, p, &completedLeg{rec: rec, presentedKey: req.APIKey})
 

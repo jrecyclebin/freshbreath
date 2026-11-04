@@ -367,3 +367,20 @@ func TestMemberWiresOnlyWhatsTheirs(t *testing.T) {
 		t.Errorf("refused writes changed the links: %v, want %v", got, before)
 	}
 }
+
+// An app's own service (/mcp/app:<nonce>) is the app's door by another
+// route, so it answers to the gate the app's pages do — the host's, here —
+// not a copy of the app's own (empty) setting.
+func TestAppServiceAnswersToTheHostGate(t *testing.T) {
+	srv := newTestServer(t)
+	_, _, gate := memberHostSetup(t, srv)
+	nonce, err := srv.store.CreateApp("Notes", "Development", "https://blog.example.org/notes", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, _ := srv.store.GetApp(nonce)
+	rec, err := srv.resolveServiceGate(appService(app))
+	if err != nil || rec == nil || rec.ID != gate.ID {
+		t.Errorf("app service gate = %+v (%v), want the host's %q", rec, err, gate.Name)
+	}
+}

@@ -53,6 +53,15 @@ func (s *Server) isAdminAuthRecord(rec *db.AuthRecord) bool {
 
 // resolveServiceGate returns the inbound gate for a service's direct door.
 func (s *Server) resolveServiceGate(svc *db.Service) (*db.AuthRecord, error) {
+	// An app's own service is the app's door by another route, so it
+	// answers to the app's gate — host gate included — not a copy of it.
+	if svc.AppNonce != "" {
+		app, err := s.store.GetApp(svc.AppNonce)
+		if err != nil {
+			return nil, err
+		}
+		return s.resolveAppGate(app)
+	}
 	if svc.ProtectedBy != nil {
 		return s.store.GetAuthRecord(*svc.ProtectedBy)
 	}

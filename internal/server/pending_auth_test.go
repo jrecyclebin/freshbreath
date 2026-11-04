@@ -177,6 +177,8 @@ func TestReturnPathBackslashesRefused(t *testing.T) {
 		"/app/page": true, "https://app.example/next": true,
 		"/\\evil.example": false, "\\evil.example": false, "/a\\b": false,
 		"//evil.example": false, "https://evil.example/next": false,
+		"/\t/evil.example": false, "/\n/evil.example": false, "/\r/evil.example": false,
+		"/a b": false, "/a%20b": true,
 	} {
 		if got := returnAllowed(other, ret); got != want {
 			t.Errorf("returnAllowed(%q) = %v, want %v", ret, got, want)
@@ -240,5 +242,28 @@ func TestRequestIPBehindTrustedProxy(t *testing.T) {
 	}
 	if code := post("198.51.100.7"); code != 401 {
 		t.Errorf("another client behind the same proxy: %d, want 401 (not locked out)", code)
+	}
+}
+
+// A burst of concurrent wrong passphrases from one address can't get past
+// the failure limit while their checks queue: each books its attempt
+// before the check runs.
+func TestLoginAttemptsBookedBeforeTheCheck(t *testing.T) {
+	var f loginFailures
+	now := time.Now()
+	for i := 0; i < loginFailureLimit; i++ {
+		if !f.attempt("2001:db8::1", now) {
+			t.Fatalf("attempt %d refused", i+1)
+		}
+	}
+	if f.attempt("2001:db8::2", now) {
+		t.Error("attempt past the limit from the same /64 allowed")
+	}
+	f.succeeded("2001:db8::1")
+	if !f.attempt("2001:db8::1", now) {
+		t.Error("a success didn't give its attempt back")
+	}
+	if !f.attempt("2001:db8:0:1::1", now) {
+		t.Error("another /64 shares the limit")
 	}
 }

@@ -33,8 +33,7 @@ const (
 // allowRate enforces a per-IP window for one named bucket — each endpoint
 // that admits anonymous callers gets its own, so a flood on one cannot
 // lock out another. Unknown IPs (proxies, tests) share the "" address. An
-// IPv6 caller is counted by its /64, the block one subscriber gets, so it
-// can't take a fresh address per request. Windows that have run out are
+// IPv6 caller is counted by its /64 (rateKeyIP). Windows that have run out are
 // swept now and then, so the map holds only callers seen in the last minute.
 func (s *Server) allowRate(bucket, ip string, limit int) bool {
 	now := time.Now()
@@ -51,10 +50,7 @@ func (s *Server) allowRate(bucket, ip string, limit int) bool {
 		}
 		s.updateRateSwept = now
 	}
-	if addr, err := netip.ParseAddr(ip); err == nil && addr.Is6() && !addr.Is4In6() {
-		ip = netip.PrefixFrom(addr, 64).Masked().String()
-	}
-	key := bucket + ":" + ip
+	key := bucket + ":" + rateKeyIP(ip)
 	c := s.updateRate[key]
 	if now.Sub(c.windowStart) >= time.Minute {
 		c = updateRateCount{windowStart: now}
@@ -62,6 +58,16 @@ func (s *Server) allowRate(bucket, ip string, limit int) bool {
 	c.count++
 	s.updateRate[key] = c
 	return c.count <= limit
+}
+
+// rateKeyIP is the address a limiter counts a caller under: an IPv4
+// address as is, an IPv6 one by its /64 — the block one subscriber gets —
+// so a caller can't take a fresh address per request.
+func rateKeyIP(ip string) string {
+	if addr, err := netip.ParseAddr(ip); err == nil && addr.Is6() && !addr.Is4In6() {
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return ip
 }
 
 // writeUpdateStream runs fn with an event channel and drains it to the client
