@@ -72,7 +72,7 @@ func mcpSlug(url string) string {
 type coreErr struct {
 	status int
 	msg    string
-	stepUp bool // only a fresh sign-in fixes it (see gateRecentSignIn)
+	stepUp bool // only a fresh sign-in fixes it (see gateFreshSignIn)
 }
 
 func (e *coreErr) Error() string { return e.msg }
@@ -87,7 +87,7 @@ func writeErr(w http.ResponseWriter, err error) {
 	var ce *coreErr
 	if errors.As(err, &ce) {
 		if ce.stepUp {
-			httpStepUp(w, ce.msg, recentSignIn)
+			httpStepUp(w, ce.msg, accessTokenTTL)
 			return
 		}
 		http.Error(w, ce.msg, ce.status)
@@ -294,23 +294,18 @@ func (s *Server) gateSelfOrAdmin(actor, target *db.User) error {
 	return s.gateUserAccount(actor, target)
 }
 
-// recentSignIn is how recently the actor must have signed in to change
-// what lets someone sign in: an SSH key (the passphrase login), an email
-// (what SSO logins are matched on), a passphrase link. A stolen access
-// token lives minutes and refreshes never make a sign-in fresher, so this
-// keeps one from being traded for a way back in that outlasts it.
-const recentSignIn = 10 * time.Minute
-
-// gateRecentSignIn refuses an actor whose sign-in is older than
-// recentSignIn, or unknown (a token minted before auth_time existed).
-// Over HTTP it answers 401 insufficient_user_authentication, which
-// frbr.js meets with a fresh login and a retry; an MCP tool reports it.
-// The setup account has no sign-in to renew, so it passes.
-func (s *Server) gateRecentSignIn(actor *db.User) error {
+// gateFreshSignIn guards what lets someone sign in: an SSH key (the
+// passphrase login), an email (what SSO logins are matched on), a passphrase
+// link. Only the token a sign-in minted passes, so a stolen token, or one a
+// stolen refresh token mints, can't be traded for a way back in that
+// outlasts it. Over HTTP it answers 401 insufficient_user_authentication,
+// which frbr.js meets with a fresh login and a retry; an MCP tool reports
+// it. The setup account has no sign-in to renew, so it passes.
+func (s *Server) gateFreshSignIn(actor *db.User) error {
 	if actor != nil && actor.ID < 0 {
 		return nil // setup mode: the panel's door is open anyway
 	}
-	if actor != nil && time.Since(actor.SignedInAt) <= recentSignIn {
+	if actor != nil && actor.FreshSignIn {
 		return nil
 	}
 	return &coreErr{status: http.StatusUnauthorized, msg: "sign in again to make this change", stepUp: true}
@@ -955,7 +950,7 @@ func (s *Server) coreUpdateUser(actor *db.User, id int64, name, email, role, sta
 	}
 	emailChanged := !strings.EqualFold(strings.TrimSpace(email), target.Email)
 	if emailChanged {
-		if err := s.gateRecentSignIn(actor); err != nil {
+		if err := s.gateFreshSignIn(actor); err != nil {
 			return err
 		}
 	}
@@ -1021,7 +1016,7 @@ func (s *Server) coreGenerateSSHKey(actor, target *db.User, passphrase string) (
 	if err := s.gateSelfOrAdmin(actor, target); err != nil {
 		return nil, err
 	}
-	if err := s.gateRecentSignIn(actor); err != nil {
+	if err := s.gateFreshSignIn(actor); err != nil {
 		return nil, err
 	}
 	if len(passphrase) < 8 {
@@ -1050,7 +1045,7 @@ func (s *Server) coreDeleteSSHKey(actor, target *db.User) error {
 	if err := s.gateSelfOrAdmin(actor, target); err != nil {
 		return err
 	}
-	if err := s.gateRecentSignIn(actor); err != nil {
+	if err := s.gateFreshSignIn(actor); err != nil {
 		return err
 	}
 	if target.Metadata == nil || target.Metadata.SSHKey == nil {
@@ -1091,7 +1086,7 @@ func (s *Server) coreUpdateProfile(actor *db.User, name, email string) (*db.User
 		return nil, cerr(http.StatusNotFound, "%v", err)
 	}
 	if !strings.EqualFold(email, u.Email) {
-		if err := s.gateRecentSignIn(actor); err != nil {
+		if err := s.gateFreshSignIn(actor); err != nil {
 			return nil, err
 		}
 	}
@@ -1129,7 +1124,7 @@ func (s *Server) coreCreatePassphraseLink(actor, target *db.User) (string, time.
 	if err := s.gateUserAccount(actor, target); err != nil {
 		return "", time.Time{}, err
 	}
-	if err := s.gateRecentSignIn(actor); err != nil {
+	if err := s.gateFreshSignIn(actor); err != nil {
 		return "", time.Time{}, err
 	}
 	secret := make([]byte, 32)

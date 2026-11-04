@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	"github.com/tailscale/tailcat"
 	"poggers.institute/freshbreath/internal/db"
 	"poggers.institute/freshbreath/internal/sshkit"
@@ -122,7 +123,7 @@ func TestTunnelTakesPanelTokens(t *testing.T) {
 	setAdminAuth(t, srv)
 	u := passphraseUser(t, srv, "Superuser")
 	rec, _ := srv.adminAuthRecord()
-	panelTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, rec.ID, rec.ID, nil, nil, time.Now().Unix())
+	panelTok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, rec.ID, rec.ID, nil, nil, true)
 	if rr := tunnelRequest(srv, "GET", "/api/me", "", bearer(panelTok)); rr.Code != 200 {
 		t.Errorf("panel token through the tunnel: %d %s", rr.Code, rr.Body.String())
 	}
@@ -191,6 +192,70 @@ func TestTunnelRefreshRotates(t *testing.T) {
 	}
 	if rr := tunnelRefresh(srv, p3); rr.Code == 200 {
 		t.Error("session survived refresh token reuse")
+	}
+}
+
+// A sign-in is fresh until its first token is refreshed away.
+func TestTunnelRefreshEndsFreshness(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminSSH(t, srv)
+	passphraseUser(t, srv, "Superuser")
+	p := tunnelLogin(t, srv)
+
+	rename := func(tok, email string) int {
+		h := bearer(tok)
+		h["Content-Type"] = "application/json"
+		return tunnelRequest(srv, "PUT", "/api/me", `{"name":"K","email":"`+email+`"}`, h).Code
+	}
+	rr := tunnelRefresh(srv, p)
+	if rr.Code != 200 {
+		t.Fatalf("refresh: %d %s", rr.Code, rr.Body.String())
+	}
+	var refreshed tunnelPair
+	json.Unmarshal(rr.Body.Bytes(), &refreshed)
+
+	if code := rename(refreshed.Access, "refreshed@example.com"); code != 401 {
+		t.Errorf("email change on a refreshed token: %d, want 401", code)
+	}
+	if code := rename(p.Access, "signedin@example.com"); code != 200 {
+		t.Errorf("email change on the sign-in's own token: %d, want 200", code)
+	}
+}
+
+// The tunnel's per-request token is the caller's token under another record:
+// it mustn't restart the clock on a fresh sign-in.
+func TestTunnelTokenKeepsTheSignInsClock(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	u := passphraseUser(t, srv, "Superuser")
+	sshID, _ := srv.store.BuiltinAuthID(db.AuthSSHKey)
+	tok, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, sshID, sshID, nil, nil, true)
+	outer, err := srv.verifyFreshbreathToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer.IssuedAt = josejwt.NewNumericDate(time.Now().Add(-14 * time.Minute))
+	outer.Expiry = josejwt.NewNumericDate(time.Now().Add(time.Minute))
+	aged, err := srv.signFreshbreathClaims(*outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "http://localhost:18080/api/me", nil)
+	req.Header.Set("Authorization", "Bearer "+aged)
+	if err := srv.tunnelAuthorize(req); err != nil {
+		t.Fatal(err)
+	}
+	inner, err := srv.verifyFreshbreathToken(strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, _ := srv.adminAuthRecord()
+	if !inner.boundTo(admin.ID) || !inner.boundTo(sshID) || !inner.identityFrom(sshID) {
+		t.Errorf("inner token bindings: %+v", inner)
+	}
+	if inner.TokenUse != "signin" || *inner.IssuedAt != *outer.IssuedAt || *inner.Expiry != *outer.Expiry {
+		t.Errorf("inner clock: token_use %q, iat %v, exp %v; want iat %v, exp %v", inner.TokenUse, inner.IssuedAt.Time(), inner.Expiry.Time(), outer.IssuedAt.Time(), outer.Expiry.Time())
 	}
 }
 
@@ -352,7 +417,7 @@ func TestTunnelWantsSSHToProveTheUser(t *testing.T) {
 	u := passphraseUser(t, srv, "Superuser")
 	sshID, _ := srv.store.BuiltinAuthID(db.AuthSSHKey)
 	other := newAuthRecord(t, srv, "require-user-sso", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.invalid", ClientID: "c", RequireUser: true})
-	sideLeg, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, other.ID, other.ID, []int64{sshID}, nil, time.Now().Unix())
+	sideLeg, _ := srv.mintFreshbreathToken(subjectForUser(u), u.Email, u.Role, u.Name, other.ID, other.ID, []int64{sshID}, nil, true)
 	if rr := tunnelRequest(srv, "GET", "/api/me", "", bearer(sideLeg)); rr.Code != 401 {
 		t.Errorf("SSH as a side leg through the tunnel: %d, want 401", rr.Code)
 	}

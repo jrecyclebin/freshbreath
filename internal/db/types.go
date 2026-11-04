@@ -36,10 +36,10 @@ type User struct {
 	Apps      []string      `json:"apps,omitempty"`
 	Metadata  *UserMetadata `json:"metadata,omitempty"`
 
-	// SignedInAt is when the sign-in behind the current request happened,
-	// from its token's auth_time. Set per request, never stored; zero when
-	// unknown. Changes that hand out a way back in check it.
-	SignedInAt time.Time `json:"-"`
+	// FreshSignIn says the current request's token came straight from a
+	// sign-in, not a refresh. Set per request, never stored. Changes that
+	// hand out a way back in check it.
+	FreshSignIn bool `json:"-"`
 }
 
 type UserMetadata struct {

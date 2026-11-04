@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -103,7 +102,7 @@ func TestCentralMCPTokenVerifierValid(t *testing.T) {
 	// token could escalate. Minting with a role that disagrees with the DB is
 	// the whole point — a test that minted "Member" too would pass even if the
 	// verifier wrongly trusted the token.
-	tok, err := srv.mintFreshbreathToken(subjectForUser(grace), "grace@example.com", "Superuser", "Grace Hopper", rec.ID, rec.ID, nil, nil, time.Now().Unix())
+	tok, err := srv.mintFreshbreathToken(subjectForUser(grace), "grace@example.com", "Superuser", "Grace Hopper", rec.ID, rec.ID, nil, nil, true)
 	if err != nil {
 		t.Fatalf("mint token: %v", err)
 	}
@@ -165,7 +164,7 @@ func TestVirtualMCPGateBinding(t *testing.T) {
 	}
 
 	// Bound to the wrong record → still 401.
-	tokOther, err := srv.mintFreshbreathToken(extSubject("other", "sub-1"), "", "", "", other.ID, other.ID, nil, nil, time.Now().Unix())
+	tokOther, err := srv.mintFreshbreathToken(extSubject("other", "sub-1"), "", "", "", other.ID, other.ID, nil, nil, true)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -176,7 +175,7 @@ func TestVirtualMCPGateBinding(t *testing.T) {
 
 	// Bound to the gate record → past the door (the MCP layer may still
 	// reject the empty body, but not with a 401).
-	tokGate, err := srv.mintFreshbreathToken(extSubject("up", "sub-2"), "", "", "", gate.ID, gate.ID, nil, nil, time.Now().Unix())
+	tokGate, err := srv.mintFreshbreathToken(extSubject("up", "sub-2"), "", "", "", gate.ID, gate.ID, nil, nil, true)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -271,7 +270,7 @@ func TestVirtualMCPAnonymousHasNoPRM(t *testing.T) {
 
 func TestIsFreshbreathToken(t *testing.T) {
 	srv := newTestServer(t)
-	tok, err := srv.mintFreshbreathToken("frbr:1", "u@example.com", "Admin", "U", 1, 1, nil, nil, time.Now().Unix())
+	tok, err := srv.mintFreshbreathToken("frbr:1", "u@example.com", "Admin", "U", 1, 1, nil, nil, true)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -454,7 +453,7 @@ func TestMCPServiceOAuthBehindOpenGate(t *testing.T) {
 	}
 
 	// A Fresh Breath token from some other login is refused, not forwarded.
-	other, _ := srv.mintFreshbreathToken("ext:x:1", "", "", "", 12345, 12345, nil, nil, time.Now().Unix())
+	other, _ := srv.mintFreshbreathToken("ext:x:1", "", "", "", 12345, 12345, nil, nil, true)
 	rr = testRequest(t, srv, "POST", "/service/"+id+"/", strings.NewReader(`{}`),
 		map[string]string{"X-App-Nonce": nonce, "Authorization": "Bearer " + other})
 	if rr.Code != 401 || up.lastAuth != "" {

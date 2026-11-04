@@ -283,8 +283,14 @@ func (s *Server) tunnelAuthorize(r *http.Request) error {
 	if user.Status != "Active" {
 		return errors.New("account is not active")
 	}
-	legs := append([]int64{claims.AuthID}, claims.Legs...)
-	tok, err := s.mintFreshbreathToken(claims.Subject, user.Email, user.Role, user.Name, admin.ID, sshID, legs, nil, claims.AuthTime)
+	// The caller's token under the panel's record, on the same clock: its
+	// iat, exp and token_use carry over, so this never extends a fresh sign-in.
+	inner := *claims
+	inner.UserEmail, inner.UserRole, inner.UserName = user.Email, user.Role, user.Name
+	inner.AuthID, inner.IdentityAuth = admin.ID, sshID
+	inner.Legs = append([]int64{claims.AuthID}, claims.Legs...)
+	inner.Sealed = ""
+	tok, err := s.signFreshbreathClaims(inner)
 	if err != nil {
 		return errors.New("tunnel sign-in failed")
 	}

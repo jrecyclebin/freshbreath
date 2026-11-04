@@ -712,6 +712,23 @@ type sealedUpstreamData struct {
 // sealedCreds maps auth provider slug → that provider's upstream credential.
 type sealedCreds map[string]sealedUpstreamData
 
+// token_use says what a token is. Access and refresh tokens share a signing
+// key, so each verifier accepts only its own kinds rather than relying on the
+// sealed payloads failing to parse as each other.
+//
+// tokenUseSignIn marks the access token a sign-in minted. Refreshes and reused
+// logins never mint it, so it can't outlive the sign-in's own token: a fresh
+// token is one still within its first TTL. (IssuedAt is then the sign-in's
+// time, should a change ever want a shorter window.)
+//
+// Tokens from before the claim carry none: they verify as they always did and
+// never count as fresh.
+const (
+	tokenUseSignIn  = "signin"
+	tokenUseAccess  = "access"
+	tokenUseRefresh = "refresh"
+)
+
 type freshbreathClaims struct {
 	josejwt.Claims
 	UserEmail string  `json:"user_email,omitempty"` // human label; Subject is the key
@@ -719,19 +736,18 @@ type freshbreathClaims struct {
 	UserName  string  `json:"user_name,omitempty"`
 	AuthID    int64   `json:"auth_id"`
 	Legs      []int64 `json:"legs,omitempty"`
+	Sealed    string  `json:"sealed,omitempty"`
 
 	// IdentityAuth is the record whose sign-in proved Subject and
 	// UserEmail. Being bound to a record (AuthID/Legs) only says its leg
 	// was cleared; a reused leg may speak for the user only when it is
 	// this one, or one login's weak provider could lend its email to
 	// another login's strong one.
-	IdentityAuth int64  `json:"id_auth,omitempty"`
-	Sealed       string `json:"sealed,omitempty"`
+	IdentityAuth int64 `json:"id_auth,omitempty"`
 
-	// AuthTime is when the user last signed in (unix seconds, as OIDC's
-	// auth_time). Refreshes carry it unchanged, so a refreshed token is no
-	// fresher a sign-in than the one that started its family.
-	AuthTime int64 `json:"auth_time,omitempty"`
+	// TokenUse is tokenUseSignIn or tokenUseAccess, or empty on a token from
+	// before the claim.
+	TokenUse string `json:"token_use,omitempty"`
 
 	// Unsealed credentials — populated by verifyFreshbreathToken, never serialized.
 	Creds sealedCreds `json:"-"`
@@ -899,14 +915,7 @@ func (s *Server) deriveSubkey(label string) []byte {
 
 // ── Access token mint/verify ────────────────────────────────────────
 
-func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID, identityAuth int64, legs []int64, creds sealedCreds, authTime int64) (string, error) {
-	sig, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		return "", err
-	}
+func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID, identityAuth int64, legs []int64, creds sealedCreds, fresh bool) (string, error) {
 	now := time.Now()
 	claims := freshbreathClaims{
 		Claims: josejwt.Claims{
@@ -922,7 +931,10 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID,
 		AuthID:       authID,
 		Legs:         legs,
 		IdentityAuth: identityAuth,
-		AuthTime:     authTime,
+		TokenUse:     tokenUseAccess,
+	}
+	if fresh {
+		claims.TokenUse = tokenUseSignIn
 	}
 	if len(creds) > 0 {
 		plain, err := json.Marshal(creds)
@@ -933,6 +945,17 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID,
 		if err != nil {
 			return "", fmt.Errorf("seal creds: %w", err)
 		}
+	}
+	return s.signFreshbreathClaims(claims)
+}
+
+func (s *Server) signFreshbreathClaims(claims freshbreathClaims) (string, error) {
+	sig, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	if err != nil {
+		return "", err
 	}
 	return josejwt.Signed(sig).Claims(claims).Serialize()
 }
@@ -951,6 +974,9 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
 	var claims freshbreathClaims
 	if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &claims); err != nil {
 		return nil, fmt.Errorf("verify: %w", err)
+	}
+	if use := claims.TokenUse; use != tokenUseSignIn && use != tokenUseAccess && use != "" {
+		return nil, fmt.Errorf("invalid: token_use %q is not an access token", use)
 	}
 	if err := claims.Claims.Validate(josejwt.Expected{
 		Issuer:      "freshbreath",
@@ -1010,7 +1036,6 @@ type freshbreathRefreshData struct {
 	AuthID       int64                         `json:"auth_id"`
 	Legs         []int64                       `json:"legs,omitempty"`
 	Upstreams    map[string]upstreamRefreshLeg `json:"upstreams,omitempty"` // provider → leg
-	AuthTime     int64                         `json:"auth_time,omitempty"` // the family's sign-in, carried to each access token
 	IdentityAuth int64                         `json:"id_auth,omitempty"`   // see freshbreathClaims.IdentityAuth
 
 	// Token-family fields for rotation (stored in JWT claims, unsealed).
@@ -1060,6 +1085,7 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
 		Sealed   string `json:"sealed"`
 		FamilyID string `json:"family_id"`
 		JTI      string `json:"jti"`
+		TokenUse string `json:"token_use"`
 	}
 	claims := refreshClaims{
 		Claims: josejwt.Claims{
@@ -1072,6 +1098,7 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
 		Sealed:   sealed,
 		FamilyID: data.FamilyID,
 		JTI:      data.JTI,
+		TokenUse: tokenUseRefresh,
 	}
 	return josejwt.Signed(sig).Claims(claims).Serialize()
 }
@@ -1119,9 +1146,15 @@ func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error)
 		Sealed   string `json:"sealed"`
 		FamilyID string `json:"family_id"`
 		JTI      string `json:"jti"`
+		TokenUse string `json:"token_use"`
 	}
 	if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &outer); err != nil {
 		return nil, fmt.Errorf("verify refresh: %w", err)
+	}
+	// With no token_use, only the checks below and the refresh endpoint's
+	// family lookup tell the kinds apart.
+	if outer.TokenUse != tokenUseRefresh && outer.TokenUse != "" {
+		return nil, fmt.Errorf("refresh token invalid: token_use %q is not a refresh token", outer.TokenUse)
 	}
 	if err := outer.Claims.Validate(josejwt.Expected{
 		Issuer:      "freshbreath",

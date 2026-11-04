@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -177,8 +176,8 @@ func (s *Server) verifyGateToken(rec *db.AuthRecord, raw string) (*freshbreathCl
 	if user == nil && rec.Descriptor.RequireUser {
 		return nil, nil, fmt.Errorf("%s admits only Fresh Breath users", rec.Name)
 	}
-	if user != nil && claims.AuthTime > 0 {
-		user.SignedInAt = time.Unix(claims.AuthTime, 0)
+	if user != nil {
+		user.FreshSignIn = claims.TokenUse == tokenUseSignIn
 	}
 	return claims, user, nil
 }
@@ -322,7 +321,7 @@ type completedLeg struct {
 	sub           string              // provider subject (interactive kinds)
 	upstream      *sealedUpstreamData // interactive kinds; nil otherwise
 	presentedKey  string              // api_key gates: the key the caller typed
-	authTime      int64               // a leg reused from a token: that token's sign-in time
+	reused        bool                // from an existing token, no sign-in behind it
 }
 
 // identity resolves the subject and user row a leg proved.
@@ -393,13 +392,9 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		}
 	}
 
-	// A reused identity leg keeps its original sign-in time, so stacking a
-	// new leg onto an old token doesn't make it look like a fresh sign-in.
-	authTime := idLeg.authTime
-	if authTime == 0 {
-		authTime = time.Now().Unix()
-	}
-	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, gateID, legIDs, creds, authTime)
+	// A reused gate leg isn't a sign-in: staying fresh here would let a
+	// fresh token renew itself by stacking legs.
+	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, gateID, legIDs, creds, !idLeg.reused)
 	if err != nil {
 		return "", rd, err
 	}
@@ -408,7 +403,6 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		UserEmail: email,
 		AuthID:    primaryID,
 		Legs:      legIDs,
-		AuthTime:  authTime,
 
 		IdentityAuth: gateID,
 	}

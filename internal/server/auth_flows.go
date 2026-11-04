@@ -95,9 +95,9 @@ func legCovered(claims *freshbreathClaims, rec *db.AuthRecord, gateID int64) boo
 // record that proved it; any other leg brings its credential and nothing
 // else.
 func (s *Server) legFromClaims(rec *db.AuthRecord, claims *freshbreathClaims) *completedLeg {
-	leg := &completedLeg{rec: rec}
+	leg := &completedLeg{rec: rec, reused: true}
 	if claims.identityFrom(rec.ID) {
-		leg.email, leg.name, leg.authTime = claims.UserEmail, claims.UserName, claims.AuthTime
+		leg.email, leg.name = claims.UserEmail, claims.UserName
 		if u, _ := s.userFromSubject(claims.Subject); u != nil {
 			leg.user = u
 		}
@@ -1471,11 +1471,10 @@ func (s *Server) mintDirectSession(user *db.User) (access, refresh string, sshID
 		return "", "", 0, err
 	}
 	subject := subjectForUser(user)
-	authTime := time.Now().Unix()
-	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, sshID, nil, nil, authTime); err != nil {
+	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, sshID, nil, nil, true); err != nil {
 		return "", "", 0, err
 	}
-	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID, IdentityAuth: sshID, AuthTime: authTime}
+	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID, IdentityAuth: sshID}
 	if rd.FamilyID, rd.JTI, err = s.newRefreshFamily(subject, sshID, "direct"); err != nil {
 		return "", "", 0, err
 	}

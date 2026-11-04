@@ -1031,7 +1031,7 @@ func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefresh
 		}
 	}
 
-	accessToken, err := s.mintFreshbreathToken(data.Subject, email, role, name, data.AuthID, data.IdentityAuth, data.Legs, creds, data.AuthTime)
+	accessToken, err := s.mintFreshbreathToken(data.Subject, email, role, name, data.AuthID, data.IdentityAuth, data.Legs, creds, false)
 	if err != nil {
 		return "", freshbreathRefreshData{}, fmt.Errorf("mint access token: %w", err)
 	}
@@ -1040,7 +1040,6 @@ func (os *oauthServer) refreshLegs(ctx context.Context, data *freshbreathRefresh
 		UserEmail: email,
 		AuthID:    data.AuthID,
 		Legs:      data.Legs,
-		AuthTime:  data.AuthTime,
 
 		IdentityAuth: data.IdentityAuth,
 	}
