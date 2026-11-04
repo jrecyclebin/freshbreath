@@ -1917,6 +1917,21 @@ type taskFile struct {
 // a scheduled task acts as a stored api_key record with nobody present
 // (design/decoupled-auth.md, stated limit). TASK_TOKEN goes in last so no
 // argument can stand in for it.
+// taskArgNameOK reports whether a caller's argument name can become a
+// TASK_<NAME> variable as is: a name with "=" or a newline would write a
+// different variable than it says, and TOKEN is the outbound credential's.
+func taskArgNameOK(name string) bool {
+	if name == "" || strings.EqualFold(name, "token") {
+		return false
+	}
+	for _, c := range name {
+		if !(c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) runTask(ctx context.Context, task *formats.Task, nonce string, args map[string]interface{}, files map[string]taskFile, token string) (*mcp.CallToolResult, error) {
 	home, err := os.MkdirTemp("", "fbr-task-*")
 	if err != nil {
@@ -1950,9 +1965,15 @@ func (s *Server) runTask(ctx context.Context, task *formats.Task, nonce string, 
 
 	env = append(env, "TASK="+task.Name)
 	for k, v := range args {
+		if !taskArgNameOK(k) {
+			return nil, fmt.Errorf("argument name %q: letters, digits and _ only", k)
+		}
 		env = append(env, "TASK_"+strings.ToUpper(k)+"="+taskArgValue(v))
 	}
 	for key, f := range files {
+		if !taskArgNameOK(key) {
+			return nil, fmt.Errorf("file argument name %q: letters, digits and _ only", key)
+		}
 		fp := filepath.Join(home, f.name)
 		if err := os.WriteFile(fp, f.data, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write file arg %q", key)

@@ -106,3 +106,21 @@ func TestRunTaskWithoutApp(t *testing.T) {
 		t.Errorf("FRBR_ vars = %q, want only FRBR_DIR", got)
 	}
 }
+
+// An argument name becomes a variable name, so it's held to one: "=" or a
+// newline would write a different variable, and TOKEN is the credential's.
+func TestRunTaskRefusesOddArgumentNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bash environment test")
+	}
+	task := &formats.Task{Name: "echo", Script: `echo "$TASK_TOKEN"`}
+	srv := &Server{config: Config{Dir: "/opt/frbr", DataDir: "/var/frbr"}}
+	for _, name := range []string{"token", "Token", "a=b", "a\nb", "a b", ""} {
+		if _, err := srv.runTask(t.Context(), task, "", map[string]interface{}{name: "x"}, nil, "real"); err == nil {
+			t.Errorf("argument %q: want refusal", name)
+		}
+	}
+	if _, err := srv.runTask(t.Context(), task, "", map[string]interface{}{"note_2": "x"}, nil, ""); err != nil {
+		t.Errorf("plain name refused: %v", err)
+	}
+}
