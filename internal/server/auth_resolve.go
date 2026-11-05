@@ -52,6 +52,15 @@ func (s *Server) isAdminAuthRecord(rec *db.AuthRecord) bool {
 
 // resolveServiceGate returns the inbound gate for a service's direct door.
 func (s *Server) resolveServiceGate(svc *db.Service) (*db.AuthRecord, error) {
+	// An app's own service is the app's door by another route, so it
+	// answers to the app's gate — host gate included — not a copy of it.
+	if svc.AppNonce != "" {
+		app, err := s.store.GetApp(svc.AppNonce)
+		if err != nil {
+			return nil, err
+		}
+		return s.resolveAppGate(app)
+	}
 	if svc.ProtectedBy != nil {
 		return s.store.GetAuthRecord(*svc.ProtectedBy)
 	}
@@ -162,6 +171,13 @@ func (s *Server) verifyGateToken(rec *db.AuthRecord, raw string) (*freshbreathCl
 	user, err := s.userFromSubject(claims.Subject)
 	if err != nil {
 		return nil, nil, err
+	}
+	// Tokens from before the record asked for an account don't slip by.
+	if user == nil && rec.Descriptor.RequireUser {
+		return nil, nil, fmt.Errorf("%s admits only Fresh Breath users", rec.Name)
+	}
+	if user != nil {
+		user.FreshSignIn = claims.TokenUse == tokenUseSignIn
 	}
 	return claims, user, nil
 }
@@ -305,6 +321,7 @@ type completedLeg struct {
 	sub           string              // provider subject (interactive kinds)
 	upstream      *sealedUpstreamData // interactive kinds; nil otherwise
 	presentedKey  string              // api_key gates: the key the caller typed
+	reused        bool                // from an existing token, no sign-in behind it
 }
 
 // identity resolves the subject and user row a leg proved.
@@ -375,7 +392,9 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		}
 	}
 
-	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, legIDs, creds)
+	// A reused gate leg isn't a sign-in: staying fresh here would let a
+	// fresh token renew itself by stacking legs.
+	accessToken, err = s.mintFreshbreathToken(subject, email, role, name, primaryID, gateID, legIDs, creds, !idLeg.reused)
 	if err != nil {
 		return "", rd, err
 	}
@@ -384,6 +403,8 @@ func (s *Server) mintForLegs(legs []*completedLeg, gateID, primaryID int64) (acc
 		UserEmail: email,
 		AuthID:    primaryID,
 		Legs:      legIDs,
+
+		IdentityAuth: gateID,
 	}
 	if len(upstreams) > 0 {
 		rd.Upstreams = upstreams

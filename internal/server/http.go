@@ -68,6 +68,11 @@ func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request, cred outboundC
 		if kl == "host" || kl == "connection" || kl == "x-app-nonce" || kl == "content-length" || kl == "origin" || kl == "access-control-request-method" || kl == "access-control-request-headers" || kl == "user-agent" || kl == "x-api-key" || kl == "cookie" {
 			continue
 		}
+		// Forwarding claims are the caller's word, not ours. A relative
+		// service is this server, which may trust them from a local peer.
+		if strings.HasPrefix(kl, "x-forwarded-") || kl == "forwarded" || kl == "x-real-ip" {
+			continue
+		}
 		if kl == "authorization" && !passAuth {
 			continue
 		}
@@ -82,7 +87,13 @@ func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request, cred outboundC
 		}
 	}
 
-	return s.httpClient.Do(proxyReq)
+	// Redirects go back to the caller rather than being followed here: a
+	// followed redirect carries a header credential (cred.Header) to
+	// wherever the upstream points, and hands the caller the body of any
+	// address this server can reach.
+	client := *s.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return client.Do(proxyReq)
 }
 
 func copyHeaders(dst, src http.Header) {

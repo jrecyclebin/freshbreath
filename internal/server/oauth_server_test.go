@@ -432,8 +432,9 @@ func TestOAuthAuthorizeLegSkip(t *testing.T) {
 	contState := interstitialState(t, rr.Body.String())
 
 	// A live token bound to the gate, carrying its provider credential.
-	tok, err := srv.mintFreshbreathToken(extSubject("up", "u-1"), "user@example.com", "", "", gate.ID, nil,
-		sealedCreds{"up": {UpstreamToken: "upstream-xyz"}})
+	tok, err := srv.mintFreshbreathToken(extSubject("up", "u-1"), "user@example.com", "", "", gate.ID, gate.ID, nil,
+		sealedCreds{"up": {UpstreamToken: "upstream-xyz"}}, true)
+
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -610,8 +611,9 @@ func TestOAuthAuthCodeGrantHappyPath(t *testing.T) {
 	gate := oidcRecord(t, srv, "Up IdP")
 
 	subject := extSubject("up-idp", "u-77")
-	fbToken, err := srv.mintFreshbreathToken(subject, "user@example.com", "", "", gate.ID, nil,
-		sealedCreds{"up-idp": {UpstreamToken: "real-upstream-token", UpstreamRefresh: "real-upstream-refresh"}})
+	fbToken, err := srv.mintFreshbreathToken(subject, "user@example.com", "", "", gate.ID, gate.ID, nil,
+		sealedCreds{"up-idp": {UpstreamToken: "real-upstream-token", UpstreamRefresh: "real-upstream-refresh"}}, true)
+
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -701,7 +703,7 @@ func TestOAuthAuthCodeGrantCreatesFamily(t *testing.T) {
 	}
 	subject := subjectForUser(user)
 
-	fbToken, err := srv.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, gate.ID, nil, nil)
+	fbToken, err := srv.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, gate.ID, gate.ID, nil, nil, true)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -1772,8 +1774,9 @@ func TestTokenSubkeySeparation(t *testing.T) {
 	}
 
 	// A credential-carrying token must still mint → verify → unseal correctly.
-	tok, err := srv.mintFreshbreathToken("ext:up:1", "u@example.com", "", "", 5, nil,
-		sealedCreds{"up": {UpstreamToken: "up"}})
+	tok, err := srv.mintFreshbreathToken("ext:up:1", "u@example.com", "", "", 5, 5, nil,
+		sealedCreds{"up": {UpstreamToken: "up"}}, true)
+
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -1803,8 +1806,9 @@ func TestVerifyAndUnwrapToken(t *testing.T) {
 	srv := newTestServer(t)
 	const recID int64 = 42
 
-	tok, err := srv.mintFreshbreathToken("ext:up:9", "u@example.com", "", "", recID, nil,
-		sealedCreds{"up": {UpstreamToken: "secret-upstream"}})
+	tok, err := srv.mintFreshbreathToken("ext:up:9", "u@example.com", "", "", recID, recID, nil,
+		sealedCreds{"up": {UpstreamToken: "secret-upstream"}}, true)
+
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
@@ -1824,7 +1828,7 @@ func TestVerifyAndUnwrapToken(t *testing.T) {
 	}
 
 	// A record carried in Legs also satisfies the binding.
-	legged, _ := srv.mintFreshbreathToken("ext:up:9", "u@example.com", "", "", recID, []int64{7}, nil)
+	legged, _ := srv.mintFreshbreathToken("ext:up:9", "u@example.com", "", "", recID, recID, []int64{7}, nil, true)
 	if _, err := srv.verifyAndUnwrapToken(legged, 7); err != nil {
 		t.Errorf("legs binding rejected: %v", err)
 	}
@@ -1984,7 +1988,7 @@ func TestOAuthAuthCodeGrantChecksRedirectURI(t *testing.T) {
 	clientID, secret := registerOAuthClient(t, srv)
 	gate := oidcRecord(t, srv, "Up IdP")
 	subject := extSubject("up-idp", "u-77")
-	fbToken, err := srv.mintFreshbreathToken(subject, "user@example.com", "", "", gate.ID, nil, nil)
+	fbToken, err := srv.mintFreshbreathToken(subject, "user@example.com", "", "", gate.ID, gate.ID, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}

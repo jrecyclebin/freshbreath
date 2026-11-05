@@ -712,6 +712,23 @@ type sealedUpstreamData struct {
 // sealedCreds maps auth provider slug → that provider's upstream credential.
 type sealedCreds map[string]sealedUpstreamData
 
+// token_use says what a token is. Access and refresh tokens share a signing
+// key, so each verifier accepts only its own kinds rather than relying on the
+// sealed payloads failing to parse as each other.
+//
+// tokenUseSignIn marks the access token a sign-in minted. Refreshes and reused
+// logins never mint it, so it can't outlive the sign-in's own token: a fresh
+// token is one still within its first TTL. (IssuedAt is then the sign-in's
+// time, should a change ever want a shorter window.)
+//
+// Tokens from before the claim carry none: they verify as they always did and
+// never count as fresh.
+const (
+	tokenUseSignIn  = "signin"
+	tokenUseAccess  = "access"
+	tokenUseRefresh = "refresh"
+)
+
 type freshbreathClaims struct {
 	josejwt.Claims
 	UserEmail string  `json:"user_email,omitempty"` // human label; Subject is the key
@@ -721,6 +738,17 @@ type freshbreathClaims struct {
 	Legs      []int64 `json:"legs,omitempty"`
 	Sealed    string  `json:"sealed,omitempty"`
 
+	// IdentityAuth is the record whose sign-in proved Subject and
+	// UserEmail. Being bound to a record (AuthID/Legs) only says its leg
+	// was cleared; a reused leg may speak for the user only when it is
+	// this one, or one login's weak provider could lend its email to
+	// another login's strong one.
+	IdentityAuth int64 `json:"id_auth,omitempty"`
+
+	// TokenUse is tokenUseSignIn or tokenUseAccess, or empty on a token from
+	// before the claim.
+	TokenUse string `json:"token_use,omitempty"`
+
 	// Unsealed credentials — populated by verifyFreshbreathToken, never serialized.
 	Creds sealedCreds `json:"-"`
 }
@@ -729,6 +757,12 @@ type freshbreathClaims struct {
 // as one of its legs.
 func (c *freshbreathClaims) boundTo(recordID int64) bool {
 	return c.AuthID == recordID || slices.Contains(c.Legs, recordID)
+}
+
+// identityFrom reports whether rec is the record that proved the token's
+// subject.
+func (c *freshbreathClaims) identityFrom(recordID int64) bool {
+	return c.IdentityAuth != 0 && c.IdentityAuth == recordID
 }
 
 // subjectForUser is the canonical subject for a Fresh Breath user row.
@@ -774,22 +808,50 @@ func activeUser(u *db.User) error {
 }
 
 // mintSubject decides the token subject for a completed interactive login:
-// frbr:<id> when the leg is the admin auth gate AND its provider-asserted
-// email belongs to a Fresh Breath user (role/name come from that row, never
-// the provider) — and, with admin_require_verified_email on, the provider
-// marked that email verified; ext:<provider>:<sub> otherwise. A non-admin gate's email
-// never elevates to frbr — signing in to a service is not signing in to
-// Fresh Breath, so a service SSO can't mint a Fresh Breath user's identity
-// no matter what email it reports. SSH passphrase logins prove a user
+// frbr:<id> when the leg is the admin auth gate (or a record set to
+// require a Fresh Breath user) AND its provider-asserted email belongs to a
+// Fresh Breath user (role/name come from that row, never the provider) —
+// and, with admin_require_verified_email on, the provider marked that email
+// verified; ext:<provider>:<sub> otherwise. Any other gate's email never
+// elevates to frbr — signing in to a service is not signing in to Fresh
+// Breath, so a service SSO can't mint a Fresh Breath user's identity no
+// matter what email it reports, unless the operator said to trust it. A
+// frbr: token from a non-admin record still opens only that record's
+// doors: the admin API wants a token bound to the admin record. SSH passphrase logins prove a user
 // directly (leg.user) and never reach here, so they mint frbr by their own
 // trust path regardless of which record they clear.
 func (s *Server) mintSubject(rec *db.AuthRecord, email, providerSub string, emailVerified bool) (subject string, user *db.User) {
-	if email != "" && s.isAdminAuthRecord(rec) && (emailVerified || !s.adminRequiresVerifiedEmail()) {
-		if u, err := s.store.GetUserByEmail(email); err == nil {
-			return subjectForUser(u), u
-		}
+	ext := extSubject(authProvider(rec), providerSub)
+	if email == "" || !(s.isAdminAuthRecord(rec) || rec.Descriptor.RequireUser) || !(emailVerified || !s.adminRequiresVerifiedEmail()) {
+		return ext, nil
 	}
-	return extSubject(authProvider(rec), providerSub), nil
+	u, err := s.store.GetUserByEmail(email)
+	if err != nil {
+		return ext, nil
+	}
+	// The first provider account to sign in as this user is pinned to
+	// them; another account reporting the same email (a second tenant, a
+	// provider that lets users type their email) stays a stranger.
+	if providerSub == "" {
+		if u.Metadata != nil && u.Metadata.Identities[identityKey(rec)] != "" {
+			return ext, nil
+		}
+		return subjectForUser(u), u
+	}
+	pinned, err := s.store.PinUserIdentity(u.ID, identityKey(rec), providerSub)
+	if err != nil || pinned != providerSub {
+		if err == nil {
+			log.Printf("auth: %s signed in as %s with a different account than the one pinned to them; not linked", rec.Name, email)
+		}
+		return ext, nil
+	}
+	return subjectForUser(u), u
+}
+
+// identityKey names an auth record in UserMetadata.Identities. By ID, not
+// provider name, so renaming a record doesn't drop its pins.
+func identityKey(rec *db.AuthRecord) string {
+	return "auth:" + strconv.FormatInt(rec.ID, 10)
 }
 
 // ── AES-256-GCM seal/open ───────────────────────────────────────────
@@ -853,14 +915,7 @@ func (s *Server) deriveSubkey(label string) []byte {
 
 // ── Access token mint/verify ────────────────────────────────────────
 
-func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID int64, legs []int64, creds sealedCreds) (string, error) {
-	sig, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		return "", err
-	}
+func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID, identityAuth int64, legs []int64, creds sealedCreds, fresh bool) (string, error) {
 	now := time.Now()
 	claims := freshbreathClaims{
 		Claims: josejwt.Claims{
@@ -870,11 +925,16 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID 
 			IssuedAt: josejwt.NewNumericDate(now),
 			Expiry:   josejwt.NewNumericDate(now.Add(accessTokenTTL)),
 		},
-		UserEmail: email,
-		UserRole:  role,
-		UserName:  name,
-		AuthID:    authID,
-		Legs:      legs,
+		UserEmail:    email,
+		UserRole:     role,
+		UserName:     name,
+		AuthID:       authID,
+		Legs:         legs,
+		IdentityAuth: identityAuth,
+		TokenUse:     tokenUseAccess,
+	}
+	if fresh {
+		claims.TokenUse = tokenUseSignIn
 	}
 	if len(creds) > 0 {
 		plain, err := json.Marshal(creds)
@@ -885,6 +945,17 @@ func (s *Server) mintFreshbreathToken(subject, email, role, name string, authID 
 		if err != nil {
 			return "", fmt.Errorf("seal creds: %w", err)
 		}
+	}
+	return s.signFreshbreathClaims(claims)
+}
+
+func (s *Server) signFreshbreathClaims(claims freshbreathClaims) (string, error) {
+	sig, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.HS256, Key: s.deriveSubkey(jwtSignLabel)},
+		(&jose.SignerOptions{}).WithType("JWT"),
+	)
+	if err != nil {
+		return "", err
 	}
 	return josejwt.Signed(sig).Claims(claims).Serialize()
 }
@@ -903,6 +974,9 @@ func (s *Server) verifyFreshbreathToken(raw string) (*freshbreathClaims, error) 
 	var claims freshbreathClaims
 	if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &claims); err != nil {
 		return nil, fmt.Errorf("verify: %w", err)
+	}
+	if use := claims.TokenUse; use != tokenUseSignIn && use != tokenUseAccess && use != "" {
+		return nil, fmt.Errorf("invalid: token_use %q is not an access token", use)
 	}
 	if err := claims.Claims.Validate(josejwt.Expected{
 		Issuer:      "freshbreath",
@@ -957,11 +1031,12 @@ type upstreamRefreshLeg struct {
 
 // freshbreathRefreshData is the payload sealed inside a refresh token.
 type freshbreathRefreshData struct {
-	Subject   string                        `json:"subject"`
-	UserEmail string                        `json:"user_email,omitempty"`
-	AuthID    int64                         `json:"auth_id"`
-	Legs      []int64                       `json:"legs,omitempty"`
-	Upstreams map[string]upstreamRefreshLeg `json:"upstreams,omitempty"` // provider → leg
+	Subject      string                        `json:"subject"`
+	UserEmail    string                        `json:"user_email,omitempty"`
+	AuthID       int64                         `json:"auth_id"`
+	Legs         []int64                       `json:"legs,omitempty"`
+	Upstreams    map[string]upstreamRefreshLeg `json:"upstreams,omitempty"` // provider → leg
+	IdentityAuth int64                         `json:"id_auth,omitempty"`   // see freshbreathClaims.IdentityAuth
 
 	// Token-family fields for rotation (stored in JWT claims, unsealed).
 	FamilyID string `json:"family_id,omitempty"`
@@ -1010,6 +1085,7 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
 		Sealed   string `json:"sealed"`
 		FamilyID string `json:"family_id"`
 		JTI      string `json:"jti"`
+		TokenUse string `json:"token_use"`
 	}
 	claims := refreshClaims{
 		Claims: josejwt.Claims{
@@ -1022,6 +1098,7 @@ func (s *Server) mintRefreshToken(data freshbreathRefreshData) (string, error) {
 		Sealed:   sealed,
 		FamilyID: data.FamilyID,
 		JTI:      data.JTI,
+		TokenUse: tokenUseRefresh,
 	}
 	return josejwt.Signed(sig).Claims(claims).Serialize()
 }
@@ -1069,9 +1146,15 @@ func (s *Server) verifyRefreshToken(raw string) (*freshbreathRefreshData, error)
 		Sealed   string `json:"sealed"`
 		FamilyID string `json:"family_id"`
 		JTI      string `json:"jti"`
+		TokenUse string `json:"token_use"`
 	}
 	if err := tok.Claims(s.deriveSubkey(jwtSignLabel), &outer); err != nil {
 		return nil, fmt.Errorf("verify refresh: %w", err)
+	}
+	// With no token_use, only the checks below and the refresh endpoint's
+	// family lookup tell the kinds apart.
+	if outer.TokenUse != tokenUseRefresh && outer.TokenUse != "" {
+		return nil, fmt.Errorf("refresh token invalid: token_use %q is not a refresh token", outer.TokenUse)
 	}
 	if err := outer.Claims.Validate(josejwt.Expected{
 		Issuer:      "freshbreath",

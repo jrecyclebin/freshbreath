@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -31,7 +32,9 @@ const (
 
 // allowRate enforces a per-IP window for one named bucket — each endpoint
 // that admits anonymous callers gets its own, so a flood on one cannot
-// lock out another. Unknown IPs (proxies, tests) share the "" address.
+// lock out another. Unknown IPs (proxies, tests) share the "" address. An
+// IPv6 caller is counted by its /64 (rateKeyIP). Windows that have run out are
+// swept now and then, so the map holds only callers seen in the last minute.
 func (s *Server) allowRate(bucket, ip string, limit int) bool {
 	now := time.Now()
 	s.updateMu.Lock()
@@ -39,7 +42,15 @@ func (s *Server) allowRate(bucket, ip string, limit int) bool {
 	if s.updateRate == nil {
 		s.updateRate = make(map[string]updateRateCount)
 	}
-	key := bucket + ":" + ip
+	if now.Sub(s.updateRateSwept) >= time.Minute {
+		for k, c := range s.updateRate {
+			if now.Sub(c.windowStart) >= time.Minute {
+				delete(s.updateRate, k)
+			}
+		}
+		s.updateRateSwept = now
+	}
+	key := bucket + ":" + rateKeyIP(ip)
 	c := s.updateRate[key]
 	if now.Sub(c.windowStart) >= time.Minute {
 		c = updateRateCount{windowStart: now}
@@ -47,6 +58,16 @@ func (s *Server) allowRate(bucket, ip string, limit int) bool {
 	c.count++
 	s.updateRate[key] = c
 	return c.count <= limit
+}
+
+// rateKeyIP is the address a limiter counts a caller under: an IPv4
+// address as is, an IPv6 one by its /64 — the block one subscriber gets —
+// so a caller can't take a fresh address per request.
+func rateKeyIP(ip string) string {
+	if addr, err := netip.ParseAddr(ip); err == nil && addr.Is6() && !addr.Is4In6() {
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return ip
 }
 
 // writeUpdateStream runs fn with an event channel and drains it to the client
@@ -268,6 +289,15 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too many requests", http.StatusTooManyRequests)
 		return
 	}
+	// One apply at a time from this door: each can download a feed's whole
+	// archive, so a crowd of callers must not each start one. A caller that
+	// finds one running tries again; the running one re-checks every feed.
+	if !s.feedApplyBusy.CompareAndSwap(false, true) {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "An update is already being applied — try again shortly", http.StatusConflict)
+		return
+	}
+	defer s.feedApplyBusy.Store(false)
 	// Anyone who can access the targets may apply their updates: the
 	// caller's token is checked against each op's gate (an open gate needs
 	// no proof, so anonymous callers still reach open feeds). The hosted

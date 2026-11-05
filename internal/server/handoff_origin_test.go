@@ -121,13 +121,20 @@ func TestLoginPostedToAppOrigin(t *testing.T) {
 	local, _ := srv.store.CreateApp("Local", "Development", "", nil, nil)
 	remote, _ := srv.store.CreateApp("Remote", "Development", "https://app.example/start", nil, nil)
 
-	r := httptest.NewRequest("GET", "/service/login", nil) // Host: example.com
-	for nonce, want := range map[string]string{
-		hosted: "http://example.com", local: "*", remote: "https://app.example", "": "http://example.com",
-	} {
-		a, _ := srv.store.GetApp(nonce)
-		if got := srv.loginOpenerOrigin(r, a); got != want {
-			t.Errorf("app nonce %q: opener origin = %q, want %q", nonce, got, want)
+	// Hosted apps and the panel get the configured base URL's origin, never
+	// whatever the Host header names: an IP literal passes hostAllowed, and
+	// a caller can send one it owns.
+	base := srv.config.PublicBaseURL
+	for _, host := range []string{"example.com", "203.0.113.66", "localhost:9009"} {
+		r := httptest.NewRequest("GET", "/service/login", nil)
+		r.Host = host
+		for nonce, want := range map[string]string{
+			hosted: base, local: "*", remote: "https://app.example", "": base,
+		} {
+			a, _ := srv.store.GetApp(nonce)
+			if got := srv.loginOpenerOrigin(r, a); got != want {
+				t.Errorf("Host %s, app nonce %q: opener origin = %q, want %q", host, nonce, got, want)
+			}
 		}
 	}
 
@@ -279,6 +286,7 @@ func TestLoginHandsOffServerAppsTheirRefreshToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ := srv.store.CreateUser("Ada", "ada@example.com", "Member", "Active")
+	u.FreshSignIn = true
 	if _, err := srv.coreGenerateSSHKey(u, u, "correct horse battery"); err != nil {
 		t.Fatalf("ssh key: %v", err)
 	}
@@ -317,5 +325,60 @@ func TestLoginHandsOffServerAppsTheirRefreshToken(t *testing.T) {
 	}
 	if findRefreshCookie(rr) == nil {
 		t.Error("panel login set no refresh cookie")
+	}
+}
+
+// An anonymous caller can't aim a hosted app's login at a page of its own
+// by sending a Host it owns: the finished login still posts only to this
+// server's origin, so the token never reaches the caller's page.
+func TestLoginOpenerIgnoresForgedHost(t *testing.T) {
+	srv := newTestServer(t)
+	gh := fakeGitHubIdP(t, srv)
+	makeAdminAuth(t, srv, gh)
+	knownUser(t, srv)
+	nonce, _ := makeHostedApp(t, srv, "dash")
+
+	req := httptest.NewRequest("GET", "/service/login?state=x", nil)
+	req.Host = "203.0.113.66"
+	req.Header.Set("X-App-Nonce", nonce)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	var login struct{ URL string }
+	json.Unmarshal(rec.Body.Bytes(), &login)
+	if login.URL == "" {
+		t.Fatalf("login refused: %d %s", rec.Code, rec.Body.String())
+	}
+
+	leg, browser := beginInBrowser(t, srv, login.URL)
+	u, _ := url.Parse(leg.String())
+	rr := testRequest(t, srv, "GET", "/service/callback?code=c1&state="+u.Query().Get("state"), nil, browser)
+	page := rr.Body.String()
+	if strings.Contains(page, "203.0.113.66") {
+		t.Fatalf("callback page targets the forged host:\n%s", page)
+	}
+	if !strings.Contains(page, `}, `+scriptString(srv.config.PublicBaseURL)+`);`) {
+		t.Errorf("callback page does not target this server's origin:\n%s", page)
+	}
+}
+
+// An app whose URL is a hosted slug is hosted before its files land too.
+// Treating it as a disk page while undeployed posted its logins to "*" and
+// let null-origin frames call as it.
+func TestUndeployedSlugAppIsStillHosted(t *testing.T) {
+	srv := newTestServer(t)
+	slug, _ := srv.store.CreateApp("Someday", "Development", "someday", nil, nil)
+	app, _ := srv.store.GetApp(slug)
+	if got := srv.loginOpenerOrigin(httptest.NewRequest("GET", "/", nil), app); got == "*" {
+		t.Errorf("undeployed slug app: opener %q, want this server's origin", got)
+	}
+	if rr := testRequest(t, srv, "GET", "/env.js", nil, map[string]string{"Origin": "null", "X-App-Nonce": slug}); rr.Code != 403 {
+		t.Errorf("null origin naming an undeployed slug app: %d, want 403", rr.Code)
+	}
+
+	// A blank URL with no slot is still a disk page, by design.
+	local, _ := srv.store.CreateApp("Local", "Development", "", nil, nil)
+	app, _ = srv.store.GetApp(local)
+	if got := srv.loginOpenerOrigin(httptest.NewRequest("GET", "/", nil), app); got != "*" {
+		t.Errorf("blank-URL disk app: opener %q, want *", got)
 	}
 }

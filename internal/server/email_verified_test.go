@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"golang.org/x/oauth2"
@@ -122,5 +123,50 @@ func TestUserInfoReportsVerifiedEmail(t *testing.T) {
 	claims, err := srv.identityFromUserInfo(context.Background(), rec, nil, &oauth2.Token{AccessToken: "t"})
 	if err != nil || claims.Email != "boss@example.com" || !emailMarkedVerified(claims.Verified) {
 		t.Errorf("primary-email lookup: %+v, %v", claims, err)
+	}
+}
+
+// The first provider account to sign in as a user is pinned to them; a
+// different account at the same record reporting the same email (another
+// tenant, a provider that lets users type an email) stays a stranger.
+func TestEmailLinkPinsFirstAccount(t *testing.T) {
+	srv := newTestServer(t)
+	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
+	super := &db.User{ID: 99, Role: "Superuser"}
+	id := strconv.FormatInt(rec.ID, 10)
+	if err := srv.coreUpdateSettings(super, &id, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	user, _ := srv.store.CreateUser("Known", "known@example.com", "Member", "Active")
+	linked := func(sub string) bool {
+		subject, _ := srv.legIdentity(&completedLeg{rec: rec, email: "known@example.com", sub: sub})
+		return subject == subjectForUser(user)
+	}
+
+	if !linked("real") {
+		t.Fatal("first sign-in didn't link")
+	}
+	if linked("impostor") {
+		t.Error("a second account with the same email linked")
+	}
+	if linked("") {
+		t.Error("an account with no subject linked past a pin")
+	}
+	if !linked("real") {
+		t.Error("the pinned account stopped linking")
+	}
+
+	// Clearing the pins re-opens the first match.
+	if err := srv.store.ClearUserIdentities(user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !linked("recreated") || linked("real") {
+		t.Error("after clearing, the next account should pin in place of the old one")
+	}
+
+	// Pins don't leak to the API.
+	u, _ := srv.store.GetUser(user.ID)
+	if b, _ := json.Marshal(u); strings.Contains(string(b), "recreated") {
+		t.Errorf("pinned subject in user JSON: %s", b)
 	}
 }

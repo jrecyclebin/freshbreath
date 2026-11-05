@@ -46,14 +46,14 @@ func TestCentralMCPToolsPerRole(t *testing.T) {
 
 	// The full admin-API tool surface (42 tools) bucketed by minimum role.
 	// Mirrors the HTTP routes in handler.go's requireAnyRole groups.
-allAppTools := []string{
+	allAppTools := []string{
 		"list_apps", "get_app", "get_app_services", // all-roles
 		"list_app_files", "search_app_files", "read_app_files", "write_app_files", "delete_app_file", // all-roles
 	}
 	// get_app_members is admin+ with the other member tools: the roster is
 	// not shown to members, on MCP any more than in the panel.
 	allAppManageTools := []string{"update_app", "delete_app", "get_app_members", "set_app_members"}
-	allAppCreateTools := []string{"create_app", "set_app_services"} // Member+; core holds a Member to their hosts and services
+	allAppCreateTools := []string{"create_app", "set_app_services"}                                                                                                         // Member+; core holds a Member to their hosts and services
 	allServiceTools := []string{"list_services", "get_service", "get_service_apps", "list_service_files", "read_service_file", "write_service_file", "delete_service_file"} // all-roles; files gated per service
 	allServiceManageTools := []string{"create_service", "update_service", "delete_service", "set_service_members"}
 	allUserTools := []string{"list_users", "get_user", "create_user", "update_user", "delete_user", "get_user_apps", "set_user_apps", "get_user_ssh_key", "generate_user_ssh_key", "delete_user_ssh_key", "create_user_passphrase_link"}

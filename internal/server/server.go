@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -19,15 +20,15 @@ import (
 // Config holds the resolved runtime configuration for a freshbreath server.
 // It is built by cmd/freshbreath (path/env discovery) and handed to New.
 type Config struct {
-	Dir           string // install directory (web/ control panel)
-	DataDir       string // mutable state directory (apps/, virtual/, tasks/)
-	ConfigDir     string // ./ in portable mode (./.env present), else XDG config dir
-	DBPath        string
-	PublicBaseURL string
-	ListenAddr    string
-	TLSCertFile   string
-	TLSKeyFile    string
-	EnvFile       string   // the env file config loads from (or would); local TLS writes here
+	Dir            string // install directory (web/ control panel)
+	DataDir        string // mutable state directory (apps/, virtual/, tasks/)
+	ConfigDir      string // ./ in portable mode (./.env present), else XDG config dir
+	DBPath         string
+	PublicBaseURL  string
+	ListenAddr     string
+	TLSCertFile    string
+	TLSKeyFile     string
+	EnvFile        string   // the env file config loads from (or would); local TLS writes here
 	TrustedProxies []string // IPs/CIDRs whose X-Forwarded-Proto is honored (FRBR_TRUSTED_PROXIES)
 }
 
@@ -53,15 +54,15 @@ type Server struct {
 	gitGw             *sshkit.GitGateway     // stateless git-over-SSH gateway
 	lastSeenAt        map[int64]time.Time
 	lastSeenMu        sync.Mutex
-	knownHosts        map[string]bool      // Host names answered besides IPs and localhost (see hostAllowed)
-	publicScheme      string                // FRBR_BASE_URL's scheme, authoritative for its host (see schemeOf)
-	publicHost        string                // FRBR_BASE_URL's host name (lowercased, no port)
-	trustedProxies    []netip.Prefix        // peers whose X-Forwarded-Proto is honored (see schemeOf)
-	hostedRoutes      map[string]hostedApp // slug → hosted app route
+	knownHosts        map[string]bool        // Host names answered besides IPs and localhost (see hostAllowed)
+	publicScheme      string                 // FRBR_BASE_URL's scheme, authoritative for its host (see schemeOf)
+	publicHost        string                 // FRBR_BASE_URL's host name (lowercased, no port)
+	trustedProxies    []netip.Prefix         // peers whose X-Forwarded-Proto is honored (see schemeOf)
+	hostedRoutes      map[string]hostedApp   // slug → hosted app route
 	hostedHosts       map[string]*hostedHost // listed host name → its apps
-	handoffs          handoffTickets       // finished page-gate logins on their way to an app's host
-	tunnel            tunnel               // the tailcat tunnel, when activated
-	remoteConns       remoteConns          // open tailcat clients to remotes
+	handoffs          handoffTickets         // finished page-gate logins on their way to an app's host
+	tunnel            tunnel                 // the tailcat tunnel, when activated
+	remoteConns       remoteConns            // open tailcat clients to remotes
 	hostedMu          sync.RWMutex
 	actTickets        actTickets                         // /api/act capability tickets (in-memory only)
 	pendingElicits    pendingElicits                     // virtual-tool elicitation suspend/resume state (in-memory only)
@@ -77,6 +78,11 @@ type Server struct {
 	pendingArchives map[string]*pendingArchive // "feedID/ref" → built archive, one-shot
 	updateMu        sync.Mutex                 // guards pendingArchives + updateRate
 	updateRate      map[string]updateRateCount // per-IP limiter for anonymous check/apply
+	updateRateSwept time.Time                  // last time stale updateRate windows were dropped
+	feedRunMu       sync.Mutex                 // one feed check or apply on the network at a time
+	feedCheckMu     sync.Mutex                 // guards feedCheck
+	feedCheck       *feedCheckRun              // the check in flight, which concurrent callers share
+	feedApplyBusy   atomic.Bool                // an anonymous-facing apply is running or waiting
 	loginFailures   loginFailures              // per-IP failed sign-ins on the passphrase and API-key forms
 
 	// App databases (design/app-databases.md). The pool is lazy; the watch
@@ -136,8 +142,8 @@ type pendingAuth struct {
 	// its result is carried back to that host (handleHandoff) rather than
 	// landing on the wrong one.
 	handoffTo string
-	opener   string // origin the finished login is posted to (see loginOpenerOrigin)
-	mcpKey   string // key into mcpAuthPending; "" for browser flows
+	opener    string // origin the finished login is posted to (see loginOpenerOrigin)
+	mcpKey    string // key into mcpAuthPending; "" for browser flows
 
 	// Browser flows: the frbr_login_<bindID> cookie (value bindSecret) the
 	// callback must see, so a callback URL only works in the browser that
@@ -165,7 +171,15 @@ type pendingAuth struct {
 }
 
 // current returns the leg the flow is waiting on.
-func (p *pendingAuth) current() *db.AuthRecord { return p.legs[p.at] }
+// current is the leg awaiting completion, or nil once every leg is done —
+// a replayed callback or form post arrives after that, since a state lives
+// until it expires.
+func (p *pendingAuth) current() *db.AuthRecord {
+	if p.at < 0 || p.at >= len(p.legs) {
+		return nil
+	}
+	return p.legs[p.at]
+}
 
 // putPending registers a login-in-progress state, stamped with pendingAuthTTL.
 // State is only removed by expiry (or its own retrieval of an expired entry) —

@@ -2519,6 +2519,14 @@ function AuthForm({ form, setForm, record }) {
               <span className="help">Google returns a refresh token only on the first consent, so a re-login after the session expires needs this to get one again. Shows a consent screen on each login.</span>
             </div>
           </div>
+          <div className="field">
+            <label>Fresh Breath users only</label>
+            <label style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer',fontSize:13,color:'var(--ink-1)',fontWeight:400}}>
+              <input type="checkbox" name="require_user" checked={!!d.require_user} onChange={e=>upd('require_user',e.target.checked)}/>
+              <span>Refuse sign-ins whose email has no user here</span>
+            </label>
+            <span className="help">For a public provider like GitHub used as a gate: anyone can have an account there. With this on, only people whose provider email matches a user on this server get in, and they sign in as that user.</span>
+          </div>
         </>
       )}
 

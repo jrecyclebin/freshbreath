@@ -35,6 +35,11 @@ type User struct {
 	CreatedAt time.Time     `json:"created_at"`
 	Apps      []string      `json:"apps,omitempty"`
 	Metadata  *UserMetadata `json:"metadata,omitempty"`
+
+	// FreshSignIn says the current request's token came straight from a
+	// sign-in, not a refresh. Set per request, never stored. Changes that
+	// hand out a way back in check it.
+	FreshSignIn bool `json:"-"`
 }
 
 type UserMetadata struct {
@@ -44,6 +49,13 @@ type UserMetadata struct {
 	// invite or a reset). Only the token's hash is kept; minting a new link
 	// replaces it and using it clears it.
 	PassphraseReset *PassphraseReset `json:"passphrase_reset,omitempty"`
+
+	// Identities pins the provider account (its subject) the user first
+	// signed in with at each email-linked auth record, keyed "auth:<id>".
+	// After that, the email alone no longer finds the user there: a second
+	// account at the same provider reporting the same email is a stranger.
+	// Clearing an entry (ClearUserIdentities) re-opens the first match.
+	Identities map[string]string `json:"identities,omitempty"`
 }
 
 type PassphraseReset struct {

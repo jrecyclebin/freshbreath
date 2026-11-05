@@ -147,7 +147,9 @@ async function authedFetch(session, url, init) {
   // A stream body was spent by the first send, so it can't ride a retry.
   const replayable = !(init.body instanceof ReadableStream);
   if (r.status === 401 && ours(r) && session && replayable && window.__FRBR_RELOGIN !== false) {
-    const fresh = await ensureLogin(session.door);
+    // A step-up: the session is fine, but this change wants a recent sign-in.
+    const stepUp = (r.headers.get("WWW-Authenticate") || "").includes("insufficient_user_authentication");
+    const fresh = await ensureLogin(session.door, stepUp ? STEP_UP_NOTE : null);
     if (fresh) {
       // login() hands back a ServiceProxy for service doors; the
       // AuthSession it rides is what knows how to authorize.
@@ -675,20 +677,22 @@ function toolOutput(result) {
  *
  * @param {string} [serviceURL] — a registered service URL, or omitted for
  *                                the page's own gate
+ * @param {string} [note] — what the dialog says, when not "session ended"
  * @returns {Promise<ServiceProxy|AuthSession|null>} the fresh login, or
  *          null if the user dismissed the dialog
  */
 const relogins = new Map(); // serviceURL → the prompt in flight for that door
 
-export function ensureLogin(serviceURL = null) {
+export function ensureLogin(serviceURL = null, note = null) {
   if (!relogins.has(serviceURL)) {
-    relogins.set(serviceURL, promptLogin(serviceURL).finally(() => relogins.delete(serviceURL)));
+    relogins.set(serviceURL, promptLogin(serviceURL, note).finally(() => relogins.delete(serviceURL)));
   }
   return relogins.get(serviceURL);
 }
 
-async function promptLogin(serviceURL) {
-  let note = null;
+const STEP_UP_NOTE = "This change needs a recent sign-in. Log in again to continue.";
+
+async function promptLogin(serviceURL, note = null) {
   if (navigator.userActivation?.isActive) {
     try {
       return await login(serviceURL, "fresh");

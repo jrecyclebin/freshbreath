@@ -109,7 +109,7 @@ func TestBrowserSQLRunnerDefaultTarget(t *testing.T) {
 	_ = svc
 }
 
-func TestBrowserSQLRunnerAppNonceLinkCheck(t *testing.T) {
+func TestBrowserSQLRunnerOnlyTouchesCallingApp(t *testing.T) {
 	srv, svc, nonce := newVirtualSvcServer(t, sqlToolFile, db.ServiceDescriptor{})
 	_ = svc
 
@@ -123,8 +123,19 @@ func TestBrowserSQLRunnerAppNonceLinkCheck(t *testing.T) {
 	runner := srv.browserSQLRunner(&db.Service{ID: 1, Descriptor: db.ServiceDescriptor{}}, nonce,
 		map[string]interface{}{"app_nonce": other})
 	_, err = runner("SELECT 1", nil)
-	if err == nil || !strings.Contains(err.Error(), "not linked") {
-		t.Errorf("want not-linked error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "not the calling app") {
+		t.Errorf("want not-the-calling-app error, got %v", err)
+	}
+
+	// Linking the other app to the service doesn't help: its nonce is still
+	// someone else's, readable from its hosted page.
+	if err := srv.store.SetAppServiceLinks(other, []int64{1}); err != nil {
+		t.Fatal(err)
+	}
+	runner = srv.browserSQLRunner(&db.Service{ID: 1, Descriptor: db.ServiceDescriptor{}}, nonce,
+		map[string]interface{}{"app_nonce": other})
+	if _, err = runner("SELECT 1", nil); err == nil {
+		t.Errorf("linked other app: want 403, got nil")
 	}
 
 	// The header nonce's own app needs no extra check (link verified upstream).
@@ -467,7 +478,7 @@ INSERT INTO stamps (email, uid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := srv.mintFreshbreathToken(subjectForUser(kay), "kay@example.com", "Member", "Kay", idp.ID, nil, nil)
+	tok, err := srv.mintFreshbreathToken(subjectForUser(kay), "kay@example.com", "Member", "Kay", idp.ID, idp.ID, nil, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,7 +696,7 @@ INSERT INTO keys (secret) VALUES ($api_key)
 // the upstream token an absolute-URL step would send (audit 202610-r3 #2).
 func TestVirtualAuthKeepsFreshBreathTokenAsSession(t *testing.T) {
 	srv := newAppDBServer(t)
-	fb, err := srv.mintFreshbreathToken("frbr:1", "", "", "", 1, nil, nil)
+	fb, err := srv.mintFreshbreathToken("frbr:1", "", "", "", 1, 1, nil, nil, true)
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}

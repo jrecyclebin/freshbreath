@@ -98,6 +98,12 @@ type AuthDescriptor struct {
 	// screen on each login.
 	ForceConsent bool `json:"force_consent,omitempty"`
 
+	// RequireUser lets through only people with a Fresh Breath account: a
+	// login whose provider email matches no user is refused, and one that
+	// matches signs in as that user (a frbr: subject) rather than as an
+	// outside identity. For a public provider (GitHub, say) used as a gate.
+	RequireUser bool `json:"require_user,omitempty"`
+
 	// mcp: the RFC 8707 resource indicator sent with authorization and
 	// token requests.
 	Resource string `json:"resource,omitempty"`

@@ -1359,7 +1359,7 @@ func authTokenForUser(t *testing.T, srv *Server, email, name, role string) strin
 	if err != nil {
 		t.Fatalf("user %s must exist before minting: %v", email, err)
 	}
-	token, err := srv.mintFreshbreathToken(subjectForUser(user), email, role, name, rec.ID, nil, nil)
+	token, err := srv.mintFreshbreathToken(subjectForUser(user), email, role, name, rec.ID, rec.ID, nil, nil, true)
 	if err != nil {
 		t.Fatalf("mint identity token: %v", err)
 	}
@@ -1816,5 +1816,41 @@ func TestGetSettingsChecksRole(t *testing.T) {
 		if (err != nil) != wantErr {
 			t.Errorf("%s: err = %v", role, err)
 		}
+	}
+}
+
+// The proxy hands an upstream's redirect back to the caller instead of
+// following it: following carried header credentials to wherever the
+// upstream pointed, and fetched any address this server can reach. The
+// caller's forwarding headers aren't passed on either.
+func TestProxyRelaysRedirects(t *testing.T) {
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("proxy followed the redirect (key header %q)", r.Header.Get("X-Upstream-Key"))
+	}))
+	defer elsewhere.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, h := range []string{"X-Forwarded-For", "X-Forwarded-Host", "Forwarded", "X-Real-Ip"} {
+			if v := r.Header.Get(h); v != "" {
+				t.Errorf("%s forwarded upstream: %q", h, v)
+			}
+		}
+		http.Redirect(w, r, elsewhere.URL+"/loot", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	srv := newTestServer(t)
+	nonce := createApp(t, srv, "proxy")
+	id := registerService(t, srv, "mock", upstream.URL, db.ServiceDescriptor{Type: "api"})
+	linkServiceToApp(t, srv, nonce, id)
+
+	rr := testRequest(t, srv, "GET", "/service/"+id+"/anything", nil, map[string]string{
+		"X-App-Nonce":      nonce,
+		"X-Forwarded-For":  "10.0.0.1",
+		"X-Forwarded-Host": "evil.example",
+		"Forwarded":        "for=10.0.0.1",
+		"X-Real-IP":        "10.0.0.1",
+	})
+	if rr.Code != http.StatusFound || rr.Header().Get("Location") != elsewhere.URL+"/loot" {
+		t.Errorf("want the 302 relayed, got %d Location=%q", rr.Code, rr.Header().Get("Location"))
 	}
 }

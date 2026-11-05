@@ -839,6 +839,50 @@ func (s *Store) UpdateUser(id int64, name, email, role, status string, metadata 
 	return err
 }
 
+// PinUserIdentity records sub as the user's account at key unless one is
+// pinned already, and returns the account pinned there after the call —
+// sub on a first sign-in, the earlier one otherwise.
+func (s *Store) PinUserIdentity(userID int64, key, sub string) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var metadataStr string
+	if err := tx.QueryRow("SELECT metadata FROM users WHERE id = ?", userID).Scan(&metadataStr); err != nil {
+		return "", err
+	}
+	md := &UserMetadata{}
+	if metadataStr != "" {
+		if err := json.Unmarshal([]byte(metadataStr), md); err != nil {
+			return "", err
+		}
+	}
+	if pinned := md.Identities[key]; pinned != "" {
+		return pinned, nil
+	}
+	if md.Identities == nil {
+		md.Identities = map[string]string{}
+	}
+	md.Identities[key] = sub
+	data, err := json.Marshal(md)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec("UPDATE users SET metadata = ? WHERE id = ?", string(data), userID); err != nil {
+		return "", err
+	}
+	return sub, tx.Commit()
+}
+
+// ClearUserIdentities forgets every provider account pinned to the user,
+// so each email-linked record matches by email once more — for a user
+// whose account at their provider was recreated.
+func (s *Store) ClearUserIdentities(userID int64) error {
+	_, err := s.db.Exec("UPDATE users SET metadata = json_remove(COALESCE(NULLIF(metadata, ''), '{}'), '$.identities') WHERE id = ?", userID)
+	return err
+}
+
 func (s *Store) DeleteUser(id int64) error {
 	_, err := s.db.Exec("DELETE FROM app_members WHERE user_id = ?", id)
 	if err != nil {

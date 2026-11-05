@@ -73,9 +73,13 @@ func (s *Server) legsForLogin(ctx context.Context, gate *db.AuthRecord, svc *db.
 
 // legCovered reports whether an existing verified token already satisfies a
 // leg: bound to the record, and carrying its provider credential when the
-// kind is interactive.
-func legCovered(claims *freshbreathClaims, rec *db.AuthRecord) bool {
+// kind is interactive. The gate leg (gateID) decides who the caller is, so
+// it is covered only by a token whose identity that same record proved.
+func legCovered(claims *freshbreathClaims, rec *db.AuthRecord, gateID int64) bool {
 	if claims == nil || !claims.boundTo(rec.ID) {
+		return false
+	}
+	if rec.ID == gateID && !claims.identityFrom(rec.ID) {
 		return false
 	}
 	if authInteractive(rec) {
@@ -87,14 +91,19 @@ func legCovered(claims *freshbreathClaims, rec *db.AuthRecord) bool {
 
 // legFromClaims reconstructs a completed leg from an already-verified
 // token, so a login that shares records with a previous one re-runs only
-// its missing legs.
+// its missing legs. The token's identity rides along only when rec is the
+// record that proved it; any other leg brings its credential and nothing
+// else.
 func (s *Server) legFromClaims(rec *db.AuthRecord, claims *freshbreathClaims) *completedLeg {
-	leg := &completedLeg{rec: rec, email: claims.UserEmail, name: claims.UserName}
-	if u, _ := s.userFromSubject(claims.Subject); u != nil {
-		leg.user = u
-	}
-	if parts := strings.SplitN(claims.Subject, ":", 3); len(parts) == 3 && parts[0] == "ext" {
-		leg.sub = parts[2]
+	leg := &completedLeg{rec: rec, reused: true}
+	if claims.identityFrom(rec.ID) {
+		leg.email, leg.name = claims.UserEmail, claims.UserName
+		if u, _ := s.userFromSubject(claims.Subject); u != nil {
+			leg.user = u
+		}
+		if parts := strings.SplitN(claims.Subject, ":", 3); len(parts) == 3 && parts[0] == "ext" {
+			leg.sub = parts[2]
+		}
 	}
 	if cred, ok := claims.Creds[authProvider(rec)]; ok {
 		c := cred
@@ -149,6 +158,11 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 // MCP client — or "" when the login finished as a browser flow and the
 // postMessage page was written to w.
 func (s *Server) completeLeg(w http.ResponseWriter, r *http.Request, p *pendingAuth, leg *completedLeg) (string, error) {
+	if leg.rec.Descriptor.RequireUser {
+		if _, user := s.legIdentity(leg); user == nil {
+			return "", fmt.Errorf("%s signs in only people with an account on this server, and %s has none", leg.rec.Name, leg.email)
+		}
+	}
 	p.done = append(p.done, leg)
 	p.at++
 	if p.at < len(p.legs) {
@@ -355,13 +369,29 @@ func (s *Server) handleHandoff(w http.ResponseWriter, r *http.Request) {
 // the only origin originAllowed let start the login — or "*" when it runs
 // from disk, since file:// pages have no origin to name (there the nonce
 // is the whole credential). Hosted apps and the control panel get this
-// server's origin.
+// server's own origin (see servedOrigin).
 func (s *Server) loginOpenerOrigin(r *http.Request, app *db.App) string {
 	if s.appRunsElsewhere(app) {
 		if o := appRegisteredOrigin(app); o != "" {
 			return o
 		}
 		return "*"
+	}
+	return s.servedOrigin(r)
+}
+
+// servedOrigin is the origin of this server that a request reached, taken
+// only from names the operator configured: a listed app host, else the
+// FRBR_BASE_URL origin. Never the raw Host header — hostAllowed accepts
+// any IP literal, and a caller (curl, not a browser) can send any of them,
+// so a Host-derived origin would let an anonymous caller start a login
+// whose result is posted to a page at an IP they own.
+func (s *Server) servedOrigin(r *http.Request) string {
+	if _, ok := s.appHost(r.Host); ok {
+		return s.schemeOf(r) + "://" + r.Host
+	}
+	if u, err := url.Parse(s.config.PublicBaseURL); err == nil && u.Scheme != "" && u.Host != "" {
+		return u.Scheme + "://" + u.Host
 	}
 	return s.schemeOf(r) + "://" + r.Host
 }
@@ -470,9 +500,12 @@ var scriptUnsafe = strings.NewReplacer("<", `\u003c`, ">", `\u003e`, "\u2028", `
 // Backslashes are refused outright: browsers treat them as path
 // separators, so a return starting "/\" reads as protocol-relative to
 // another host — and a server-relative return path never legitimately
-// contains one anyway.
+// contains one anyway. So are whitespace and control characters: a
+// browser drops tabs and newlines from a URL before reading it, so
+// "/<tab>/evil.example" would become "//evil.example" — and a real
+// return path carries them percent-encoded.
 func returnAllowed(app *db.App, ret string) bool {
-	if strings.Contains(ret, `\`) {
+	if strings.Contains(ret, `\`) || strings.IndexFunc(ret, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
 		return false
 	}
 	if strings.HasPrefix(ret, "/") && !strings.HasPrefix(ret, "//") {
@@ -654,7 +687,7 @@ func (s *Server) passPageGate(w http.ResponseWriter, r *http.Request, appNonce s
 		appNonce:  appNonce,
 		appState:  utils.GenNonce(),
 		returnTo:  withSigninStamp(withoutSigninStamp(r.URL), time.Now()),
-		opener:    s.schemeOf(r) + "://" + r.Host, // a page on this origin asked
+		opener:    s.servedOrigin(r), // a page on this origin asked
 		legs:      legs,
 		gateID:    legs[0].ID,
 		primaryID: legs[len(legs)-1].ID,
@@ -909,7 +942,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var done []*completedLeg
 	var todo []*db.AuthRecord
 	for _, rec := range legs {
-		if legCovered(claims, rec) {
+		if legCovered(claims, rec, legs[0].ID) {
 			done = append(done, s.legFromClaims(rec, claims))
 		} else {
 			todo = append(todo, rec)
@@ -1051,6 +1084,10 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec := p.current()
+	if rec == nil {
+		http.Error(w, "This sign-in already finished — start it again from the app", http.StatusBadRequest)
+		return
+	}
 	if !authInteractive(rec) {
 		http.Error(w, "Unexpected callback for this auth kind", http.StatusBadRequest)
 		return
@@ -1214,16 +1251,13 @@ type loginFailures struct {
 	m  map[string]updateRateCount
 }
 
-// blocked reports whether ip has used up its failures for this window.
-func (f *loginFailures) blocked(ip string, now time.Time) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	c, ok := f.m[ip]
-	return ok && now.Sub(c.windowStart) < loginFailureWindow && c.count >= loginFailureLimit
-}
-
-// fail records one failed sign-in from ip, sweeping lapsed windows.
-func (f *loginFailures) fail(ip string, now time.Time) {
+// attempt books one sign-in attempt from ip, counted as a failure until
+// succeeded takes it back, and reports false once ip has used up its
+// failures for this window. Booking before the check, not after, is what
+// keeps a burst of concurrent attempts from all getting past the limit
+// while their checks queue. Lapsed windows are swept.
+func (f *loginFailures) attempt(ip string, now time.Time) bool {
+	ip = rateKeyIP(ip)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.m == nil {
@@ -1238,8 +1272,23 @@ func (f *loginFailures) fail(ip string, now time.Time) {
 	if !ok {
 		c = updateRateCount{windowStart: now}
 	}
+	if c.count >= loginFailureLimit {
+		return false
+	}
 	c.count++
 	f.m[ip] = c
+	return true
+}
+
+// succeeded takes back the attempt a successful sign-in booked.
+func (f *loginFailures) succeeded(ip string) {
+	ip = rateKeyIP(ip)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c, ok := f.m[ip]; ok && c.count > 0 {
+		c.count--
+		f.m[ip] = c
+	}
 }
 
 // tooManyLogins answers a client that has used up its failed sign-ins.
@@ -1317,7 +1366,7 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ip := s.requestIP(r)
-		if s.loginFailures.blocked(ip, time.Now()) {
+		if !s.loginFailures.attempt(ip, time.Now()) {
 			tooManyLogins(w)
 			return
 		}
@@ -1326,10 +1375,10 @@ func (s *Server) handleSSHAuth(w http.ResponseWriter, r *http.Request) {
 		user, err := s.store.GetUserByEmail(req.Email)
 		if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
 			!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
-			s.loginFailures.fail(ip, time.Now())
 			http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 			return
 		}
+		s.loginFailures.succeeded(ip)
 		// Checked after the passphrase so an account's status isn't
 		// readable by anyone who knows its email.
 		if user.Status != "Active" {
@@ -1375,7 +1424,7 @@ func (s *Server) handleDirectLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := s.requestIP(r)
-	if s.loginFailures.blocked(ip, time.Now()) {
+	if !s.loginFailures.attempt(ip, time.Now()) {
 		tooManyLogins(w)
 		return
 	}
@@ -1383,10 +1432,10 @@ func (s *Server) handleDirectLogin(w http.ResponseWriter, r *http.Request) {
 	user, err := s.store.GetUserByEmail(req.Email)
 	if err != nil || user.Metadata == nil || user.Metadata.SSHKey == nil ||
 		!verifyPassphraseBounded(r, user.Metadata.SSHKey, req.Passphrase) {
-		s.loginFailures.fail(ip, time.Now())
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
+	s.loginFailures.succeeded(ip)
 	if user.Status != "Active" {
 		http.Error(w, "This account is "+strings.ToLower(user.Status)+" — ask an admin to activate it", http.StatusForbidden)
 		return
@@ -1422,10 +1471,10 @@ func (s *Server) mintDirectSession(user *db.User) (access, refresh string, sshID
 		return "", "", 0, err
 	}
 	subject := subjectForUser(user)
-	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, nil, nil); err != nil {
+	if access, err = s.mintFreshbreathToken(subject, user.Email, user.Role, user.Name, sshID, sshID, nil, nil, true); err != nil {
 		return "", "", 0, err
 	}
-	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID}
+	rd := freshbreathRefreshData{Subject: subject, UserEmail: user.Email, AuthID: sshID, IdentityAuth: sshID}
 	if rd.FamilyID, rd.JTI, err = s.newRefreshFamily(subject, sshID, "direct"); err != nil {
 		return "", "", 0, err
 	}
@@ -1480,16 +1529,16 @@ func (s *Server) handleAPIKeyAuth(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ip := s.requestIP(r)
-		if s.loginFailures.blocked(ip, time.Now()) {
+		if !s.loginFailures.attempt(ip, time.Now()) {
 			tooManyLogins(w)
 			return
 		}
 		rec := p.current()
 		if rec.Descriptor.Key == "" || !keysEqual(req.APIKey, rec.Descriptor.Key) {
-			s.loginFailures.fail(ip, time.Now())
 			http.Error(w, "Invalid API key", http.StatusUnauthorized)
 			return
 		}
+		s.loginFailures.succeeded(ip)
 
 		s.respondLeg(w, r, p, &completedLeg{rec: rec, presentedKey: req.APIKey})
 
