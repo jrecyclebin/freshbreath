@@ -1231,7 +1231,7 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 // for both the script-tag JS form (renderEnvJS) and the JSON form frbr.js
 // fetches when Referer is suppressed (handleEnv with ?loc=).
 func (s *Server) envConfig(r *http.Request) envConfig {
-	apiBase := s.schemeOf(r) + "://" + r.Host
+	apiBase := s.config.PublicBaseURL
 
 	// Resolve the app nonce from the request. See resolveAppNonce for the
 	// full order; the headline is that the admin nonce is reachable ONLY via
