@@ -9,6 +9,7 @@
     "preview": "vitepress preview --host 0.0.0.0 --port 5174"
   },
   "devDependencies": {
+    "sql.js": "^1.13.0",
     "vitepress": "^1.6.4",
     "vitepress-plugin-llms": "^1.14.0"
   }

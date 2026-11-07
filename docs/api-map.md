@@ -1,4 +1,11 @@
-# Fresh Breath API & MCP Map
+---
+reference: true
+beats: false
+title: API & MCP map
+icon: 🗺️
+blurb: Every HTTP route and MCP endpoint the server mounts.
+---
+
 
 A complete reference to every HTTP route and MCP endpoint the server mounts.
 

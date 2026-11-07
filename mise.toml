@@ -268,7 +268,7 @@ run = "aube run dev"
 [tasks."docs:build"]
 description = "Build the docs site into docs/.vitepress/dist"
 dir = "docs"
-sources = ["package.json", "aube-lock.yaml", "*.md", "public/**", ".vitepress/config.mts"]
+sources = ["package.json", "aube-lock.yaml", "*.md", "public/**", ".vitepress/config.mts", ".vitepress/theme/**"]
 outputs = [".vitepress/dist"]
 run = "aube run build"
 
