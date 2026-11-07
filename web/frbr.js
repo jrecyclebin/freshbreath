@@ -1149,6 +1149,41 @@ export class ServiceProxy {
     }
     return this.#fetch(url, init);
   }
+
+  /**
+   * Watch this service's completed calls, by anyone, as they happen. Each
+   * successful call arrives as one object: `{tool, key?}` for a task or
+   * virtual tool (key is a WATCH directive's result), or `{method, fetch}`
+   * for a fetch through the proxy (the path under the service, no query).
+   * Reconnects on its own; abort the signal to stop, which resolves it.
+   * Events missed while disconnected are gone, so re-read on reconnect.
+   * @param {(event: Object) => void} onEvent
+   * @param {Object} [opts]
+   * @param {AbortSignal} [opts.signal]
+   * @param {Function} [opts.onOpen] — called on each (re)connect
+   */
+  async watch(onEvent, { signal, onOpen } = {}) {
+    if (this.#serviceID == null) throw new Error("watch() needs the service's id; get this proxy from login()");
+    const url = `${API}/service/watch/${this.#serviceID}`;
+    let renewed = false;
+    for (;;) {
+      await this.session?.check();
+      try {
+        return await sseStream(url, {
+          method: "GET", session: this.session, signal, reconnect: true,
+          headers: { "X-App-Nonce": APP_NONCE },
+          onOpen: () => { renewed = false; onOpen?.(); },
+          onEvent: (_, payload) => onEvent(payload),
+        });
+      } catch (e) {
+        // A token that expired mid-watch: renew it once and carry on. A
+        // second 401 straight after means renewing doesn't help.
+        if (e.status !== 401 || !this.session || renewed) throw e;
+        renewed = true;
+        await this.session.refresh();
+      }
+    }
+  }
 }
 
 // ── Remote updates ──────────────────────────────────────────────

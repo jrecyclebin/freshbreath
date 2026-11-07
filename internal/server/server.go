@@ -91,7 +91,12 @@ type Server struct {
 	appDBPool    map[dbPoolKey]*dbPoolEntry
 	appDBWatchMu sync.Mutex
 	appDBWatch   map[string]*appDBWatchHub
-	dbRowCap     int // 0 → appDBRowCapDefault; lowered in tests
+
+	// serviceWatch holds each service's /service/watch subscribers, by
+	// service ID. An entry exists only while someone is watching.
+	serviceWatchMu sync.Mutex
+	serviceWatch   map[int64]map[chan serviceWatchEvent]struct{}
+	dbRowCap       int // 0 → appDBRowCapDefault; lowered in tests
 }
 
 // updateRateCount is one per-IP fixed-window counter for the anonymous

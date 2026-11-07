@@ -58,6 +58,7 @@ provider redirect → provider calls `callback` → "legs" are completed in sequ
 |---|---|---|
 | `/service/{id}/…` | ANY | Proxy to an HTTP/Azure service's URL. Requires `X-App-Nonce`; service must be approved for the app. Consumes gate credential, applies resolved outbound credential (sealed in browser token → unsealed here) |
 | `/service/call/{name}` | GET/POST | Non-proxy REST-like surface for `tasks` & `virtual` services. GET lists tools; POST `{task, args}` (JSON or multipart for file args) executes one. Elicitation steps rejected (MCP-only) |
+| `/service/watch/{id}` | GET | SSE feed of a service's completed calls, every caller's: `event: call` with `{tool, key?}` (tasks, virtual — `WATCH` directives choose the tools and keys; none means all) or `{method, fetch}` (2xx fetches through an `api` service's proxy, path without query). Requires `X-App-Nonce`, an approved service and the app's gate; an app's own service is its negative id. Proxied `mcp` and `ssh` refused. Forward-only, no replay |
 
 ## 4. MCP
 

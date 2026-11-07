@@ -2786,3 +2786,158 @@ HTTP 200
 		}
 	}
 }
+
+// TestWatchDirective pins WATCH: bare or with a key expression, evaluated
+// in place like an assert (scope passes through), reported only when the
+// run succeeds, and only for watched tools once any tool in the service
+// has a WATCH. A service with none reports every call, keyless.
+func TestWatchDirective(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/fail") {
+			w.WriteHeader(500)
+		}
+		fmt.Fprint(w, `{"id": 7, "list": "groceries"}`)
+	}))
+	defer ts.Close()
+
+	file := fmt.Sprintf(`[add-item] Add an item.
+
+POST %[1]s/items
+{name: $name}
+
+HTTP 200
+WATCH
+WATCH {list: .list,
+  by: $name}
+{ id: .id }
+---
+[list-items] List items.
+
+GET %[1]s/items
+HTTP 200
+---
+[break] Fail after watching.
+
+WATCH "never"
+GET %[1]s/fail
+HTTP 200
+`, ts.URL)
+	tools, err := ParseVirtualFile([]byte(file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type event struct {
+		tool string
+		key  interface{}
+	}
+	var got []event
+	hooks := &VirtualHooks{Watch: func(tool string, key interface{}) { got = append(got, event{tool, key}) }}
+	run := func(tools []VirtualTool, name string) (interface{}, error) {
+		got = nil
+		return ExecuteVirtualTool(http.DefaultClient, tools, name, map[string]interface{}{"name": "milk"}, VirtualAuth{}, nil, &ExecContext{Hooks: hooks})
+	}
+
+	// Watched tool: one event per WATCH, the key evaluated in place, and
+	// the shaping still sees the response (WATCH passes scope through).
+	result, err := run(tools, "add-item")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.(map[string]interface{})["id"] != float64(7) {
+		t.Fatalf("result = %v", result)
+	}
+	if len(got) != 2 || got[0] != (event{"add-item", nil}) || got[1].tool != "add-item" {
+		t.Fatalf("events = %+v", got)
+	}
+	if key := got[1].key.(map[string]interface{}); key["list"] != "groceries" || key["by"] != "milk" {
+		t.Fatalf("key = %+v", key)
+	}
+
+	// An unwatched tool in a watching service reports nothing.
+	if _, err := run(tools, "list-items"); err != nil || len(got) != 0 {
+		t.Fatalf("list-items: err %v, events %+v", err, got)
+	}
+
+	// A failed run reports nothing, even past its WATCH.
+	if _, err := run(tools, "break"); err == nil || len(got) != 0 {
+		t.Fatalf("break: err %v, events %+v", err, got)
+	}
+
+	// A service with no WATCH at all reports every call, keyless.
+	plain := []VirtualTool{tools[1]}
+	if _, err := run(plain, "list-items"); err != nil || len(got) != 1 || got[0] != (event{"list-items", nil}) {
+		t.Fatalf("unwatched service: err %v, events %+v", err, got)
+	}
+}
+
+// TestWatchAcrossElicitation pins that a suspended run carries the WATCH
+// keys it gathered before the suspended step, and that the resumed step's
+// own WATCH (its pre-block re-runs on resume) is counted once.
+func TestWatchAcrossElicitation(t *testing.T) {
+	file := `[ask] Ask twice, watching along the way.
+
+WATCH "first"
+FORM Step one?
+    $a is boolean
+WATCH "second"
+FORM Step two?
+    $b is boolean
+{ b: .b }
+`
+	tools, err := ParseVirtualFile([]byte(file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []interface{}
+	hooks := &VirtualHooks{Watch: func(tool string, key interface{}) { got = append(got, key) }}
+
+	// suspend runs (or resumes) the tool and expects it to suspend.
+	suspend := func(resume *ResumeState) *Suspension {
+		t.Helper()
+		_, err := ExecuteVirtualTool(http.DefaultClient, tools, "ask", nil, VirtualAuth{}, nil, &ExecContext{Hooks: hooks, Resume: resume})
+		var susp *ErrSuspend
+		if !errors.As(err, &susp) {
+			t.Fatalf("want suspension, got %v", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("a suspended run reported %v", got)
+		}
+		return susp.Susp
+	}
+	answer := func(s *Suspension, field string) *ResumeState {
+		rs := s.ResumeState()
+		rs.Response = &ElicitResponse{Action: "accept", Content: map[string]interface{}{field: true}}
+		return rs
+	}
+
+	first := suspend(nil)
+	second := suspend(answer(first, "a"))
+	if fmt.Sprint(second.Watched) != "[first]" {
+		t.Fatalf("second suspension carries %v, want [first]", second.Watched)
+	}
+	if _, err := ExecuteVirtualTool(http.DefaultClient, tools, "ask", nil, VirtualAuth{}, nil, &ExecContext{Hooks: hooks, Resume: answer(second, "b")}); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(got) != "[first second]" {
+		t.Fatalf("events = %v, want [first second]", got)
+	}
+}
+
+// TestWatchAfterSQL pins the guide's shape: a WATCH after a SQL step
+// starts the next step's pre-block, and the tool still returns the SQL
+// result.
+func TestWatchAfterSQL(t *testing.T) {
+	tools, err := ParseVirtualFile([]byte(`[add-item] Add.
+
+INSERT INTO items (list_id, name) VALUES ($list_id, $name)
+WATCH $list_id
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := tools[0].Steps
+	if len(steps) != 2 || steps[0].SQL == "" || len(steps[1].Pre) != 1 || !steps[1].Pre[0].Watch || steps[1].Pre[0].Expr != "$list_id" {
+		t.Fatalf("steps = %+v", steps)
+	}
+}

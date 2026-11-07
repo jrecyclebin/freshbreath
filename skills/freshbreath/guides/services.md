@@ -293,7 +293,32 @@ relative to the service's registered URL; the leading slash is optional.
 
 ---
 
-## 6. Full minimal example
+## 6. watch()
+
+For tasks, virtual and proxied `api` services, `svc.watch()` streams
+completed calls on the service as they happen. These are *anyone's* calls,
+not just this page's:
+
+```js
+const stop = new AbortController();
+svc.watch((ev) => {
+  // { tool: "add-item", key: 12 }       a task or virtual tool
+  // { method: "POST", fetch: "/v1/items" }  a fetch through the proxy
+  if (ev.tool === "add-item" && ev.key === currentList) refresh();
+}, { signal: stop.signal, onOpen: refresh });
+// later: stop.abort();
+```
+
+Only successful calls are reported. There are no arguments, bodies or query
+strings, just the tool name or the path, plus a key when the tool's `WATCH`
+directive computes one (see the virtual-services guide). It reconnects by
+itself and renews an expired session once. Events missed while disconnected
+aren't replayed, so re-read in `onOpen`. Proxied MCP services can't be
+watched. The proxy needs the service's id, so get it from `login()`.
+
+---
+
+## 7. Full minimal example
 
 ```html
 <!DOCTYPE html>
@@ -332,7 +357,7 @@ relative to the service's registered URL; the leading slash is optional.
 
 ---
 
-## 7. Fresh Breath API
+## 8. Fresh Breath API
 
 The `api` function gives you a convenient wrapper around the fetch API to
 pass in a logged-in session and make an API call - with built-in retries and

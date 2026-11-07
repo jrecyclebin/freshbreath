@@ -210,6 +210,9 @@ func (s *Server) virtualHooks(svc *db.Service) *formats.VirtualHooks {
 			plain, err := open(key, sealed)
 			return string(plain), err
 		},
+		Watch: func(tool string, key interface{}) {
+			s.reportServiceCall(svc.ID, serviceWatchEvent{Tool: tool, Key: key})
+		},
 	}
 }
 

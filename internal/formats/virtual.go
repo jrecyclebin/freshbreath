@@ -134,12 +134,14 @@ type VirtualStep struct {
 	Elicit    *VirtualElicit           // FORM or URL directive: elicitation step
 }
 
-// VirtualStmt is one line of a step's pre-block: either an assignment
-// (Assign non-nil, the new $-variable's bare name) or a bare jq
-// expression whose result replaces "." (a mutation) or is discarded
-// after a check (an assert, which passes its input through).
+// VirtualStmt is one line of a step's pre-block: an assignment (Assign
+// non-nil, the new $-variable's bare name), a WATCH directive (Watch set;
+// Expr is its key expression, empty for a bare WATCH), or a bare jq
+// expression whose result replaces "." (a mutation) or is discarded after
+// a check (an assert, which passes its input through).
 type VirtualStmt struct {
 	Assign *string // bare variable name for "$x = expr"; nil for a bare expression
+	Watch  bool    // a WATCH directive: report this call to the service's watchers
 	Expr   string  // jq expression
 }
 
@@ -408,6 +410,14 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 			if ok, vn, ex := tryParseAssignment(line); ok {
 				name := vn
 				step.Pre = append(step.Pre, VirtualStmt{Assign: &name, Expr: ex})
+			} else if line == "WATCH" || strings.HasPrefix(line, "WATCH ") {
+				// WATCH directive: marks the tool watched, so a successful
+				// call is reported to the service's watchers. An expression
+				// after it is evaluated here, like an assert, and its result
+				// rides along as the event's key. Scope passes through.
+				expr, k := collectJQ(lines, i)
+				step.Pre = append(step.Pre, VirtualStmt{Watch: true, Expr: strings.TrimSpace(strings.TrimPrefix(expr, "WATCH"))})
+				i = k
 			} else if ann, ok := parseAnnotation(line); ok {
 				tool.typeAnnotations = append(tool.typeAnnotations, ann)
 			} else if ok, form := tryParseForm(line); ok {
@@ -1253,7 +1263,8 @@ type Suspension struct {
 	StepIdx       int
 	ElicitationID string // crypto-random; doubles as the MCP RequestState / ElicitationID
 	Elicit        ElicitRequest
-	Handoff       bool // URL step as the final step with no shaping: no response is needed
+	Handoff       bool          // URL step as the final step with no shaping: no response is needed
+	Watched       []interface{} // WATCH keys gathered before StepIdx, reported once the run succeeds
 }
 
 // ResumeState converts a suspension into a resumable state (response to be
@@ -1266,6 +1277,7 @@ func (susp *Suspension) ResumeState() *ResumeState {
 		Vars:     susp.Vars,
 		Scope:    susp.Scope,
 		StepIdx:  susp.StepIdx,
+		Watched:  susp.Watched,
 	}
 }
 
@@ -1311,6 +1323,7 @@ type ResumeState struct {
 	Vars     map[string]interface{}
 	Scope    map[string]interface{}
 	StepIdx  int
+	Watched  []interface{}
 	Response *ElicitResponse
 }
 
@@ -1331,6 +1344,12 @@ type VirtualHooks struct {
 	// service opens. Nil means neither is available and both fail the tool.
 	Seal func(plain string) (string, error)
 	Open func(sealed string) (string, error)
+
+	// Watch reports a successful call to the service's watchers, once per
+	// WATCH directive the run passed (key nil for a bare WATCH). A service
+	// with no WATCH directive anywhere reports every call, keyless. Failed
+	// and suspended runs report nothing. Nil means nobody is listening.
+	Watch func(tool string, key interface{})
 }
 
 // ExecContext is the optional server-provided context for a run: the hooks
@@ -1366,7 +1385,36 @@ func ExecuteVirtualTool(httpClient *http.Client, tools []VirtualTool, toolName s
 	if rs != nil && rs.ToolName != "" && !strings.EqualFold(rs.ToolName, tool.Name) {
 		return nil, fmt.Errorf("resume state is for tool %q, not %q", rs.ToolName, toolName)
 	}
-	return runVirtualTool(tool, httpClient, args, auth, sqlRunner, hooks, rs)
+	var watched []interface{}
+	if rs != nil {
+		watched = append(watched, rs.Watched...)
+	}
+	result, err := runVirtualTool(tool, httpClient, args, auth, sqlRunner, hooks, rs, &watched)
+	if err == nil && hooks != nil && hooks.Watch != nil {
+		if serviceWatches(tools) {
+			for _, key := range watched {
+				hooks.Watch(tool.Name, key)
+			}
+		} else {
+			hooks.Watch(tool.Name, nil)
+		}
+	}
+	return result, err
+}
+
+// serviceWatches reports whether any tool in a service carries a WATCH
+// directive. A service without one reports every call to its watchers.
+func serviceWatches(tools []VirtualTool) bool {
+	for _, t := range tools {
+		for _, st := range t.Steps {
+			for _, stmt := range st.Pre {
+				if stmt.Watch {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // relativeURL reports whether a step's URL template is a path on this
@@ -1391,8 +1439,9 @@ func toolLeavesServer(tool *VirtualTool) bool {
 	return false
 }
 
-// runVirtualTool is the executor core.
-func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]interface{}, auth VirtualAuth, sqlRunner SQLRunner, hooks *VirtualHooks, rs *ResumeState) (interface{}, error) {
+// runVirtualTool is the executor core. Each WATCH directive it passes
+// appends its key to watched; the caller reports them if the run succeeds.
+func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]interface{}, auth VirtualAuth, sqlRunner SQLRunner, hooks *VirtualHooks, rs *ResumeState, watched *[]interface{}) (interface{}, error) {
 	vars := make(map[string]interface{})
 	scope := interface{}(map[string]interface{}{})
 	startIdx := 0
@@ -1557,6 +1606,9 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 
 	for stepIdx := startIdx; stepIdx < len(tool.Steps); stepIdx++ {
 		step := tool.Steps[stepIdx]
+		// A suspension resumes AT this step and re-runs its pre-block, so it
+		// keeps only the WATCH keys gathered before it.
+		watchedBefore := len(*watched)
 
 		// Run the pre-block: assignments and bare jq statements, in source
 		// order, against the scope the previous step left. An assignment
@@ -1566,16 +1618,26 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 		// (an assert, which passes its input through). Source order matters:
 		// an assert can gate a later mutation in the same block.
 		for _, st := range step.Pre {
+			if st.Watch && st.Expr == "" {
+				*watched = append(*watched, nil)
+				continue
+			}
 			val, err := eval.run(st.Expr, scope)
 			if err != nil {
+				if st.Watch {
+					return nil, fmt.Errorf("step %d, WATCH: %w", stepIdx, err)
+				}
 				if st.Assign != nil {
 					return nil, fmt.Errorf("step %d, assignment $%s: %w", stepIdx, *st.Assign, err)
 				}
 				return nil, fmt.Errorf("step %d: %w", stepIdx, err)
 			}
-			if st.Assign != nil {
+			switch {
+			case st.Watch:
+				*watched = append(*watched, val)
+			case st.Assign != nil:
 				vars[*st.Assign] = val
-			} else {
+			default:
 				scope = val
 			}
 		}
@@ -1668,6 +1730,7 @@ func runVirtualTool(tool *VirtualTool, httpClient *http.Client, args map[string]
 					ElicitationID: elicitationID,
 					Elicit:        *el,
 					Handoff:       handoff,
+					Watched:       append([]interface{}(nil), (*watched)[:watchedBefore]...),
 				}}
 			}
 			if vr := step.Responses[0]; vr != nil && vr.Shaping != "" {

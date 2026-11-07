@@ -312,6 +312,9 @@ func (s *Server) newTaskMCPServer(svc *db.Service) (*mcp.Server, error) {
 			if err != nil {
 				return mcpAuthError("%v", err), nil
 			}
+			if !result.IsError {
+				s.reportServiceCall(svc.ID, serviceWatchEvent{Tool: task.Name})
+			}
 			return result, nil
 		})
 	}
