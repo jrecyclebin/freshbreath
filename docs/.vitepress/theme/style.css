@@ -319,14 +319,44 @@ html.dark .webapp { --wa-bg: #12151b; --wa-ink: #e6e9ef; --wa-soft: #8d95a5; --w
 .webapp label { display: block; font-size: 12.5px; font-weight: 600; color: var(--wa-soft); margin-bottom: 3px }
 .webapp code { background: var(--wa-tint); color: var(--wa-ink) }
 
-/* ---- Leaving an episode: shimmer, then slide ----------------------------- */
+/* ---- Leaving an episode: an effect, then the slide ------------------------
+   Each effect is a fixed overlay blended with mix-blend-mode, so whatever
+   passes under it is inverted or recoloured: white + difference inverts,
+   a colour + hue re-tints. The slide underneath is the same every time. */
 main { position: relative }
-main.leaving::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 40;
-  background: linear-gradient(105deg, transparent 30%, color-mix(in srgb, var(--mint) 35%, transparent) 45%, rgba(255,255,255,.7) 50%, color-mix(in srgb, var(--cobalt) 30%, transparent) 55%, transparent 70%);
-  background-size: 250% 100%; animation: shimmer .75s ease-in forwards }
 main.leaving > article { animation: slideOut .45s ease-in .35s forwards }
 main.arriving > article { animation: slideIn .45s ease-out }
-@keyframes shimmer { from { background-position: 130% 0 } to { background-position: -30% 0 } }
+.fx { position: fixed; inset: 0; pointer-events: none; z-index: 45; overflow: hidden; mix-blend-mode: difference }
+.fx i { position: absolute; display: none }
+
+/* Shimmer: a soft-edged band that inverts what it crosses, with tinted
+   fringes (difference turns mint and cobalt into their opposites). */
+.fx-shimmer::before { content: ""; position: absolute; inset: -20% -60%;
+  background: linear-gradient(105deg, transparent 34%, #1f8a5b 40%, #fff 46%, #fff 54%, #3f5bd8 60%, transparent 66%);
+  animation: fxSweep .8s cubic-bezier(.5, 0, .3, 1) forwards }
+@keyframes fxSweep { from { transform: translateX(65%) } to { transform: translateX(-65%) } }
+
+/* Ripple: thin inverting rings spreading out from the button. */
+.fx-ripple i { display: block; left: var(--x); top: var(--y); width: 0; height: 0; transform: translate(-50%, -50%); border-radius: 50%;
+  border: 18px solid #fff; animation: fxRing .9s cubic-bezier(.2, .6, .3, 1) forwards; opacity: 0 }
+.fx-ripple i:nth-child(n+4) { display: none }
+.fx-ripple i:nth-child(2) { animation-delay: .1s; border-width: 9px }
+.fx-ripple i:nth-child(3) { animation-delay: .2s; border-width: 4px }
+@keyframes fxRing { 0% { opacity: 1; width: 0; height: 0 } 75% { opacity: 1 } 100% { opacity: 0; width: 280vmax; height: 280vmax } }
+
+/* Blinds: stripes flip across, inverting as they go, then fold away. */
+.fx-blinds i { display: block; left: 0; right: 0; height: calc(100% / 8 + 1px); top: calc((var(--n) - 1) * 100% / 8);
+  background: #fff; transform-origin: left; transform: scaleX(0);
+  animation: fxBlind .75s cubic-bezier(.6, 0, .3, 1) calc(var(--n) * 35ms) forwards }
+@keyframes fxBlind { 0% { transform: scaleX(0); transform-origin: left } 45% { transform: scaleX(1); transform-origin: left }
+  55% { transform: scaleX(1); transform-origin: right } 100% { transform: scaleX(0); transform-origin: right } }
+
+/* Prism: a rainbow iris opening from the button, every colour flipped. */
+.fx-prism::before { content: ""; position: absolute; inset: 0;
+  background: conic-gradient(from 200deg at var(--x) var(--y), #ff5f6d, #ffc371, #47e891, #3fa9f5, #a66cff, #ff5f6d);
+  clip-path: circle(0 at var(--x) var(--y)); animation: fxIris .8s cubic-bezier(.5, 0, .2, 1) forwards }
+@keyframes fxIris { 0% { clip-path: circle(0 at var(--x) var(--y)); opacity: 1 } 60% { clip-path: circle(150% at var(--x) var(--y)); opacity: .85 } 100% { clip-path: circle(150% at var(--x) var(--y)); opacity: 0 } }
+
 @keyframes slideOut { to { opacity: 0; transform: translateX(-60px) } }
 @keyframes slideIn { from { opacity: 0; transform: translateX(60px) } to { opacity: 1; transform: none } }
 
@@ -338,7 +368,7 @@ main.arriving > article { animation: slideIn .45s ease-out }
 .chat li .who { display: block; width: max-content; margin: 0 0 4px; padding: 0; background: none }
 .chat li p { margin: 0 0 8px } .chat li p:last-child { margin: 0 }
 .chat li code { background: color-mix(in srgb, var(--surface) 70%, transparent) }
-.chat .typing { align-self: flex-start; background: var(--cobalt-soft); border-radius: 12px; padding: 12px 16px; display: flex; gap: 4px }
+.chat .typing { align-self: flex-start; padding: 6px 4px; display: flex; gap: 5px }
 .chat .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--cobalt); animation: blink 1s infinite }
 .chat .typing i:nth-child(2) { animation-delay: .15s } .chat .typing i:nth-child(3) { animation-delay: .3s }
 @keyframes blink { 0%, 100% { opacity: .25 } 50% { opacity: 1 } }
@@ -361,6 +391,7 @@ main.arriving > article { animation: slideIn .45s ease-out }
   .beat-foot .btn { padding: 9px 12px; font-size: 14px }
   .chat li { max-width: 100% }
 }
+@media (prefers-reduced-motion: reduce) { .fx { display: none } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important } }
 .field small.bad { color: var(--red) }
 .field input[aria-invalid="true"] { border-color: var(--red) }

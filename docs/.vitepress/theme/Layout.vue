@@ -42,13 +42,24 @@ function showBeat(i: number, scroll = true) {
   if (scroll) nextTick(() => document.querySelector('.episode-head')?.scrollIntoView({ block: 'start' }))
 }
 
-// Finishing an episode moves straight on: a shimmer sweeps the page, it
-// slides away, and the next episode slides in. Only the last episode stops
-// for a celebration, since there's nowhere left to go.
+// Finishing an episode moves straight on: a visual effect washes over the
+// page, it slides away, and the next episode slides in. The effect is picked
+// at random (never the same twice running); the slide is always the same.
+// Only the last episode stops for a celebration, since there's nowhere left
+// to go.
+const EFFECTS = ['shimmer', 'ripple', 'blinds', 'prism'] as const
 const leaving = ref(false)
 const arriving = ref(false)
+const effect = ref<string>('')
+const origin = ref({ x: '50%', y: '50%' })
 
-function finish() {
+function pickEffect(e?: MouseEvent) {
+  const others = EFFECTS.filter((x) => x !== effect.value)
+  effect.value = others[Math.floor(Math.random() * others.length)]
+  if (e) origin.value = { x: e.clientX + 'px', y: e.clientY + 'px' }
+}
+
+function finish(e?: MouseEvent) {
   if (!here.value) return
   store.done[normalize(here.value.url)] = true
   const next = nextEpisode.value
@@ -58,6 +69,7 @@ function finish() {
     return
   }
   say(`✓ Episode ${here.value.episode} done`)
+  pickEffect(e)
   leaving.value = true
   setTimeout(async () => {
     await router.go(withBase(next.url))
@@ -294,7 +306,7 @@ const nextLabel = computed(() => {
             :class="{ quiet: play.needs[play.current.value] && !play.passed[play.current.value], pulse: play.passed[play.current.value] }"
             @click="showBeat(play.current.value + 1)"
           >{{ nextLabel }} →</button>
-          <button v-else class="btn finish-btn" :disabled="leaving" @click="finish">{{ nextEpisode ? 'Next episode: ' + nextEpisode.title : 'Finish 🎉' }} →</button>
+          <button v-else class="btn finish-btn" :disabled="leaving" @click="finish($event)">{{ nextEpisode ? 'Next episode: ' + nextEpisode.title : 'Finish 🎉' }} →</button>
         </footer>
 
         <div v-if="finished" class="finish">
@@ -353,6 +365,10 @@ const nextLabel = computed(() => {
       </div>
       <p style="margin-top:16px"><button class="btn" @click="setupOpen = false">Done</button></p>
     </div>
+  </div>
+
+  <div v-if="leaving" class="fx" :class="'fx-' + effect" :style="{ '--x': origin.x, '--y': origin.y }" aria-hidden="true">
+    <i v-for="n in 8" :key="n" :style="{ '--n': n }" />
   </div>
 
   <div class="toast" :class="{ show: toast.shown }" role="status">{{ toast.text }}</div>

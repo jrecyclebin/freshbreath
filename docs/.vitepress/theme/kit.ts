@@ -115,6 +115,26 @@ export const Beat = defineComponent({
   }
 })
 
+// Copies text. The Clipboard API only works on HTTPS (or localhost) and in
+// frames allowed to write the clipboard, so a hidden textarea and
+// execCommand cover everywhere else.
+export async function copyText(words: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(words)
+    return true
+  } catch { /* fall through */ }
+  const area = document.createElement('textarea')
+  area.value = words
+  area.setAttribute('readonly', '')
+  area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none'
+  document.body.append(area)
+  area.select()
+  let ok = false
+  try { ok = document.execCommand('copy') } catch { ok = false }
+  area.remove()
+  return ok
+}
+
 // "Say this to Claude". The text is written straight into the markdown;
 // [app], [nonce], [slug] and [server] fill in from Your setup, and any other
 // [bracketed words] become a highlighted blank for the reader to fill.
@@ -176,11 +196,16 @@ export const Say = defineComponent({
     })
 
     async function copy() {
-      try {
-        await navigator.clipboard.writeText(text.value!.innerText.trim())
+      const words = text.value!.innerText.trim()
+      if (await copyText(words)) {
         say('Copied. Paste it to ' + props.to + '.')
-      } catch {
-        say('Copy blocked: select the text instead')
+      } else {
+        // Last resort: select it, so one Ctrl/Cmd-C does the job.
+        const range = document.createRange()
+        range.selectNodeContents(text.value!)
+        getSelection()?.removeAllRanges()
+        getSelection()?.addRange(range)
+        say('Selected. Press Ctrl/Cmd-C to copy.')
       }
     }
 
