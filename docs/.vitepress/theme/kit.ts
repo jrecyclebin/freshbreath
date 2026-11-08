@@ -1,8 +1,9 @@
 // Shared state and the small building blocks every episode uses.
 //
 // * `store` is everything we remember in this browser: which episodes are
-//   finished, Play vs Read, and "Your setup" (server, app name, nonce, slug)
-//   which fills in every <Say> box.
+//   finished, Play vs Read, and "Your setup" (server, app name, web path)
+//   which fills in every <Say> box. Prompts name the app; the MCP looks up
+//   its nonce by name, so readers never need to copy one.
 // * `Play` is the per-page tutorial state: which beat is on screen and which
 //   beats hold a challenge the reader has finished. The Layout provides it,
 //   <Beat> reads it, and simulations report into it through useBeat().
@@ -20,7 +21,6 @@ export const store = reactive({
   setup: {
     server: 'http://localhost:9009',
     app: 'Tix',
-    nonce: '',
     slug: 'tix'
   }
 })
@@ -33,7 +33,11 @@ export function loadStore() {
     const saved = JSON.parse(localStorage.getItem(KEY) || '{}')
     if (saved.mode) store.mode = saved.mode
     if (saved.done) store.done = saved.done
-    if (saved.setup) Object.assign(store.setup, saved.setup)
+    if (saved.setup) {
+      store.setup.server = saved.setup.server ?? store.setup.server
+      store.setup.app = saved.setup.app ?? store.setup.app
+      store.setup.slug = saved.setup.slug ?? store.setup.slug
+    }
   } catch { /* private window or blocked storage: defaults are fine */ }
   store.ready = true
   watch(() => [store.mode, store.done, store.setup], () => {
@@ -114,7 +118,27 @@ export const Beat = defineComponent({
 // "Say this to Claude". The text is written straight into the markdown;
 // [app], [nonce], [slug] and [server] fill in from Your setup, and any other
 // [bracketed words] become a highlighted blank for the reader to fill.
-const FILLS: Record<string, string> = { app: 'app name', nonce: 'app ID', slug: 'web path', server: 'server' }
+const FILLS: Record<string, string> = { app: 'app name', slug: 'web path', server: 'server' }
+
+// The nonce shown in simulations. Real ones come from the control panel.
+export const SAMPLE_NONCE = 'aB3xK9mQ2p'
+
+// Fresh Breath's rule for an app slug (normalizeAppURL in the server): it's
+// lowercased and trimmed of slashes, then must read as letters and digits
+// joined by single dashes. Returns what's wrong, or '' when it's fine.
+export const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
+export const RESERVED_SLUGS = ['api', 'control', 'mcp', 'service', 'oauth']
+export function slugProblem(raw: string): string {
+  const slug = raw.trim().toLowerCase().replace(/^\/+|\/+$/g, '')
+  if (!slug) return ''
+  if (slug.includes('/')) {
+    const [first, ...rest] = slug.split('/')
+    return `Apps can’t sit in subdirectories. Make a “${first}” app and publish into its “${rest.join('/')}” folder instead.`
+  }
+  if (!SLUG_RE.test(slug)) return 'A slug is letters, digits and single dashes, like “blog” or “team-tix”.'
+  if (RESERVED_SLUGS.includes(slug)) return `“${slug}” is reserved by Fresh Breath. Pick another path for this app.`
+  return ''
+}
 
 export const Say = defineComponent({
   name: 'Say',
@@ -167,5 +191,30 @@ export const Say = defineComponent({
       ]),
       h('div', { class: 'say-text', ref: text }, slots.default?.())
     ])
+  }
+})
+
+// A little browser window around a simulated web app: a title tab and an
+// address field, no buttons. The slot is the page; give it the `webapp`
+// look (or its own) so it reads as a real site inside the guide.
+export const BrowserFrame = defineComponent({
+  name: 'BrowserFrame',
+  props: { url: { type: String, default: '' }, title: String, icon: { type: String, default: '🌐' }, accent: String },
+  setup(props, { slots }) {
+    return () => {
+      const secure = props.url.startsWith('https://')
+      const [, scheme, rest] = props.url.match(/^(\w+:\/\/)?(.*)$/) || []
+      return h('div', { class: 'bframe', style: props.accent ? `--app: ${props.accent}` : undefined }, [
+        h('div', { class: 'bframe-bar' }, [
+          h('div', { class: 'bframe-tab' }, [h('span', { class: 'bframe-ic' }, props.icon), h('span', props.title || rest)]),
+          h('div', { class: 'bframe-url' }, [
+            h('span', { class: secure ? 'bframe-lock on' : 'bframe-lock' }, secure ? '🔒' : 'ⓘ'),
+            h('span', { class: 'bframe-scheme' }, scheme || ''),
+            h('span', rest)
+          ])
+        ]),
+        h('div', { class: 'bframe-page webapp' }, slots.default?.())
+      ])
+    }
   }
 })

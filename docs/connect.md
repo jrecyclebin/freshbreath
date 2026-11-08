@@ -1,10 +1,10 @@
 ---
 episode: 3
-title: Bring in your agent
+title: Connect your prompt
 icon: 🤝
 minutes: 3
-blurb: Connect Claude to Fresh Breath, and check it can see your apps.
-short: Fresh Breath is an MCP server at /mcp. Point Claude Code (or Pi, OpenCode, Claude Desktop…) at it, sign in with the Fresh Breath login you just made, and ask it to list your apps.
+blurb: Plug your agent into Fresh Breath, and give an app its first service.
+short: Fresh Breath is an MCP server at /mcp. Point Claude Code (or Pi, OpenCode, Claude Desktop…) at it and sign in. From then on your prompts can build apps and hook up services — an API or MCP server, linked to the app that needs it.
 ---
 
 ## Plug it in
@@ -35,7 +35,7 @@ The first thing to ask is whether it can see anything. Here's how that goes.
 
 <ChatSim>
 
-- @you Can you see my Fresh Breath apps? List each one with its name, ID (nonce) and web path.
+- @you Can you see my Fresh Breath apps? List each one with its name and web path.
 - @claude Calling `list_apps`… Yes! You have one app so far:
 - @claude **Tix** — nonce `aB3xK9mQ2p`, served at `/tix`. It has no files yet, so it's empty. Want me to build something into it?
 - @you Not yet. What else can you do here?
@@ -46,17 +46,40 @@ The first thing to ask is whether it can see anything. Here's how that goes.
 Your turn: ask the same thing for real.
 
 <Say>
-Can you see my Fresh Breath apps? List each one with its name, ID (nonce) and web path.
+Can you see my Fresh Breath apps? List each one with its name and web path.
 </Say>
+
+## Give an app a service
+
+Apps reach the outside world through **services**: an HTTP API, an MCP
+server, and a few kinds of Fresh Breath's own (later episodes). A service is
+registered once on the server, then **linked** to each app allowed to use
+it. Try it from the control panel side.
+
+<ServiceSim />
+
+Or just ask. Your agent makes the same calls you saw in the log:
+
+<Say>
+Read the Fresh Breath services guide. Then add the GitHub API (https://api.github.com) as a proxied service, link it to my app [app], and show me the login() call the app should use.
+</Say>
+
+::: tip Proxied or not?
+A **proxied** service is called through Fresh Breath (`/service/{id}/…`),
+which adds the right credential on the way out and gets around CORS. An
+OAuth MCP server like Notion only works proxied. Unproxied calls go straight
+from the browser.
+:::
 
 ## Fill in your setup
 
 Every “Say this to Claude” box in this guide can fill in your app's details
 for you. Open **⚙ Your setup** in the sidebar and put in your server, app
-name, nonce and web path. They stay in this browser.
+name and web path. They stay in this browser. You never need the app's ID
+(its nonce) in a prompt: your agent looks the app up by name.
 
 <Say>
-Read the Fresh Breath guide for [what you're about to do] first. Then, in my app [app] (ID [nonce]), …
+Read the Fresh Breath guide for [what you're about to do] first. Then, in my app [app], …
 </Say>
 
 ::: tip One habit that prevents most mistakes

@@ -283,6 +283,53 @@ div[class*="language-"]:hover .lang { opacity: 0 }
 .flash { animation: flash 1s ease }
 @keyframes flash { 0% { box-shadow: 0 0 0 3px var(--mint) } 100% { box-shadow: 0 0 0 3px transparent } }
 
+/* ---- Browser window around simulated apps --------------------------------- */
+.bframe { --app: #2f6fed; border-radius: 12px; border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent); background: var(--surface-2); box-shadow: 0 1px 0 rgba(255,255,255,.5) inset, 0 10px 28px -12px rgba(20, 24, 40, .35); overflow: hidden; min-width: 0 }
+.bframe-bar { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 8px; background: linear-gradient(var(--surface-2), color-mix(in srgb, var(--surface-2) 85%, var(--ink) 6%)); border-bottom: 1px solid color-mix(in srgb, var(--ink) 14%, transparent) }
+.bframe-tab { align-self: flex-start; display: flex; align-items: center; gap: 7px; max-width: 100%; padding: 3px 12px 3px 9px; border-radius: 7px 7px 3px 3px; background: var(--surface); font: 600 12px var(--body); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08) }
+.bframe-tab span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.bframe-ic { font-size: 13px }
+.bframe-url { display: flex; align-items: center; gap: 2px; padding: 4px 12px; border-radius: 99px; background: var(--surface); font: 12.5px var(--mono); color: var(--ink); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0 }
+.bframe-url > span:last-child { overflow: hidden; text-overflow: ellipsis }
+.bframe-lock { font-size: 11px; margin-right: 6px; color: var(--ink-soft) }
+.bframe-scheme { color: var(--ink-soft) }
+
+/* The page inside: its own little site, not the guide's look. */
+.webapp { --wa-bg: #ffffff; --wa-ink: #1c2230; --wa-soft: #6b7385; --wa-line: #e3e6ec; --wa-tint: #f4f6f9;
+  background: var(--wa-bg); color: var(--wa-ink); font: 14.5px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; min-height: 120px }
+html.dark .webapp { --wa-bg: #12151b; --wa-ink: #e6e9ef; --wa-soft: #8d95a5; --wa-line: #252a34; --wa-tint: #191d25 }
+.webapp .wa-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--app); color: #fff; flex-wrap: wrap }
+.webapp .wa-head b { font-size: 15px; font-weight: 700; flex: 1; letter-spacing: -.01em }
+.webapp .wa-head small { opacity: .85; font-size: 12.5px }
+.webapp .wa-body { padding: 14px }
+.webapp .wa-btn { font-weight: 600; font-size: 13px; font-family: inherit; padding: 6px 12px; border-radius: 6px; border: 0; background: var(--app); color: #fff; cursor: pointer }
+.webapp .wa-btn:hover { filter: brightness(1.08) }
+.webapp .wa-btn.ghost { background: transparent; color: var(--app); box-shadow: inset 0 0 0 1.5px var(--app) }
+.webapp .wa-btn.light { background: rgba(255,255,255,.18); color: #fff }
+.webapp .wa-btn.plain { background: var(--wa-tint); color: var(--wa-ink); box-shadow: inset 0 0 0 1px var(--wa-line) }
+.webapp .wa-btn:disabled { opacity: .45; cursor: default }
+.webapp .wa-input, .webapp select { font: inherit; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--wa-line); background: var(--wa-bg); color: var(--wa-ink); min-width: 0 }
+.webapp .wa-input:focus, .webapp select:focus { outline: 2px solid color-mix(in srgb, var(--app) 40%, transparent); border-color: var(--app) }
+.webapp .wa-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center }
+.webapp .wa-list { list-style: none; margin: 0; padding: 0 !important; border: 1px solid var(--wa-line); border-radius: 8px; overflow: hidden }
+.webapp .wa-list li { margin: 0; padding: 7px 12px; border-bottom: 1px solid var(--wa-line); background: var(--wa-bg) }
+.webapp .wa-list li:last-child { border-bottom: 0 }
+.webapp .wa-muted { color: var(--wa-soft); font-size: 13px }
+.webapp .wa-card { border: 1px solid var(--wa-line); border-radius: 8px; padding: 10px 12px; background: var(--wa-tint) }
+.webapp label { display: block; font-size: 12.5px; font-weight: 600; color: var(--wa-soft); margin-bottom: 3px }
+.webapp code { background: var(--wa-tint); color: var(--wa-ink) }
+
+/* ---- Leaving an episode: shimmer, then slide ----------------------------- */
+main { position: relative }
+main.leaving::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 40;
+  background: linear-gradient(105deg, transparent 30%, color-mix(in srgb, var(--mint) 35%, transparent) 45%, rgba(255,255,255,.7) 50%, color-mix(in srgb, var(--cobalt) 30%, transparent) 55%, transparent 70%);
+  background-size: 250% 100%; animation: shimmer .75s ease-in forwards }
+main.leaving > article { animation: slideOut .45s ease-in .35s forwards }
+main.arriving > article { animation: slideIn .45s ease-out }
+@keyframes shimmer { from { background-position: 130% 0 } to { background-position: -30% 0 } }
+@keyframes slideOut { to { opacity: 0; transform: translateX(-60px) } }
+@keyframes slideIn { from { opacity: 0; transform: translateX(60px) } to { opacity: 1; transform: none } }
+
 /* ---- ChatSim ---------------------------------------------------------------- */
 .chat ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px }
 .chat li { max-width: 88%; padding: 10px 14px; border-radius: 12px; margin: 0; font-size: 16px }
@@ -298,14 +345,6 @@ div[class*="language-"]:hover .lang { opacity: 0 }
 .composer { display: flex; gap: 10px; align-items: flex-end; margin-top: 14px; padding: 10px; border: 1.5px solid var(--line); border-radius: 12px; background: var(--bg) }
 .composer p { flex: 1; margin: 0; font-size: 15px; color: var(--ink) }
 .composer.idle p { color: var(--ink-soft); font-style: italic }
-
-/* ---- Checklist -------------------------------------------------------------- */
-.checklist ul { list-style: none; padding: 0; margin: 0 }
-.checklist li { display: flex; gap: 12px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; cursor: pointer; margin: 0 }
-.checklist li:hover { background: var(--bg) }
-.checklist li .box { flex: none; width: 22px; height: 22px; margin-top: 2px; border: 2px solid var(--line); border-radius: 6px; display: grid; place-items: center; font-size: 14px; color: transparent; transition: all .15s }
-.checklist li.ticked .box { background: var(--mint); border-color: var(--mint); color: var(--surface) }
-.checklist li.ticked > :not(.box) { opacity: .65 }
 
 /* ---- Mobile ---------------------------------------------------------------- */
 @media (max-width: 860px) {
@@ -323,3 +362,5 @@ div[class*="language-"]:hover .lang { opacity: 0 }
   .chat li { max-width: 100% }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important } }
+.field small.bad { color: var(--red) }
+.field input[aria-invalid="true"] { border-color: var(--red) }

@@ -1,5 +1,5 @@
 ---
-episode: 9
+episode: 10
 title: Live updates with watch()
 icon: 📡
 minutes: 5
@@ -75,7 +75,7 @@ tools that change things.
 :::
 
 <Say>
-Make my Fresh Breath app [app] (ID [nonce]) update live: add WATCH lines keyed by id to the tools in app:[nonce] that change data, and have the page use watch() to refresh only what changed. Read the virtuals guide's section on WATCH first.
+Make my Fresh Breath app [app] update live: add WATCH lines keyed by id to the tools in the app's own service that change data, and have the page use watch() to refresh only what changed. Read the virtuals guide's section on WATCH first.
 </Say>
 
 ::: details Under the hood

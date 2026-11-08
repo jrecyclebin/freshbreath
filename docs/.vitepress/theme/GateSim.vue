@@ -13,10 +13,12 @@ const GATES: Record<Gate, string> = {
 }
 const admin = ref<Gate>('ssh')
 const protectedBy = ref<'' | Gate>('')
+// The GitHub record's "Fresh Breath users only" (require_user) checkbox.
+const usersOnly = ref(false)
 const beat = useBeat()
 
 const visitors = [
-  { name: 'You', icon: '🧑‍💻', about: 'Fresh Breath superuser, work account, GitHub', has: ['ssh', 'sso', 'github'] },
+  { name: 'You', icon: '🧑‍💻', about: 'Fresh Breath superuser. Work account, and a GitHub account with the same email', has: ['ssh', 'sso', 'github'] },
   { name: 'Dana', icon: '👩‍🔬', about: 'Coworker. Work account, no Fresh Breath account', has: ['sso'] },
   { name: 'Sam', icon: '🕵️', about: 'Stranger on the internet with a GitHub account', has: ['github'] },
   { name: 'Passerby', icon: '🚶', about: 'No accounts at all', has: [] as string[] }
@@ -30,14 +32,17 @@ function reason(v: typeof visitors[number]) {
   if (v.has.includes(g)) {
     if (g === 'ssh') return { in: true, why: 'Has a Fresh Breath account and passphrase.' }
     if (g === 'sso') return { in: true, why: v.name === 'You' ? 'Signs in with work.' : 'Work SSO vouches for Dana. No Fresh Breath account needed.' }
+    if (usersOnly.value && !v.has.includes('ssh')) return { in: false, why: 'GitHub vouches for Sam, but Sam’s email matches no Fresh Breath user, and this record takes users only.' }
+    if (usersOnly.value) return { in: true, why: 'GitHub email matches a Fresh Breath user, so you sign in as that user.' }
     return { in: true, why: v.name === 'Sam' ? 'GitHub vouches for anyone with a GitHub account. Including Sam.' : 'Signs in with GitHub.' }
   }
   return { in: false, why: g === 'ssh' ? 'Not a Fresh Breath user.' : `No ${g === 'sso' ? 'work' : 'GitHub'} account to sign in with.` }
 }
 
-const seen = reactive({ trap: false, coworkers: false, open: false, locked: false })
-watch([admin, protectedBy], () => {
-  if (!protectedBy.value && admin.value === 'github') seen.trap = true
+const seen = reactive({ trap: false, coworkers: false, open: false, locked: false, sam: false })
+watch([admin, protectedBy, usersOnly], () => {
+  if (effective.value === 'github' && usersOnly.value) seen.sam = true
+  if (!protectedBy.value && admin.value === 'github' && !usersOnly.value) seen.trap = true
   if (effective.value === 'sso') seen.coworkers = true
   if (protectedBy.value === 'anon') seen.open = true
   if (effective.value === 'ssh' && seen.trap) seen.locked = true
@@ -62,6 +67,10 @@ watch([admin, protectedBy], () => {
           </select>
         </label>
       </div>
+      <label class="users-only" :class="{ on: usersOnly }">
+        <input v-model="usersOnly" type="checkbox">
+        <span><b>GitHub record → Fresh Breath users only</b><small>Refuse sign-ins whose email has no user here. Those who match sign in as that user.</small></span>
+      </label>
       <p class="effective">
         The door uses: <strong>{{ GATES[effective] }}</strong>
         <span v-if="!protectedBy" class="note"> ← inherited from Admin auth, because Protected by is empty</span>
@@ -74,7 +83,7 @@ watch([admin, protectedBy], () => {
           <p>{{ reason(v).why }}</p>
         </div>
       </div>
-      <div v-if="!protectedBy && admin === 'github'" class="verdict bad">⚠️ This is the trap: a generic GitHub login as admin auth, and an empty Protected by. Every app and service that inherits it is open to anyone on Earth with a GitHub account. Keep that to a LAN, or give the app a gate of its own.</div>
+      <div v-if="!protectedBy && admin === 'github' && !usersOnly" class="verdict bad">⚠️ This is the trap: a generic GitHub login as admin auth, and an empty Protected by. Every app and service that inherits it is open to anyone on Earth with a GitHub account. Keep that to a LAN, or give the app a gate of its own.</div>
     </div>
     <ul class="quests">
       <li class="quests-head">Quests</li>
@@ -82,12 +91,18 @@ watch([admin, protectedBy], () => {
       <li :class="{ got: seen.locked }">Now lock it back down to Fresh Breath users only</li>
       <li :class="{ got: seen.coworkers }">Let coworkers in without making them Fresh Breath accounts</li>
       <li :class="{ got: seen.open }">Open the app to everyone, on purpose</li>
+      <li :class="{ got: seen.sam }">Keep the door on GitHub, but stop Sam. Use only the GitHub record’s settings.</li>
     </ul>
   </div>
 </template>
 
 <style scoped>
 .effective { margin: 14px 0 12px }
+.users-only { display: flex; gap: 10px; align-items: flex-start; margin-top: 12px; padding: 10px 12px; border: 1.5px dashed var(--line); border-radius: 10px; cursor: pointer }
+.users-only.on { border-style: solid; border-color: var(--amber); background: var(--amber-soft) }
+.users-only input { margin-top: 4px }
+.users-only b { display: block; font-size: 14.5px }
+.users-only small { display: block; color: var(--ink-soft); font-size: 13px }
 .visitors { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px }
 .visitor { border: 1.5px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg) }
 .visitor .face { font-size: 30px; display: block }

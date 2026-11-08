@@ -4,7 +4,7 @@ title: Give it a database
 icon: 🗄️
 minutes: 6
 blurb: Write tools as SQL, and call them from the app or your agent.
-short: Every app has its own database and its own blank toolbox, app:<nonce>. You fill the toolbox with tools — each one a named SQL query — and the app calls them with callTool().
+short: Every app has its own database and its own blank toolbox, its app service. You fill the toolbox with tools — each one a named SQL query — and the app calls them with callTool().
 ---
 
 ## Buttons, not spreadsheets
@@ -58,16 +58,125 @@ format. Run the tools, then edit the script and see what breaks.
 ## Ask for it
 
 You'll rarely write these by hand. Describe what to remember, the way you'd
-plan spreadsheet columns, and let your agent do the rest.
+plan spreadsheet columns, and watch your agent build the file.
+
+<ChatSim title="Try it: Claude writes the tools" file="app:Tix · tools">
+
+- @you I want Tix to save issues: a title, a status, and who filed it. Read the Fresh Breath virtuals guide first.
+- @claude Reading `get_guide("virtuals")`… Every app has its own blank service, so I'll write into Tix's. First, a `migrate` tool to create the table. The app will run it when it opens.
+
+  ```txt
+  [migrate] Create the tables if they don't exist.
+
+  CREATE TABLE IF NOT EXISTS issues (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT DEFAULT 'open',
+    added_by TEXT)
+  ```
+
+- @claude Now adding and listing. I'll fill `added_by` from `$token_email`, so nobody can file an issue as someone else.
+
+  ```txt
+  [migrate] Create the tables if they don't exist.
+
+  CREATE TABLE IF NOT EXISTS issues (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT DEFAULT 'open',
+    added_by TEXT)
+  ---
+  [add-issue] File a new issue.
+
+  INSERT INTO issues (title, added_by)
+    VALUES ($title, $token_email)
+  ---
+  [list-issues] List issues with a status: open or closed.
+
+  SELECT id, title, status, added_by
+    FROM issues
+    WHERE status = $status
+    ORDER BY id DESC
+  ```
+
+- @you Nice. Can I search them too?
+- @claude Sure, a `search-issues` tool… Hm, after writing it the tools won't load: “$term is inside a SQL string literal”. In `LIKE '%$term%'` a variable can't be bound. I'll take the whole pattern as the argument instead.
+
+  ```txt
+  [migrate] Create the tables if they don't exist.
+
+  CREATE TABLE IF NOT EXISTS issues (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT DEFAULT 'open',
+    added_by TEXT)
+  ---
+  [add-issue] File a new issue.
+
+  INSERT INTO issues (title, added_by)
+    VALUES ($title, $token_email)
+  ---
+  [list-issues] List issues with a status: open or closed.
+
+  SELECT id, title, status, added_by
+    FROM issues
+    WHERE status = $status
+    ORDER BY id DESC
+  ---
+  [search-issues] Find issues whose title matches a pattern, like %fern%.
+
+  SELECT id, title, status
+    FROM issues
+    WHERE title LIKE $pattern
+  ```
+
+- @claude And a way to close them, so the list doesn't only grow. Then I'll wire the app's buttons to `callTool()`.
+
+  ```txt
+  [migrate] Create the tables if they don't exist.
+
+  CREATE TABLE IF NOT EXISTS issues (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    status TEXT DEFAULT 'open',
+    added_by TEXT)
+  ---
+  [add-issue] File a new issue.
+
+  INSERT INTO issues (title, added_by)
+    VALUES ($title, $token_email)
+  ---
+  [list-issues] List issues with a status: open or closed.
+
+  SELECT id, title, status, added_by
+    FROM issues
+    WHERE status = $status
+    ORDER BY id DESC
+  ---
+  [search-issues] Find issues whose title matches a pattern, like %fern%.
+
+  SELECT id, title, status
+    FROM issues
+    WHERE title LIKE $pattern
+  ---
+  [close-issue] Close an issue.
+
+  UPDATE issues SET status = 'closed'
+    WHERE id = $id
+  ```
+
+- @claude Done: five tools in Tix's service, and the page saves and loads through them. Add an issue at **/tix@dev**, then refresh. It should still be there.
+
+</ChatSim>
 
 <Say>
-I want my Fresh Breath app [app] (ID [nonce]) to save [what to save, e.g. issues with a title, status and who added them]. Read the Fresh Breath virtuals guide first. Then write tools into the app's own service (app:[nonce]): a migrate tool that creates the tables, plus tools to add, list, update and delete. Have the app run migrate when it opens and save and load through these tools.
+I want my Fresh Breath app [app] to save [what to save, e.g. issues with a title, status and who added them]. Read the Fresh Breath virtuals guide first. Then write tools into the app's own service: a migrate tool that creates the tables, plus tools to add, list, update and delete. Have the app run migrate when it opens and save and load through these tools.
 </Say>
 
 Then check from your agent's side:
 
 <Say>
-Look in my Fresh Breath app [nonce]'s database and show me what tables exist and what's saved so far.
+Look in my Fresh Breath app [app]'s database and show me what tables exist and what's saved so far.
 </Say>
 
 ::: details The rules the parser enforces

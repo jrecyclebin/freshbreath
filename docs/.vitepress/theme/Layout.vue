@@ -5,7 +5,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useData, useRoute, useRouter, withBase } from 'vitepress'
 import { data as pages } from './episodes.data'
-import { store, loadStore, providePlay, resetProgress, toast, say } from './kit'
+import { store, loadStore, providePlay, resetProgress, toast, say, slugProblem } from './kit'
 
 const { frontmatter, isDark, page } = useData()
 const route = useRoute()
@@ -42,11 +42,33 @@ function showBeat(i: number, scroll = true) {
   if (scroll) nextTick(() => document.querySelector('.episode-head')?.scrollIntoView({ block: 'start' }))
 }
 
+// Finishing an episode moves straight on: a shimmer sweeps the page, it
+// slides away, and the next episode slides in. Only the last episode stops
+// for a celebration, since there's nowhere left to go.
+const leaving = ref(false)
+const arriving = ref(false)
+
 function finish() {
-  if (here.value) store.done[normalize(here.value.url)] = true
-  finished.value = true
-  nextTick(() => document.querySelector('.finish')?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+  if (!here.value) return
+  store.done[normalize(here.value.url)] = true
+  const next = nextEpisode.value
+  if (!next) {
+    finished.value = true
+    nextTick(() => document.querySelector('.finish')?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+    return
+  }
+  say(`✓ Episode ${here.value.episode} done`)
+  leaving.value = true
+  setTimeout(async () => {
+    await router.go(withBase(next.url))
+    leaving.value = false
+    arriving.value = true
+    window.scrollTo(0, 0)
+    setTimeout(() => (arriving.value = false), 500)
+  }, 780)
 }
+
+const slugIssue = computed(() => slugProblem(store.setup.slug))
 
 function followHash() {
   finished.value = false
@@ -211,7 +233,7 @@ const nextLabel = computed(() => {
       </div>
     </aside>
 
-    <main>
+    <main :class="{ leaving, arriving }">
       <!-- Home -->
       <template v-if="isHome">
         <p class="hero-word"><span>a guide to</span>FRESH<br>BREATH</p>
@@ -272,16 +294,15 @@ const nextLabel = computed(() => {
             :class="{ quiet: play.needs[play.current.value] && !play.passed[play.current.value], pulse: play.passed[play.current.value] }"
             @click="showBeat(play.current.value + 1)"
           >{{ nextLabel }} →</button>
-          <button v-else class="btn finish-btn" @click="finish">Finish episode 🎉</button>
+          <button v-else class="btn finish-btn" :disabled="leaving" @click="finish">{{ nextEpisode ? 'Next episode: ' + nextEpisode.title : 'Finish 🎉' }} →</button>
         </footer>
 
         <div v-if="finished" class="finish">
           <div class="confetti" aria-hidden="true"><i v-for="n in 18" :key="n" /></div>
-          <b>Episode {{ here.episode }} done!</b>
-          <p v-if="nextEpisode">Up next: <strong>{{ nextEpisode.title }}</strong>. {{ nextEpisode.blurb }}</p>
-          <p v-else>That's the whole set. You know Fresh Breath now.</p>
+          <b>That's the whole set!</b>
+          <p>You know Fresh Breath now. Every episode stays here as reference: hit <kbd>/</kbd> to jump to anything.</p>
           <div class="finish-actions">
-            <a v-if="nextEpisode" class="btn" :href="withBase(nextEpisode.url)">Episode {{ nextEpisode.episode }} →</a>
+            <a class="btn" :href="withBase('/')">Back to the start</a>
             <button class="btn ghost" @click="showBeat(0)">Replay this one</button>
           </div>
         </div>
@@ -324,12 +345,11 @@ const nextLabel = computed(() => {
   <div v-if="setupOpen" class="modal-wrap" @click.self="setupOpen = false">
     <div class="modal" role="dialog" aria-label="Your setup">
       <h3>Your setup</h3>
-      <p class="note">Every “Say this to Claude” box fills itself in from here. It stays in this browser.</p>
+      <p class="note">Every “Say this to Claude” box fills itself in from here. It stays in this browser. (No app ID needed: your agent looks the app up by name.)</p>
       <div class="setup-grid">
         <label class="field">Server address<input v-model="store.setup.server" spellcheck="false"><small>Where your Fresh Breath runs</small></label>
         <label class="field">App name<input v-model="store.setup.app"><small>What you call it</small></label>
-        <label class="field">App ID (nonce)<input v-model="store.setup.nonce" spellcheck="false" placeholder="e.g. aB3xK9mQ2p"><small>10 characters, under the app's name in the control panel</small></label>
-        <label class="field">Web path<input v-model="store.setup.slug" spellcheck="false"><small>The end of the app's address</small></label>
+        <label class="field">Web path<input v-model="store.setup.slug" spellcheck="false" :aria-invalid="!!slugIssue"><small :class="{ bad: slugIssue }">{{ slugIssue || 'The end of the app’s address, like tix' }}</small></label>
       </div>
       <p style="margin-top:16px"><button class="btn" @click="setupOpen = false">Done</button></p>
     </div>

@@ -82,7 +82,7 @@ signOut();                          // forget this app's gate
 everyone else, so it doubles as a stable user ID.
 
 <Say>
-In my Fresh Breath app [app] (ID [nonce]), read the Fresh Breath services guide, then check for a session silently when the page loads, show a Sign in button if there isn't one, and show the person's name and a Sign out button if there is.
+In my Fresh Breath app [app], read the Fresh Breath services guide, then check for a session silently when the page loads, show a Sign in button if there isn't one, and show the person's name and a Sign out button if there is.
 </Say>
 
 ::: details Under the hood

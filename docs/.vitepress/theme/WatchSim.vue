@@ -4,7 +4,7 @@
 // and every call is reported, reads included, which is how a page that
 // refreshes on events ends up refreshing forever.
 import { reactive, ref } from 'vue'
-import { useBeat } from './kit'
+import { useBeat, BrowserFrame } from './kit'
 
 const LISTS: Record<number, string> = { 12: 'Groceries', 7: 'Hardware' }
 const db = reactive<Record<number, string[]>>({ 12: ['Milk', 'Eggs'], 7: ['Nails'] })
@@ -102,16 +102,23 @@ function toggleDirectives() {
             <b>{{ w.icon }} {{ w.who }}</b>
             <label class="toggle small"><input v-model="w.watching" type="checkbox"> watch()</label>
           </div>
-          <select v-model.number="w.list" @change="switchList(i)">
-            <option v-for="(name, id) in LISTS" :key="id" :value="Number(id)">List {{ id }}: {{ name }}</option>
-          </select>
-          <ul :key="w.flash" class="items" :class="{ flash: w.flash }">
-            <li v-for="(it, j) in w.items" :key="j">{{ it }}</li>
-          </ul>
-          <div class="row">
-            <input v-model="w.draft" type="text" class="grow" placeholder="Add an item…" @keydown.enter="add(i)">
-            <button class="btn small" @click="add(i)">Add</button>
-          </div>
+          <BrowserFrame :url="'https://fb.yourteam.dev/lists/' + w.list" title="Shared Lists" icon="🛒" accent="#e0663a">
+            <div class="wa-head">
+              <b>🛒 Lists</b>
+              <select v-model.number="w.list" class="list-pick" @change="switchList(i)">
+                <option v-for="(name, id) in LISTS" :key="id" :value="Number(id)">{{ name }}</option>
+              </select>
+            </div>
+            <div class="wa-body">
+              <ul :key="w.flash" class="wa-list" :class="{ flash: w.flash }">
+                <li v-for="(it, j) in w.items" :key="j">☐ {{ it }}</li>
+              </ul>
+              <div class="wa-row" style="margin-top:10px">
+                <input v-model="w.draft" type="text" class="wa-input grow" placeholder="Add an item…" @keydown.enter="add(i)">
+                <button class="wa-btn" @click="add(i)">Add</button>
+              </div>
+            </div>
+          </BrowserFrame>
         </div>
         <div class="side-panel">
           <pre class="file mono"><span>[add-item] Add an item to a list.</span>
@@ -141,12 +148,11 @@ SELECT name FROM items
 
 <style scoped>
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(0, 1.1fr); gap: 10px }
-.win { border: 1.5px solid var(--line); border-radius: 12px; padding: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 8px }
+.win { display: flex; flex-direction: column; gap: 8px; min-width: 0 }
+.grow { flex: 1 1 100px }
+.list-pick { padding: 3px 6px !important; font-size: 13px; background: rgba(255,255,255,.95) !important; color: #2a2a2a !important; border: 0 !important }
 .win-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap }
 .win-top b { font-family: var(--display) }
-.items { list-style: none; padding: 8px !important; margin: 0; border-radius: 8px; background: var(--surface); min-height: 90px }
-.items li { margin: 0; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 15px }
-.items li:last-child { border: 0 }
 .toggle { display: inline-flex; gap: 6px; align-items: center; font-family: var(--mono); font-size: 13px; cursor: pointer }
 .toggle.small { font-size: 12px; color: var(--ink-soft) }
 .side-panel { display: flex; flex-direction: column; gap: 8px; min-width: 0 }

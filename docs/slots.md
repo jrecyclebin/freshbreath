@@ -31,14 +31,29 @@ the API call it makes.
 
 <SlotSim />
 
-## Things that trip people up
+## Links that work in every slot
 
-::: warning Hardcoded paths break in other slots
-An app that bakes `/tix/` into its links will miss when it's served from
-`/tix@staging/`. Use relative paths (`./app.js`) and the same files work in
-every slot. Don't add a `<base>` tag either; Fresh Breath adds the right one
-itself when it needs to.
-:::
+The same files are served at `/tools/`, `/tools@dev/`, `/tools@staging/`
+and `/tools@prod/`. And because apps are served single-page style, a deep
+URL like `/tools/email/review/42` is answered by the nearest `index.html`
+above it. A page's relative links would point at the wrong folder there,
+so Fresh Breath fixes them up: it adds a `<base>` tag pointing at the
+page's own folder, slot and all.
+
+Pick a URL and follow what the server does.
+
+<BaseSim />
+
+What that means for your app:
+
+1. **Use relative links** for the app's own files (`app.js`, `css/site.css`).
+   With the `<base>` Fresh Breath adds, they find the right file at any
+   depth, in every slot.
+2. **Don't add a `<base>` tag** or a script that builds one. Fresh Breath
+   leaves a page with its own alone, and a hand-written one names one slot.
+3. **Keep Fresh Breath's own paths absolute**: `/frbr.js`, `/api/…`.
+4. **Route with absolute paths** in a single-page app: under an added
+   `<base>`, a bare `#section` link resolves against the base too.
 
 ::: warning The database isn't slotted
 Only the web files have slots. The app's database, its data files and its

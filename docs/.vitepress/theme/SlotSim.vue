@@ -2,7 +2,7 @@
 // Episode 5: three slots, a default environment, and the address bar that
 // shows which copy each URL serves. Every button logs the API call behind it.
 import { computed, reactive, ref } from 'vue'
-import { store, useBeat } from './kit'
+import { store, useBeat, BrowserFrame, SAMPLE_NONCE } from './kit'
 
 type Slot = 'dev' | 'staging' | 'prod'
 const slots = reactive<Record<Slot, number | null>>({ dev: 1, staging: null, prod: null })
@@ -14,7 +14,7 @@ const seen = reactive({ honest404: false, staged: false, live: false, restored: 
 const beat = useBeat()
 
 const slug = computed(() => store.setup.slug || 'tix')
-const nonce = computed(() => store.setup.nonce || 'aB3xK9mQ2p')
+const nonce = computed(() => SAMPLE_NONCE)
 const label: Record<Slot, string> = { dev: 'Development', staging: 'Staging', prod: 'Production' }
 
 const serving = computed<Slot>(() => (view.value ? (view.value.slice(1) as Slot) : defaultEnv.value))
@@ -94,17 +94,23 @@ function check() {
           <span class="note" style="margin:0">Visit:</span>
           <button v-for="v in (['', '@dev', '@staging', '@prod'] as const)" :key="v" class="chip" :class="{ on: view === v }" @click="look(v)">/{{ slug }}{{ v }}</button>
         </div>
-        <div class="urlbar" style="margin-top:8px"><span class="lock">●</span>{{ (store.setup.server || 'http://localhost:9009').replace(/\/$/, '') }}/{{ slug }}{{ view }}/</div>
-        <div :key="serving + page" class="viewport pop" :class="{ missing: page == null }">
-          <template v-if="page != null">
-            <b>{{ store.setup.app || 'Tix' }} <span>v{{ page }}</span></b>
-            <small>served from {{ label[serving] }}{{ view ? '' : ' (the default environment)' }}</small>
-          </template>
-          <template v-else>
-            <b>404</b>
-            <small>{{ label[serving] }} hasn’t been deployed yet. Fresh Breath won’t quietly serve a different slot instead.</small>
-          </template>
-        </div>
+        <BrowserFrame :url="(store.setup.server || 'http://localhost:9009').replace(/\/$/, '') + '/' + slug + view + '/'" :title="page == null ? '404 Not Found' : (store.setup.app || 'Tix') + ' · issues'" :icon="page == null ? '⚠️' : '🎫'" accent="#6d4bd8" style="margin-top:10px">
+          <div v-if="page != null" :key="serving + page" class="pop">
+            <div class="wa-head"><b>🎫 {{ store.setup.app || 'Tix' }}</b><span class="ver">v{{ page }}</span></div>
+            <div class="wa-body">
+              <ul class="wa-list">
+                <li>#12 Login page is slow</li>
+                <li v-if="page >= 2">#13 Add dark mode <span class="new">new in v2</span></li>
+                <li v-if="page >= 3">#14 Export to CSV <span class="new">new in v3</span></li>
+              </ul>
+              <p class="wa-muted" style="margin:8px 0 0">Served from {{ label[serving] }}{{ view ? '' : ' (the default environment)' }}</p>
+            </div>
+          </div>
+          <div v-else :key="'404' + serving" class="missing pop">
+            <b>404 page not found</b>
+            <p>{{ label[serving] }} hasn’t been deployed yet. Fresh Breath won’t quietly serve a different slot instead.</p>
+          </div>
+        </BrowserFrame>
       </div>
 
       <div class="log">
@@ -137,8 +143,9 @@ function check() {
 .slot-actions .btn { justify-content: center }
 .browser { margin: 16px 0 12px; padding: 12px; border: 1.5px solid var(--line); border-radius: 10px }
 .chip.on { background: var(--cobalt); border-color: var(--cobalt); color: var(--surface) }
-.viewport { margin-top: 10px; padding: 22px; border-radius: 8px; background: var(--mint-soft); text-align: center }
-.viewport b { display: block; font-family: var(--display); font-size: 30px; font-weight: 800 }
-.viewport b span { color: var(--mint) }
-.viewport.missing { background: var(--red-soft); color: var(--red) }
+.ver { font: 600 12px var(--mono); background: rgba(255,255,255,.22); padding: 2px 8px; border-radius: 99px }
+.new { font-size: 11px; font-weight: 700; color: #6d4bd8; background: #efeaff; padding: 1px 6px; border-radius: 4px; margin-left: 6px }
+.missing { padding: 26px 18px; text-align: center; font-family: Georgia, serif }
+.missing b { display: block; font-size: 22px; margin-bottom: 6px }
+.missing p { margin: 0; color: var(--wa-soft); font-family: -apple-system, sans-serif; font-size: 14px }
 </style>

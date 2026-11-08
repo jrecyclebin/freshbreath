@@ -14,8 +14,9 @@ In the control panel, open **Apps** and add one. Give it a name — say,
 paying for.
 
 Fresh Breath gives every app a **nonce**: a random 10-character ID shown
-right under its name. That's how your agent (and the app's own code) tells
-Fresh Breath which app it means.
+right under its name. The app's code and Fresh Breath's API use it to say
+which app they mean. In a prompt, the app's name is enough: your agent looks
+the nonce up.
 
 ::: info 🏬 Think of it like a shop in a mall
 The app name is the sign over the door. The nonce is the unit number on the
@@ -57,7 +58,7 @@ You've got an empty app. Now have your agent fill it.
 </ChatSim>
 
 <Say>
-Read the Fresh Breath publishing guide first. Then build [what the app should do] and publish it to my Fresh Breath app [app] (ID [nonce]) as index.html. Keep every file link relative so it works in every slot. Tell me the address to open when you're done.
+Read the Fresh Breath publishing guide first. Then build [what the app should do] and publish it to my Fresh Breath app [app] as index.html. Keep every file link relative so it works in every slot. Tell me the address to open when you're done.
 </Say>
 
 ::: tip Building it by hand?
@@ -68,18 +69,30 @@ Code handoff zip, the normal one.
 
 ## Web files and data files
 
-Every app has two areas for files:
+On the server, each app is one folder, named for its nonce:
+
+```txt
+apps/aB3xK9mQ2p/
+  web/          Development: what you upload and edit
+  staging/      a frozen copy, once you deploy (next episode)
+  production/   ditto, one step further
+  data/         private files: never served, never deployed
+  db/           the app's databases: app.db, plus any others attached to it
+```
+
+Three of those matter day to day:
 
 <div class="facts">
   <div class="fact"><span class="ic">🪟</span><b>web</b><p>What visitors see. Served at the app’s address, and copied when you deploy.</p></div>
-  <div class="fact"><span class="ic">🗄️</span><b>data</b><p>Private. Never served, never deployed. Good for uploads and backups.</p></div>
+  <div class="fact"><span class="ic">🔒</span><b>data</b><p>Private. Never served, never deployed. Good for uploads and backups.</p></div>
+  <div class="fact"><span class="ic">🗄️</span><b>db</b><p>Holds any databases attached to the app. Shared by every slot. Reached through tools (episode 8) or your agent’s <code>db_query</code>, not as files.</p></div>
 </div>
 
 Writing a file **replaces** it — nothing is merged. So before a big change,
 have your agent back things up into the data area:
 
 <Say>
-In my Fresh Breath app [app] (ID [nonce]), I want to [describe the change]. First save a backup of index.html in the app's data area, in a backups folder with today's date. Then make only the edits needed and tell me what you changed.
+In my Fresh Breath app [app], I want to [describe the change]. First save a backup of index.html in the app's data area, in a backups folder with today's date. Then make only the edits needed and tell me what you changed.
 </Say>
 
 ::: details Under the hood

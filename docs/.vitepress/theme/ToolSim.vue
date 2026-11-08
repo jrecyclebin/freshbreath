@@ -5,7 +5,7 @@
 // of a line with indented continuation lines, and `$vars` as bound
 // parameters. It also flags the mistakes the real parser rejects.
 import { computed, onMounted, reactive, ref, shallowRef, watch } from 'vue'
-import { store, useBeat } from './kit'
+import { useBeat, SAMPLE_NONCE } from './kit'
 
 const START = `[migrate] Create the tables if they don't exist.
 
@@ -175,7 +175,7 @@ function resetScript() { script.value = START }
     </div>
     <div class="sim-body grid">
       <div>
-        <label class="inline">service file · app:{{ store.setup.nonce || 'aB3xK9mQ2p' }}
+        <label class="inline">service file · app:{{ SAMPLE_NONCE }}
           <textarea v-model="script" class="editor mono" spellcheck="false" rows="22" />
         </label>
         <ul v-if="parsed.errors.length" class="errors">

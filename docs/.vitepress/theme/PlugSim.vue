@@ -3,7 +3,7 @@
 // Breath. Each button fails for an honest reason on its own, and works once
 // the app is plugged in.
 import { computed, reactive, ref } from 'vue'
-import { useBeat } from './kit'
+import { useBeat, BrowserFrame } from './kit'
 
 const plugged = ref(false)
 const cards = ref<string[]>(['Water the ferns'])
@@ -92,24 +92,29 @@ function flip() {
       </div>
     </div>
     <div class="sim-body">
-      <div class="urlbar"><span :class="{ lock: plugged }">{{ plugged ? '🔒' : '📄' }}</span>{{ plugged ? 'https://fb.yourteam.dev/ferns' : 'file:///Users/you/Desktop/ferns.html' }}</div>
-      <div class="mini-app" :class="{ plugged }">
-        <div class="mini-top">
+      <BrowserFrame
+        :url="plugged ? 'https://fb.yourteam.dev/ferns' : 'file:///Users/you/Desktop/ferns.html'"
+        title="Fern Board" icon="🌿" accent="#2e8b57"
+        :class="{ plugged }"
+      >
+        <div class="wa-head">
           <b>🌿 Fern Board</b>
-          <span class="note" style="margin:0">{{ user ? 'Hi, ' + user : 'Not signed in' }}</span>
-          <button class="btn small ghost" @click="signIn">Sign in</button>
+          <small>{{ user ? 'Hi, ' + user : 'Not signed in' }}</small>
+          <button class="wa-btn light" @click="signIn">Sign in</button>
         </div>
-        <ul class="mini-cards">
-          <li v-for="(c, i) in cards" :key="i + c">{{ c }}</li>
-          <li v-for="iss in issues" :key="iss" class="gh">🐙 {{ iss }}</li>
-        </ul>
-        <div class="row">
-          <input v-model="draft" type="text" class="grow" placeholder="New card…" @keydown.enter="save">
-          <button class="btn small" @click="save">Save card</button>
-          <button class="btn small ghost" @click="github">Pull GitHub issues</button>
-          <button class="btn small quiet" @click="refresh">↻ Refresh page</button>
+        <div class="wa-body">
+          <ul class="mini-cards">
+            <li v-for="(c, i) in cards" :key="i + c">{{ c }}</li>
+            <li v-for="iss in issues" :key="iss" class="gh">🐙 {{ iss }}</li>
+          </ul>
+          <div class="wa-row">
+            <input v-model="draft" type="text" class="wa-input grow" placeholder="New card…" @keydown.enter="save">
+            <button class="wa-btn" @click="save">Save card</button>
+            <button class="wa-btn ghost" @click="github">Pull GitHub issues</button>
+            <button class="wa-btn plain" @click="refresh">↻ Refresh page</button>
+          </div>
         </div>
-      </div>
+      </BrowserFrame>
       <div v-if="message" :key="message.text" class="verdict pop" :class="message.kind">{{ message.text }}</div>
     </div>
     <ul class="quests">
@@ -119,11 +124,11 @@ function flip() {
 </template>
 
 <style scoped>
-.mini-app { margin-top: 12px; border: 1.5px dashed var(--line); border-radius: 10px; padding: 14px; background: var(--bg); transition: border-color .3s }
-.mini-app.plugged { border-style: solid; border-color: var(--mint) }
-.mini-top { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap }
-.mini-top b { font-family: var(--display); font-size: 18px; flex: 1 }
+.bframe { margin-top: 2px; transition: box-shadow .3s }
+.bframe.plugged { box-shadow: 0 0 0 2px var(--mint), 0 10px 28px -12px rgba(20, 24, 40, .35) }
+.grow { flex: 1 1 160px }
 .mini-cards { list-style: none; padding: 0 !important; margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 8px }
-.mini-cards li { background: var(--surface); border: 1.5px solid var(--line); border-radius: 8px; padding: 6px 12px; font-size: 15px; margin: 0; animation: pop .3s }
-.mini-cards li.gh { border-color: var(--amber) }
+.mini-cards li { background: #fff8e6; color: #3a3220; border-radius: 4px; padding: 8px 12px; font-size: 14px; margin: 0; box-shadow: 0 1px 3px rgba(0,0,0,.15); transform: rotate(-.6deg); animation: pop .3s }
+.mini-cards li:nth-child(even) { transform: rotate(.8deg); background: #e9f7ee }
+.mini-cards li.gh { background: #efeaff }
 </style>
