@@ -23,6 +23,13 @@ let APP_NONCE = CFG.appNonce ?? null; // let: re-derived if the server couldn't 
 // behind the Anonymous record, or an instance still in setup.
 let GATE_ID = CFG.authRecordID ?? 0; // let: re-derived alongside APP_NONCE
 
+// This page load's name for itself, sent as X-Frbr-Client with every
+// ServiceProxy request so service watchers aren't told about this page's
+// own calls. getRandomValues, not randomUUID: the latter needs a secure
+// context, and an app may be served over plain http on a LAN.
+const CLIENT_ID = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+  b => b.toString(16).padStart(2, "0")).join("");
+
 // The origin our callback page will post from. The page posts only to
 // the app's own origin (its registered one for an app that runs off the
 // server, or "*" for a file:// page, which has none); the listener checks
@@ -1048,9 +1055,14 @@ export class ServiceProxy {
 
   // The single choke point: every request out of this proxy goes through
   // authedFetch, so a dead login is retried and re-prompted the same way
-  // api() does it.
+  // api() does it. A request to this server names the page, so its own
+  // calls skip its watch; one going straight to a third party doesn't —
+  // an unknown header there would cost a CORS preflight it may refuse.
   async #fetch(url, init = {}) {
-    return authedFetch(this.session, url, init);
+    if (!url.startsWith(`${API}/service/`)) return authedFetch(this.session, url, init);
+    const headers = new Headers(init.headers);
+    headers.set("X-Frbr-Client", CLIENT_ID);
+    return authedFetch(this.session, url, { ...init, headers });
   }
 
   // A proxied MCP service is reached through the server, which swaps the
@@ -1151,10 +1163,11 @@ export class ServiceProxy {
   }
 
   /**
-   * Watch this service's completed calls, by anyone, as they happen. Each
-   * successful call arrives as one object: `{tool, key?}` for a task or
-   * virtual tool (key is a WATCH directive's result), or `{method, fetch}`
-   * for a fetch through the proxy (the path under the service, no query).
+   * Watch this service's completed calls, by anyone but this page, as they
+   * happen. Each successful call arrives as one object: `{tool, key?}` for
+   * a task or virtual tool (key is a WATCH directive's result), or
+   * `{method, fetch}` for a fetch through the proxy (the path under the
+   * service, no query). Agents' calls over MCP always arrive.
    * Reconnects on its own; abort the signal to stop, which resolves it.
    * Events missed while disconnected are gone, so re-read on reconnect.
    * @param {(event: Object) => void} onEvent
@@ -1171,7 +1184,7 @@ export class ServiceProxy {
       try {
         return await sseStream(url, {
           method: "GET", session: this.session, signal, reconnect: true,
-          headers: { "X-App-Nonce": APP_NONCE },
+          headers: { "X-App-Nonce": APP_NONCE, "X-Frbr-Client": CLIENT_ID },
           onOpen: () => { renewed = false; onOpen?.(); },
           onEvent: (_, payload) => onEvent(payload),
         });

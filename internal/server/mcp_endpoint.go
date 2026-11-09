@@ -214,7 +214,7 @@ func (s *Server) newVirtualMCPServer(svc *db.Service, opts ...func(*mcp.ServerOp
 		}
 		capturedName := vt.Name
 		svcSlug := mcpSlug(svc.URL)
-		hooks := s.virtualHooks(svc)
+		hooks := s.virtualHooks(svc, "")
 		mcps.AddTool(tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			cred, session, claims, denied := s.mcpCallerCred(svc, req)
 			if denied != nil {
@@ -313,7 +313,7 @@ func (s *Server) newTaskMCPServer(svc *db.Service) (*mcp.Server, error) {
 				return mcpAuthError("%v", err), nil
 			}
 			if !result.IsError {
-				s.reportServiceCall(svc.ID, serviceWatchEvent{Tool: task.Name})
+				s.reportServiceCall(svc.ID, "", serviceWatchEvent{Tool: task.Name})
 			}
 			return result, nil
 		})

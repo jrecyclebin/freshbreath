@@ -93,9 +93,10 @@ type Server struct {
 	appDBWatch   map[string]*appDBWatchHub
 
 	// serviceWatch holds each service's /service/watch subscribers, by
-	// service ID. An entry exists only while someone is watching.
+	// service ID, each with the page client ID it watches from. An entry
+	// exists only while someone is watching.
 	serviceWatchMu sync.Mutex
-	serviceWatch   map[int64]map[chan serviceWatchEvent]struct{}
+	serviceWatch   map[int64]map[chan serviceWatchEvent]string
 	dbRowCap       int // 0 → appDBRowCapDefault; lowered in tests
 }
 

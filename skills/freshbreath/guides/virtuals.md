@@ -790,10 +790,15 @@ under the service URL, without the query string.
 > its result leaves the tool through the protocol. Key on ids, not on
 > contents.
 
-> **Mind feedback loops.** A page that refreshes by calling a tool, on a
-> service that reports everything, hears its own refresh and refreshes again.
-> Add `WATCH` to the tools that change things, or ignore the events your
-> own reads cause.
+A page never hears about its own calls: frbr.js names each page load
+(`X-Frbr-Client`), and its watch skips the calls that carry its name. Calls
+over MCP carry none, so every watcher hears those.
+
+> **Mind feedback loops.** That skip covers one page, not two. On a service
+> that reports everything, a page that refreshes by calling a read tool sets
+> off every *other* open page, and their refreshes set it off in turn, back
+> and forth. Add `WATCH` to the tools that change things, so reads go
+> unreported.
 
 ## App Services — Every App Has One
 

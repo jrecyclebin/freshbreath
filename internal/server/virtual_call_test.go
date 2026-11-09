@@ -77,12 +77,13 @@ HTTP 200
 
 // watchStream opens /service/watch/{id} on a live server and returns the
 // call events as they arrive. It returns once the subscription is live.
-func watchStream(t *testing.T, base, id, nonce string) <-chan serviceWatchEvent {
+func watchStream(t *testing.T, base, id, nonce, client string) <-chan serviceWatchEvent {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/service/watch/"+id, nil)
 	req.Header.Set("X-App-Nonce", nonce)
+	req.Header.Set("X-Frbr-Client", client)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -122,8 +123,9 @@ func nextWatchEvent(t *testing.T, ch <-chan serviceWatchEvent) serviceWatchEvent
 
 // TestServiceWatch pins /service/watch for a virtual service and a proxied
 // api service: successful calls arrive as events (tool names with their
-// WATCH keys; fetch method and path, no query), failures don't, and the
-// endpoint answers only apps the service is approved for.
+// WATCH keys; fetch method and path, no query), failures and the watching
+// page's own calls don't, and the endpoint answers only apps the service
+// is approved for.
 func TestServiceWatch(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/missing") {
@@ -139,7 +141,7 @@ POST %[1]s/items
 {name: $name}
 
 HTTP 200
-WATCH .list
+WATCH $name
 ---
 [list-items] List items.
 
@@ -150,20 +152,27 @@ HTTP 200
 	live := httptest.NewServer(srv)
 	t.Cleanup(live.Close) // registered first, so the watch streams are cancelled before it waits on them
 
-	call := func(task string) {
+	call := func(task, name, client string) {
 		t.Helper()
 		rr := testRequest(t, srv, http.MethodPost, "/service/call/keeper",
-			strings.NewReader(`{"task": "`+task+`", "args": {"name": "milk"}}`),
-			map[string]string{"X-App-Nonce": nonce})
+			strings.NewReader(`{"task": "`+task+`", "args": {"name": "`+name+`"}}`),
+			map[string]string{"X-App-Nonce": nonce, "X-Frbr-Client": client})
 		if rr.Code != http.StatusOK {
 			t.Fatalf("%s: status %d: %s", task, rr.Code, rr.Body.String())
 		}
 	}
 
-	events := watchStream(t, live.URL, fmt.Sprint(svc.ID), nonce)
-	call("list-items") // unwatched: no event
-	call("add-item")
-	if ev := nextWatchEvent(t, events); ev.Tool != "add-item" || ev.Key != "groceries" {
+	// Events arrive in call order, so the first one must be the other
+	// page's: the watcher's own call and the unwatched tool came earlier.
+	events := watchStream(t, live.URL, fmt.Sprint(svc.ID), nonce, "page-a")
+	call("list-items", "milk", "page-b") // unwatched: no event
+	call("add-item", "mine", "page-a")   // the watcher's own: no event
+	call("add-item", "theirs", "page-b")
+	if ev := nextWatchEvent(t, events); ev.Tool != "add-item" || ev.Key != "theirs" {
+		t.Fatalf("event = %+v", ev)
+	}
+	call("add-item", "agent", "") // no client (an MCP caller): everyone hears it
+	if ev := nextWatchEvent(t, events); ev.Key != "agent" {
 		t.Fatalf("event = %+v", ev)
 	}
 
@@ -176,7 +185,7 @@ HTTP 200
 		t.Fatal(err)
 	}
 	apiID := fmt.Sprint(api.ID)
-	fetches := watchStream(t, live.URL, apiID, nonce)
+	fetches := watchStream(t, live.URL, apiID, nonce, "page-a")
 	for _, path := range []string{"/missing", "/users/42?secret=1"} {
 		rr := testRequest(t, srv, http.MethodPost, "/service/"+apiID+path, strings.NewReader(`{}`),
 			map[string]string{"X-App-Nonce": nonce})

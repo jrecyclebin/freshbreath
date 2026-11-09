@@ -1436,7 +1436,7 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	// A proxied MCP service is all POSTs to one URL, so it reports nothing.
 	if copyErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && svc.Descriptor.Type == "api" {
 		path := "/" + strings.TrimLeft(strings.TrimPrefix(r.URL.Path, "/service/"+idStr+"/"), "/")
-		s.reportServiceCall(svc.ID, serviceWatchEvent{Method: r.Method, Fetch: path})
+		s.reportServiceCall(svc.ID, r.Header.Get("X-Frbr-Client"), serviceWatchEvent{Method: r.Method, Fetch: path})
 	}
 }
 
@@ -1452,19 +1452,20 @@ type serviceWatchEvent struct {
 	Fetch  string      `json:"fetch,omitempty"`
 }
 
-// watchService subscribes to a service's completed calls. The returned
+// watchService subscribes to a service's completed calls, except those
+// made by the same page client (client "" hears everything). The returned
 // stop function unsubscribes; callers MUST defer it.
-func (s *Server) watchService(id int64) (chan serviceWatchEvent, func()) {
+func (s *Server) watchService(id int64, client string) (chan serviceWatchEvent, func()) {
 	ch := make(chan serviceWatchEvent, 16)
 	s.serviceWatchMu.Lock()
 	defer s.serviceWatchMu.Unlock()
 	if s.serviceWatch == nil {
-		s.serviceWatch = make(map[int64]map[chan serviceWatchEvent]struct{})
+		s.serviceWatch = make(map[int64]map[chan serviceWatchEvent]string)
 	}
 	if s.serviceWatch[id] == nil {
-		s.serviceWatch[id] = make(map[chan serviceWatchEvent]struct{})
+		s.serviceWatch[id] = make(map[chan serviceWatchEvent]string)
 	}
-	s.serviceWatch[id][ch] = struct{}{}
+	s.serviceWatch[id][ch] = client
 	return ch, func() {
 		s.serviceWatchMu.Lock()
 		defer s.serviceWatchMu.Unlock()
@@ -1475,13 +1476,18 @@ func (s *Server) watchService(id int64) (chan serviceWatchEvent, func()) {
 	}
 }
 
-// reportServiceCall tells a service's watchers about one completed call.
-// A watcher whose buffer is full misses the event rather than holding up
-// the call that caused it.
-func (s *Server) reportServiceCall(id int64, ev serviceWatchEvent) {
+// reportServiceCall tells a service's watchers about one completed call,
+// skipping the watcher on the page that made it: from is the caller's page
+// client ID (X-Frbr-Client), "" when it has none (MCP callers), which
+// every watcher hears. A watcher whose buffer is full misses the event
+// rather than holding up the call that caused it.
+func (s *Server) reportServiceCall(id int64, from string, ev serviceWatchEvent) {
 	s.serviceWatchMu.Lock()
 	defer s.serviceWatchMu.Unlock()
-	for ch := range s.serviceWatch[id] {
+	for ch, client := range s.serviceWatch[id] {
+		if from != "" && client == from {
+			continue
+		}
 		select {
 		case ch <- ev:
 		default:
@@ -1492,7 +1498,8 @@ func (s *Server) reportServiceCall(id int64, ev serviceWatchEvent) {
 // handleServiceWatch streams a service's completed calls as SSE: tool
 // calls on task and virtual services (from /service/call, the MCP mount and
 // resumed elicitations alike) and successful fetches through the proxy of
-// an api service. Watchers see every caller's calls, not just their own.
+// an api service. Watchers see every caller's calls but their own page's:
+// a page names itself with X-Frbr-Client, here and on its calls.
 // An app's own service is addressed by the negative ID its logins report.
 // Like /db/watch it is forward-only: no ids, no replay.
 func (s *Server) handleServiceWatch(w http.ResponseWriter, r *http.Request) {
@@ -1548,7 +1555,7 @@ func (s *Server) handleServiceWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, stop := s.watchService(svc.ID)
+	ch, stop := s.watchService(svc.ID, r.Header.Get("X-Frbr-Client"))
 	defer stop()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -1883,7 +1890,7 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 	sqlRunner := s.browserSQLRunner(svc, r.Header.Get("X-App-Nonce"), body.Args)
 
 	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, auth, sqlRunner,
-		&formats.ExecContext{Hooks: s.virtualHooks(svc)})
+		&formats.ExecContext{Hooks: s.virtualHooks(svc, r.Header.Get("X-Frbr-Client"))})
 	if err != nil {
 		// A FORM/URL step suspends the run waiting for an elicitation —
 		// only an MCP client can supply that. Surface a clean message
@@ -2013,7 +2020,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 		http.Error(w, text, http.StatusInternalServerError)
 		return
 	}
-	s.reportServiceCall(svc.ID, serviceWatchEvent{Tool: task.Name})
+	s.reportServiceCall(svc.ID, r.Header.Get("X-Frbr-Client"), serviceWatchEvent{Tool: task.Name})
 	w.Header().Set("Content-Type", "application/json")
 	// A script's stdout is the result: sent as JSON when it is JSON,
 	// string-wrapped when it isn't — the same output toolOutput() used

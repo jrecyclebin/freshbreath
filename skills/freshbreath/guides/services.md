@@ -297,7 +297,8 @@ relative to the service's registered URL; the leading slash is optional.
 
 For tasks, virtual and proxied `api` services, `svc.watch()` streams
 completed calls on the service as they happen. These are *anyone's* calls,
-not just this page's:
+other users', other tabs' and agents', except this page's own, which it
+already knows about:
 
 ```js
 const stop = new AbortController();
