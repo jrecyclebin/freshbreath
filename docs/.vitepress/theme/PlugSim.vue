@@ -16,8 +16,8 @@ const tried = reactive({ signin: false, save: false, github: false })
 const beat = useBeat()
 
 const quests = computed(() => [
-  { got: tried.signin && tried.save && tried.github, text: 'Try all three buttons as a plain HTML file' },
-  { got: worked.signin && worked.save && worked.github, text: 'Plug into Fresh Breath and get all three working' }
+  { got: tried.signin && tried.save && tried.github, text: 'Try all four buttons as a plain HTML file' },
+  { got: worked.signin && worked.save && worked.github, text: 'Plug into Fresh Breath and get everything working' }
 ])
 
 function check() {

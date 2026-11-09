@@ -25,6 +25,8 @@ static page four things it can't have by itself:
   <div class="fact"><span class="ic">🗄️</span><b>Remember things</b><p>Every app gets its own database.</p></div>
   <div class="fact"><span class="ic">🔗</span><b>Talk to other tools</b><p>APIs, MCP servers, scripts. Proxied, so CORS isn’t your problem.</p></div>
   <div class="fact"><span class="ic">🌐</span><b>Live at a real address</b><p>So teammates can open it in a browser.</p></div>
+  <div class="fact"><span class="ic">✏️</span><b>Prompt to publish</b><p>Update the app over MCP (Claude, Codex, etc).</p></div>
+  <div class="fact"><span class="ic">🚇</span><b>Secret Tunneling</b><p>A Tailcat address if it's on a LAN and you need remote access.</p></div>
 </div>
 
 ::: info 🔌 Think of it like a universal adapter
