@@ -1,5 +1,6 @@
 // Build-time index of every page: episode order and blurbs for the sidebar and
-// home page, plus each beat's title, anchor and text for the Jump search.
+// home page (episodes first, then the advanced ones that teach frbr.js code,
+// then reference), plus each beat's title, anchor and text for the Jump search.
 import { createContentLoader } from 'vitepress'
 
 export interface BeatInfo { title: string, id: string, text: string }
@@ -7,6 +8,7 @@ export interface Page {
   url: string
   title: string
   episode?: number
+  advanced?: number
   reference?: boolean
   blurb: string
   minutes?: number
@@ -24,11 +26,13 @@ const strip = (html: string) => html
   .replace(/\s+/g, ' ')
   .trim()
 
+const order = (p: Page) => p.episode ?? (p.advanced ? 1000 + p.advanced : 9999)
+
 export default createContentLoader('*.md', {
   render: true,
   transform(raw): Page[] {
     return raw
-      .filter((p) => p.frontmatter.episode || p.frontmatter.reference)
+      .filter((p) => p.frontmatter.episode || p.frontmatter.advanced || p.frontmatter.reference)
       .map((p) => {
         const fm = p.frontmatter
         const html = p.html || ''
@@ -45,6 +49,7 @@ export default createContentLoader('*.md', {
           url: p.url,
           title: fm.title,
           episode: fm.episode,
+          advanced: fm.advanced,
           reference: !!fm.reference,
           blurb: fm.blurb || '',
           minutes: fm.minutes,
@@ -53,6 +58,6 @@ export default createContentLoader('*.md', {
           beats
         }
       })
-      .sort((a, b) => (a.episode ?? 999) - (b.episode ?? 999) || a.title.localeCompare(b.title))
+      .sort((a, b) => order(a) - order(b) || a.title.localeCompare(b.title))
   }
 })

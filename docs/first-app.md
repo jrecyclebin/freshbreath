@@ -85,7 +85,7 @@ Three of those matter day to day:
 <div class="facts">
   <div class="fact"><span class="ic">🪟</span><b>web</b><p>What visitors see. Served at the app’s address, and copied when you deploy.</p></div>
   <div class="fact"><span class="ic">🔒</span><b>data</b><p>Private. Never served, never deployed. Good for uploads and backups.</p></div>
-  <div class="fact"><span class="ic">🗄️</span><b>db</b><p>Holds any databases attached to the app. Shared by every slot. Reached through tools (episode 8) or your agent’s <code>db_query</code>, not as files.</p></div>
+  <div class="fact"><span class="ic">🗄️</span><b>db</b><p>Holds any databases attached to the app. Shared by every slot. Reached through tools (episode 7) or your agent’s <code>db_query</code>, not as files.</p></div>
 </div>
 
 Writing a file **replaces** it — nothing is merged. So before a big change,

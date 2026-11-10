@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Episode 9: two pages watching one service. A call that changes something
+// Advanced 2: two pages watching one service. A call that changes something
 // sends an event; pages showing that list refresh. Take the WATCH lines out
 // and every call is reported, reads included, which is how a page that
 // refreshes on events ends up refreshing forever.

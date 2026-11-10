@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Episode 11: a small deploy app on SSH file sync. Sign in with the
+// Advanced 3: a small deploy app on SSH file sync. Sign in with the
 // passphrase (that loads the key into the server's agent for an hour), open
 // a session to a host (good for 8 hours), diff the local folder against the
 // remote one, and push the difference. Every request goes through api(),

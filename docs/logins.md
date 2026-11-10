@@ -1,5 +1,5 @@
 ---
-episode: 7
+advanced: 1
 title: Logging in from your app
 icon: 🔑
 minutes: 5

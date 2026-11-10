@@ -1,5 +1,5 @@
 ---
-episode: 11
+advanced: 3
 title: SSH and file sync
 icon: 🔐
 minutes: 5
