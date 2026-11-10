@@ -179,7 +179,10 @@ func appHostServes(p string) bool {
 	case strings.HasPrefix(p, "/control/"):
 		return strings.HasPrefix(p, "/control/vendor/")
 	case strings.HasPrefix(p, "/api/"):
-		return p == "/api/updates/check" || p == "/api/updates/apply" || strings.HasPrefix(p, "/api/elicitation/")
+		// Editor apps sync files and drive git over ssh from their own
+		// host; the rest of the admin API (/api/db included) stays off it.
+		return p == "/api/updates/check" || p == "/api/updates/apply" || strings.HasPrefix(p, "/api/elicitation/") ||
+			strings.HasPrefix(p, "/api/ssh/") || strings.HasPrefix(p, "/api/sync/")
 	case strings.HasPrefix(p, "/oauth/"):
 		return p == "/oauth/token" || strings.HasPrefix(p, "/oauth/token/")
 	case strings.HasPrefix(p, "/.well-known/"):
@@ -390,6 +393,7 @@ func (s *Server) SetupRoutes() {
 	s.mux.HandleFunc("/service/handoff", s.handleHandoff)
 	s.mux.HandleFunc("/service/{id}/", s.handleServiceProxy)
 	s.mux.HandleFunc("/service/call/{name}", s.handleServiceCall)
+	s.mux.HandleFunc("/service/watch/{id}", s.handleServiceWatch)
 
 	// MCP endpoints for virtual services — single routes dispatch by slug
 	s.mux.HandleFunc("/mcp/{name}", s.handleMCP)
@@ -1231,6 +1235,8 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 // for both the script-tag JS form (renderEnvJS) and the JSON form frbr.js
 // fetches when Referer is suppressed (handleEnv with ?loc=).
 func (s *Server) envConfig(r *http.Request) envConfig {
+	// The host the page reached: a custom domain answers its apps' calls
+	// itself, and a tunnel client keeps its forwarded port.
 	apiBase := s.schemeOf(r) + "://" + r.Host
 
 	// Resolve the app nonce from the request. See resolveAppNonce for the
@@ -1428,7 +1434,165 @@ func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	flw := &flushWriter{w: w}
-	io.Copy(flw, resp.Body)
+	_, copyErr := io.Copy(flw, resp.Body)
+
+	// A finished, successful fetch is news to the service's watchers: the
+	// method and the path under the service, never the query or a body.
+	// A proxied MCP service is all POSTs to one URL, so it reports nothing.
+	if copyErr == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && svc.Descriptor.Type == "api" {
+		path := "/" + strings.TrimLeft(strings.TrimPrefix(r.URL.Path, "/service/"+idStr+"/"), "/")
+		s.reportServiceCall(svc.ID, r.Header.Get("X-Frbr-Client"), serviceWatchEvent{Method: r.Method, Fetch: path})
+	}
+}
+
+// ── Service watch ───────────────────────────────────────────────────
+
+// serviceWatchEvent is one completed call on a service as its watchers see
+// it: a tool's name (with its WATCH key, when the directive had one), or a
+// proxied fetch's method and path. Never arguments, query strings or bodies.
+type serviceWatchEvent struct {
+	Tool   string      `json:"tool,omitempty"`
+	Key    interface{} `json:"key,omitempty"`
+	Method string      `json:"method,omitempty"`
+	Fetch  string      `json:"fetch,omitempty"`
+}
+
+// watchService subscribes to a service's completed calls, except those
+// made by the same page client (client "" hears everything). The returned
+// stop function unsubscribes; callers MUST defer it.
+func (s *Server) watchService(id int64, client string) (chan serviceWatchEvent, func()) {
+	ch := make(chan serviceWatchEvent, 16)
+	s.serviceWatchMu.Lock()
+	defer s.serviceWatchMu.Unlock()
+	if s.serviceWatch == nil {
+		s.serviceWatch = make(map[int64]map[chan serviceWatchEvent]string)
+	}
+	if s.serviceWatch[id] == nil {
+		s.serviceWatch[id] = make(map[chan serviceWatchEvent]string)
+	}
+	s.serviceWatch[id][ch] = client
+	return ch, func() {
+		s.serviceWatchMu.Lock()
+		defer s.serviceWatchMu.Unlock()
+		delete(s.serviceWatch[id], ch)
+		if len(s.serviceWatch[id]) == 0 {
+			delete(s.serviceWatch, id)
+		}
+	}
+}
+
+// reportServiceCall tells a service's watchers about one completed call,
+// skipping the watcher on the page that made it: from is the caller's page
+// client ID (X-Frbr-Client), "" when it has none (MCP callers), which
+// every watcher hears. A watcher whose buffer is full misses the event
+// rather than holding up the call that caused it.
+func (s *Server) reportServiceCall(id int64, from string, ev serviceWatchEvent) {
+	s.serviceWatchMu.Lock()
+	defer s.serviceWatchMu.Unlock()
+	for ch, client := range s.serviceWatch[id] {
+		if from != "" && client == from {
+			continue
+		}
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
+}
+
+// handleServiceWatch streams a service's completed calls as SSE: tool
+// calls on task and virtual services (from /service/call, the MCP mount and
+// resumed elicitations alike) and successful fetches through the proxy of
+// an api service. Watchers see every caller's calls but their own page's:
+// a page names itself with X-Frbr-Client, here and on its calls.
+// An app's own service is addressed by the negative ID its logins report.
+// Like /db/watch it is forward-only: no ids, no replay.
+func (s *Server) handleServiceWatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nonce := r.Header.Get("X-App-Nonce")
+	if nonce == "" {
+		http.Error(w, "Missing X-App-Nonce header", http.StatusUnauthorized)
+		return
+	}
+	serviceID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid service id", http.StatusBadRequest)
+		return
+	}
+	app, err := s.store.GetApp(nonce)
+	if err != nil {
+		http.Error(w, "Unknown app", http.StatusUnauthorized)
+		return
+	}
+	var svc *db.Service
+	if serviceID < 0 {
+		if -serviceID != app.ID {
+			http.Error(w, "Service not found", http.StatusNotFound)
+			return
+		}
+		svc = appService(app)
+	} else if svc, err = s.store.GetService(serviceID); err != nil {
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
+	}
+	if !s.appMayUseService(app.Nonce, svc) {
+		http.Error(w, "Service not approved for this app", http.StatusForbidden)
+		return
+	}
+	switch svc.Descriptor.Type {
+	case "api", "tasks", "virtual":
+	default:
+		http.Error(w, fmt.Sprintf("A %s service can't be watched", svc.Descriptor.Type), http.StatusBadRequest)
+		return
+	}
+
+	// The app door's gate, as for /service/call and the proxy.
+	gate, err := s.resolveAppGate(app)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Gate resolution failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if _, _, err := s.verifyGateRequest(gate, r); err != nil {
+		httpInvalidToken(w, "Unauthorized: "+err.Error())
+		return
+	}
+
+	ch, stop := s.watchService(svc.ID, r.Header.Get("X-Frbr-Client"))
+	defer stop()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	fw := flushWriter{w: w}
+	// One comment up front so a quiet service still proves the
+	// subscription is live — the client's onOpen fires on first bytes.
+	fmt.Fprint(&fw, ": watch\n\n")
+
+	enc := json.NewEncoder(&fw)
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev := <-ch:
+			if _, err := fmt.Fprint(&fw, "event: call\ndata: "); err != nil {
+				return
+			}
+			if err := enc.Encode(ev); err != nil {
+				return
+			}
+			if _, err := fmt.Fprint(&fw, "\n"); err != nil {
+				return
+			}
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(&fw, ": hb\n\n"); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // ── Admin API ──
@@ -1731,7 +1895,7 @@ func (s *Server) handleVirtualExec(w http.ResponseWriter, r *http.Request, svc *
 	sqlRunner := s.browserSQLRunner(svc, r.Header.Get("X-App-Nonce"), body.Args)
 
 	result, err := formats.ExecuteVirtualTool(s.httpClient, tools, body.Task, body.Args, auth, sqlRunner,
-		&formats.ExecContext{Hooks: s.virtualHooks(svc)})
+		&formats.ExecContext{Hooks: s.virtualHooks(svc, r.Header.Get("X-Frbr-Client"))})
 	if err != nil {
 		// A FORM/URL step suspends the run waiting for an elicitation —
 		// only an MCP client can supply that. Surface a clean message
@@ -1861,6 +2025,7 @@ func (s *Server) handleTaskExec(w http.ResponseWriter, r *http.Request, svc *db.
 		http.Error(w, text, http.StatusInternalServerError)
 		return
 	}
+	s.reportServiceCall(svc.ID, r.Header.Get("X-Frbr-Client"), serviceWatchEvent{Tool: task.Name})
 	w.Header().Set("Content-Type", "application/json")
 	// A script's stdout is the result: sent as JSON when it is JSON,
 	// string-wrapped when it isn't — the same output toolOutput() used

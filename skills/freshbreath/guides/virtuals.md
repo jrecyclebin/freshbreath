@@ -737,6 +737,69 @@ as `"truncated": true` rather than silently shortened.
 > `recent-tasks` can't be talked into `DROP TABLE` no matter how confidently
 > it asks.
 
+## Watching Calls — WATCH
+
+An app can watch a service — `svc.watch()` in frbr.js, which streams
+`/service/watch/{id}` — and hear about each tool call on it as the call
+finishes. By default, a virtual service reports **every** successful call, by
+tool name only. Once *any* tool in the file has a `WATCH` directive, only the
+tools with one are reported:
+
+```
+[add-item] Add an item to a list.
+
+INSERT INTO items (list_id, name) VALUES ($list_id, $name)
+WATCH $list_id
+---
+[rename-list] Rename a list.
+
+UPDATE lists SET name = $name WHERE id = $list_id
+WATCH
+---
+[list-items] Read a list. (Not watched — reads don't change anything.)
+
+SELECT name FROM items WHERE list_id = $list_id
+```
+
+A bare `WATCH` marks the tool watched, so a watcher gets `{"tool":
+"rename-list"}`. `WATCH <expr>` does that too, and evaluates a jq expression
+whose result rides along as the event's key: `{"tool": "add-item", "key":
+12}`. A page that shows list 12 can refresh when it sees that key, and
+ignore the rest. The expression is jq, the same as anywhere else: `WATCH
+{list: $list_id, kind: "item"}`, `WATCH .rows[0].id`.
+
+`WATCH` runs where it sits, like an `assert`: `.` is the response the last
+step returned, `$vars` are whatever has been assigned by then, and `.` passes
+through unchanged. A tool can have more than one, and each `WATCH` it passes
+sends its own event. Only a call that **succeeds** is reported. A tool that
+fails after its `WATCH`, or stops at an elicitation that is never answered,
+sends nothing. A `WATCH` after a shaping block never runs, because shaping
+ends the tool, so put it before the shaping block.
+
+Calls are reported however they arrive: from an app's pages, over MCP (an
+agent, a scheduled task) or resumed after an elicitation. Task services report
+every successful task, by name. Proxied `api` services report every
+successful fetch as `{"method": "POST", "fetch": "/v1/items/7"}`: the path
+under the service URL, without the query string.
+
+> **A WATCH key is broadcast.** Watchers see every caller's calls, not just
+> their own, and anyone who can open the app can watch. Whatever a `WATCH`
+> expression returns goes out to every one of them. `WATCH $list_id` is
+> fine; `WATCH .customer` hands them the record. That's why it's written in
+> capitals: its result leaves the tool through the protocol. Key on ids, not
+> on contents. The `$token*` built-ins are refused outright (saving the file
+> fails), so a key can never say who made the call.
+
+A page never hears about its own calls: frbr.js names each page load
+(`X-Frbr-Client`), and its watch skips the calls that carry its name. Calls
+over MCP carry none, so every watcher hears those.
+
+> **Mind feedback loops.** That skip covers one page, not two. On a service
+> that reports everything, a page that refreshes by calling a read tool sets
+> off every *other* open page, and their refreshes set it off in turn, back
+> and forth. Add `WATCH` to the tools that change things, so reads go
+> unreported.
+
 ## App Services — Every App Has One
 
 Every app comes with its own virtual service, ready to fill: no service to

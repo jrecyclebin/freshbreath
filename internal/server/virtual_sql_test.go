@@ -665,11 +665,11 @@ HTTP 200
 	}
 
 	// The ciphertext is the service's own: another service can't open it.
-	other := srv.virtualHooks(&db.Service{ID: svc.ID + 1})
+	other := srv.virtualHooks(&db.Service{ID: svc.ID + 1}, "")
 	if _, err := other.Open(stored); err == nil {
 		t.Error("another service opened this service's ciphertext")
 	}
-	if plain, err := srv.virtualHooks(svc).Open(stored); err != nil || plain != "sk-live-123" {
+	if plain, err := srv.virtualHooks(svc, "").Open(stored); err != nil || plain != "sk-live-123" {
 		t.Errorf("own service open = %q, %v", plain, err)
 	}
 }

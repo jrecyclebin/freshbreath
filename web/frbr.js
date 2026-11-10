@@ -14,7 +14,7 @@
  * SameSite=Strict), so it keeps its own rotating refresh token in its
  * entry instead.
  */
-import { McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.32.2.js";
+import { EventEmitter, McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.32.2.js";
 
 const CFG = window.__HOMESLICE_CONFIG ?? {};
 const API = CFG.apiBase ?? "";
@@ -22,6 +22,13 @@ let APP_NONCE = CFG.appNonce ?? null; // let: re-derived if the server couldn't 
 // The auth record guarding this page. 0 when the door is open — an app
 // behind the Anonymous record, or an instance still in setup.
 let GATE_ID = CFG.authRecordID ?? 0; // let: re-derived alongside APP_NONCE
+
+// This page load's name for itself, sent as X-Frbr-Client with every
+// ServiceProxy request so service watchers aren't told about this page's
+// own calls. getRandomValues, not randomUUID: the latter needs a secure
+// context, and an app may be served over plain http on a LAN.
+const CLIENT_ID = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+  b => b.toString(16).padStart(2, "0")).join("");
 
 // The origin our callback page will post from. The page posts only to
 // the app's own origin (its registered one for an app that runs off the
@@ -1048,9 +1055,14 @@ export class ServiceProxy {
 
   // The single choke point: every request out of this proxy goes through
   // authedFetch, so a dead login is retried and re-prompted the same way
-  // api() does it.
+  // api() does it. A request to this server names the page, so its own
+  // calls skip its watch; one going straight to a third party doesn't —
+  // an unknown header there would cost a CORS preflight it may refuse.
   async #fetch(url, init = {}) {
-    return authedFetch(this.session, url, init);
+    if (!url.startsWith(`${API}/service/`)) return authedFetch(this.session, url, init);
+    const headers = new Headers(init.headers);
+    headers.set("X-Frbr-Client", CLIENT_ID);
+    return authedFetch(this.session, url, { ...init, headers });
   }
 
   // A proxied MCP service is reached through the server, which swaps the
@@ -1149,6 +1161,67 @@ export class ServiceProxy {
     }
     return this.#fetch(url, init);
   }
+
+  /**
+   * Watch this service's completed calls, by anyone but this page, as they
+   * happen. The stream opens now and reconnects on its own until close().
+   * @param {Function} [onWatch] — a "watch" handler, given each call
+   * @returns {ServiceWatch}
+   */
+  watch(onWatch) {
+    if (this.#serviceID == null) throw new Error("watch() needs the service's id; get this proxy from login()");
+    const w = new ServiceWatch();
+    if (onWatch) w.on("watch", onWatch);
+    this.#runWatch(w);
+    return w;
+  }
+
+  async #runWatch(w) {
+    const url = `${API}/service/watch/${this.#serviceID}`;
+    let renewed = false;
+    try {
+      for (;;) {
+        await this.session?.check();
+        try {
+          return await sseStream(url, {
+            method: "GET", session: this.session, signal: w.stopper.signal, reconnect: true,
+            headers: { "X-App-Nonce": APP_NONCE, "X-Frbr-Client": CLIENT_ID },
+            onOpen: () => { renewed = false; w.emit("open"); },
+            onEvent: (_, payload) => w.emit("watch", payload),
+          });
+        } catch (e) {
+          // A token that expired mid-watch: renew it once and carry on. A
+          // second 401 straight after means renewing doesn't help.
+          if (e.status !== 401 || !this.session || renewed) throw e;
+          renewed = true;
+          await this.session.refresh();
+        }
+      }
+    } catch (e) {
+      if (w.stopper.signal.aborted) return;
+      // eventemitter3 doesn't throw an unheard "error", so say it somewhere.
+      if (w.listenerCount("error")) w.emit("error", e);
+      else console.error("ServiceProxy: watch stopped", e);
+    }
+  }
+}
+
+/**
+ * One running watch from ServiceProxy.watch(), as an EventEmitter
+ * (eventemitter3):
+ *
+ *   "open"  — each (re)connect, the first one included. Events missed
+ *             while disconnected are gone, so load (or reload) data here.
+ *   "watch" — a completed call: `{tool, key?}` for a task or virtual tool
+ *             (key is a WATCH directive's result), or `{method, fetch}` for
+ *             a fetch through the proxy (the path under the service, no
+ *             query). Agents' calls over MCP always arrive.
+ *   "error" — the watch gave up (refused, or a login renewal didn't help).
+ */
+export class ServiceWatch extends EventEmitter {
+  stopper = new AbortController();
+
+  close() { this.stopper.abort(); }
 }
 
 // ── Remote updates ──────────────────────────────────────────────
@@ -1599,7 +1672,7 @@ export default ServiceProxy;
 // Expose to window for non-module consumers (e.g. the admin panel)
 if (typeof window !== 'undefined') {
   window.FreshBreath = window.FrBr = {
-    api, escapePath, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
+    api, escapePath, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy, ServiceWatch,
     remote, RemoteExpired,
     sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
   };

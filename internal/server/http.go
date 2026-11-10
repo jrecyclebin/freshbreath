@@ -65,7 +65,7 @@ func (s *Server) serviceDoProxy(svc *db.Service, r *http.Request, cred outboundC
 		kl := strings.ToLower(k)
 		// Cookie is this server's (the gate pass among them), never the
 		// upstream's.
-		if kl == "host" || kl == "connection" || kl == "x-app-nonce" || kl == "content-length" || kl == "origin" || kl == "access-control-request-method" || kl == "access-control-request-headers" || kl == "user-agent" || kl == "x-api-key" || kl == "cookie" {
+		if kl == "host" || kl == "connection" || kl == "x-app-nonce" || kl == "x-frbr-client" || kl == "content-length" || kl == "origin" || kl == "access-control-request-method" || kl == "access-control-request-headers" || kl == "user-agent" || kl == "x-api-key" || kl == "cookie" {
 			continue
 		}
 		// Forwarding claims are the caller's word, not ours. A relative

@@ -196,7 +196,10 @@ func (s *Server) answerRun(tools []formats.VirtualTool, resume *formats.ResumeSt
 // opaque to every other service, and to the at-rest and token seals that
 // share the master key. Renaming a service keeps its key; deleting and
 // recreating it does not.
-func (s *Server) virtualHooks(svc *db.Service) *formats.VirtualHooks {
+//
+// client is the page client ID of the caller (X-Frbr-Client), so a page's
+// own calls aren't echoed back to its watch; "" for callers without one.
+func (s *Server) virtualHooks(svc *db.Service, client string) *formats.VirtualHooks {
 	key := s.deriveSubkey(fmt.Sprintf("%s%d", serviceSecretLabel, svc.ID))
 	return &formats.VirtualHooks{
 		ElicitationURL: func(elicitationID string) string {
@@ -209,6 +212,9 @@ func (s *Server) virtualHooks(svc *db.Service) *formats.VirtualHooks {
 		Open: func(sealed string) (string, error) {
 			plain, err := open(key, sealed)
 			return string(plain), err
+		},
+		Watch: func(tool string, key interface{}) {
+			s.reportServiceCall(svc.ID, client, serviceWatchEvent{Tool: tool, Key: key})
 		},
 	}
 }
