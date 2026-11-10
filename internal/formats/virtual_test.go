@@ -2941,3 +2941,18 @@ WATCH $list_id
 		t.Fatalf("steps = %+v", steps)
 	}
 }
+
+// TestWatchRejectsTokenVars pins that a WATCH key can't carry the caller's
+// credential or identity, since every watcher sees it.
+func TestWatchRejectsTokenVars(t *testing.T) {
+	for _, v := range []string{"token", "token_email", "token_sub", "token_id"} {
+		_, err := ParseVirtualFile([]byte("[add] Add.\n\nWATCH {list: $list_id,\n  by: $" + v + "}\n"))
+		if err == nil || !strings.Contains(err.Error(), "$"+v) {
+			t.Errorf("$%s: err = %v", v, err)
+		}
+	}
+	// A name that only starts with "token" is an ordinary variable.
+	if _, err := ParseVirtualFile([]byte("[add] Add.\n\nWATCH $token_count\n")); err != nil {
+		t.Errorf("$token_count: %v", err)
+	}
+}

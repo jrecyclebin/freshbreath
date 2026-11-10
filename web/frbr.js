@@ -14,7 +14,7 @@
  * SameSite=Strict), so it keeps its own rotating refresh token in its
  * entry instead.
  */
-import { McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.32.2.js";
+import { EventEmitter, McpClient, StreamableHTTPClientTransport } from "/control/vendor/frbr-deps-1.32.2.js";
 
 const CFG = window.__HOMESLICE_CONFIG ?? {};
 const API = CFG.apiBase ?? "";
@@ -1164,39 +1164,64 @@ export class ServiceProxy {
 
   /**
    * Watch this service's completed calls, by anyone but this page, as they
-   * happen. Each successful call arrives as one object: `{tool, key?}` for
-   * a task or virtual tool (key is a WATCH directive's result), or
-   * `{method, fetch}` for a fetch through the proxy (the path under the
-   * service, no query). Agents' calls over MCP always arrive.
-   * Reconnects on its own; abort the signal to stop, which resolves it.
-   * Events missed while disconnected are gone, so re-read on reconnect.
-   * @param {(event: Object) => void} onEvent
-   * @param {Object} [opts]
-   * @param {AbortSignal} [opts.signal]
-   * @param {Function} [opts.onOpen] — called on each (re)connect
+   * happen. The stream opens now and reconnects on its own until close().
+   * @param {Function} [onWatch] — a "watch" handler, given each call
+   * @returns {ServiceWatch}
    */
-  async watch(onEvent, { signal, onOpen } = {}) {
+  watch(onWatch) {
     if (this.#serviceID == null) throw new Error("watch() needs the service's id; get this proxy from login()");
+    const w = new ServiceWatch();
+    if (onWatch) w.on("watch", onWatch);
+    this.#runWatch(w);
+    return w;
+  }
+
+  async #runWatch(w) {
     const url = `${API}/service/watch/${this.#serviceID}`;
     let renewed = false;
-    for (;;) {
-      await this.session?.check();
-      try {
-        return await sseStream(url, {
-          method: "GET", session: this.session, signal, reconnect: true,
-          headers: { "X-App-Nonce": APP_NONCE, "X-Frbr-Client": CLIENT_ID },
-          onOpen: () => { renewed = false; onOpen?.(); },
-          onEvent: (_, payload) => onEvent(payload),
-        });
-      } catch (e) {
-        // A token that expired mid-watch: renew it once and carry on. A
-        // second 401 straight after means renewing doesn't help.
-        if (e.status !== 401 || !this.session || renewed) throw e;
-        renewed = true;
-        await this.session.refresh();
+    try {
+      for (;;) {
+        await this.session?.check();
+        try {
+          return await sseStream(url, {
+            method: "GET", session: this.session, signal: w.stopper.signal, reconnect: true,
+            headers: { "X-App-Nonce": APP_NONCE, "X-Frbr-Client": CLIENT_ID },
+            onOpen: () => { renewed = false; w.emit("open"); },
+            onEvent: (_, payload) => w.emit("watch", payload),
+          });
+        } catch (e) {
+          // A token that expired mid-watch: renew it once and carry on. A
+          // second 401 straight after means renewing doesn't help.
+          if (e.status !== 401 || !this.session || renewed) throw e;
+          renewed = true;
+          await this.session.refresh();
+        }
       }
+    } catch (e) {
+      if (w.stopper.signal.aborted) return;
+      // eventemitter3 doesn't throw an unheard "error", so say it somewhere.
+      if (w.listenerCount("error")) w.emit("error", e);
+      else console.error("ServiceProxy: watch stopped", e);
     }
   }
+}
+
+/**
+ * One running watch from ServiceProxy.watch(), as an EventEmitter
+ * (eventemitter3):
+ *
+ *   "open"  — each (re)connect, the first one included. Events missed
+ *             while disconnected are gone, so load (or reload) data here.
+ *   "watch" — a completed call: `{tool, key?}` for a task or virtual tool
+ *             (key is a WATCH directive's result), or `{method, fetch}` for
+ *             a fetch through the proxy (the path under the service, no
+ *             query). Agents' calls over MCP always arrive.
+ *   "error" — the watch gave up (refused, or a login renewal didn't help).
+ */
+export class ServiceWatch extends EventEmitter {
+  stopper = new AbortController();
+
+  close() { this.stopper.abort(); }
 }
 
 // ── Remote updates ──────────────────────────────────────────────
@@ -1647,7 +1672,7 @@ export default ServiceProxy;
 // Expose to window for non-module consumers (e.g. the admin panel)
 if (typeof window !== 'undefined') {
   window.FreshBreath = window.FrBr = {
-    api, escapePath, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy,
+    api, escapePath, login, currentSession, signOut, AuthSession, SessionExpired, ServiceProxy, ServiceWatch,
     remote, RemoteExpired,
     sseStream, fetchUpdatesCheck, applyUpdates, autoUpdates, defaultUpdateBanner,
   };

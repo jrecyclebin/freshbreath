@@ -739,7 +739,7 @@ as `"truncated": true` rather than silently shortened.
 
 ## Watching Calls — WATCH
 
-An app can watch a service — `svc.watch(onEvent)` in frbr.js, which streams
+An app can watch a service — `svc.watch()` in frbr.js, which streams
 `/service/watch/{id}` — and hear about each tool call on it as the call
 finishes. By default, a virtual service reports **every** successful call, by
 tool name only. Once *any* tool in the file has a `WATCH` directive, only the
@@ -766,7 +766,7 @@ A bare `WATCH` marks the tool watched, so a watcher gets `{"tool":
 whose result rides along as the event's key: `{"tool": "add-item", "key":
 12}`. A page that shows list 12 can refresh when it sees that key, and
 ignore the rest. The expression is jq, the same as anywhere else: `WATCH
-{list: $list_id, by: $token_email}`, `WATCH .rows[0].id`.
+{list: $list_id, kind: "item"}`, `WATCH .rows[0].id`.
 
 `WATCH` runs where it sits, like an `assert`: `.` is the response the last
 step returned, `$vars` are whatever has been assigned by then, and `.` passes
@@ -785,10 +785,10 @@ under the service URL, without the query string.
 > **A WATCH key is broadcast.** Watchers see every caller's calls, not just
 > their own, and anyone who can open the app can watch. Whatever a `WATCH`
 > expression returns goes out to every one of them. `WATCH $list_id` is
-> fine; `WATCH $token_email` tells every watcher who just made the call, and
-> `WATCH .customer` hands them the record. That's why it's written in capitals:
-> its result leaves the tool through the protocol. Key on ids, not on
-> contents.
+> fine; `WATCH .customer` hands them the record. That's why it's written in
+> capitals: its result leaves the tool through the protocol. Key on ids, not
+> on contents. The `$token*` built-ins are refused outright (saving the file
+> fails), so a key can never say who made the call.
 
 A page never hears about its own calls: frbr.js names each page load
 (`X-Frbr-Client`), and its watch skips the calls that carry its name. Calls

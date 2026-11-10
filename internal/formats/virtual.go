@@ -159,6 +159,10 @@ type VirtualResponse struct {
 var toolNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*!?$`)
 var plainVarRe = regexp.MustCompile(`\$([a-zA-Z_]\w*)`)
 
+// tokenVars are the server's built-ins for the caller's credential and
+// identity.
+var tokenVars = map[string]bool{"token": true, "token_email": true, "token_sub": true, "token_id": true}
+
 // ParseVirtualFile parses a virtual service description file into tools.
 // Tools are separated by --- delimiters and begin with [name] headers.
 func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
@@ -416,7 +420,15 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				// after it is evaluated here, like an assert, and its result
 				// rides along as the event's key. Scope passes through.
 				expr, k := collectJQ(lines, i)
-				step.Pre = append(step.Pre, VirtualStmt{Watch: true, Expr: strings.TrimSpace(strings.TrimPrefix(expr, "WATCH"))})
+				expr = strings.TrimSpace(strings.TrimPrefix(expr, "WATCH"))
+				// A WATCH key is broadcast to every watcher, so the caller's
+				// credential and identity never go into one.
+				for _, m := range plainVarRe.FindAllStringSubmatch(expr, -1) {
+					if tokenVars[m[1]] {
+						return fmt.Errorf("WATCH can't use $%s: its key goes to every watcher; key on ids instead", m[1])
+					}
+				}
+				step.Pre = append(step.Pre, VirtualStmt{Watch: true, Expr: expr})
 				i = k
 			} else if ann, ok := parseAnnotation(line); ok {
 				tool.typeAnnotations = append(tool.typeAnnotations, ann)

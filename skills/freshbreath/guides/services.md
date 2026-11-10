@@ -296,26 +296,28 @@ relative to the service's registered URL; the leading slash is optional.
 ## 6. watch()
 
 For tasks, virtual and proxied `api` services, `svc.watch()` streams
-completed calls on the service as they happen. These are *anyone's* calls,
-other users', other tabs' and agents', except this page's own, which it
+completed calls on the service as they happen. These are *anyone's*
+calls, other users', other tabs' and agents', except this page's own, which it
 already knows about:
 
 ```js
-const stop = new AbortController();
-svc.watch((ev) => {
+const w = svc.watch((ev) => {    // fn is the "watch" handler
   // { tool: "add-item", key: 12 }       a task or virtual tool
   // { method: "POST", fetch: "/v1/items" }  a fetch through the proxy
   if (ev.tool === "add-item" && ev.key === currentList) refresh();
-}, { signal: stop.signal, onOpen: refresh });
-// later: stop.abort();
+});
+w.on("open", refresh);         // each (re)connect, the first too
+w.on("error", console.error);  // the watch gave up for good
+// later: w.close();
 ```
 
 Only successful calls are reported. There are no arguments, bodies or query
 strings, just the tool name or the path, plus a key when the tool's `WATCH`
 directive computes one (see the virtual-services guide). It reconnects by
 itself and renews an expired session once. Events missed while disconnected
-aren't replayed, so re-read in `onOpen`. Proxied MCP services can't be
-watched. The proxy needs the service's id, so get it from `login()`.
+aren't replayed, so re-read on `"open"`. What `watch()` returns is an
+eventemitter3 EventEmitter, so `once`, `off` and the rest all work. Proxied
+MCP services can't be watched. The proxy needs the service's id, so get it from `login()`.
 
 ---
 

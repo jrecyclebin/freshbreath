@@ -1,10 +1,11 @@
 ---
 episode: 10
-title: Live updates with watch()
+title: Live updates
 icon: 📡
 minutes: 5
 blurb: Hear about changes the moment anyone makes them.
-short: svc.watch() streams every finished call on a service — anyone’s, from any page or agent. Mark the tools that change things with WATCH, key the events by id, and pages refresh only when their data moved.
+short: >
+  Set a watch and Fresh Breath can stream back the name of every finished call on a service — anyone’s, from any page or agent. Tools that change things can be marked with the WATCH keyword.
 ---
 
 ## Somebody else changed it
@@ -18,7 +19,7 @@ You *could* poll every few seconds. Or you can **watch** the service:
 const svc = await login("/mcp/app:");
 svc.watch((ev) => {
   if (ev.tool === "add-item" && ev.key === currentList) refresh();
-}, { onOpen: refresh });
+}).on("open", refresh);
 ```
 
 Every successful call on the service — from any page, any agent, any
@@ -64,8 +65,9 @@ line out.
 
 ::: warning A WATCH key is broadcast
 Everyone who can open the app can watch it, and sees every caller's events.
-`WATCH $list_id` is fine. `WATCH $token_email` tells every watcher who just
-made the call. Key on ids, not contents.
+`WATCH $list_id` is fine. `WATCH .customer` hands every watcher the record.
+Key on ids, not contents. (`$token_email` and the other `$token*` built-ins
+are refused outright, so a key can never say who made the call.)
 :::
 
 ::: warning Mind feedback loops
@@ -75,14 +77,5 @@ tools that change things.
 :::
 
 <Say>
-Make my Fresh Breath app [app] update live: add WATCH lines keyed by id to the tools in the app's own service that change data, and have the page use watch() to refresh only what changed. Read the virtuals guide's section on WATCH first.
+Make my Fresh Breath app [app] update live: add WATCH lines keyed by id to the tools in the app's own service that change data, and have the page use svc.watch() to refresh only what changed. Read the virtuals guide's section on WATCH first.
 </Say>
-
-::: details Under the hood
-`watch()` streams `/service/watch/{id}` and reconnects by itself. Events
-missed while disconnected aren't replayed, so re-read in `onOpen`. Task
-services report every successful task by name; proxied API services report
-each fetch as `{"method": "POST", "fetch": "/v1/items/7"}`. Proxied MCP
-services can't be watched. A `WATCH` after a response-shaping block never
-runs, so put it before.
-:::
