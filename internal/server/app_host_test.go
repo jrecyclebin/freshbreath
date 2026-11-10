@@ -179,10 +179,18 @@ func TestRemoteAppServedAtItsHost(t *testing.T) {
 	}
 
 	// The panel, the admin API and the central MCP don't answer there.
-	for _, path := range []string{"/control", "/control/", "/control/app.js", "/api/apps", "/api/me", "/mcp",
+	for _, path := range []string{"/control", "/control/", "/control/app.js", "/api/apps", "/api/me", "/api/db", "/api/db/x/query", "/mcp",
 		"/oauth/authorize", "/oauth/register", "/.well-known/oauth-protected-resource/mcp"} {
 		if rr := hostRequest(srv, "GET", "https://blog.example.org"+path, nil); rr.Code != 404 {
 			t.Errorf("%s on the app host: %d, want 404", path, rr.Code)
+		}
+	}
+
+	// Editor apps' file sync and git over ssh do (refused here only for
+	// want of a login).
+	for _, path := range []string{"/api/sync/files", "/api/ssh/git/branches", "/api/ssh/sessions"} {
+		if rr := hostRequest(srv, "GET", "https://blog.example.org"+path, nil); rr.Code == 404 {
+			t.Errorf("%s on the app host: 404, want it served", path)
 		}
 	}
 

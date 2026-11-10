@@ -179,7 +179,10 @@ func appHostServes(p string) bool {
 	case strings.HasPrefix(p, "/control/"):
 		return strings.HasPrefix(p, "/control/vendor/")
 	case strings.HasPrefix(p, "/api/"):
-		return p == "/api/updates/check" || p == "/api/updates/apply" || strings.HasPrefix(p, "/api/elicitation/")
+		// Editor apps sync files and drive git over ssh from their own
+		// host; the rest of the admin API (/api/db included) stays off it.
+		return p == "/api/updates/check" || p == "/api/updates/apply" || strings.HasPrefix(p, "/api/elicitation/") ||
+			strings.HasPrefix(p, "/api/ssh/") || strings.HasPrefix(p, "/api/sync/")
 	case strings.HasPrefix(p, "/oauth/"):
 		return p == "/oauth/token" || strings.HasPrefix(p, "/oauth/token/")
 	case strings.HasPrefix(p, "/.well-known/"):
@@ -1232,7 +1235,9 @@ func (s *Server) renderEnvJS(r *http.Request) []byte {
 // for both the script-tag JS form (renderEnvJS) and the JSON form frbr.js
 // fetches when Referer is suppressed (handleEnv with ?loc=).
 func (s *Server) envConfig(r *http.Request) envConfig {
-	apiBase := s.config.PublicBaseURL
+	// The host the page reached: a custom domain answers its apps' calls
+	// itself, and a tunnel client keeps its forwarded port.
+	apiBase := s.schemeOf(r) + "://" + r.Host
 
 	// Resolve the app nonce from the request. See resolveAppNonce for the
 	// full order; the headline is that the admin nonce is reachable ONLY via
