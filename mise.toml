@@ -46,14 +46,17 @@ description = "Build for Linux arm64, fully static (musl; native arm64 host, req
 env = { CGO_ENABLED = "1", GOOS = "linux", GOARCH = "arm64", CC = "${CC:-musl-gcc}", FRBR_STATIC = "1" }
 run = "bash scripts/build.sh"
 
+# cgo links through clang, and clang stamps the binary's minimum macOS with
+# the build host's version unless told otherwise. Pinned so a newer runner
+# image can't quietly lock out everyone a release or two behind it.
 [tasks."build:mac"]
 description = "Build for macOS arm64 (native on macOS runners; needs osxcross on Linux)"
-env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "arm64", CC = "${CC:-cc}" }
+env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "arm64", CC = "${CC:-cc}", MACOSX_DEPLOYMENT_TARGET = "14.0" }
 run = "bash scripts/build.sh"
 
 [tasks."build:mac-x64"]
 description = "Build for macOS x64 (native on macOS runners; needs osxcross on Linux)"
-env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "amd64", CC = "${CC:-cc}" }
+env = { CGO_ENABLED = "1", GOOS = "darwin", GOARCH = "amd64", CC = "${CC:-cc}", MACOSX_DEPLOYMENT_TARGET = "14.0" }
 run = "bash scripts/build.sh"
 
 # The macOS .pkg installer — the peer of build:windows-installer. Like the

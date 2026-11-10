@@ -36,7 +36,9 @@ jobs:
             ext: .tar.gz
             label: linux-arm64
             mise_task: build:linux-arm64-static
-          - os: macos-14
+          # macos-14 was retired out from under the v0.9.12 release. The
+          # binary's minimum macOS is pinned in mise.toml, not by this image.
+          - os: macos-15
             goos: darwin
             goarch: arm64
             cc: cc
