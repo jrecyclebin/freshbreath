@@ -1176,7 +1176,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
     <>
       <div className="home-top">
         <div className="connect-card">
-          <span className="entity-icn page-icn tone-green"><Icon name="plug" size={20}/></span>
+          <span className="entity-icn page-icn"><Icon name="plug" size={20}/></span>
           <div className="connect-body">
             <h2>Connect an agent</h2>
             <p>
