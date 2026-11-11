@@ -755,20 +755,98 @@ function UserAreaTabs({ active, onNav }) {
 
 // ── Shell ──────────────────────────────────────────────────────────────
 
-function PageHead({ title, sub, back, backLabel, actions }) {
+// icon + tone put the entity's own tile (the one it wears in the home
+// table) beside the title, so a page says what kind of thing it is.
+function PageHead({ title, sub, back, backLabel, actions, icon, tone }) {
   return (
     <div className="page-head">
-      <div>
+      <div className="page-head-main">
         {back && (
           <button className="back-link" onClick={back}>
             <Icon name="back" size={14}/> <span>{backLabel || 'Back'}</span>
           </button>
         )}
-        <h1 className="page-title">{title}</h1>
-        {sub && <p className="page-sub">{sub}</p>}
+        <div className="page-ident">
+          {icon && <span className={'entity-icn page-icn tone-' + tone}><Icon name={icon} size={20}/></span>}
+          <div className="page-titles">
+            <h1 className="page-title">{title}</h1>
+            {sub && <div className="page-sub">{sub}</div>}
+          </div>
+        </div>
       </div>
       {actions && <div className="head-actions">{actions}</div>}
     </div>
+  );
+}
+
+// A titled card — the unit the settings pages are built from.
+function Panel({ title, desc, actions, className = '', children }) {
+  return (
+    <section className={'panel ' + className}>
+      <header className="panel-head">
+        <div className="panel-titles">
+          <h2>{title}</h2>
+          {desc && <p>{desc}</p>}
+        </div>
+        {actions && <div className="panel-actions">{actions}</div>}
+      </header>
+      <div className="panel-body">{children}</div>
+    </section>
+  );
+}
+
+// An address someone will paste somewhere else: the whole box is the copy
+// button, so there is no selecting a long URL by hand.
+function CopyField({ label, value, help }) {
+  const toast = useToast();
+  return (
+    <div className="field">
+      {label && <label>{label}</label>}
+      <button type="button" className="copy-field" title="Copy to clipboard" onClick={() => copyText(value, toast)}>
+        <span className="mono">{value}</span>
+        <Icon name="copy" size={13}/>
+      </button>
+      {help && <span className="help">{help}</span>}
+    </div>
+  );
+}
+
+// A service's tools, full width: name beside description, a row each, with
+// a filter once the list is long enough to need one. tools is null while
+// loading; onEdit is left out for someone who can't edit the file.
+function ToolsPanel({ tools, error, desc, empty, onEdit }) {
+  const [q, setQ] = useState('');
+  const query = q.trim().toLowerCase();
+  const shown = (tools || []).filter(t =>
+    !query || (t.name + ' ' + (t.description || '')).toLowerCase().includes(query));
+  return (
+    <Panel
+      title={<>Tools <Badge tone="gray" dot={false}>{tools ? tools.length : '…'}</Badge></>}
+      desc={desc}
+      actions={<>
+        {tools && tools.length > 8 && (
+          <div className="search">
+            <span className="icn"><Icon name="search" size={14}/></span>
+            <input type="search" name="search" {...NO_FILL} value={q} onChange={e => setQ(e.target.value)} placeholder="Filter tools…"/>
+          </div>
+        )}
+        {onEdit && <button className="btn btn-sm btn-primary" onClick={onEdit}><Icon name="edit" size={12}/> Edit</button>}
+      </>}>
+      {error && <span className="help" style={{color:'var(--danger)'}}>{error}</span>}
+      {!tools && !error && <span className="muted">Loading…</span>}
+      {tools && !error && tools.length === 0 && <span className="muted">{empty}</span>}
+      {tools && tools.length > 0 && shown.length === 0 && <span className="muted">No tools match “{q}”.</span>}
+      {shown.length > 0 && (
+        <ul className="tool-list">
+          {shown.map(t => (
+            <li key={t.name}>
+              <span className="tool-name mono">{t.name}</span>
+              <span className="tool-desc" title={t.description}>{t.description}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
   );
 }
 
@@ -840,6 +918,20 @@ const copyText = async (text, toast) => {
   catch { toast('Failed to copy', true); }
 };
 
+// This server's own address, as a client outside the browser would type it.
+const apiBase = () => window.__HOMESLICE_CONFIG?.apiBase || window.location.origin;
+
+// Where an entity answers MCP on this server: every app's own service at
+// /mcp/app:<nonce>, virtual and tasks services at /mcp/<slug>. An upstream
+// MCP or API service has no endpoint here, so it has no path.
+const mcpPath = (kind, e) => {
+  if (kind === 'app') return '/mcp/' + appServiceName(e);
+  const url = e.url || '';
+  if (url.startsWith('/mcp/')) return url;
+  if (url.startsWith('tasks://')) return '/mcp/' + url.slice('tasks://'.length);
+  return null;
+};
+
 function serviceInstructions(service) {
   if (service.descriptor?.type === "ssh") {
     return `  - ${service.name} (see the SSH guide in the 'freshbreath' skill)`
@@ -874,7 +966,7 @@ const slotRoute = (route, slot) => route + (/^[a-z]+:\/\/[^/]+$/i.test(route) ? 
 const isHosted = (a) => !!(a.details?.last_uploaded || a.details?.last_deployed_staging || a.details?.last_deployed_production);
 
 function buildPrompt(app, appServices) {
-  const fbURL = window.__HOMESLICE_CONFIG?.apiBase || window.location.origin;
+  const fbURL = apiBase();
   const serviceLines = appServices.length
     ? ("\nIntegrations: (be sure to use any URLs exactly)\n" + appServices.map(serviceInstructions).join('\n'))
     : '';
@@ -892,9 +984,9 @@ const authUsedBy = (id, services, apps) => [
   ...apps.filter(a => a.protected_by === id).map(a => `${a.name} (protects)`),
 ];
 
-// A copyable identifier shown under an entity's name in the table — the
-// app nonce or the service URL. Auth records aren't referred to
-// externally, so they get no subtitle.
+// A copyable address shown under an entity's name in the table — the app's
+// route or the service URL. Auth records aren't referred to externally, so
+// they get no subtitle.
 const IDSub = ({ value, toast }) => {
   if (!value) return null;
   return (
@@ -903,6 +995,19 @@ const IDSub = ({ value, toast }) => {
       <span className="mono">{value}</span>
       <Icon name="copy" size={11}/>
     </button>
+  );
+};
+
+// The table's MCP cell: an agent is connected with the full URL, a script
+// or another service is usually handed the path, so both copy in one click.
+const McpCopy = ({ path, toast }) => {
+  if (!path) return <span className="muted">—</span>;
+  const url = apiBase() + path;
+  return (
+    <span className="mcp-copy" onClick={ev => ev.stopPropagation()}>
+      <button type="button" title={'Copy ' + url} onClick={() => copyText(url, toast)}><Icon name="copy" size={11}/> URL</button>
+      <button type="button" title={'Copy ' + path} onClick={() => copyText(path, toast)}>Path</button>
+    </span>
   );
 };
 
@@ -983,15 +1088,24 @@ const ENTITY_VIEWS = [
   { id: 'auth',     label: 'Auth',            singular: 'auth record', icon: 'key'   },
 ];
 
+// How many hosted apps the home page shows before "Show all" — two rows
+// of the grid at full width, so the table below stays on the first screen.
+const HOSTED_PREVIEW = 8;
+
 function HomePage({ session, navigate, apps, services, auth, users, adminAuthID, hosts, onRefresh }) {
   const { user } = useAuth();
   const { isAdmin } = useRoles();
   const [view, setView] = useState('recent');
   const [q, setQ] = useState('');
   const [dropFiles, setDropFiles] = useState(null);
+  const [allHosted, setAllHosted] = useState(() => localStorage.getItem('frebre_all_hosted') === '1');
   const toast = useToast();
 
   const hosted = apps.filter(isHosted);
+  const toggleHosted = () => {
+    localStorage.setItem('frebre_all_hosted', allHosted ? '0' : '1');
+    setAllHosted(!allHosted);
+  };
 
   const appRows    = apps.map(a => ({ kind: 'app', id: a.nonce, name: a.name, when: a.updated_at, entity: a }));
   const serviceRows = services.map(s => ({ kind: 'service', id: s.id, name: s.name, when: s.updated_at, entity: s }));
@@ -1057,41 +1171,51 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
       : <span className="muted">—</span>;
   };
 
-  const mcpUrl = `${window.__HOMESLICE_CONFIG.apiBase}/mcp`;
+  const canDrop = isAdmin || apps.length > 0 || services.some(s => canEditServiceFile(s, user));
   return (
     <>
-      <p>Connect to the MCP at <strong>{mcpUrl}</strong>.
-      <button className="id-sub" onClick={() => copyText(mcpUrl, toast)} title="Copy URL"><Icon name="copy" size={14}/></button>
-      &nbsp;<a href="https://freshbreath.dev/" target="_blank">Read more.</a></p>
+      <div className="home-top">
+        <div className="connect-card">
+          <span className="entity-icn page-icn tone-green"><Icon name="plug" size={20}/></span>
+          <div className="connect-body">
+            <h2>Connect an agent</h2>
+            <p>
+              Fresh Breath is an MCP server itself. Point an agent at this URL to build and publish apps here.{' '}
+              <a href="https://freshbreath.dev/" target="_blank" rel="noopener noreferrer">Read more</a>
+            </p>
+            <CopyField value={apiBase() + '/mcp'}/>
+          </div>
+        </div>
+        {canDrop && <DropZone onFiles={setDropFiles} updateOnly={!isAdmin}/>}
+      </div>
+
       <div className="home-section">
-        <div className="home-hosted">
-          {hosted.length === 0 ? (
-            <div className="empty hosted-empty">
-              <b>No hosted apps yet.</b><br/>
-              Drop an .html or .zip file, or a folder of files, to publish your first one.
-            </div>
-          ) : (
-            <div className="hosted-grid">
-              {hosted.map(a => (
-                <div key={a.nonce} className="hosted-card" onClick={() => window.open(hostRoute(a), '_blank', 'noopener')} title="Open app">
-                  <Favicon route={hostRoute(a)} name={a.name}/>
-                  <a className="hosted-name" href={hostRoute(a)} target="_blank" rel="noopener noreferrer"
-                     onClick={ev => ev.stopPropagation()}>{a.name}</a>
-                  <Badge tone={envTone(a.environment)}>
-                    <span className="env-full">{a.environment || '—'}</span>
-                    <span className="env-short">{envShort(a.environment)}</span>
-                  </Badge>
-                  <button className="btn btn-icon btn-ghost hosted-edit" onClick={ev => { ev.stopPropagation(); navigate('app', { nonce: a.nonce }); }} title="Edit app settings"><Icon name="edit" size={14}/></button>
-                </div>
-              ))}
-            </div>
-          )}
-          {(isAdmin || apps.length > 0 || services.some(s => canEditServiceFile(s, user))) && (
-            <div className="home-dropzone-wrap">
-              <DropZone onFiles={setDropFiles} updateOnly={!isAdmin}/>
-            </div>
+        <div className="home-section-head">
+          <h2>Hosted apps {hosted.length > 0 && <Badge tone="gray" dot={false}>{hosted.length}</Badge>}</h2>
+          {hosted.length > HOSTED_PREVIEW && (
+            <button className="btn btn-ghost btn-sm" onClick={toggleHosted}>
+              {allHosted ? 'Show fewer' : `Show all ${hosted.length}`}
+            </button>
           )}
         </div>
+        {hosted.length === 0 ? (
+          <div className="empty hosted-empty">
+            <b>No hosted apps yet.</b>
+            Drop an .html or .zip file, or a folder of files, to publish your first one.
+          </div>
+        ) : (
+          <div className="hosted-grid">
+            {(allHosted ? hosted : hosted.slice(0, HOSTED_PREVIEW)).map(a => (
+              <div key={a.nonce} className="hosted-card" onClick={() => window.open(hostRoute(a), '_blank', 'noopener')} title="Open app">
+                <Favicon route={hostRoute(a)} name={a.name}/>
+                <a className="hosted-name" href={hostRoute(a)} target="_blank" rel="noopener noreferrer"
+                   onClick={ev => ev.stopPropagation()}>{a.name}</a>
+                <span className={'env-dot ' + envTone(a.environment)} title={a.environment || 'No environment'}/>
+                <button className="btn btn-icon btn-ghost hosted-edit" onClick={ev => { ev.stopPropagation(); navigate('app', { nonce: a.nonce }); }} title="Edit app settings"><Icon name="edit" size={14}/></button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="home-section">
@@ -1128,6 +1252,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
                 <th style={{width:'30%'}}>Name</th>
                 {view !== 'recent' && <th>{view === 'app' ? 'Environment' : view === 'auth' ? 'Kind' : 'Type'}</th>}
                 <th>Access</th>
+                {view !== 'auth' && <th>MCP</th>}
                 <th>Edited</th>
                 <th style={{width:80}}></th>
               </tr></thead>
@@ -1147,7 +1272,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
                           </span>
                           <div className="meta">
                             <b>{row.name}</b>
-                            {row.kind === 'app' && <IDSub value={e.nonce} toast={toast}/>}
+                            {row.kind === 'app' && <IDSub value={hostRoute(e)} toast={toast}/>}
                             {row.kind === 'service' && <IDSub value={e.url} toast={toast}/>}
                             {row.kind === 'auth' && e.builtin && <Badge tone="purple" dot={false}>Built-in</Badge>}
                             {row.kind === 'service' && unproxied(e) && (
@@ -1160,7 +1285,8 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
                         <td data-col="badge">{kindBadge(row)}</td>
                       )}
                       <td data-col="detail">{detailCell(row)}</td>
-                      <td data-col="detail" className="muted">{fmtAuditTime(row.when)}</td>
+                      {view !== 'auth' && <td data-col="detail"><McpCopy path={mcpPath(row.kind, e)} toast={toast}/></td>}
+                      <td data-col="detail" className="muted cell-when">{fmtAuditTime(row.when)}</td>
                       <td data-col="actions" onClick={ev => ev.stopPropagation()}>
                         <div className="row-actions">
                           <button className="btn btn-icon btn-ghost" onClick={() => open(row)} title="Open"><Icon name="edit" size={14}/></button>
@@ -1527,7 +1653,6 @@ function UserAppTags({ apps, appList }) {
 // new-app flow, so the two can't drift apart. `app` is null for a new one;
 // `onCreateGate` opens the inline auth-record modal from a gate slot.
 function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID, hosts = [], loading, onCreateGate }) {
-  const toast = useToast();
   const { isAdmin } = useRoles();
   const { user } = useAuth();
 
@@ -1606,17 +1731,6 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
           <span className="help">A path on this server (<code>blog</code> serves at <code>/blog/</code>), or one level down on a listed host (<code>https://blog.example.com/notes</code>) to be served there. Any other full URL says where the app runs elsewhere.</span>
         </div>
       </div>
-      {app && app.nonce && (
-        <div className="field">
-          <label>Nonce</label>
-          <div className="input" style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-            <span className="mono">{app.nonce}</span>
-            <button className="btn btn-ghost" style={{padding:'2px 8px',fontSize:12}} onClick={()=>copyText(app.nonce, toast)}>
-              <Icon name="copy" size={14}/> Copy
-            </button>
-          </div>
-        </div>
-      )}
       <div className="field-row">
         <div className="field"><label>Default environment</label>
           <select className="input" name="environment" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
@@ -1633,6 +1747,7 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
           {!ownerKept && <span className="help">Chosen from Admins and Superusers.</span>}
         </div>
       </div>
+      <div className="field-group">Access</div>
       {isAdmin && (
         <div className="field">
           <label>Members</label>
@@ -1809,50 +1924,62 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
   return (
     <>
       <PageHead
+        icon="apps" tone="green"
         title={app ? app.name : 'New app'}
-        sub={app ? 'Settings, hosting slots and access.' : 'Name it and set who it answers to.'}
+        sub={app ? (
+          <span className="page-meta">
+            <Badge tone={envTone(app.environment)}>{app.environment || 'No environment'}</Badge>
+            {isHosted(app)
+              ? <a className="hosted-app-link mono" href={hostRoute(app)} target="_blank" rel="noopener noreferrer">{hostRoute(app)}</a>
+              : <span className="muted">Not hosted yet</span>}
+          </span>
+        ) : 'Name it and set who it answers to.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
           {isAdmin && app && <button className="btn btn-ghost" style={{color:'var(--danger)'}} onClick={remove}><Icon name="trash" size={14}/> Delete</button>}
           {(isAdmin || memberCreating || memberWiring) && <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>}
         </>}
       />
-      <div className={'page-form' + (app && !loading ? ' page-cols' : '')}>
-        <div className="page-col">
-          {memberCreating
-            ? <MemberNewAppFields form={form} setForm={setForm} hosts={hosts}/>
-            : <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
-                             auth={auth} adminAuthID={adminAuthID} hosts={hosts} loading={loading}
-                             onCreateGate={()=>setCreatingGate(true)}/>}
+      <div className={'entity-layout' + (app && !loading ? ' with-aside' : '')}>
+        <div className="entity-main">
+          <Panel title="Settings" desc="Where the app lives, who owns it and what it may reach.">
+            {memberCreating
+              ? <MemberNewAppFields form={form} setForm={setForm} hosts={hosts}/>
+              : <AppFormFields form={form} setForm={setForm} app={app} services={services} users={users}
+                               auth={auth} adminAuthID={adminAuthID} hosts={hosts} loading={loading}
+                               onCreateGate={()=>setCreatingGate(true)}/>}
+          </Panel>
         </div>
         {app && !loading && (
-          <div className="page-col">
-            <HostUpload session={session} app={app} onRefresh={onRefresh}/>
-            <AppServiceTools session={session} app={app} navigate={navigate}/>
-            {setupPrompt && (
-              <div className="field">
-                <label>Setup prompt</label>
-                <span className="help">Paste into Claude Code to wire up this app with the freshbreath skill.</span>
-                <div style={{position:'relative'}}>
-                  <textarea
-                    className="input"
-                    name="setup_prompt"
-                    readOnly
-                    style={{fontFamily:'var(--font-mono)',fontSize:11,lineHeight:1.6,resize:'vertical',paddingRight:38,width:'100%',fieldSizing:'content'}}
-                    value={setupPrompt}
-                    onClick={e=>e.target.select()}
-                  />
-                  <button
-                    className="btn btn-ghost"
-                    style={{position:'absolute',top:8,right:8,padding:'4px 6px'}}
-                    title="Copy prompt"
-                    onClick={()=>copyText(setupPrompt, toast)}
-                  >
-                    <Icon name="copy" size={13}/>
-                  </button>
+          <aside className="entity-aside">
+            <Panel title="Hosting" desc="Upload into Development, then deploy onward.">
+              <HostUpload session={session} app={app} onRefresh={onRefresh}/>
+            </Panel>
+            <Panel title="Connect" desc="Addresses for agents and for the app's own pages.">
+              <CopyField label="MCP URL" value={apiBase() + mcpPath('app', app)}
+                         help="This app's own service, behind the app's gate. Named for the nonce, so a rename never moves it."/>
+              <CopyField label="From the app" value={'/service/call/' + appServiceName(app)}
+                         help={<>Or the bare <span className="mono">/mcp/app:</span> from its own pages.</>}/>
+              <CopyField label="Nonce" value={app.nonce}/>
+              {setupPrompt && (
+                <div className="field">
+                  <label>Setup prompt</label>
+                  <span className="help">Paste into Claude Code to wire up this app with the freshbreath skill.</span>
+                  <div className="prompt-box">
+                    <textarea className="input mono" name="setup_prompt" readOnly value={setupPrompt}
+                              onClick={e=>e.target.select()}/>
+                    <button className="btn btn-ghost btn-icon" title="Copy prompt" onClick={()=>copyText(setupPrompt, toast)}>
+                      <Icon name="copy" size={13}/>
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+            </Panel>
+          </aside>
+        )}
+        {app && !loading && (
+          <div className="entity-wide">
+            <AppServiceTools session={session} app={app} navigate={navigate}/>
           </div>
         )}
       </div>
@@ -2140,9 +2267,6 @@ const appServiceName = (app) => 'app:' + app.nonce;
 function AppServiceTools({ session, app, navigate }) {
   const [tools, setTools] = useState(null);
   const [error, setError] = useState('');
-  const toast = useToast();
-  const name = appServiceName(app);
-  const mcpUrl = `${window.__HOMESLICE_CONFIG.apiBase}/mcp/${name}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -2153,31 +2277,10 @@ function AppServiceTools({ session, app, navigate }) {
   }, [app.nonce, session]);
 
   return (
-    <div className="field">
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-        <label style={{margin:0}}>App service tools <Badge tone="gray" dot={false}>{tools ? tools.length : '…'}</Badge></label>
-        <button className="btn btn-sm btn-primary" onClick={()=>navigate('apptools', {nonce: app.nonce})}>
-          <Icon name="edit" size={12}/> Edit
-        </button>
-      </div>
-      <span className="help">
-        This app's own virtual service, behind the app's gate, named for the nonce so renames never move it. MCP at <span className="mono">{mcpUrl}</span>
-        <button className="id-sub" onClick={() => copyText(mcpUrl, toast)} title="Copy URL"><Icon name="copy" size={12}/></button>
-        ; the app calls it at <span className="mono">/service/call/{name}</span> — or the bare <span className="mono">/mcp/app:</span> from its own pages.
-      </span>
-      {error && <span className="help" style={{color:'var(--danger)'}}>{error}</span>}
-      {tools && !error && tools.length === 0 && <span className="muted">No tools yet. Edit to add some.</span>}
-      {tools && tools.length > 0 && (
-        <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
-          {tools.map((t,i)=>
-            <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
-              <b>{t.name}</b>
-              {t.description && <span className="muted"> — {t.description}</span>}
-            </li>
-          )}
-        </ul>
-      )}
-    </div>
+    <ToolsPanel tools={tools} error={error}
+                desc="This app's own virtual service — what an agent, or the app itself, can call."
+                empty="No tools yet. Edit to add some."
+                onEdit={()=>navigate('apptools', {nonce: app.nonce})}/>
   );
 }
 
@@ -2620,8 +2723,14 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
   return (
     <>
       <PageHead
+        icon="key" tone="violet"
         title={record ? record.name : 'New auth record'}
-        sub={record ? 'A credential and login method, standing on its own.' : 'Name a credential and login method.'}
+        sub={record ? (
+          <span className="page-meta">
+            <Badge tone={authKindTone(record.kind)} dot={false}>{authKindLabel(record.kind)}</Badge>
+            <span>A credential and login method, standing on its own.</span>
+          </span>
+        ) : 'Name a credential and login method.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
           {isAdmin && record && !isBuiltin && (
@@ -2634,30 +2743,31 @@ function AuthPage({ session, authId, isNew, auth, services, apps, onRefresh, nav
           )}
         </>}
       />
-      <div className="page-form">
-        {isBuiltin ? (
-          <div className="field">
-            <label>Built-in auth record</label>
-            <div><Badge tone={authKindTone(record.kind)} dot={false}>{authKindLabel(record.kind)}</Badge></div>
-            <span className="help">{authKind(record.kind)?.blurb}</span>
-            <span className="help">
-              Seeded at startup and maintained by the instance, it has no editable settings.
-              Services and apps point at it the same as any other record.
-            </span>
-          </div>
-        ) : (
-          <fieldset className="read-only-fields" disabled={!isAdmin}>
-            {!isAdmin && <span className="help">Read-only — only admins can change auth records.</span>}
-            <AuthForm form={form} setForm={setForm} record={record}/>
-          </fieldset>
-        )}
-        {record && (
-          <div className="field"><label>Used by</label>
-            <span className="help">
-              {uses.length ? uses.join(', ') : 'Nothing points at this record yet.'}
-            </span>
-          </div>
-        )}
+      <div className="entity-layout">
+        <div className="entity-main">
+          {isBuiltin ? (
+            <Panel title="Built-in auth record" desc={authKind(record.kind)?.blurb}>
+              <span className="help">
+                Seeded at startup and maintained by the instance, it has no editable settings.
+                Services and apps point at it the same as any other record.
+              </span>
+            </Panel>
+          ) : (
+            <Panel title="Settings" desc="What this record is and how it signs someone in.">
+              <fieldset className="read-only-fields" disabled={!isAdmin}>
+                {!isAdmin && <span className="help">Read-only — only admins can change auth records.</span>}
+                <AuthForm form={form} setForm={setForm} record={record}/>
+              </fieldset>
+            </Panel>
+          )}
+          {record && (
+            <Panel title="Used by" desc="Delete is refused while anything still points here.">
+              {uses.length
+                ? <span className="tags">{uses.map(u => <span key={u} className="tag">{u}</span>)}</span>
+                : <span className="muted">Nothing points at this record yet.</span>}
+            </Panel>
+          )}
+        </div>
       </div>
     </>
   );
@@ -2908,12 +3018,21 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
   // The SSH service is the instance's own — seeded at startup, fronting
   // users' keys and each app's known hosts. It has no editable settings.
   const isBuiltin = isEdit && service.descriptor?.type === 'ssh';
+  // Only a saved tasks or virtual service answers MCP here; it's what the
+  // Connect panel and the tools list hang off.
+  const servicePath = hasTools ? mcpPath('service', service) : null;
 
   return (
     <>
       <PageHead
+        icon="plug" tone="blue"
         title={service ? service.name : 'New service'}
-        sub={service ? 'A registered provider — MCP, API, tasks, virtual or SSH.' : 'Name it and say what it is.'}
+        sub={service ? (
+          <span className="page-meta">
+            <Badge tone="gray" dot={false}>{service.descriptor?.type?.toLocaleUpperCase() || '—'}</Badge>
+            <span className="mono">{service.url}</span>
+          </span>
+        ) : 'Name it and say what it is.'}
         back={()=>navigate('home')} backLabel="Home"
         actions={<>
           {isAdmin && service && !isBuiltin && (
@@ -2924,68 +3043,57 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
           )}
         </>}
       />
-      <div className={'page-form' + (!isBuiltin && isEdit && (isTasks || isVirtual) ? ' page-cols' : '')}>
-        {isBuiltin && (
-          <div className="field">
-            <label>Built-in service</label>
-            <span className="help">
-              The SSH service is part of the instance — seeded at startup, it fronts users' SSH keys and each app's known hosts.
-              There is nothing to edit or save here; apps get SSH access by linking this service on their own page.
-            </span>
-          </div>
-        )}
-        {!isBuiltin && (
-          <div className="page-col">
-            <fieldset className="read-only-fields" disabled={!isAdmin}>
-              {!isAdmin && (
-                <span className="help">
-                  Read-only — only admins can change a service.{canEditFile && hasFile ? ' You can edit its definition file.' : ''}
-                </span>
-              )}
-              <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
-                                 service={service} onCreateGate={isAdmin ? (slot)=>setCreatingFor(slot) : undefined}/>
-            </fieldset>
-            {isAdmin && isEdit && hasFile && (
-              <div className="field">
-                <label>Members</label>
-                <span className="help">Users who may edit this service's definition file — nothing else about it. Admins always can.</span>
-                <MultiSelect
-                  options={users.filter(assignableMember).map(u => ({value:u.id,label:u.name}))}
-                  value={members}
-                  onChange={setMembers}
-                  placeholder="No members"
-                />
-              </div>
-            )}
-          </div>
-        )}
-        {!isBuiltin && isEdit && (isTasks || isVirtual) && (
-          <div className="page-col">
-            <div className="field">
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-                <label style={{margin:0}}>Tools <Badge tone="gray" dot={false}>{tools.length}</Badge></label>
-                {canEditFile && (
-                  <button className="btn btn-sm btn-primary" onClick={()=>navigate('tools', {serviceId:String(service.id)})}>
-                    <Icon name="edit" size={12}/> Edit
-                  </button>
+      <div className={'entity-layout' + (servicePath ? ' with-aside' : '')}>
+        <div className="entity-main">
+          {isBuiltin ? (
+            <Panel title="Built-in service">
+              <span className="help">
+                The SSH service is part of the instance — seeded at startup, it fronts users' SSH keys and each app's known hosts.
+                There is nothing to edit or save here; apps get SSH access by linking this service on their own page.
+              </span>
+            </Panel>
+          ) : (
+            <Panel title="Settings" desc="What the service is, who may call it and what it sends upstream.">
+              <fieldset className="read-only-fields" disabled={!isAdmin}>
+                {!isAdmin && (
+                  <span className="help">
+                    Read-only — only admins can change a service.{canEditFile && hasFile ? ' You can edit its definition file.' : ''}
+                  </span>
                 )}
-              </div>
-              {toolsLoading && <span className="muted">Loading…</span>}
-              {!toolsLoading && toolsError && <span className="help" style={{color:'var(--danger)'}}>{toolsError}</span>}
-              {!toolsLoading && !toolsError && tools.length===0 && (
-                <span className="muted">No tools found. Publish a {isTasks?'tasks':'virtual'} file to define tools.</span>
+                <ServiceFormFields form={form} setForm={setForm} auth={auth} adminAuthID={adminAuthID}
+                                   service={service} onCreateGate={isAdmin ? (slot)=>setCreatingFor(slot) : undefined}/>
+              </fieldset>
+              {isAdmin && isEdit && hasFile && (
+                <div className="field">
+                  <label>Members</label>
+                  <span className="help">Users who may edit this service's definition file — nothing else about it. Admins always can.</span>
+                  <MultiSelect
+                    options={users.filter(assignableMember).map(u => ({value:u.id,label:u.name}))}
+                    value={members}
+                    onChange={setMembers}
+                    placeholder="No members"
+                  />
+                </div>
               )}
-              {!toolsLoading && !toolsError && tools.length>0 && (
-                <ul style={{margin:'8px 0 0',padding:0,listStyle:'none'}}>
-                  {tools.map((t,i)=>
-                    <li key={i} style={{padding:'6px 0',borderBottom:'1px solid var(--line-soft)'}}>
-                      <b>{t.name}</b>
-                      {t.description && <span className="muted"> — {t.description}</span>}
-                    </li>
-                  )}
-                </ul>
-              )}
-            </div>
+            </Panel>
+          )}
+        </div>
+        {servicePath && (
+          <aside className="entity-aside">
+            <Panel title="Connect" desc="Addresses for agents and for apps linked to this service.">
+              <CopyField label="MCP URL" value={apiBase() + servicePath} help="Give this to an agent."/>
+              <CopyField label="MCP path" value={servicePath}/>
+              <CopyField label="From an app" value={'/service/call/' + servicePath.slice('/mcp/'.length)}
+                         help="An app linked to this service calls its tools here."/>
+            </Panel>
+          </aside>
+        )}
+        {servicePath && (
+          <div className="entity-wide">
+            <ToolsPanel tools={toolsLoading ? null : tools} error={toolsError}
+                        desc="Defined by this service's definition file."
+                        empty={`No tools found. Publish a ${isTasks ? 'tasks' : 'virtual'} file to define tools.`}
+                        onEdit={canEditFile ? ()=>navigate('tools', {serviceId:String(service.id)}) : undefined}/>
           </div>
         )}
       </div>
