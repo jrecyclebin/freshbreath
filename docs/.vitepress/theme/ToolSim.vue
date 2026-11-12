@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Episode 8: a working tool script, run against a real SQLite database in the
+// Episode 7: a working tool script, run against a real SQLite database in the
 // browser (sql.js). It reads the same format Fresh Breath does, for SQL steps:
 // `[name] description` headers, `---` between tools, a SQL verb at the start
 // of a line with indented continuation lines, and `$vars` as bound

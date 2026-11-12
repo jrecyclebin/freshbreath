@@ -1,5 +1,5 @@
 ---
-episode: 8
+episode: 7
 title: Give it a database
 icon: 🗄️
 minutes: 6

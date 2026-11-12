@@ -1,5 +1,5 @@
 ---
-episode: 10
+advanced: 2
 title: Live updates
 icon: 📡
 minutes: 5

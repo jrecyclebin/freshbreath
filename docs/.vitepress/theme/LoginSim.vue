@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Episode 7: two apps, one browser store. login() only prompts when the store
+// Advanced 1: two apps, one browser store. login() only prompts when the store
 // has nothing for that app's gate, so a second app behind the same gate
 // signs in with zero prompts.
 import { computed, reactive, ref } from 'vue'

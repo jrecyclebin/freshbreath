@@ -12,7 +12,13 @@ const route = useRoute()
 const router = useRouter()
 
 const episodes = pages.filter((p) => p.episode)
+const advanced = pages.filter((p) => p.advanced)
 const references = pages.filter((p) => p.reference)
+// Episodes and advanced lessons play as one run: finishing the last episode
+// moves on to the first advanced one, and progress counts them all.
+const course = [...episodes, ...advanced]
+const kicker = (p: typeof pages[number]) =>
+  p.episode ? `Episode ${p.episode}` : p.advanced ? `Advanced ${p.advanced}` : 'Reference'
 
 const normalize = (path: string) => {
   let p = path.replace(/\.html$/, '').replace(/\/index$/, '/')
@@ -20,16 +26,16 @@ const normalize = (path: string) => {
 }
 const here = computed(() => pages.find((p) => normalize(p.url) === normalize(route.path)))
 const isHome = computed(() => frontmatter.value.layout === 'home')
-const isEpisode = computed(() => !!here.value?.episode)
+const isEpisode = computed(() => !!(here.value?.episode || here.value?.advanced))
 const beats = computed(() => here.value?.beats || [])
 const count = computed(() => (frontmatter.value.beats === false ? 0 : beats.value.length))
 const play = providePlay(count)
 const playing = computed(() => isEpisode.value && count.value > 0 && store.mode === 'play')
 const nextEpisode = computed(() => {
-  const i = episodes.findIndex((e) => e === here.value)
-  return i >= 0 ? episodes[i + 1] : undefined
+  const i = course.findIndex((e) => e === here.value)
+  return i >= 0 ? course[i + 1] : undefined
 })
-const doneCount = computed(() => episodes.filter((e) => store.done[normalize(e.url)]).length)
+const doneCount = computed(() => course.filter((e) => store.done[normalize(e.url)]).length)
 const finished = ref(false)
 
 // ---- Beat navigation -------------------------------------------------------
@@ -68,7 +74,7 @@ function finish(e?: MouseEvent) {
     nextTick(() => document.querySelector('.finish')?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
     return
   }
-  say(`✓ Episode ${here.value.episode} done`)
+  say(`✓ ${kicker(here.value)} done`)
   pickEffect(e)
   leaving.value = true
   setTimeout(async () => {
@@ -106,7 +112,7 @@ const jumpInput = ref<HTMLInputElement>()
 const results = computed(() => {
   const words = query.value.toLowerCase().split(/\s+/).filter(Boolean)
   const all = pages.flatMap((p) => [
-    { url: p.url, label: p.title, where: p.episode ? `Episode ${p.episode}` : 'Reference', icon: p.icon, hay: (p.title + ' ' + p.blurb + ' ' + p.short).toLowerCase(), weight: 3 },
+    { url: p.url, label: p.title, where: kicker(p), icon: p.icon, hay: (p.title + ' ' + p.blurb + ' ' + p.short).toLowerCase(), weight: 3 },
     ...p.beats.map((b) => ({ url: p.url + '#' + b.id, label: b.title, where: p.title, icon: '↳', hay: (b.title + ' ' + b.title + ' ' + b.text).toLowerCase(), weight: 1 }))
   ])
   if (!words.length) return all.filter((r) => r.weight === 3)
@@ -206,8 +212,8 @@ const nextLabel = computed(() => {
       <a class="brand" :href="withBase('/')"><span>a guide to</span>FRESH BREATH</a>
 
       <div class="progress">
-        <div class="bar" aria-hidden="true"><i :style="{ width: (doneCount / episodes.length) * 100 + '%' }" /></div>
-        <span>{{ doneCount }}/{{ episodes.length }}</span>
+        <div class="bar" aria-hidden="true"><i :style="{ width: (doneCount / course.length) * 100 + '%' }" /></div>
+        <span>{{ doneCount }}/{{ course.length }}</span>
       </div>
 
       <button class="jump-btn" @click="openJump">
@@ -221,6 +227,18 @@ const nextLabel = computed(() => {
             <a :href="withBase(e.url)" :aria-current="here === e ? 'page' : undefined">
               <span class="dot">{{ store.done[normalize(e.url)] ? '✓' : e.episode }}</span>
               <span>{{ e.title }}</span>
+            </a>
+          </li>
+        </ul>
+      </nav>
+
+      <nav v-if="advanced.length" class="navgroup">
+        <h2>Advanced</h2>
+        <ul class="nav">
+          <li v-for="a in advanced" :key="a.url" :class="{ done: store.done[normalize(a.url)] }">
+            <a :href="withBase(a.url)" :aria-current="here === a ? 'page' : undefined">
+              <span class="dot">{{ store.done[normalize(a.url)] ? '✓' : a.advanced }}</span>
+              <span>{{ a.title }}</span>
             </a>
           </li>
         </ul>
@@ -267,14 +285,27 @@ const nextLabel = computed(() => {
             </a>
           </li>
         </ul>
+        <template v-if="advanced.length">
+          <h3>Advanced</h3>
+          <p class="note">For when you want to write the app code yourself: frbr.js, sign-in, live updates and SSH.</p>
+          <ul class="path">
+            <li v-for="a in advanced" :key="a.url">
+              <a :href="withBase(a.url)" :class="{ done: store.done[normalize(a.url)] }">
+                <span class="ic">{{ a.icon }}</span>
+                <span class="n">A{{ a.advanced }}</span>
+                <span class="t">{{ a.title }}<small>{{ a.blurb }}</small></span>
+                <span class="tag">{{ store.done[normalize(a.url)] ? '✓ done' : a.minutes + ' min' }}</span>
+              </a>
+            </li>
+          </ul>
+        </template>
       </template>
 
       <!-- Episode or reference page -->
       <article v-else-if="here" class="page" :class="{ playing }">
         <header class="episode-head">
           <div class="kicker">
-            <span v-if="here.episode" class="ep">Episode {{ here.episode }}</span>
-            <span v-else class="ep">Reference</span>
+            <span class="ep">{{ kicker(here) }}</span>
             <span v-if="here.minutes" class="mins">{{ here.minutes }} min</span>
             <span class="spacer" />
             <div v-if="isEpisode && count" class="mode" role="group" aria-label="View">
@@ -306,7 +337,7 @@ const nextLabel = computed(() => {
             :class="{ quiet: play.needs[play.current.value] && !play.passed[play.current.value], pulse: play.passed[play.current.value] }"
             @click="showBeat(play.current.value + 1)"
           >{{ nextLabel }} →</button>
-          <button v-else class="btn finish-btn" :disabled="leaving" @click="finish($event)">{{ nextEpisode ? 'Next episode: ' + nextEpisode.title : 'Finish 🎉' }} →</button>
+          <button v-else class="btn finish-btn" :disabled="leaving" @click="finish($event)">{{ nextEpisode ? 'Next: ' + nextEpisode.title : 'Finish 🎉' }} →</button>
         </footer>
 
         <div v-if="finished" class="finish">
