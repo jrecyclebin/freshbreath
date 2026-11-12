@@ -1,14 +1,16 @@
 /* Fresh Breath Control Panel */
 
 :root {
-  --bg: oklch(0.985 0.004 90);
-  --panel: oklch(0.99 0.003 90);
+  /* The page sits a step below its cards and fields, so they read as raised. */
+  --bg: oklch(0.968 0.006 90);
+  --panel: oklch(0.995 0.002 90);
+  --field: oklch(1 0 0);
   --ink: oklch(0.22 0.01 270);
   --ink-2: oklch(0.42 0.01 270);
   --ink-3: oklch(0.62 0.008 270);
-  --line: oklch(0.92 0.005 90);
-  --line-soft: oklch(0.95 0.004 90);
-  --hover: oklch(0.965 0.005 90);
+  --line: oklch(0.90 0.006 90);
+  --line-soft: oklch(0.94 0.005 90);
+  --hover: oklch(0.955 0.006 90);
   --accent: oklch(0.62 0.06 150);
   --accent-tint: oklch(0.96 0.025 150);
   --warn: oklch(0.7 0.12 60);
@@ -16,6 +18,8 @@
   --radius: 10px;
   --radius-lg: 14px;
   --shadow-soft: 0 1px 0 rgba(20,20,20,.02), 0 8px 28px -16px rgba(20,20,20,.10);
+  --shadow-card: 0 1px 1px rgba(20,20,20,.03), 0 2px 4px -1px rgba(20,20,20,.04), 0 14px 26px -20px rgba(20,20,20,.22);
+  --focus-ring: 0 0 0 3px oklch(from var(--accent) l c h / .16);
   --font-ui: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   --tone-green:  oklch(0.62 0.12 150);
@@ -33,6 +37,7 @@
 [data-theme="dark"] {
   --bg: oklch(0.16 0.008 270);
   --panel: oklch(0.21 0.01 270);
+  --field: oklch(0.175 0.008 270);
   --ink: oklch(0.93 0.005 270);
   --ink-2: oklch(0.75 0.005 270);
   --ink-3: oklch(0.56 0.004 270);
@@ -44,6 +49,7 @@
   --warn: oklch(0.78 0.10 60);
   --danger: oklch(0.70 0.12 25);
   --shadow-soft: 0 1px 0 rgba(0,0,0,.30), 0 8px 28px -16px rgba(0,0,0,.50);
+  --shadow-card: 0 1px 0 rgba(0,0,0,.30), 0 14px 26px -20px rgba(0,0,0,.70);
   --tone-green:  oklch(0.72 0.14 150);
   --tone-amber:  oklch(0.78 0.15 70);
   --tone-red:    oklch(0.72 0.16 25);
@@ -301,6 +307,12 @@ button { font-family: inherit; }
   margin-bottom: 28px;
   gap: 24px;
 }
+.page-head-main { min-width: 0; }
+.page-ident { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.page-titles { min-width: 0; }
+/* The entity's tile, at page size. */
+.entity-icn.page-icn { width: 46px; height: 46px; border-radius: 13px; }
+.page-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
 
 .back-link {
   display: inline-flex;
@@ -366,10 +378,12 @@ button { font-family: inherit; }
 }
 .btn:hover { background: var(--hover); }
 .btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn-primary {
   background: var(--ink);
   color: var(--bg);
   border-color: var(--ink);
+  box-shadow: 0 1px 2px rgba(20,20,20,.18);
 }
 .btn-primary:hover { background: var(--ink-deep); border-color: var(--ink-deep); }
 .btn-ghost { border-color: transparent; background: transparent; }
@@ -395,15 +409,15 @@ button { font-family: inherit; }
   width: 100%;
   padding: 8px 12px 8px 34px;
   border: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--field);
   border-radius: 9px;
   font-size: 13px;
   font-family: inherit;
   color: var(--ink);
   outline: none;
-  transition: border-color .15s, background .15s;
+  transition: border-color .15s, box-shadow .15s;
 }
-.search input:focus { border-color: var(--accent-border); background: var(--panel); }
+.search input:focus { border-color: var(--accent-border); box-shadow: var(--focus-ring); }
 .search input::placeholder { color: var(--ink-3); }
 .search .icn {
   position: absolute;
@@ -438,6 +452,7 @@ button { font-family: inherit; }
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--panel);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 
@@ -579,7 +594,7 @@ table.tbl {
   gap: 8px;
   padding: 6px 10px;
   border: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--field);
   border-radius: 9px;
   cursor: pointer;
   min-height: 42px;
@@ -722,21 +737,37 @@ table.tbl {
 }
 
 .field { display: flex; flex-direction: column; gap: 6px; }
-.field label { font-size: 12px; color: var(--ink-2); font-weight: 500; }
-.field .help { font-size: 12px; color: var(--ink-3); }
+.field label { font-size: 12.5px; color: var(--ink); font-weight: 500; }
+.field .help { font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+.field .help code, .field .help .mono { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-2); }
 
 .input {
   padding: 10px 12px;
   border: 1px solid var(--line);
-  background: var(--panel);
+  background: var(--field);
   border-radius: 9px;
   font-size: 13.5px;
   font-family: inherit;
   color: var(--ink);
   outline: none;
-  transition: border-color .15s, background .15s;
+  transition: border-color .15s, box-shadow .15s;
 }
-.input:focus { border-color: var(--accent-border); background: var(--panel); }
+.input:hover { border-color: oklch(from var(--line) calc(l - .06) c h); }
+.input:focus { border-color: var(--accent-border); box-shadow: var(--focus-ring); }
+.input:disabled { background: var(--hover); color: var(--ink-2); }
+input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
+/* A heading that splits one long form into named parts. */
+.field-group {
+  margin: 6px 0 -4px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-3);
+}
 .input.mono { font-family: var(--font-mono); font-size: 12.5px; }
 
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -921,12 +952,11 @@ select.input {
 /* The frbr-concept layout: each area is a section with a fixed-width rail
    naming it (plus a one-line “what this is”), and the controls beside it;
    a rule between sections. */
-.settings-layout { margin-top: 18px; }
+.settings-layout { margin-top: 18px; display: flex; flex-direction: column; gap: 20px; }
+.settings-section { align-items: flex-start; }
 .settings-section {
   display: flex;
   gap: 24px;
-  padding: 24px 0;
-  border-top: 1px solid var(--line);
   flex-wrap: wrap;
 }
 .settings-rail { flex: 0 0 220px; }
@@ -940,10 +970,18 @@ select.input {
   margin-top: 4px;
   line-height: 1.45;
 }
+.settings-rail { padding-top: 18px; }
 .settings-body {
   flex: 1 1 480px;
   min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-card);
 }
+/* A card inside a card sits flat. */
+.settings-body .feed-card { box-shadow: none; background: var(--field); }
 
 /* Update-feed rows — one bordered card, a row per feed: identity left,
    applied/pending/error status beside it, actions right. */
@@ -951,6 +989,7 @@ select.input {
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--panel);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 .feed-empty { padding: 18px 16px; font-size: 13px; }
@@ -1012,72 +1051,97 @@ select.input {
 }
 
 /* ── Home page ──────────────────────────────────────────────────────────
-   Two stacked sections: hosted apps (plus the drop box) on top, and the
-   entity table beneath — everything recently edited together, or the
-   alphabetized list of one type, switched by the rail beside the table. */
+   Three stacked sections: the way in (connect an agent, or drop a file),
+   the hosted apps as a launcher capped at two rows, and the entity table —
+   everything recently edited together, or the alphabetized list of one
+   type, switched by the rail beside the table. */
 
-.home-section { margin-bottom: 36px; }
+.home-section { margin-bottom: 32px; }
 .home-section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 14px;
+  min-height: 30px;
+  margin-bottom: 12px;
 }
 .home-section-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-size: 16px;
   font-weight: 500;
   letter-spacing: -0.01em;
 }
 
-/* A container, not a media query, drives the column count: what matters
-   is the width left for the grid after the drop pane's 300px, not the
-   viewport — so the row measures itself and the grid asks it. */
-.home-hosted {
+.home-top {
   display: flex;
   gap: 16px;
-  align-items: flex-start;
-  container-type: inline-size;
+  align-items: stretch;
+  margin-bottom: 32px;
 }
-.hosted-grid {
+.connect-card {
   flex: 1;
   min-width: 0;
+  display: flex;
+  gap: 16px;
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(120deg, var(--accent-tint), var(--panel) 62%);
+  box-shadow: var(--shadow-card);
+}
+.connect-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.connect-body h2 { margin: 0; font-size: 16px; font-weight: 500; letter-spacing: -0.01em; }
+.connect-body p { margin: 0 0 10px; font-size: 13px; color: var(--ink-2); max-width: 60ch; }
+.connect-body a { color: var(--ink); text-underline-offset: 2px; }
+.connect-body a:hover { color: var(--accent); }
+.home-top .home-dropzone { width: 300px; flex-shrink: 0; justify-content: center; }
+
+/* A container, not a media query, drives the column count: what matters
+   is the width the grid really has, not the viewport's. */
+.home-section { container-type: inline-size; }
+.hosted-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
 }
-/* Two comfortable card columns need ~510px (2 × 240 + gap); beside the
-   drop pane that's ~830px of row. Anything narrower: one column, the
-   rows stack and each card keeps its full width. */
-@container (max-width: 830px) {
-  .hosted-grid { grid-template-columns: 1fr; }
+@container (max-width: 760px) {
+  .hosted-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
-.hosted-empty { flex: 1; padding: 28px 16px; }
-.home-dropzone-wrap {
-  position: sticky;
-  top: 92px;
-  width: 300px;
-  flex-shrink: 0;
+@container (max-width: 540px) {
+  .hosted-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.hosted-empty {
+  padding: 28px 16px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
 }
 .hosted-card {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
-  padding: 8px 8px 8px 10px;
+  box-shadow: 0 1px 1px rgba(20,20,20,.03);
+  padding: 7px 6px 7px 11px;
+  color: var(--ink-3);
   cursor: pointer;
-  transition: border-color .12s, background .12s;
+  transition: border-color .12s, box-shadow .12s, transform .12s;
 }
-.hosted-card:hover { border-color: var(--tone-blue); background: var(--hover); }
+.hosted-card:hover {
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-card);
+  transform: translateY(-1px);
+}
 .hosted-fav {
-  width: 22px; height: 22px;
-  border-radius: 6px;
+  width: 20px; height: 20px;
+  border-radius: 5px;
   flex-shrink: 0;
   object-fit: contain;
-  background: var(--bg);
 }
 .hosted-name {
   flex: 1;
@@ -1090,34 +1154,68 @@ select.input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.hosted-name:hover { color: var(--tone-blue); text-decoration: underline; }
-.hosted-edit { flex-shrink: 0; }
+.hosted-card:hover .hosted-name { color: var(--ink-deep); }
+/* The app's default environment as a dot — the tile is too narrow for a
+   badge, and the name is what you're scanning for. */
+.env-dot {
+  width: 7px; height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  background: var(--ink-3);
+}
+.env-dot.green { background: var(--tone-green); }
+.env-dot.amber { background: var(--tone-amber); }
+.env-dot.blue  { background: var(--tone-blue); }
+.hosted-edit { flex-shrink: 0; color: var(--ink-3); opacity: .55; }
+.hosted-card:hover .hosted-edit { opacity: 1; }
 
 /* The home drop box — bigger than the in-form one, it's the front door */
 .home-dropzone {
   margin-top: 0;
-  padding: 34px 24px;
+  padding: 18px 20px;
   border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  border-width: 2px;
+  gap: 4px;
 }
-.home-dropzone b { font-size: 14.5px; font-weight: 500; color: var(--ink-2); }
-.home-dropzone span { font-size: 12.5px; }
+.home-dropzone b { font-size: 14px; font-weight: 500; color: var(--ink-2); }
+.home-dropzone span { font-size: 12px; line-height: 1.45; }
 .home-dropzone:hover b, .home-dropzone-active b { color: var(--ink); }
 .dz-icon {
   display: grid;
   place-items: center;
-  width: 40px; height: 40px;
-  border-radius: 12px;
+  width: 36px; height: 36px;
+  border-radius: 11px;
   border: 1px solid var(--line);
   background: var(--panel);
   color: var(--ink-3);
   margin-bottom: 4px;
 }
-.home-dropzone:hover .dz-icon, .home-dropzone-active .dz-icon { color: var(--accent); border-color: var(--accent-border); }
+.home-dropzone:hover .dz-icon, .drop-zone-active .dz-icon { color: var(--accent); border-color: var(--accent-border); }
+
+/* The table's MCP cell: two halves of one chip, each a copy button. */
+.mcp-copy {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--field);
+  overflow: hidden;
+}
+.mcp-copy button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.mcp-copy button + button { border-left: 1px solid var(--line); }
+.mcp-copy button:hover { background: var(--accent-tint); color: var(--ink); }
 
 /* Entity table with its left-hand view rail */
 .entity-wrap {
@@ -1161,6 +1259,7 @@ select.input {
 }
 .entity-toolbar .search { max-width: 300px; }
 .tbl tr.entity-row { cursor: pointer; }
+.tbl .cell-when { white-space: nowrap; }
 .entity-icn {
   width: 30px; height: 30px;
   border-radius: 8px;
@@ -1177,31 +1276,124 @@ select.input {
 .badge.blue,   .rail-btn.active.tone-blue,   .tl-icn.tone-blue,   .entity-icn.tone-blue   { background: oklch(from var(--tone-blue)   var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-blue)   var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-blue)   var(--tone-border-l) calc(c * .33) h); }
 .badge.violet, .rail-btn.active.tone-violet, .tl-icn.tone-violet, .entity-icn.tone-violet { background: oklch(from var(--tone-violet) var(--tone-bg-l) calc(c * .25) h); color: oklch(from var(--tone-violet) var(--tone-fg-l) calc(c * .67) h); border-color: oklch(from var(--tone-violet) var(--tone-border-l) calc(c * .33) h); }
 
-/* Full-page settings forms (the old drawers, promoted) */
-.page-form {
-  max-width: 720px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-/* Two-column entity pages (service, app): the settings form on the left,
-   the page's side panels — tools, hosting, the setup prompt — stacked to
-   the right. The form keeps its 720px cap; the side column takes what's
-   left and can't shrink past hosting's slot rows. */
-.page-cols {
-  max-width: none;
+/* ── Entity pages (app, service, auth record) ───────────────────────────
+   Panels in a grid: the settings form in the main column, the addresses
+   and hosting in a fixed aside, and anything long — a tool list — in a
+   full-width row underneath, where its length pushes nothing aside. */
+.entity-layout {
   display: grid;
-  grid-template-columns: minmax(0, 720px) minmax(280px, 1fr);
-  gap: 20px 40px;
+  grid-template-columns: minmax(0, 720px);
+  gap: 20px;
   align-items: start;
 }
-.page-col {
+.entity-layout.with-aside { grid-template-columns: minmax(0, 1fr) 340px; }
+.entity-main, .entity-aside {
   display: flex;
   flex-direction: column;
   gap: 20px;
   min-width: 0;
 }
+.entity-wide { grid-column: 1 / -1; min-width: 0; }
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-card);
+  min-width: 0;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.panel-titles { min-width: 0; }
+.panel-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.panel-head p { margin: 2px 0 0; font-size: 12.5px; color: var(--ink-3); }
+.panel-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.panel-actions .search { width: 220px; }
+.panel-actions .search input { padding-top: 6px; padding-bottom: 6px; }
+.panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+}
+.entity-aside .panel-body { gap: 16px; }
+
+/* A copyable address: the whole box is the button. */
+.copy-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--field);
+  color: var(--ink-3);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s, color .15s;
+}
+.copy-field .mono {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copy-field svg { flex-shrink: 0; }
+.copy-field:hover { border-color: var(--accent-border); color: var(--accent); box-shadow: var(--focus-ring); }
+
+.prompt-box { position: relative; }
+.prompt-box textarea {
+  width: 100%;
+  padding-right: 38px;
+  font-size: 11px;
+  line-height: 1.6;
+  resize: vertical;
+  field-sizing: content;
+}
+.prompt-box .btn { position: absolute; top: 6px; right: 6px; }
+
+/* Tools: name beside description, one row each. Descriptions hold to two
+   lines so a long list stays scannable; the full text is in the tooltip. */
+.tool-list { margin: -8px 0; padding: 0; list-style: none; }
+.tool-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.tool-list li:last-child { border-bottom: 0; }
+.tool-name { font-size: 12.5px; font-weight: 500; color: var(--ink); overflow-wrap: anywhere; }
+.tool-desc {
+  font-size: 13px;
+  color: var(--ink-2);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* In a panel the hosting drop box is one of several things, not the door. */
+.panel .home-dropzone { padding: 16px; }
 
 /* Deployment slots — one bordered card, a row per slot. Each row is two
    lines: the badge, the slot's state and its action up top, the slot's URL
@@ -1210,7 +1402,7 @@ select.input {
 .slot-card {
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--panel);
+  background: var(--field);
 }
 .slot-row {
   display: flex;
@@ -1315,10 +1507,10 @@ select.input {
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 9px;
-  background: var(--panel);
+  background: var(--field);
   color: var(--ink-3);
 }
-.replace-search:focus-within { border-color: var(--accent-border); }
+.replace-search:focus-within { border-color: var(--accent-border); box-shadow: var(--focus-ring); }
 .replace-search input {
   border: 0;
   outline: none;
@@ -1458,18 +1650,23 @@ select.input {
   }
   .entity-toolbar .search { max-width: none; flex: 1; }
 
-  .hosted-grid { grid-template-columns: 1fr; }
-  .home-hosted { flex-direction: column; }
-  .home-dropzone-wrap { position: static; width: 100%; }
-  .home-dropzone { padding: 24px 16px; }
-  .page-form { max-width: none; }
-  .page-cols { grid-template-columns: 1fr; }
+  .home-top { flex-direction: column; }
+  .home-top .home-dropzone { width: 100%; }
+  .connect-card { padding: 16px; }
+  .connect-card > .page-icn { display: none; }
+  .entity-layout, .entity-layout.with-aside { grid-template-columns: minmax(0, 1fr); }
+  .entity-icn.page-icn { width: 38px; height: 38px; border-radius: 11px; }
+  .panel-head { padding: 14px 16px; flex-wrap: wrap; }
+  .panel-body { padding: 16px; }
+  .panel-actions .search { width: 150px; }
+  .tool-list li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .upload-mode button { font-size: 11.5px; padding: 7px 6px; }
   .menu-pop { right: -6px; }
 
   /* Settings sections stack: the rail names the area, the body follows. */
-  .settings-section { padding: 20px 0; gap: 16px; }
-  .settings-rail { flex-basis: 100%; }
+  .settings-section { gap: 12px; }
+  .settings-rail { flex-basis: 100%; padding-top: 4px; }
+  .settings-body { padding: 16px; }
 
   /* Feed rows stack their three zones. */
   .feed-row { flex-direction: column; align-items: flex-start; gap: 8px; }
