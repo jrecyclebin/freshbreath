@@ -3,6 +3,9 @@ env_shell_expand = true
 
 [tools]
 go = "1.27"
+# Readable test logs plus a JSON record of every test, which the PR Gate
+# counts (scripts/test-stats.sh).
+"go:gotest.tools/gotestsum" = "1.13.0"
 
 [env]
 # FTS5 is a build-time question for mattn/go-sqlite3: no tag, no full-text
@@ -195,9 +198,14 @@ mise run release:undo "$VERSION"
 mise run release "$VERSION"
 """
 
+# Both suites leave tmp/<suite>.json (every test event) and
+# tmp/<suite>-cover.out behind for scripts/test-stats.sh to tally.
 [tasks.test]
 description = "Run all tests"
-run = "go test -cover ./... -v"
+run = """
+mkdir -p tmp
+gotestsum --format testname --jsonfile tmp/test.json -- -coverprofile=tmp/test-cover.out ./...
+"""
 
 [tasks.test-race]
 description = "Run all tests with race detector"
@@ -205,7 +213,12 @@ run = "go test ./... -race"
 
 [tasks.e2e]
 description = "Run the end-to-end suite (headless Chromium; FRBR_E2E_CHROME picks the binary)"
-run = "go test -tags e2e,sqlite_fts5 ./e2e/ -v"
+# The server runs in-process, so -coverpkg measures how much of internal/
+# the browser flows reach.
+run = """
+mkdir -p tmp
+gotestsum --format testname --jsonfile tmp/e2e.json -- -tags e2e,sqlite_fts5 -coverpkg=./internal/... -coverprofile=tmp/e2e-cover.out ./e2e/
+"""
 
 [tasks.lint]
 description = "Run go vet"

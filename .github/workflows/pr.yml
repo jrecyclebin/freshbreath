@@ -8,7 +8,9 @@ name: PR Gate
 # rather than waiting on it. A failure or skip upstream short-circuits the
 # rest, and `report` — `if: always()` — still folds all three into a
 # success rate and fails (blocking the PR, once the check is required in
-# branch protection) unless all pass.
+# branch protection) unless all pass. `test` and `e2e` each hand it a tally
+# (tests passed/failed/skipped, coverage) as job outputs; the report lands
+# in the step summary and in one PR comment that each push edits in place.
 #
 # NB: a failing check only blocks a merge once "report" (or the three
 # individual checks) is a *required* status check under the repo's branch
@@ -50,6 +52,11 @@ jobs:
   test:
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.stats.outputs.passed }}
+      failed: ${{ steps.stats.outputs.failed }}
+      skipped: ${{ steps.stats.outputs.skipped }}
+      coverage: ${{ steps.stats.outputs.coverage }}
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v4
@@ -68,9 +75,20 @@ jobs:
       - name: mise test
         run: mise run test
 
+      # always() so a red run still reports how red.
+      - name: Tally
+        id: stats
+        if: always()
+        run: scripts/test-stats.sh tmp/test.json tmp/test-cover.out | tee -a "$GITHUB_OUTPUT"
+
   e2e:
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.stats.outputs.passed }}
+      failed: ${{ steps.stats.outputs.failed }}
+      skipped: ${{ steps.stats.outputs.skipped }}
+      coverage: ${{ steps.stats.outputs.coverage }}
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v4
@@ -104,55 +122,102 @@ jobs:
         env:
           FRBR_E2E_CHROME: ${{ steps.chrome.outputs.path }}
 
+      - name: Tally
+        id: stats
+        if: always()
+        run: scripts/test-stats.sh tmp/e2e.json tmp/e2e-cover.out | tee -a "$GITHUB_OUTPUT"
+
   report:
     needs: [build, test, e2e]
     # always() so the rate is published even when a check failed or was
     # skipped — the whole point is to see 2/3, not to swallow the result.
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - name: Success rate
+      - name: Report
         shell: bash
         env:
           R_BUILD: ${{ needs.build.result }}
           R_TEST: ${{ needs.test.result }}
           R_E2E: ${{ needs.e2e.result }}
+          T_PASSED: ${{ needs.test.outputs.passed }}
+          T_FAILED: ${{ needs.test.outputs.failed }}
+          T_SKIPPED: ${{ needs.test.outputs.skipped }}
+          T_COVERAGE: ${{ needs.test.outputs.coverage }}
+          E_PASSED: ${{ needs.e2e.outputs.passed }}
+          E_FAILED: ${{ needs.e2e.outputs.failed }}
+          E_SKIPPED: ${{ needs.e2e.outputs.skipped }}
+          E_COVERAGE: ${{ needs.e2e.outputs.coverage }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
           total=3
           pass=0
-          sum="$GITHUB_STEP_SUMMARY"
-          {
-            echo "### PR Gate"
-            echo ""
-          } >> "$sum"
+          # The marker is how the next push finds this comment to edit
+          # rather than stacking a new one under it.
+          marker="<!-- pr-gate-report -->"
+          body="$RUNNER_TEMP/report.md"
 
-          emit() {
-            local name="$1" res="$2" icon line
+          # One table row. Stages that never got to run (skipped upstream)
+          # have no tally, so their cells fall back to a dash.
+          row() {
+            local name="$1" res="$2" passed="$3" failed="$4" skipped="$5" cov="$6" icon tests
             if [ "$res" = "success" ]; then
               icon="✅"
               pass=$((pass + 1))
             else
-              icon="❌"
+              icon="❌ $res"
             fi
-            line="- $name: $icon"
-            [ "$res" = "success" ] || line="$line ($res)"
-            echo "$line"
-            echo "$line" >> "$sum"
+            if [ -n "$passed" ]; then
+              tests="$passed passed · $failed failed"
+              [ "${skipped:-0}" -gt 0 ] && tests="$tests · $skipped skipped"
+            else
+              tests="—"
+            fi
+            echo "| $name | $icon | $tests | ${cov:-—} |"
           }
 
-          emit "mise build" "$R_BUILD"
-          emit "mise test"  "$R_TEST"
-          emit "mise e2e"   "$R_E2E"
-
+          {
+            echo "$marker"
+            echo "### PR Gate"
+            echo ""
+            echo "| stage | result | tests | coverage |"
+            echo "|---|---|---|---|"
+            row "mise build" "$R_BUILD" "" "" "" ""
+            row "mise test"  "$R_TEST"  "$T_PASSED" "$T_FAILED" "$T_SKIPPED" "$T_COVERAGE"
+            row "mise e2e"   "$R_E2E"   "$E_PASSED" "$E_FAILED" "$E_SKIPPED" "$E_COVERAGE"
+          } > "$body"
           rate=$((pass * 100 / total))
           {
             echo ""
             echo "**Success rate: ${pass}/${total} (${rate}%)**"
-          } >> "$sum"
+            echo ""
+            echo "<sub>e2e coverage is of \`internal/\`, measured through the browser flows. [Run](${RUN_URL}) · \`${SHA:0:7}\`</sub>"
+          } >> "$body"
 
-          echo ""
-          echo "Success rate: ${pass}/${total} (${rate}%)"
+          cat "$body" >> "$GITHUB_STEP_SUMMARY"
+          cat "$body"
+
+          # The comment is a convenience, never the gate: a dispatch run has
+          # no PR, and a fork's token can't write — both just skip it.
+          if [ -n "$PR" ]; then
+            id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+                   --jq ".[] | select(.body | startswith(\"$marker\")) | .id" 2>/dev/null | head -1)
+            if [ -n "$id" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$body" > /dev/null \
+                || echo "::warning::couldn't update the PR comment"
+            else
+              gh api -X POST "repos/$REPO/issues/$PR/comments" -F body=@"$body" > /dev/null \
+                || echo "::warning::couldn't post the PR comment"
+            fi
+          fi
 
           if [ "$pass" -ne "$total" ]; then
             echo "::error::${pass}/${total} checks passed — this PR is blocked"
