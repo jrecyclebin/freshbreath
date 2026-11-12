@@ -558,6 +558,28 @@ func fakeOIDCIssuer(t *testing.T) *httptest.Server {
 	return s
 }
 
+// Microsoft's multi-tenant endpoints publish a templated issuer; a token is
+// accepted only from the tenant its own tid names.
+func TestCheckIssuer(t *testing.T) {
+	const template = "https://login.microsoftonline.com/{tenantid}/v2.0"
+	cases := []struct {
+		published, tokenIssuer, tid string
+		ok                          bool
+	}{
+		{"https://idp.example", "https://idp.example", "", true},
+		{"https://idp.example", "https://evil.example", "", false},
+		{template, "https://login.microsoftonline.com/abc/v2.0", "abc", true},
+		{template, "https://login.microsoftonline.com/abc/v2.0", "xyz", false},
+		{template, "https://login.microsoftonline.com/abc/v2.0", "", false},
+		{template, "https://evil.example/abc/v2.0", "abc", false},
+	}
+	for _, c := range cases {
+		if err := checkIssuer(c.published, c.tokenIssuer, c.tid); (err == nil) != c.ok {
+			t.Errorf("checkIssuer(%q, %q, %q) = %v, want ok=%v", c.published, c.tokenIssuer, c.tid, err, c.ok)
+		}
+	}
+}
+
 // An edited issuer is discovered afresh: the cache is keyed by issuer, so
 // the record's old provider can't answer for its new one.
 func TestOIDCProviderFollowsIssuerEdit(t *testing.T) {

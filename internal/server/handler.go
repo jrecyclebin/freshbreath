@@ -3480,7 +3480,15 @@ func (s *Server) getOIDCProvider(ctx context.Context, issuer string) (*oidc.Prov
 		return p, nil
 	}
 
-	p, err := oidc.NewProvider(ctx, issuer)
+	// Microsoft's tenant-independent endpoints (common, organizations,
+	// consumers) publish an issuer that never equals the URL they are served
+	// from, so discovery's issuer match is waived for that host; the id
+	// token's issuer is checked against the published one in checkIssuer.
+	discoveryCtx := ctx
+	if u, err := url.Parse(issuer); err == nil && u.Scheme == "https" && u.Host == "login.microsoftonline.com" {
+		discoveryCtx = oidc.InsecureIssuerURLContext(ctx, issuer)
+	}
+	p, err := oidc.NewProvider(discoveryCtx, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("OIDC discovery for %s: %w", issuer, err)
 	}

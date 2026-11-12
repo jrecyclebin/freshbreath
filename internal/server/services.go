@@ -156,6 +156,25 @@ func authCodeOptions(verifier string, d db.AuthDescriptor) []oauth2.AuthCodeOpti
 	return opts
 }
 
+// checkIssuer confirms an id token came from the issuer its provider
+// published in discovery. Microsoft's multi-tenant endpoints publish a
+// template — https://login.microsoftonline.com/{tenantid}/v2.0 — and each
+// token names the tenant that signed the user in, so the placeholder is
+// filled from the token's tid claim before comparing.
+func checkIssuer(published, tokenIssuer, tenantID string) error {
+	want := published
+	if strings.Contains(published, "{tenantid}") {
+		if tenantID == "" {
+			return fmt.Errorf("id token has no tid claim to fill issuer %q", published)
+		}
+		want = strings.ReplaceAll(published, "{tenantid}", tenantID)
+	}
+	if tokenIssuer != want {
+		return fmt.Errorf("id token issued by %q, expected %q", tokenIssuer, want)
+	}
+	return nil
+}
+
 func (s *Server) oidcBeginAuth(ctx context.Context, rec *db.AuthRecord, redirectURI string) (authURL, state, verifier, oidcNonce, tokenURL string, err error) {
 	provider, err := s.getOIDCProvider(ctx, rec.Descriptor.Issuer)
 	if err != nil {
@@ -213,9 +232,26 @@ func (s *Server) oidcExchangeCode(ctx context.Context, rec *db.AuthRecord, code,
 		return claims, tok.AccessToken, tok.RefreshToken, nil
 	}
 
-	verifierConfig := &oidc.Config{ClientID: rec.Descriptor.ClientID}
+	// The issuer is checked by checkIssuer below, against what the provider
+	// published — which for Microsoft differs from the record's issuer.
+	verifierConfig := &oidc.Config{ClientID: rec.Descriptor.ClientID, SkipIssuerCheck: true}
 	idToken, err := provider.Verifier(verifierConfig).Verify(ctx, idTokenRaw)
 	if err != nil {
+		return nil, "", "", fmt.Errorf("id token verification: %w", err)
+	}
+	var published struct {
+		Issuer string `json:"issuer"`
+	}
+	var tenant struct {
+		ID string `json:"tid"`
+	}
+	if err := provider.Claims(&published); err != nil {
+		return nil, "", "", fmt.Errorf("discovery document: %w", err)
+	}
+	if err := idToken.Claims(&tenant); err != nil {
+		return nil, "", "", fmt.Errorf("id token claims: %w", err)
+	}
+	if err := checkIssuer(published.Issuer, idToken.Issuer, tenant.ID); err != nil {
 		return nil, "", "", fmt.Errorf("id token verification: %w", err)
 	}
 
