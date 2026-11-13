@@ -186,7 +186,7 @@ jobs:
 
           {
             echo "$marker"
-            echo "### PR Gate"
+            echo "### Report for `${SHA:0:7}`"
             echo ""
             echo "| stage | result | tests | coverage |"
             echo "|---|---|---|---|"
@@ -199,7 +199,7 @@ jobs:
             echo ""
             echo "**Success rate: ${pass}/${total} (${rate}%)**"
             echo ""
-            echo "<sub>e2e coverage is of \`internal/\`, measured through the browser flows. [Run](${RUN_URL}) · \`${SHA:0:7}\`</sub>"
+            echo "<sub>e2e coverage is of \`internal/\`, measured through the browser flows. [View the run.](${RUN_URL})</sub>"
           } >> "$body"
 
           cat "$body" >> "$GITHUB_STEP_SUMMARY"
