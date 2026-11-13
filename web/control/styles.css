@@ -8,17 +8,27 @@
   --ink: oklch(0.22 0.01 270);
   --ink-2: oklch(0.42 0.01 270);
   --ink-3: oklch(0.62 0.008 270);
-  --line: oklch(0.90 0.006 90);
+  --line: oklch(0.86 0.008 88);
   --line-soft: oklch(0.94 0.005 90);
   --hover: oklch(0.955 0.006 90);
   --accent: oklch(0.62 0.06 150);
   --accent-tint: oklch(0.96 0.025 150);
   --warn: oklch(0.7 0.12 60);
   --danger: oklch(0.6 0.15 25);
-  --radius: 10px;
-  --radius-lg: 14px;
+  /* Papercraft: cards are cut sheets with square corners; controls keep
+     the faintest ease so they still read as things to press. */
+  --radius: 2px;
+  --radius-lg: 0px;
   --shadow-soft: 0 1px 0 rgba(20,20,20,.02), 0 8px 28px -16px rgba(20,20,20,.10);
-  --shadow-card: 0 1px 1px rgba(20,20,20,.03), 0 2px 4px -1px rgba(20,20,20,.04), 0 14px 26px -20px rgba(20,20,20,.22);
+  /* A second sheet showing from under the first: no blur, just an offset
+     outline filled with a darker paper. */
+  --under: oklch(0.925 0.012 85);
+  --shadow-card: 4px 4px 0 -1px var(--under), 4px 4px 0 0 var(--line);
+  --shadow-lift: 6px 6px 0 -1px var(--under), 6px 6px 0 0 var(--line);
+  /* Wind: the dusty blue-gray that sits beside the sand. */
+  --wind: oklch(0.52 0.03 245);
+  --wind-tint: oklch(0.935 0.009 245);
+  --wind-line: oklch(0.82 0.016 245);
   --focus-ring: 0 0 0 3px oklch(from var(--accent) l c h / .16);
   --font-ui: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
@@ -49,7 +59,10 @@
   --warn: oklch(0.78 0.10 60);
   --danger: oklch(0.70 0.12 25);
   --shadow-soft: 0 1px 0 rgba(0,0,0,.30), 0 8px 28px -16px rgba(0,0,0,.50);
-  --shadow-card: 0 1px 0 rgba(0,0,0,.30), 0 14px 26px -20px rgba(0,0,0,.70);
+  --under: oklch(0.125 0.008 270);
+  --wind: oklch(0.76 0.04 240);
+  --wind-tint: oklch(0.25 0.014 245);
+  --wind-line: oklch(0.38 0.02 245);
   --tone-green:  oklch(0.72 0.14 150);
   --tone-amber:  oklch(0.78 0.15 70);
   --tone-red:    oklch(0.72 0.16 25);
@@ -107,7 +120,7 @@ button { font-family: inherit; }
   background: transparent;
   padding: 2px;
   cursor: pointer;
-  border-radius: 8px;
+  border-radius: var(--radius);
 }
 .tb-brand:hover { background: var(--hover); }
 .tb-brand .brand-logo {
@@ -137,7 +150,7 @@ button { font-family: inherit; }
   width: 34px; height: 34px;
   display: grid; place-items: center;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink-2);
   cursor: pointer;
@@ -153,7 +166,7 @@ button { font-family: inherit; }
   min-width: 180px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-soft);
   padding: 5px;
   z-index: 80;
@@ -185,7 +198,7 @@ button { font-family: inherit; }
 .menu-heading-link {
   width: 100%;
   border: 0;
-  border-radius: 7px 7px 0 0;
+  border-radius: var(--radius) var(--radius) 0 0;
   background: transparent;
   text-align: left;
   cursor: pointer;
@@ -199,7 +212,7 @@ button { font-family: inherit; }
   width: 100%;
   padding: 8px 10px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink-2);
   font-size: 13px;
@@ -268,12 +281,12 @@ button { font-family: inherit; }
   padding: 3px;
   background: var(--hover);
   border: 1px solid var(--line-soft);
-  border-radius: 10px;
+  border-radius: var(--radius);
   width: fit-content;
 }
 .area-tab {
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius);
   padding: 6px 14px;
   background: transparent;
   color: var(--ink-2);
@@ -311,7 +324,7 @@ button { font-family: inherit; }
 .page-ident { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .page-titles { min-width: 0; }
 /* The entity's tile, at page size. */
-.entity-icn.page-icn { width: 46px; height: 46px; border-radius: 13px; }
+.entity-icn.page-icn { width: 46px; height: 46px; border-radius: var(--radius-lg); }
 .page-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
 
 .back-link {
@@ -321,7 +334,7 @@ button { font-family: inherit; }
   margin-bottom: 10px;
   padding: 3px 8px 3px 4px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink-3);
   font-size: 12.5px;
@@ -366,7 +379,7 @@ button { font-family: inherit; }
   align-items: center;
   gap: 8px;
   padding: 8px 14px;
-  border-radius: 9px;
+  border-radius: var(--radius);
   border: 1px solid var(--line);
   background: var(--panel);
   color: var(--ink);
@@ -383,7 +396,7 @@ button { font-family: inherit; }
   background: var(--ink);
   color: var(--bg);
   border-color: var(--ink);
-  box-shadow: 0 1px 2px rgba(20,20,20,.18);
+  box-shadow: 2px 2px 0 0 var(--ink-3);
 }
 .btn-primary:hover { background: var(--ink-deep); border-color: var(--ink-deep); }
 .btn-ghost { border-color: transparent; background: transparent; }
@@ -410,7 +423,7 @@ button { font-family: inherit; }
   padding: 8px 12px 8px 34px;
   border: 1px solid var(--line);
   background: var(--field);
-  border-radius: 9px;
+  border-radius: var(--radius);
   font-size: 13px;
   font-family: inherit;
   color: var(--ink);
@@ -522,7 +535,7 @@ table.tbl {
   display: inline-block;
   padding: 3px 6px;
   margin: -3px -6px;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: text;
   border: 1px solid transparent;
   transition: background .12s, border-color .12s;
@@ -533,7 +546,7 @@ table.tbl {
   color: inherit;
   background: white;
   border: 1px solid var(--accent-border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   padding: 3px 6px;
   margin: -4px -7px;
   outline: none;
@@ -546,8 +559,8 @@ table.tbl {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 9px;
-  border-radius: 999px;
+  padding: 3px 8px;
+  border-radius: var(--radius);
   font-size: 11.5px;
   font-weight: 500;
   border: 1px solid var(--line);
@@ -576,7 +589,7 @@ table.tbl {
   font-family: var(--font-mono);
   font-size: 11px;
   padding: 2px 7px;
-  border-radius: 5px;
+  border-radius: var(--radius);
   background: var(--bg);
   color: var(--ink-2);
   border: 1px solid var(--line);
@@ -595,7 +608,7 @@ table.tbl {
   padding: 6px 10px;
   border: 1px solid var(--line);
   background: var(--field);
-  border-radius: 9px;
+  border-radius: var(--radius);
   cursor: pointer;
   min-height: 42px;
   transition: border-color .15s;
@@ -620,7 +633,7 @@ table.tbl {
   padding: 3px 6px 3px 8px;
   background: var(--accent-tint);
   border: 1px solid oklch(from var(--accent) 0.88 0.04 h);
-  border-radius: 6px;
+  border-radius: var(--radius);
   font-size: 12.5px;
   color: var(--ink);
 }
@@ -629,7 +642,7 @@ table.tbl {
   display: grid;
   place-items: center;
   width: 14px; height: 14px;
-  border-radius: 3px;
+  border-radius: var(--radius);
   border: 0;
   background: transparent;
   cursor: pointer;
@@ -647,7 +660,7 @@ table.tbl {
   left: 0; right: 0;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-soft);
   z-index: 50;
   max-height: 220px;
@@ -745,7 +758,7 @@ table.tbl {
   padding: 10px 12px;
   border: 1px solid var(--line);
   background: var(--field);
-  border-radius: 9px;
+  border-radius: var(--radius);
   font-size: 13.5px;
   font-family: inherit;
   color: var(--ink);
@@ -774,7 +787,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px;
 
 .drop-zone {
   border: 1.5px dashed var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 20px 16px;
   text-align: center;
   font-size: 12.5px;
@@ -817,7 +830,7 @@ select.input {
 }
 .tl-icn {
   width: 28px; height: 28px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   display: grid; place-items: center;
   margin: 0 auto;
   position: relative;
@@ -866,7 +879,7 @@ select.input {
   background: var(--ink);
   color: var(--bg);
   padding: 10px 16px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   font-size: 13px;
   display: flex;
   align-items: center;
@@ -1014,7 +1027,7 @@ select.input {
   margin: 14px 0 8px;
   padding: 12px 14px;
   border: 1px solid oklch(from var(--tone-red) var(--tone-border-l) calc(c * .33) h);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: oklch(from var(--tone-red) var(--tone-bg-l) calc(c * .25) h);
   color: oklch(from var(--tone-red) var(--tone-fg-l) calc(c * .67) h);
   font-size: 13px;
@@ -1089,14 +1102,18 @@ select.input {
   padding: 20px 22px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  background: linear-gradient(120deg, var(--accent-tint), var(--panel) 62%);
-  box-shadow: var(--shadow-card);
+  border-color: var(--wind-line);
+  background: var(--wind-tint);
+  box-shadow: 4px 4px 0 -1px oklch(from var(--wind-tint) calc(l - .04) c h), 4px 4px 0 0 var(--wind-line);
 }
+.connect-card .page-icn { background: var(--panel); border-color: var(--wind-line); color: var(--wind); }
+.connect-card .copy-field { border-color: var(--wind-line); }
+.connect-card .copy-field:hover { border-color: var(--wind); color: var(--wind); box-shadow: 0 0 0 3px oklch(from var(--wind) l c h / .16); }
 .connect-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .connect-body h2 { margin: 0; font-size: 16px; font-weight: 500; letter-spacing: -0.01em; }
 .connect-body p { margin: 0 0 10px; font-size: 13px; color: var(--ink-2); max-width: 60ch; }
 .connect-body a { color: var(--ink); text-underline-offset: 2px; }
-.connect-body a:hover { color: var(--accent); }
+.connect-body a:hover { color: var(--wind); }
 .home-top .home-dropzone { width: 300px; flex-shrink: 0; justify-content: center; }
 
 /* A container, not a media query, drives the column count: what matters
@@ -1126,20 +1143,20 @@ select.input {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
-  box-shadow: 0 1px 1px rgba(20,20,20,.03);
+  box-shadow: 2px 2px 0 -1px var(--under), 2px 2px 0 0 var(--line);
   padding: 7px 6px 7px 11px;
   color: var(--ink-3);
   cursor: pointer;
   transition: border-color .12s, box-shadow .12s, transform .12s;
 }
 .hosted-card:hover {
-  border-color: var(--accent-border);
-  box-shadow: var(--shadow-card);
-  transform: translateY(-1px);
+  border-color: var(--ink-3);
+  box-shadow: var(--shadow-lift);
+  transform: translate(-2px, -2px);
 }
 .hosted-fav {
   width: 20px; height: 20px;
-  border-radius: 5px;
+  border-radius: var(--radius);
   flex-shrink: 0;
   object-fit: contain;
 }
@@ -1186,7 +1203,7 @@ select.input {
   display: grid;
   place-items: center;
   width: 36px; height: 36px;
-  border-radius: 11px;
+  border-radius: var(--radius);
   border: 1px solid var(--line);
   background: var(--panel);
   color: var(--ink-3);
@@ -1198,7 +1215,7 @@ select.input {
 .mcp-copy {
   display: inline-flex;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: var(--radius);
   background: var(--field);
   overflow: hidden;
 }
@@ -1236,7 +1253,7 @@ select.input {
   display: grid;
   place-items: center;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink-3);
   cursor: pointer;
@@ -1262,7 +1279,7 @@ select.input {
 .tbl .cell-when { white-space: nowrap; }
 .entity-icn {
   width: 30px; height: 30px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   display: grid;
   place-items: center;
   border: 1px solid var(--line);
@@ -1340,7 +1357,7 @@ select.input {
   width: 100%;
   padding: 8px 10px 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius);
   background: var(--field);
   color: var(--ink-3);
   font-size: 12.5px;
@@ -1466,7 +1483,7 @@ select.input {
 .upload-file-icon {
   width: 42px;
   height: 42px;
-  border-radius: 11px;
+  border-radius: var(--radius);
   background: var(--hover);
   display: grid;
   place-items: center;
@@ -1486,7 +1503,7 @@ select.input {
 .upload-close {
   width: 34px;
   height: 34px;
-  border-radius: 9px;
+  border-radius: var(--radius);
   border: 0;
   background: none;
   display: grid;
@@ -1506,7 +1523,7 @@ select.input {
   height: 38px;
   padding: 0 12px;
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius);
   background: var(--field);
   color: var(--ink-3);
 }
@@ -1525,7 +1542,7 @@ select.input {
   max-height: 300px;
   overflow: auto;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
 }
 .replace-row {
   width: 100%;
@@ -1580,7 +1597,7 @@ select.input {
   font-size: 13px;
   color: var(--ink-2);
   background: var(--hover);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 10px 12px;
   line-height: 1.45;
 }
@@ -1592,12 +1609,12 @@ select.input {
   padding: 3px;
   background: var(--hover);
   border: 1px solid var(--line-soft);
-  border-radius: 10px;
+  border-radius: var(--radius);
   margin: 18px 0 20px;
 }
 .upload-mode button {
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius);
   padding: 7px 10px;
   background: transparent;
   color: var(--ink-2);
@@ -1655,7 +1672,7 @@ select.input {
   .connect-card { padding: 16px; }
   .connect-card > .page-icn { display: none; }
   .entity-layout, .entity-layout.with-aside { grid-template-columns: minmax(0, 1fr); }
-  .entity-icn.page-icn { width: 38px; height: 38px; border-radius: 11px; }
+  .entity-icn.page-icn { width: 38px; height: 38px; border-radius: var(--radius); }
   .panel-head { padding: 14px 16px; flex-wrap: wrap; }
   .panel-body { padding: 16px; }
   .panel-actions .search { width: 150px; }
@@ -1833,7 +1850,7 @@ select.input {
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--ink-3);
   cursor: pointer;
@@ -1884,7 +1901,7 @@ select.input {
 .auth-error, .auth-hint, .auth-ok {
   padding: 12px 14px;
   border: 1px solid;
-  border-radius: 10px;
+  border-radius: var(--radius);
   font-size: 13px;
   line-height: 1.55;
   word-break: break-word;
@@ -1907,7 +1924,7 @@ select.input {
   padding: 12px;
   background: var(--bg);
   border: 1px solid var(--line);
-  border-radius: 9px;
+  border-radius: var(--radius);
   color: var(--ink-2);
   font-family: var(--font-mono);
   font-size: 12px;
