@@ -186,7 +186,7 @@ jobs:
 
           {
             echo "$marker"
-            echo "### Report for `${SHA:0:7}`"
+            echo "### Report for ${SHA:0:7}"
             echo ""
             echo "| stage | result | tests | coverage |"
             echo "|---|---|---|---|"
