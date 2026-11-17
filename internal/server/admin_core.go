@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -587,6 +588,7 @@ func (s *Server) coreDeleteApp(actor *db.User, nonce string) error {
 		return cerr(http.StatusInternalServerError, "%v", err)
 	}
 	os.RemoveAll(filepath.Join(s.config.DataDir, "apps", nonce))
+	s.appFilesChanged(nonce)
 	s.rebuildHostedRoutes()
 	s.syncAppServiceMount(nonce)
 	s.audit(actor, "deleted app", app.Name)
@@ -1299,17 +1301,147 @@ func (s *Server) adminRequiresVerifiedEmail() bool {
 
 // ── App Web operations ─────────────────────────────────────────────
 
-// appFileDir resolves an app file area to its directory. "web" (the default)
-// is the Development slot the web server hosts; "data" sits beside it and is
-// never served — private storage such as user uploads.
+// appFileAreas maps an app file area to its folder under apps/<nonce>.
+// "web" (the default) is the Development slot the web server hosts; "data"
+// sits beside it and is never served — private storage such as user
+// uploads. "staging" and "prod" are the deployed slots: they can be listed
+// and read, but only a deploy writes them (see appFileWritable).
+var appFileAreas = map[string]string{
+	"":        "web",
+	"web":     "web",
+	"staging": "staging",
+	"prod":    "production",
+	"data":    "data",
+}
+
+// appFileDir resolves an app file area to its directory.
 func (s *Server) appFileDir(nonce, area string) (string, error) {
-	switch area {
-	case "", "web":
-		return filepath.Join(s.config.DataDir, "apps", nonce, "web"), nil
-	case "data":
-		return filepath.Join(s.config.DataDir, "apps", nonce, "data"), nil
+	name, ok := appFileAreas[area]
+	if !ok {
+		return "", cerr(http.StatusBadRequest, `area must be "web", "staging", "prod" or "data"`)
 	}
-	return "", cerr(http.StatusBadRequest, `area must be "web" or "data"`)
+	return filepath.Join(s.config.DataDir, "apps", nonce, name), nil
+}
+
+// appFileWritable refuses file edits in a deployed slot. Staging and
+// Production hold what a deploy put there; a file edited in place would
+// drift from Development and vanish at the next deploy.
+func appFileWritable(area string) error {
+	if area == "staging" || area == "prod" {
+		return cerr(http.StatusBadRequest, "%s files are read-only: edit Development and deploy", area)
+	}
+	return nil
+}
+
+// ── App storage sizes ──────────────────────────────────────────────
+//
+// How much disk each app uses is cached in memory so the control panel can
+// show it without walking folders on every load. Anything that changes an
+// app's files drops its entry (appFilesChanged) and the next look measures
+// again (appStorage), so a burst of writes costs one walk, and only once
+// someone is looking. Databases change without passing through here, so
+// their size is re-read on the first query after a 30–60 minute expiry
+// instead (refreshDBSize). Nothing is stored: every app is measured afresh
+// when the server starts (measureApps).
+
+// storageSizes is the size in bytes of each of an app's folders: the three
+// deployment slots, its private data files and its databases.
+type storageSizes struct {
+	Dev      int64 `json:"dev"`
+	Staging  int64 `json:"staging"`
+	Prod     int64 `json:"prod"`
+	Data     int64 `json:"data"`
+	Database int64 `json:"database"`
+}
+
+// appStorage returns an app's storage sizes: the cached ones when there
+// are any, else freshly measured and cached.
+func (s *Server) appStorage(nonce string) storageSizes {
+	// Held across the walk so a file change can't land between measuring
+	// and caching, which would leave the old sizes cached for good.
+	s.storageMu.Lock()
+	defer s.storageMu.Unlock()
+	if st, ok := s.storage[nonce]; ok {
+		return *st
+	}
+	base := filepath.Join(s.config.DataDir, "apps", nonce)
+	st := &storageSizes{
+		Dev:      dirSize(filepath.Join(base, "web")),
+		Staging:  dirSize(filepath.Join(base, "staging")),
+		Prod:     dirSize(filepath.Join(base, "production")),
+		Data:     dirSize(filepath.Join(base, "data")),
+		Database: dirSize(filepath.Join(base, "db")),
+	}
+	if s.storage == nil {
+		s.storage = map[string]*storageSizes{}
+	}
+	s.storage[nonce] = st
+	return *st
+}
+
+// measureApps fills the storage cache for every app. Run in the background
+// at startup, so the first page load after a restart doesn't wait on the
+// walk; an app asked about before its turn is simply measured then.
+func (s *Server) measureApps() {
+	apps, err := s.store.ListHostedApps()
+	if err != nil {
+		return
+	}
+	for _, app := range apps {
+		s.appStorage(app.Nonce)
+	}
+}
+
+// appFilesChanged drops an app's cached storage sizes. Call it after
+// anything that writes or removes files under apps/<nonce>.
+func (s *Server) appFilesChanged(nonce string) {
+	s.storageMu.Lock()
+	defer s.storageMu.Unlock()
+	delete(s.storage, nonce)
+}
+
+// refreshDBSize re-reads an app's database size into its cached storage
+// if the last reading has expired. Called after each query on an app
+// database; a reading lasts a random 30–60 minutes, so a busy server's
+// apps don't all come due together. Other targets have no app to size.
+func (s *Server) refreshDBSize(target string) {
+	nonce, ok := strings.CutPrefix(target, "app:")
+	if !ok {
+		return
+	}
+	now := time.Now()
+	s.dbSizeMu.Lock()
+	due := !now.Before(s.dbSizeDue[nonce])
+	if due {
+		if s.dbSizeDue == nil {
+			s.dbSizeDue = map[string]time.Time{}
+		}
+		s.dbSizeDue[nonce] = now.Add(30*time.Minute + mrand.N(30*time.Minute))
+	}
+	s.dbSizeMu.Unlock()
+	if !due {
+		return
+	}
+	size := dirSize(filepath.Join(s.config.DataDir, "apps", nonce, "db"))
+	s.storageMu.Lock()
+	defer s.storageMu.Unlock()
+	// With nothing cached there is nothing to correct: the next look
+	// measures the whole app.
+	if st, ok := s.storage[nonce]; ok {
+		st.Database = size
+	}
+}
+
+// dirSize totals the bytes of every file under dir. A missing folder is 0.
+func dirSize(dir string) int64 {
+	var total int64
+	filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && !fi.IsDir() {
+			total += fi.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // appFile is one entry in an app's web or data directory.
@@ -1706,6 +1838,7 @@ func (s *Server) coreUploadAppWeb(actor *db.User, nonce, dir string, files []upl
 	if fi, err := os.Stat(webDir); err == nil && !fi.IsDir() {
 		return "", cerr(http.StatusBadRequest, "%s is a file, not a folder", filepath.ToSlash(sub))
 	}
+	defer s.appFilesChanged(nonce)
 	if err := os.RemoveAll(webDir); err != nil {
 		return "", cerr(http.StatusInternalServerError, "failed to clear web dir")
 	}
@@ -1797,6 +1930,7 @@ func (s *Server) coreDeleteAppWeb(actor *db.User, nonce string) error {
 		return cerr(http.StatusNotFound, "app not found: %v", err)
 	}
 	webDir := filepath.Join(s.config.DataDir, "apps", nonce, "web")
+	defer s.appFilesChanged(nonce)
 	if err := os.RemoveAll(webDir); err != nil {
 		return cerr(http.StatusInternalServerError, "failed to remove web dir")
 	}
@@ -1855,6 +1989,7 @@ func (s *Server) coreDeployApp(actor *db.User, nonce, source, target string) (st
 		return "", cerr(http.StatusNotFound, "%s slot is empty; nothing to deploy", source)
 	}
 	dstDir := filepath.Join(base, dstName)
+	defer s.appFilesChanged(nonce)
 	if err := os.RemoveAll(dstDir); err != nil {
 		return "", cerr(http.StatusInternalServerError, "failed to clear %s slot", target)
 	}
@@ -2100,6 +2235,9 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, area, filePath string, 
 		return cerr(http.StatusBadRequest, "%v", err)
 	}
 
+	if err := appFileWritable(area); err != nil {
+		return err
+	}
 	dir, err := s.appFileDir(nonce, area)
 	if err != nil {
 		return err
@@ -2126,6 +2264,7 @@ func (s *Server) coreWriteAppFile(actor *db.User, nonce, area, filePath string, 
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		return cerr(http.StatusInternalServerError, "failed to create directory")
 	}
+	defer s.appFilesChanged(nonce)
 	if err := os.WriteFile(fullPath, newData, 0644); err != nil {
 		return cerr(http.StatusInternalServerError, "write failed")
 	}
@@ -2160,6 +2299,9 @@ func (s *Server) coreDeleteAppFile(actor *db.User, nonce, area, filePath string)
 	if err != nil {
 		return cerr(http.StatusBadRequest, "%v", err)
 	}
+	if err := appFileWritable(area); err != nil {
+		return err
+	}
 	dir, err := s.appFileDir(nonce, area)
 	if err != nil {
 		return err
@@ -2173,6 +2315,7 @@ func (s *Server) coreDeleteAppFile(actor *db.User, nonce, area, filePath string)
 		}
 		return cerr(http.StatusInternalServerError, "delete failed")
 	}
+	s.appFilesChanged(nonce)
 	if area != "data" {
 		s.rebuildHostedRoutes()
 	}

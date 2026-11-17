@@ -440,6 +440,7 @@ func (s *Server) executeUpdateOp(op UpdateOp, archiveDir string) error {
 	switch op.Action {
 	case "update_app_files":
 		dst := filepath.Join(s.config.DataDir, "apps", op.Target, "web")
+		defer s.appFilesChanged(op.Target)
 		// Rollback protection: the replaced dev slot stays one rename away
 		// at web.bak — recovery is a manual copy back, nothing fancier. Only
 		// the latest backup is kept (a rename can't land on a full dir). It

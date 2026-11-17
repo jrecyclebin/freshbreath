@@ -48,6 +48,9 @@ const Icon = ({ name, size = 16 }) => {
     back:    <><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></>,
     tag:     <><path d="M20.6 13.4L13.4 20.6a2 2 0 0 1-2.8 0l-7.2-7.2A2 2 0 0 1 2.8 12V5a2 2 0 0 1 2-2h7a2 2 0 0 1 1.4.6l7.4 7.4a2 2 0 0 1 0 2.4z"/><circle cx="7.5" cy="7.5" r="1.2"/></>,
     chevron: <><path d="M6 9l6 6 6-6"/></>,
+    folder:  <><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></>,
+    file:    <><path d="M6 3h8l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v4h4"/></>,
+    database:<><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></>,
     eye:     <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></>,
     eyeOff:  <><path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-2.9 3.9"/><path d="M6.6 6.6C3.8 8.4 2 12 2 12s3.5 7 10 7a10.6 10.6 0 0 0 5.4-1.4"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="M3 3l18 18"/></>,
   };
@@ -965,6 +968,30 @@ const slotRoute = (route, slot) => route + (/^[a-z]+:\/\/[^/]+$/i.test(route) ? 
 // bare route serves the app's default environment.
 const isHosted = (a) => !!(a.details?.last_uploaded || a.details?.last_deployed_staging || a.details?.last_deployed_production);
 
+// An app's files live in four areas, named as /api/apps/:nonce/:area names
+// them; key is the area's size in the app's storage. The deployed
+// slots are read-only: only a deploy writes them.
+const FILE_AREAS = [
+  { area: 'web',     key: 'dev',     label: 'Development' },
+  { area: 'staging', key: 'staging', label: 'Staging',    readOnly: true },
+  { area: 'prod',    key: 'prod',    label: 'Production', readOnly: true },
+  { area: 'data',    key: 'data',    label: 'Data files' },
+];
+
+const fmtBytes = (n) => {
+  if (n == null) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return (i === 0 || n >= 100 ? Math.round(n) : n.toFixed(1)) + ' ' + units[i];
+};
+
+// Everything an app keeps on disk: its slots, data files and databases.
+const storageTotal = (app) => {
+  const st = app.storage;
+  return st ? st.dev + st.staging + st.prod + st.data + st.database : null;
+};
+
 function buildPrompt(app, appServices) {
   const fbURL = apiBase();
   const serviceLines = appServices.length
@@ -1171,6 +1198,9 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
       : <span className="muted">—</span>;
   };
 
+  // Only apps have a size, so the column shows where apps do.
+  const sized = view === 'recent' || view === 'app';
+
   const canDrop = isAdmin || apps.length > 0 || services.some(s => canEditServiceFile(s, user));
   return (
     <>
@@ -1253,6 +1283,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
                 {view !== 'recent' && <th>{view === 'app' ? 'Environment' : view === 'auth' ? 'Kind' : 'Type'}</th>}
                 <th>Access</th>
                 {view !== 'auth' && <th>MCP</th>}
+                {sized && <th>Size</th>}
                 <th>Edited</th>
                 <th style={{width:80}}></th>
               </tr></thead>
@@ -1286,6 +1317,11 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
                       )}
                       <td data-col="detail">{detailCell(row)}</td>
                       {view !== 'auth' && <td data-col="detail"><McpCopy path={mcpPath(row.kind, e)} toast={toast}/></td>}
+                      {sized && (
+                        <td data-col="detail" className="muted cell-when" title={row.kind === 'app' ? 'Web files, data files and databases' : undefined}>
+                          {row.kind === 'app' ? fmtBytes(storageTotal(e)) : '—'}
+                        </td>
+                      )}
                       <td data-col="detail" className="muted cell-when">{fmtAuditTime(row.when)}</td>
                       <td data-col="actions" onClick={ev => ev.stopPropagation()}>
                         <div className="row-actions">
@@ -1940,6 +1976,7 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
           {(isAdmin || memberCreating || memberWiring) && <button className="btn btn-primary" onClick={save} disabled={!form.name}>{app ? 'Save' : 'Create app'}</button>}
         </>}
       />
+      {app && <AppConnect app={app} setupPrompt={setupPrompt}/>}
       <div className={'entity-layout' + (app && !loading ? ' with-aside' : '')}>
         <div className="entity-main">
           <Panel title="Settings" desc="Where the app lives, who owns it and what it may reach.">
@@ -1955,25 +1992,8 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
             <Panel title="Hosting" desc="Upload into Development, then deploy onward.">
               <HostUpload session={session} app={app} onRefresh={onRefresh}/>
             </Panel>
-            <Panel title="Connect" desc="Addresses for agents and for the app's own pages.">
-              <CopyField label="MCP URL" value={apiBase() + mcpPath('app', app)}
-                         help="This app's own service, behind the app's gate. Named for the nonce, so a rename never moves it."/>
-              <CopyField label="From the app" value={'/service/call/' + appServiceName(app)}
-                         help={<>Or the bare <span className="mono">/mcp/app:</span> from its own pages.</>}/>
-              <CopyField label="Nonce" value={app.nonce}/>
-              {setupPrompt && (
-                <div className="field">
-                  <label>Setup prompt</label>
-                  <span className="help">Paste into Claude Code to wire up this app with the freshbreath skill.</span>
-                  <div className="prompt-box">
-                    <textarea className="input mono" name="setup_prompt" readOnly value={setupPrompt}
-                              onClick={e=>e.target.select()}/>
-                    <button className="btn btn-ghost btn-icon" title="Copy prompt" onClick={()=>copyText(setupPrompt, toast)}>
-                      <Icon name="copy" size={13}/>
-                    </button>
-                  </div>
-                </div>
-              )}
+            <Panel title="Storage" desc="What the app keeps on disk. Pick a folder to browse its files.">
+              <AppStorage app={app} navigate={navigate}/>
             </Panel>
           </aside>
         )}
@@ -2424,6 +2444,181 @@ function HostUpload({ session, app, onRefresh }) {
           ))}
         </div>
       </div>
+    </>
+  );
+}
+
+// The app page's connect line: the addresses someone pastes elsewhere, each
+// a labelled copy button, in one row across the top of the page. The setup
+// prompt is long, so it stays folded away until asked for.
+function AppConnect({ app, setupPrompt }) {
+  const toast = useToast();
+  const [showPrompt, setShowPrompt] = useState(false);
+  const values = [
+    { label: 'MCP URL', value: apiBase() + mcpPath('app', app),
+      help: "This app's own service, behind the app's gate. Named for the nonce, so a rename never moves it." },
+    { label: 'From the app', value: '/service/call/' + appServiceName(app),
+      help: 'How the app calls its own service. Or the bare /mcp/app: from its own pages.' },
+    { label: 'Nonce', value: app.nonce, help: "The app's ID." },
+  ];
+  return (
+    <div className="connect-line">
+      <div className="connect-values">
+        {values.map(v => (
+          <button key={v.label} type="button" className="connect-value" title={v.help + ' Click to copy.'}
+                  onClick={() => copyText(v.value, toast)}>
+            <span className="connect-label">{v.label}</span>
+            <span className="mono">{v.value}</span>
+            <Icon name="copy" size={12}/>
+          </button>
+        ))}
+        {setupPrompt && (
+          <button type="button" className={'connect-value connect-toggle' + (showPrompt ? ' open' : '')}
+                  title="A prompt to paste into Claude Code to wire up this app with the freshbreath skill."
+                  onClick={() => setShowPrompt(!showPrompt)}>
+            <span className="connect-label">Setup prompt</span>
+            <Icon name="chevron" size={12}/>
+          </button>
+        )}
+      </div>
+      {setupPrompt && showPrompt && (
+        <div className="prompt-box">
+          <textarea className="input mono" name="setup_prompt" readOnly value={setupPrompt}
+                    onClick={e=>e.target.select()}/>
+          <button className="btn btn-ghost btn-icon" title="Copy prompt" onClick={()=>copyText(setupPrompt, toast)}>
+            <Icon name="copy" size={13}/>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The app page's storage panel: the size of each file area (a link into
+// its file tree), the databases, and the total. The sizes ride the apps
+// list; the server caches them in memory.
+function AppStorage({ app, navigate }) {
+  const st = app.storage || {};
+  return (
+    <div className="slot-card">
+      {FILE_AREAS.map(a => (
+        <button key={a.area} className="storage-row storage-link" title={'Browse the ' + a.label + ' files'}
+                onClick={() => navigate('appfiles', { nonce: app.nonce, area: a.area })}>
+          <span className="storage-name"><Icon name="folder" size={14}/> {a.label}</span>
+          <span className="storage-size">{fmtBytes(st[a.key])}</span>
+        </button>
+      ))}
+      <div className="storage-row">
+        <span className="storage-name"><Icon name="database" size={14}/> Databases</span>
+        <span className="storage-size">{fmtBytes(st.database)}</span>
+      </div>
+      <div className="storage-row storage-total">
+        <span className="storage-name">Total</span>
+        <span className="storage-size">{fmtBytes(storageTotal(app))}</span>
+      </div>
+    </div>
+  );
+}
+
+// Files past this open nowhere: the editor is a textarea.
+const EDITABLE_MAX = 1 << 20;
+
+// The file tree for one of an app's areas. The server lists the area flat
+// (path and size per file); the folders, and their totals, are built here.
+// A file opens in the editor.
+function AppFilesPage({ session, app, area, navigate }) {
+  const info = FILE_AREAS.find(a => a.area === area);
+  const [files, setFiles] = useState(null);
+  const [error, setError] = useState('');
+  // Folders the user has flipped from the default (see isOpen).
+  const [flipped, setFlipped] = useState(() => new Set());
+
+  useEffect(() => {
+    if (!app || !info) return;
+    let cancelled = false;
+    setFiles(null);
+    frbr(session, 'GET', '/api/apps/' + app.nonce + '/' + area)
+      .then(r => { if (!cancelled) { setFiles(r.files || []); setError(''); } })
+      .catch(e => { if (!cancelled) { setFiles([]); setError(e.message); } });
+    return () => { cancelled = true; };
+  }, [app?.nonce, area, session]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!app || !info) {
+    return (
+      <>
+        <PageHead title="Files not found" back={()=>navigate('home')} backLabel="Home"/>
+        <div className="empty"><b>No such app or folder.</b></div>
+      </>
+    );
+  }
+
+  const root = { dirs: {}, files: [], size: 0, count: 0 };
+  for (const f of files || []) {
+    const parts = f.path.split('/');
+    let node = root;
+    node.size += f.size; node.count++;
+    parts.slice(0, -1).forEach((name, i) => {
+      node = node.dirs[name] ||= { name, path: parts.slice(0, i + 1).join('/'), dirs: {}, files: [], size: 0, count: 0 };
+      node.size += f.size; node.count++;
+    });
+    node.files.push({ name: parts[parts.length - 1], path: f.path, size: f.size });
+  }
+
+  // A small tree starts fully open; a big one starts as its top level.
+  const isOpen = (path) => (root.count <= 100) !== flipped.has(path);
+  const flip = (path) => setFlipped(prev => {
+    const next = new Set(prev);
+    next.has(path) ? next.delete(path) : next.add(path);
+    return next;
+  });
+
+  const rows = [];
+  const walk = (node, depth) => {
+    for (const name of Object.keys(node.dirs).sort()) {
+      const dir = node.dirs[name];
+      const open = isOpen(dir.path);
+      rows.push(
+        <button key={'d:' + dir.path} className={'tree-row tree-dir' + (open ? ' open' : '')}
+                style={{paddingLeft: 14 + depth * 20}} onClick={() => flip(dir.path)}>
+          <span className="tree-chevron"><Icon name="chevron" size={12}/></span>
+          <Icon name="folder" size={14}/>
+          <span className="tree-name">{name}</span>
+          <span className="tree-meta">{dir.count} file{dir.count === 1 ? '' : 's'}</span>
+          <span className="tree-size">{fmtBytes(dir.size)}</span>
+        </button>
+      );
+      if (open) walk(dir, depth + 1);
+    }
+    for (const f of node.files) {
+      const tooBig = f.size > EDITABLE_MAX;
+      rows.push(
+        <button key={'f:' + f.path} className="tree-row tree-file" style={{paddingLeft: 14 + depth * 20}}
+                disabled={tooBig} title={tooBig ? 'Too large to open in the editor' : info.readOnly ? 'View' : 'Edit'}
+                onClick={() => navigate('appfile', { nonce: app.nonce, area, path: f.path })}>
+          <span className="tree-chevron"/>
+          <Icon name="file" size={14}/>
+          <span className="tree-name">{f.name}</span>
+          <span className="tree-size">{fmtBytes(f.size)}</span>
+        </button>
+      );
+    }
+  };
+  walk(root, 0);
+
+  return (
+    <>
+      <PageHead
+        icon="folder" tone="green"
+        title={info.label + (area === 'data' ? '' : ' files')}
+        sub={files === null ? 'Loading…'
+          : `${root.count} file${root.count === 1 ? '' : 's'} · ${fmtBytes(root.size)}` +
+            (info.readOnly ? ' · read-only: edit Development and deploy' : '')}
+        back={()=>navigate('app', { nonce: app.nonce })} backLabel={app.name}
+      />
+      {error ? <div className="empty"><b>Couldn't list the files.</b> {error}</div>
+        : files === null ? null
+        : rows.length === 0 ? <div className="empty"><b>Nothing here yet.</b></div>
+        : <div className="file-tree">{rows}</div>}
     </>
   );
 }
@@ -3119,7 +3314,10 @@ function ServicePage({ session, serviceId, isNew, services, auth, adminAuthID, a
 // Edits one definition file: a registered service's (filesPath
 // /api/services/:id/files) or an app's own service's
 // (/api/apps/:nonce/service/files). A missing name means nothing was found.
-function ServiceToolsEditor({ session, name, isTasks, filesPath, onBack, onSaved }) {
+// The plain-text editor, full page. It edits a service's definition file
+// (saved as a form upload) or, with put, any one app file (saved as the
+// request body). name is what's being edited — falsy means it wasn't found.
+function FileEditor({ session, name, title, sub, filesPath, put, readOnly, onBack, onSaved }) {
   const toast = useToast();
   const textareaRef = useRef(null);
 
@@ -3127,13 +3325,16 @@ function ServiceToolsEditor({ session, name, isTasks, filesPath, onBack, onSaved
   const [loading,setLoading] = useState(true);
   const [saving,setSaving] = useState(false);
   const [dirty,setDirty] = useState(false);
+  // A file with NUL bytes isn't text; saving it from a textarea would mangle it.
+  const [binary,setBinary] = useState(false);
+  const locked = readOnly || binary;
 
   useEffect(() => {
     if (!name) return;
     let cancelled = false;
     setLoading(true);
     frbr(session, 'GET', filesPath, null, { rawText: true })
-      .then(text => { if (!cancelled) { setContent(text || ''); setDirty(false); } })
+      .then(text => { if (!cancelled) { setContent(text || ''); setDirty(false); setBinary((text || '').includes('\u0000')); } })
       .catch(e => {
         if (cancelled) return;
         if (e.message.includes('404')) { setContent(''); setDirty(false); }
@@ -3152,16 +3353,20 @@ function ServiceToolsEditor({ session, name, isTasks, filesPath, onBack, onSaved
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [content, saving]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [content, saving, locked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleSave = async () => {
-    if (!name) return;
+    if (!name || locked) return;
     setSaving(true);
     try {
-      const blob = new Blob([content], { type: 'text/plain' });
-      const form = new FormData();
-      form.append('file', blob, name + '.txt');
-      await frbr(session, 'POST', filesPath, form, { rawText: true });
+      if (put) {
+        await frbr(session, 'PUT', filesPath, content);
+      } else {
+        const blob = new Blob([content], { type: 'text/plain' });
+        const form = new FormData();
+        form.append('file', blob, name + '.txt');
+        await frbr(session, 'POST', filesPath, form, { rawText: true });
+      }
       setDirty(false);
       toast('File saved');
       onSaved?.();
@@ -3175,8 +3380,8 @@ function ServiceToolsEditor({ session, name, isTasks, filesPath, onBack, onSaved
   if (!name) {
     return (
       <>
-        <PageHead title="Service not found" back={onBack} backLabel="Back"/>
-        <div className="empty"><b>Service not found.</b></div>
+        <PageHead title="Not found" back={onBack} backLabel="Back"/>
+        <div className="empty"><b>Nothing to edit here.</b></div>
       </>
     );
   }
@@ -3187,27 +3392,30 @@ function ServiceToolsEditor({ session, name, isTasks, filesPath, onBack, onSaved
           the editor spans exactly the width the pages beneath it do. */}
       <div className="editor-inner">
         <PageHead
-          title={`Edit ${isTasks ? 'tasks' : 'virtual'} script`}
-          sub={`Plain-text definition for ${name}.`}
+          title={title}
+          sub={sub}
           back={onBack}
-          backLabel={name}
-          actions={
+          backLabel="Back"
+          actions={locked ? <button className="btn btn-ghost" onClick={onBack}>Close</button> : (
             <>
               <button className="btn btn-ghost" onClick={onBack} disabled={saving}>Cancel</button>
               <button className="btn btn-primary" onClick={handleSave} disabled={saving || !dirty}>
                 {saving ? 'Saving…' : 'Save'} <span className="muted" style={{fontSize:11,marginLeft:6}}>⌘S</span>
               </button>
             </>
-          }
+          )}
         />
         {loading ? (
           <div style={{display:'grid',placeItems:'center',padding:48,color:'var(--ink-3)'}}>Loading…</div>
+        ) : binary ? (
+          <div className="empty"><b>This isn't a text file.</b> It can't be edited here.</div>
         ) : (
           <textarea
             ref={textareaRef}
             className="editor-textarea"
             name="file_content"
             value={content}
+            readOnly={locked}
             onChange={e => { setContent(e.target.value); setDirty(true); }}
             spellCheck={false}
             autoComplete="off"
@@ -4474,6 +4682,8 @@ const fmtShortTime = (iso) => {
 //   /control/services/new · /control/services/:id
 //     · /control/services/:id/edit-tools      -> service page / tools editor
 //   /control/apps/:nonce/edit-tools           -> the app's own service's tools editor
+//   /control/apps/:nonce/files/:area          -> the file tree of one of the app's areas
+//   /control/apps/:nonce/files/:area/<path>   -> one of those files, in the editor
 //   /control/auth/new · /control/auth/:id     -> auth record page
 //   /control/users|roles|audit|settings       -> the user area and settings
 //   /control/remotes                          -> other servers, through their tunnels
@@ -4485,6 +4695,10 @@ const parseRoute = () => {
   if (a === 'apps') {
     if (b === 'new') return { page: 'app', params: { isNew: true } };
     if (b && c === 'edit-tools') return { page: 'apptools', params: { nonce: b } };
+    if (b && c === 'files' && parts[3]) {
+      const path = parts.slice(4).map(decodeURIComponent).join('/');
+      return { page: path ? 'appfile' : 'appfiles', params: { nonce: b, area: parts[3], path } };
+    }
     if (b) return { page: 'app', params: { nonce: b } };
   }
   if (a === 'services') {
@@ -4500,11 +4714,15 @@ const parseRoute = () => {
   return { page: 'home', params: {} };
 };
 
+const encodePath = (path) => path.split('/').map(encodeURIComponent).join('/');
+
 const buildPath = (page, params = {}) => {
   if (page === 'app') return params.isNew ? '/control/apps/new' : `/control/apps/${params.nonce}`;
   if (page === 'service') return params.isNew ? '/control/services/new' : `/control/services/${params.serviceId}`;
   if (page === 'tools') return `/control/services/${params.serviceId}/edit-tools`;
   if (page === 'apptools') return `/control/apps/${params.nonce}/edit-tools`;
+  if (page === 'appfiles') return `/control/apps/${params.nonce}/files/${params.area}`;
+  if (page === 'appfile') return `/control/apps/${params.nonce}/files/${params.area}/${encodePath(params.path)}`;
   if (page === 'authrecord') return params.isNew ? '/control/auth/new' : `/control/auth/${params.authId}`;
   return page === 'home' ? '/control' : `/control/${page}`;
 };
@@ -4602,15 +4820,31 @@ function AppShell() {
         {page==='service'   && <ServicePage session={session} serviceId={route.params.serviceId} isNew={route.params.isNew} services={services} auth={auth} adminAuthID={adminAuthID} apps={apps} users={users} onRefresh={load} navigate={navigate}/>}
         {page==='tools'     && (() => {
           const svc = services.find(s => String(s.id) === route.params.serviceId);
-          return <ServiceToolsEditor session={session} name={svc?.name} isTasks={svc?.descriptor?.type === 'tasks'}
-                                     filesPath={'/api/services/' + route.params.serviceId + '/files'}
-                                     onBack={()=>navigate('service',{serviceId:route.params.serviceId})} onSaved={load}/>;
+          return <FileEditor session={session} name={svc?.name}
+                             title={`Edit ${svc?.descriptor?.type === 'tasks' ? 'tasks' : 'virtual'} script`}
+                             sub={`Plain-text definition for ${svc?.name}.`}
+                             filesPath={'/api/services/' + route.params.serviceId + '/files'}
+                             onBack={()=>navigate('service',{serviceId:route.params.serviceId})} onSaved={load}/>;
         })()}
         {page==='apptools'  && (() => {
           const app = apps.find(a => a.nonce === route.params.nonce);
-          return <ServiceToolsEditor session={session} name={app && appServiceName(app)} isTasks={false}
-                                     filesPath={'/api/apps/' + route.params.nonce + '/service/files'}
-                                     onBack={()=>navigate('app',{nonce:route.params.nonce})} onSaved={load}/>;
+          return <FileEditor session={session} name={app && appServiceName(app)}
+                             title="Edit virtual script"
+                             sub={app && `Plain-text definition for ${appServiceName(app)}.`}
+                             filesPath={'/api/apps/' + route.params.nonce + '/service/files'}
+                             onBack={()=>navigate('app',{nonce:route.params.nonce})} onSaved={load}/>;
+        })()}
+        {page==='appfiles'  && <AppFilesPage session={session} app={apps.find(a => a.nonce === route.params.nonce)}
+                                             area={route.params.area} navigate={navigate}/>}
+        {page==='appfile'   && (() => {
+          const { nonce, area, path } = route.params;
+          const app = apps.find(a => a.nonce === nonce);
+          const info = FILE_AREAS.find(a => a.area === area);
+          return <FileEditor session={session} name={app && info && path} put readOnly={info?.readOnly}
+                             title={path.split('/').pop()}
+                             sub={app && info && `${app.name} · ${info.label} · ${path}` + (info.readOnly ? ' · read-only' : '')}
+                             filesPath={'/api/apps/' + nonce + '/' + area + '/' + encodePath(path)}
+                             onBack={()=>navigate('appfiles',{nonce, area})} onSaved={load}/>;
         })()}
         {page==='authrecord'&& <AuthPage session={session} authId={route.params.authId} isNew={route.params.isNew} auth={auth} services={services} apps={apps} onRefresh={load} navigate={navigate}/>}
         {page==='users'     && <UsersView session={session} users={users} apps={apps} onRefresh={load}/>}
