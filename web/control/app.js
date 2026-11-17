@@ -2862,6 +2862,16 @@ function AuthForm({ form, setForm, record }) {
             </label>
             <span className="help">For a public provider like GitHub used as a gate: anyone can have an account there. With this on, only people whose provider email matches a user on this server get in, and they sign in as that user.</span>
           </div>
+          {d.require_user && (
+            <div className="field">
+              <label>Also allow these emails</label>
+              <textarea className="input mono" name="allowed_emails" rows={4} {...NO_FILL}
+                        value={(d.allowed_emails||[]).join('\n')}
+                        onChange={e=>upd('allowed_emails', e.target.value.split('\n'))}
+                        placeholder={'friend@example.com\ncontractor@example.org'}/>
+              <span className="help">One per line. These people get in without a user here — they sign in as outside identities, not as users, so they can't reach the control panel. Removing an email cuts off their existing sessions too.</span>
+            </div>
+          )}
         </>
       )}
 

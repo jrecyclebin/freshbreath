@@ -34,6 +34,10 @@ A GitHub or Google record can be told to take **Fresh Breath users only**.
 Then a sign-in whose email matches no user here is refused, and one that
 matches signs in as that user. That's how you keep GitHub as the door
 without letting in the whole internet.
+
+Need to let in a few people who aren't users? Add their emails to the
+record's **Also allow these emails** list. They get in as outside
+guests — not as Fresh Breath users — and lose access when you remove them.
 :::
 
 <Say>

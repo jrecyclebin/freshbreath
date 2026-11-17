@@ -856,6 +856,7 @@ func (s *Server) coreCreateAuth(actor *db.User, name, kind string, d db.AuthDesc
 	if !db.ValidAuthKind(kind) {
 		return nil, cerr(http.StatusBadRequest, "unknown auth kind %q", kind)
 	}
+	d.NormalizeAllowedEmails()
 	rec, err := s.store.CreateAuthRecord(name, kind, d)
 	if err != nil {
 		return nil, cerr(http.StatusInternalServerError, "%v", err)
@@ -890,6 +891,7 @@ func (s *Server) coreUpdateAuth(actor *db.User, id int64, name, kind string, d d
 	if !db.ValidAuthKind(kind) {
 		return cerr(http.StatusBadRequest, "unknown auth kind %q", kind)
 	}
+	d.NormalizeAllowedEmails()
 	if err := s.store.UpdateAuthRecord(id, name, kind, d); err != nil {
 		return cerr(http.StatusBadRequest, "%v", err)
 	}

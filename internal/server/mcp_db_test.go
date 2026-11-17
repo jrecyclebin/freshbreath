@@ -153,3 +153,14 @@ func TestSettingsMCPDatabaseMode(t *testing.T) {
 		t.Errorf("get_settings: %s", out)
 	}
 }
+
+// A query tool called without a target errors instead of panicking.
+func TestMCPDatabaseToolsMissingTarget(t *testing.T) {
+	srv := newAppDBServer(t)
+	for _, name := range []string{"db_query", "db_execute"} {
+		res := callCentralTool(t, srv, name, map[string]interface{}{"sql": "SELECT 1"})
+		if !res.IsError {
+			t.Errorf("%s without target: want a tool error, got %s", name, toolResultText(t, res))
+		}
+	}
+}

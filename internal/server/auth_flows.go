@@ -159,8 +159,11 @@ func (s *Server) beginLeg(ctx context.Context, p *pendingAuth) (string, error) {
 // postMessage page was written to w.
 func (s *Server) completeLeg(w http.ResponseWriter, r *http.Request, p *pendingAuth, leg *completedLeg) (string, error) {
 	if leg.rec.Descriptor.RequireUser {
-		if _, user := s.legIdentity(leg); user == nil {
-			return "", fmt.Errorf("%s signs in only people with an account on this server, and %s has none", leg.rec.Name, leg.email)
+		// A reused leg's email came from a token this server minted, so it
+		// was already vetted when that sign-in happened.
+		verified := leg.emailVerified || leg.reused || !s.adminRequiresVerifiedEmail()
+		if _, user := s.legIdentity(leg); user == nil && !(verified && leg.rec.Descriptor.AllowsEmail(leg.email)) {
+			return "", fmt.Errorf("%s signs in only people with an account on this server or on its allowlist, and %s is neither", leg.rec.Name, leg.email)
 		}
 	}
 	p.done = append(p.done, leg)

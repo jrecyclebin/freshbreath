@@ -230,6 +230,60 @@ func TestRequireUserRecord(t *testing.T) {
 	}
 }
 
+// An email on a require-user record's allowlist gets in with no user row,
+// as an outside identity, and loses access once taken off the list.
+func TestRequireUserRecordAllowlist(t *testing.T) {
+	srv := newTestServer(t)
+	setAdminAuth(t, srv)
+	gh := fakeGitHubIdP(t, srv)
+	nonce := appBehind(t, srv, "gh-app", &gh.ID)
+
+	gh.Descriptor.RequireUser = true
+	gh.Descriptor.AllowedEmails = []string{"  " + strings.ToUpper(knownEmail) + " ", ""}
+	if err := srv.coreUpdateAuth(mustUser(t, srv, "root", "Superuser", "Active"), gh.ID, gh.Name, gh.Kind, gh.Descriptor); err != nil {
+		t.Fatal(err)
+	}
+	gh, _ = srv.store.GetAuthRecord(gh.ID)
+	if len(gh.Descriptor.AllowedEmails) != 1 || gh.Descriptor.AllowedEmails[0] != strings.ToLower(knownEmail) {
+		t.Fatalf("allowlist not normalized: %q", gh.Descriptor.AllowedEmails)
+	}
+
+	if sub := appOAuthLogin(t, srv, nonce); !strings.HasPrefix(sub, "ext:") {
+		t.Errorf("allowlisted subject = %q, want an ext: identity", sub)
+	}
+
+	tok, err := srv.mintFreshbreathToken("ext:github:4242", knownEmail, "", "", gh.ID, gh.ID, nil, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.verifyGateToken(gh, tok); err != nil {
+		t.Errorf("allowlisted token refused: %v", err)
+	}
+	// The email only counts when this record proved it.
+	other := newAuthRecord(t, srv, "other-sso", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.invalid", ClientID: "c"})
+	lent, err := srv.mintFreshbreathToken("ext:other:1", knownEmail, "", "", gh.ID, other.ID, []int64{other.ID}, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := srv.verifyGateToken(gh, lent); err == nil {
+		t.Error("email proved by another record cleared the allowlist")
+	}
+
+	gh.Descriptor.AllowedEmails = nil
+	if err := srv.store.UpdateAuthRecord(gh.ID, gh.Name, gh.Kind, gh.Descriptor); err != nil {
+		t.Fatal(err)
+	}
+	gh, _ = srv.store.GetAuthRecord(gh.ID)
+	if _, _, err := srv.verifyGateToken(gh, tok); err == nil {
+		t.Error("token still clears the gate after its email left the allowlist")
+	}
+	leg, browser := beginInBrowser(t, srv, appLoginStart(t, srv, nonce))
+	rr := testRequest(t, srv, "GET", "/service/callback?code=c1&state="+leg.Query().Get("state"), nil, browser)
+	if strings.Contains(rr.Body.String(), "access_token") {
+		t.Fatalf("login finished after email left the allowlist: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAppDoorAdminGateMatchingEmailYieldsFrbr(t *testing.T) {
 	srv := newTestServer(t)
 	gh := fakeGitHubIdP(t, srv)

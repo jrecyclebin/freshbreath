@@ -1648,6 +1648,8 @@ var authDescriptorSchema = map[string]interface{}{
 	"provider":            map[string]interface{}{"type": "string", "description": "oidc/oauth2: upstream slug (e.g. 'github'). Two records over the same upstream share a slug, and so share one identity for the people behind them"},
 	"key":                 map[string]interface{}{"type": "string", "description": "api_key: the stored key. ssh_key: an optional stored private key; empty checks passphrases against each user's own. Never read back"},
 	"header":              map[string]interface{}{"type": "string", "description": "api_key: header to send it under; empty means Authorization: Bearer"},
+	"require_user":        map[string]interface{}{"type": "boolean", "description": "oidc/oauth2: refuse sign-ins whose email matches no Fresh Breath user (unless on allowed_emails)"},
+	"allowed_emails":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "oidc/oauth2, with require_user: emails admitted without a user here; they sign in as outside identities"},
 }
 
 func (s *Server) registerAuthTools(mcps *mcp.Server, role string) {

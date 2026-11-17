@@ -435,8 +435,8 @@ func (s *Server) rowCap() int {
 // refuses writes (PRAGMA query_only, set as a DSN pragma before the
 // authorizer goes up), so the read-only guarantee is not a SQL blocklist.
 //
-// The MCP db_query/db_execute faces call this with ro=true; the HTTP faces
-// and virtual-service SQL steps call it with ro=false.
+// MCP db_query calls this with ro=true; db_execute, the HTTP faces and
+// virtual-service SQL steps call it with ro=false.
 func (s *Server) coreDBQuery(actor *db.User, target string, req dbQueryRequest, ro bool) (*dbQueryResult, error) {
 	if err := s.gateDBTarget(actor, target); err != nil {
 		return nil, err

@@ -108,6 +108,7 @@ func (s *Server) registerDatabaseTools(mcps *mcp.Server) {
 				"params":   map[string]interface{}{"description": "Positional array or named object of bind parameters."},
 				"batch":    map[string]interface{}{"type": "array", "description": "Statements run in one all-or-nothing transaction."},
 			},
+			"required": []string{"target"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -116,7 +117,8 @@ func (s *Server) registerDatabaseTools(mcps *mcp.Server) {
 		}
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		res, err := s.coreDBQuery(user, args["target"].(string), dbReqFromArgs(args), true)
+		target, _ := args["target"].(string)
+		res, err := s.coreDBQuery(user, target, dbReqFromArgs(args), true)
 		if err != nil {
 			if isReadonlyWriteErr(err) {
 				return mcpToolError("%v", errMCPDatabaseReadOnly), nil
@@ -141,6 +143,7 @@ func (s *Server) registerDatabaseTools(mcps *mcp.Server) {
 				"params":   map[string]interface{}{"description": "Positional array or named object of bind parameters."},
 				"batch":    map[string]interface{}{"type": "array", "description": "Statements run in one all-or-nothing transaction."},
 			},
+			"required": []string{"target"},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		user, err := s.mcpUser(req)
@@ -152,7 +155,8 @@ func (s *Server) registerDatabaseTools(mcps *mcp.Server) {
 		}
 		args := make(map[string]interface{})
 		json.Unmarshal(req.Params.Arguments, &args)
-		res, err := s.coreDBQuery(user, args["target"].(string), dbReqFromArgs(args), false)
+		target, _ := args["target"].(string)
+		res, err := s.coreDBQuery(user, target, dbReqFromArgs(args), false)
 		if err != nil {
 			return mcpToolError("%v", err), nil
 		}
