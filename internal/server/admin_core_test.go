@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"poggers.institute/freshbreath/internal/db"
 )
@@ -538,5 +539,147 @@ func TestDeletedServiceAndRecordIDsStayDead(t *testing.T) {
 	fresh := newAuthRecord(t, srv, "Finance SSO", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://b.example"})
 	if _, _, err := srv.verifyGateToken(fresh, tok); err == nil {
 		t.Errorf("token bound to deleted record %d clears new record %d", old.ID, fresh.ID)
+	}
+}
+
+// Storage sizes are measured once, served from the cache after that, and
+// measured again only once the app's files change.
+func TestAppStorageCache(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &db.User{ID: 1, Name: "Admin", Role: "Admin"}
+	nonce, err := srv.coreCreateApp(admin, "Sized", "Development", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	write := func(area, path, body string) {
+		t.Helper()
+		if err := srv.coreWriteAppFile(admin, nonce, area, path, []byte(body), ""); err != nil {
+			t.Fatalf("write %s/%s: %v", area, path, err)
+		}
+	}
+	write("web", "index.html", "12345")
+	write("data", "notes/a.txt", "123")
+
+	if st := srv.appStorage(nonce); st.Dev != 5 || st.Data != 3 || st.Staging != 0 {
+		t.Fatalf("measured %+v, want dev 5, data 3", st)
+	}
+
+	// A change behind the server's back isn't seen: the sizes are cached.
+	sneaky := filepath.Join(srv.config.DataDir, "apps", nonce, "data", "sneaky.txt")
+	if err := os.WriteFile(sneaky, []byte("1234567"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if st := srv.appStorage(nonce); st.Data != 3 {
+		t.Fatalf("data = %d, want the cached 3", st.Data)
+	}
+
+	// A write through the server drops the cache; a deploy fills a slot.
+	write("data", "b.txt", "1")
+	if st := srv.appStorage(nonce); st.Data != 11 {
+		t.Fatalf("data = %d after a write, want 11", st.Data)
+	}
+	if _, err := srv.coreDeployApp(admin, nonce, "dev", "staging"); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if st := srv.appStorage(nonce); st.Staging != 5 {
+		t.Fatalf("staging = %d after deploy, want 5", st.Staging)
+	}
+}
+
+// The database size is re-read by a query, but only once the last reading
+// has expired.
+func TestAppStorageDatabaseSize(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &db.User{ID: 1, Name: "Admin", Role: "Admin"}
+	nonce, err := srv.coreCreateApp(admin, "Sized", "Development", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if st := srv.appStorage(nonce); st.Database != 0 {
+		t.Fatalf("database = %d before any query, want 0", st.Database)
+	}
+	query := func(sql string) {
+		t.Helper()
+		if _, err := srv.runDBQuery("app:"+nonce, dbQueryRequest{SQL: sql}, false); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	query("CREATE TABLE items (name TEXT)")
+	first := srv.appStorage(nonce).Database
+	if first == 0 {
+		t.Fatal("database size not read by the first query")
+	}
+	due := srv.dbSizeDue[nonce]
+	if wait := time.Until(due); wait < 29*time.Minute || wait > 61*time.Minute {
+		t.Fatalf("next reading due in %v, want 30–60 minutes", wait)
+	}
+
+	// Not due yet: the reading stands, and its expiry doesn't move.
+	query("INSERT INTO items VALUES (hex(randomblob(100000)))")
+	if got := srv.appStorage(nonce).Database; got != first || !srv.dbSizeDue[nonce].Equal(due) {
+		t.Fatalf("database = %d (was %d) before the reading expired", got, first)
+	}
+
+	// Expired: the next query of any kind reads it again.
+	srv.dbSizeDue[nonce] = time.Now().Add(-time.Second)
+	query("SELECT 1")
+	if got := srv.appStorage(nonce).Database; got <= first {
+		t.Fatalf("database = %d after expiry, want more than %d", got, first)
+	}
+}
+
+// Deployed slots list and read like any area, but only a deploy writes them.
+func TestDeployedSlotsReadOnly(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &db.User{ID: 1, Name: "Admin", Role: "Admin"}
+	nonce, err := srv.coreCreateApp(admin, "Slots", "Development", "", nil, nil)
+	if err != nil {
+		t.Fatalf("create app: %v", err)
+	}
+	if err := srv.coreWriteAppFile(admin, nonce, "web", "index.html", []byte("hi"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.coreDeployApp(admin, nonce, "dev", "prod"); err != nil {
+		t.Fatal(err)
+	}
+	files, err := srv.coreListAppFiles(admin, nonce, "prod", "", "")
+	if err != nil || len(files) != 1 || files[0].Path != "index.html" {
+		t.Fatalf("list prod = %+v, %v", files, err)
+	}
+	if data, err := srv.coreReadAppFile(admin, nonce, "prod", "index.html", 0, 0); err != nil || string(data) != "hi" {
+		t.Fatalf("read prod = %q, %v", data, err)
+	}
+	if err := srv.coreWriteAppFile(admin, nonce, "prod", "index.html", []byte("no"), ""); err == nil {
+		t.Fatal("wrote a production file in place")
+	}
+	if err := srv.coreDeleteAppFile(admin, nonce, "staging", "index.html"); err == nil {
+		t.Fatal("deleted a staging file in place")
+	}
+}
+
+// The startup scan measures every app, so a later look walks nothing.
+func TestMeasureApps(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.DataDir = t.TempDir()
+	admin := &db.User{ID: 1, Name: "Admin", Role: "Admin"}
+	var nonces []string
+	for _, name := range []string{"One", "Two"} {
+		nonce, err := srv.coreCreateApp(admin, name, "Development", "", nil, nil)
+		if err != nil {
+			t.Fatalf("create app: %v", err)
+		}
+		if err := srv.coreWriteAppFile(admin, nonce, "data", "a.txt", []byte("1234"), ""); err != nil {
+			t.Fatal(err)
+		}
+		nonces = append(nonces, nonce)
+	}
+	srv.measureApps()
+	for _, nonce := range nonces {
+		if st, ok := srv.storage[nonce]; !ok || st.Data != 4 {
+			t.Fatalf("app %s not measured at startup: %+v", nonce, st)
+		}
 	}
 }

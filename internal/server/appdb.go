@@ -467,6 +467,7 @@ func (s *Server) runDBQuery(target string, req dbQueryRequest, ro bool) (*dbQuer
 	if err != nil {
 		return nil, err
 	}
+	defer s.refreshDBSize(target)
 	if len(req.Batch) > 0 {
 		return s.coreDBBatch(handle, req.Batch)
 	}
@@ -759,6 +760,9 @@ func (s *Server) coreDBDelete(actor *db.User, target, name string) error {
 	// Close the pool entries before unlinking; on Linux an open handle keeps
 	// the inode alive and the WAL sidecars would linger.
 	s.appDBClose(target, name)
+	if nonce, ok := strings.CutPrefix(target, "app:"); ok {
+		defer s.appFilesChanged(nonce)
+	}
 	for _, suffix := range []string{"", "-wal", "-shm"} {
 		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
 			return err

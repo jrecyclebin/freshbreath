@@ -269,6 +269,9 @@ button { font-family: inherit; }
   white-space: nowrap;
   min-width: 0;
 }
+/* In a table the cell sizes to its content, so 100% is no limit at all:
+   a long URL would widen the column and push the rest off the edge. */
+.tbl .id-sub { max-width: 260px; }
 .id-sub svg { flex-shrink: 0; opacity: 0.55; }
 .id-sub:hover { color: var(--accent); }
 .id-sub:hover svg { opacity: 1; }
@@ -1376,6 +1379,52 @@ select.input {
 .copy-field svg { flex-shrink: 0; }
 .copy-field:hover { border-color: var(--accent-border); color: var(--accent); box-shadow: var(--focus-ring); }
 
+/* The app page's connect line — a plain line of text across the page, no
+   box: a labelled copy button per address. The MCP URL is the long one, so
+   it is the one that gives (and ellipsizes) when the line runs out of width. */
+.connect-line {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: -12px 0 14px;
+}
+.connect-values { display: flex; gap: 20px; min-width: 0; }
+.connect-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-shrink: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.connect-value:first-child { flex: 0 1 auto; }
+.connect-value:hover, .connect-value:hover .mono, .connect-value:hover .connect-label { color: var(--accent); }
+.connect-label { font-size: 12px; color: var(--ink-3); }
+.connect-value .mono {
+  min-width: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.connect-value svg { flex-shrink: 0; opacity: .6; }
+.connect-value:hover svg { opacity: 1; }
+.connect-toggle { margin-left: auto; }
+.connect-toggle svg { transition: transform .12s; }
+.connect-toggle.open svg { transform: rotate(180deg); }
+@media (max-width: 860px) {
+  .connect-line { margin-top: 0; }
+  .connect-values { flex-direction: column; gap: 4px; }
+  .connect-value { flex-shrink: 1; }
+  .connect-toggle { margin-left: 0; }
+}
+
 .prompt-box { position: relative; }
 .prompt-box textarea {
   width: 100%;
@@ -1463,6 +1512,101 @@ select.input {
   text-decoration: none;
 }
 .slot-url.muted:hover { color: var(--ink-3); }
+
+/* Storage — the slot card again, a row per folder: name left, size right.
+   The folders are buttons into their file trees. */
+.storage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+.storage-row:last-child { border-bottom: 0; }
+.storage-link { cursor: pointer; }
+.storage-link:hover { background: var(--hover); }
+.storage-link:hover .storage-name { text-decoration: underline; text-underline-offset: 2px; }
+.storage-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.storage-name svg { color: var(--ink-3); flex-shrink: 0; }
+.storage-size {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.storage-total { font-weight: 600; }
+.storage-total .storage-size { color: var(--ink); }
+
+/* An app folder's file tree — one bordered card, a row per folder or file,
+   indented by depth (inline padding-left). */
+.file-tree {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.tree-row:last-child { border-bottom: 0; }
+.tree-row:hover { background: var(--hover); }
+.tree-row:disabled { cursor: default; color: var(--ink-3); }
+.tree-row:disabled:hover { background: none; }
+.tree-row > svg { color: var(--ink-3); flex-shrink: 0; }
+.tree-chevron {
+  display: grid;
+  place-items: center;
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--ink-3);
+  transform: rotate(-90deg);
+  transition: transform .12s;
+}
+.tree-dir.open .tree-chevron { transform: none; }
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-file .tree-name { font-family: var(--font-mono); font-size: 12.5px; }
+.tree-dir .tree-name { font-weight: 500; }
+.tree-meta { font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.tree-size {
+  width: 72px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
+  text-align: right;
+  white-space: nowrap;
+}
 
 /* The dropped-file modal
    frbr-concept mockup: the file itself leads (icon, name, meta), a segmented

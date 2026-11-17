@@ -2156,6 +2156,10 @@ func (s *Server) runTask(ctx context.Context, task *formats.Task, nonce string, 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	execErr := cmd.Run()
+	if nonce != "" {
+		// The script had the run of FRBR_APP_DIR; assume it wrote there.
+		s.appFilesChanged(nonce)
+	}
 
 	result := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: stdout.String()}},
@@ -2261,6 +2265,11 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Every app carries its storage sizes; one with none cached (since a
+	// restart, or since its files changed) is measured here.
+	for _, app := range apps {
+		app["storage"] = s.appStorage(app["nonce"].(string))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"apps": apps})
 }
@@ -2286,9 +2295,10 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sub-routes: /api/apps/{nonce}/{web|data}[/<path>] — the hosted dev
-	// slot, and private files the web server never hosts
-	if len(parts) >= 4 && (parts[3] == "web" || parts[3] == "data") {
+	// Sub-routes: /api/apps/{nonce}/{web|staging|prod|data}[/<path>] — the
+	// hosted dev slot, the deployed slots (read-only), and private files
+	// the web server never hosts
+	if len(parts) >= 4 && parts[3] != "" && appFileAreas[parts[3]] != "" {
 		s.handleAppFiles(w, r, nonce, parts[3], strings.Join(parts[4:], "/"))
 		return
 	}
@@ -2478,6 +2488,10 @@ func (s *Server) handleAppFiles(w http.ResponseWriter, r *http.Request, nonce, a
 		w.Write(data)
 
 	case http.MethodPost:
+		if err := appFileWritable(area); err != nil {
+			writeErr(w, err)
+			return
+		}
 		files, err := readUploadFiles(w, r)
 		if err != nil {
 			writeErr(w, err)

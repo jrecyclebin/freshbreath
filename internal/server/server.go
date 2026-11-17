@@ -92,6 +92,14 @@ type Server struct {
 	appDBWatchMu sync.Mutex
 	appDBWatch   map[string]*appDBWatchHub
 
+	// App storage sizes, cached by nonce (see appStorage). storageMu makes
+	// measuring an app and dropping its entry take turns; dbSizeDue is
+	// when each app's cached database size next goes stale.
+	storageMu sync.Mutex
+	storage   map[string]*storageSizes
+	dbSizeMu  sync.Mutex
+	dbSizeDue map[string]time.Time
+
 	// serviceWatch holds each service's /service/watch subscribers, by
 	// service ID, each with the page client ID it watches from. An entry
 	// exists only while someone is watching.
@@ -281,6 +289,7 @@ func New(cfg Config, store *db.Store, localKey []byte, agentMgr *sshkit.AgentMan
 	s.oauthSrv.clients.sweepIdle()
 	s.SetupRoutes()
 	go s.resumeTunnel()
+	go s.measureApps()
 
 	// Periodically expire stale SSH agent keys and sessions.
 	go func() {
