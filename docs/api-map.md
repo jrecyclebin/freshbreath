@@ -117,7 +117,8 @@ refused while referenced.
 
 **Other tools**: `list_roles`, `list_audit`, `get_guide`
 (guides: `publishing`, `services`, `ssh`, `tasks`, `virtuals`),
-`get_settings`/`update_settings` (superuser; incl. `mcp_database_mode`).
+`get_settings`/`update_settings` (superuser; incl. `mcp_database_mode` and
+`mcp_delete_tools` — off hides every `delete_*` tool and refuses calls to them).
 
 **Database tools** (`registerDatabaseTools`): `db_list_databases`, `db_schema`,
 `db_query` (target: `''` per-app / `global` / `app:<nonce>`; `db_execute` needs
@@ -213,7 +214,7 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/me/ssh-key` | GET/POST/DELETE | any | Own SSH key |
 | `/api/me/sessions` | GET/DELETE | any | Refresh-token families; DELETE revokes all |
 | `/api/me/sessions/{id}` | DELETE | any | Revoke one session |
-| `/api/settings` | GET/PUT | superuser | `admin_auth_service`, `default_app`, `mcp_database_mode` |
+| `/api/settings` | GET/PUT | superuser | `admin_auth_service`, `default_app`, `mcp_database_mode`, `admin_require_verified_email`, `mcp_delete_tools` |
 | `/api/onboarding` | GET/POST | superuser (open in setup mode) | Needed? / `POST {name, email, passphrase}` = first superuser |
 | `/api/onboarding/skip` | POST | superuser | Skip onboarding |
 | `/api/tls` | POST | superuser | Local HTTPS setup |

@@ -1211,11 +1211,22 @@ func (s *Server) coreSetPassphraseByLink(token, passphrase string) (*db.User, er
 
 // ── Settings operations ─────────────────────────────────────────────
 
+// settingsUpdate is a change to the system settings: each non-nil field is
+// set, the rest are left alone. The HTTP API decodes its body into it.
+type settingsUpdate struct {
+	AdminAuthService     *string `json:"admin_auth_service"`
+	DefaultApp           *string `json:"default_app"`
+	McpDatabaseMode      *string `json:"mcp_database_mode"`
+	RequireVerifiedEmail *bool   `json:"admin_require_verified_email"`
+	McpDeleteTools       *bool   `json:"mcp_delete_tools"`
+}
+
 // coreUpdateSettings applies the non-nil settings fields, validating each.
-func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp, mcpDBMode *string, requireVerifiedEmail *bool) error {
+func (s *Server) coreUpdateSettings(actor *db.User, u settingsUpdate) error {
 	if err := s.gate(actor, rolesSuperuser); err != nil {
 		return err
 	}
+	adminAuthService, defaultApp, mcpDBMode, requireVerifiedEmail := u.AdminAuthService, u.DefaultApp, u.McpDatabaseMode, u.RequireVerifiedEmail
 	if adminAuthService != nil {
 		if *adminAuthService != "" {
 			id, err := parseID(*adminAuthService)
@@ -1261,6 +1272,12 @@ func (s *Server) coreUpdateSettings(actor *db.User, adminAuthService, defaultApp
 		}
 		s.audit(actor, "updated settings", "admin_require_verified_email")
 	}
+	if u.McpDeleteTools != nil {
+		if err := s.store.SetSetting("mcp_delete_tools", strconv.FormatBool(*u.McpDeleteTools)); err != nil {
+			return cerr(http.StatusInternalServerError, "%v", err)
+		}
+		s.audit(actor, "updated settings", "mcp_delete_tools")
+	}
 	return nil
 }
 
@@ -1279,6 +1296,7 @@ func (s *Server) settingsView() map[string]interface{} {
 	result := map[string]interface{}{
 		"admin_auth_service": nil, "default_app": nil, "mcp_database_mode": "read-only",
 		"admin_require_verified_email": s.adminRequiresVerifiedEmail(),
+		"mcp_delete_tools":             s.mcpDeleteToolsOn(),
 	}
 	if v, err := s.store.GetSetting("admin_auth_service"); err == nil && v != "" {
 		result["admin_auth_service"] = v
@@ -1290,6 +1308,13 @@ func (s *Server) settingsView() map[string]interface{} {
 		result["mcp_database_mode"] = v
 	}
 	return result
+}
+
+// mcpDeleteToolsOn reports whether the central MCP offers its delete_*
+// tools. On unless a Superuser has turned them off.
+func (s *Server) mcpDeleteToolsOn() bool {
+	v, err := s.store.GetSetting("mcp_delete_tools")
+	return err != nil || v != "false"
 }
 
 // adminRequiresVerifiedEmail reports whether the admin gate links a login

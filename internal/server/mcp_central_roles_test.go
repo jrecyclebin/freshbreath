@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"poggers.institute/freshbreath/internal/db"
 )
 
 // toolNamesViaInMemory connects an in-memory MCP client to mcps and
@@ -153,4 +155,62 @@ func concat[S ~[]E, E any](ss ...S) S {
 		out = append(out, s...)
 	}
 	return out
+}
+
+// TestCentralMCPDeleteToolsSwitch: turning mcp_delete_tools off hides every
+// delete_* tool from tools/list and refuses a direct call, on the already
+// cached server; turning it back on restores them.
+func TestCentralMCPDeleteToolsSwitch(t *testing.T) {
+	srv := newTestServer(t)
+	super := &db.User{ID: 1, Role: "Superuser"}
+	mcps := srv.centralMCPServerForRole("Superuser")
+
+	if !slices.Contains(toolNamesViaInMemory(t, mcps), "delete_app") {
+		t.Fatal("delete_app should be listed by default")
+	}
+
+	off := false
+	if err := srv.coreUpdateSettings(super, settingsUpdate{McpDeleteTools: &off}); err != nil {
+		t.Fatal(err)
+	}
+	names := toolNamesViaInMemory(t, mcps)
+	for _, n := range names {
+		if isDeleteTool(n) {
+			t.Errorf("%s still listed with delete tools off", n)
+		}
+	}
+	if !slices.Contains(names, "list_apps") {
+		t.Error("list_apps should still be listed")
+	}
+	if v := srv.settingsView()["mcp_delete_tools"]; v != false {
+		t.Errorf("settings view mcp_delete_tools = %v", v)
+	}
+
+	ctx := context.Background()
+	t1, t2 := mcp.NewInMemoryTransports()
+	ss, err := mcps.Connect(ctx, t1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil).Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "delete_app", Arguments: map[string]any{"id": "1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError || !strings.Contains(text, "turned off") {
+		t.Errorf("delete_app call should be refused while delete tools are off, got %q", text)
+	}
+
+	on := true
+	if err := srv.coreUpdateSettings(super, settingsUpdate{McpDeleteTools: &on}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(toolNamesViaInMemory(t, mcps), "delete_app") {
+		t.Error("delete_app should be listed again once turned back on")
+	}
 }

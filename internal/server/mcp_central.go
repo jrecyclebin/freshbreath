@@ -197,7 +197,41 @@ Fresh Breath server URL: %q`, s.config.PublicBaseURL),
 		s.registerSettingsTools(mcps)
 	}
 
+	mcps.AddReceivingMiddleware(s.deleteToolsSwitch)
 	return mcps
+}
+
+// isDeleteTool reports whether a central MCP tool deletes something. Every
+// one is named delete_*, so a new one is covered by the switch below
+// without being listed anywhere.
+func isDeleteTool(name string) bool {
+	return strings.HasPrefix(name, "delete_")
+}
+
+// deleteToolsSwitch enforces the mcp_delete_tools setting: while it's off,
+// the delete tools are left out of tools/list and refused if called anyway.
+// It reads the setting on every request, so the cached per-role servers
+// never need rebuilding when it flips.
+func (s *Server) deleteToolsSwitch(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		if s.mcpDeleteToolsOn() {
+			return next(ctx, method, req)
+		}
+		if call, ok := req.(*mcp.CallToolRequest); ok && isDeleteTool(call.Params.Name) {
+			return mcpToolError("%s is turned off: an admin has disabled the MCP delete tools in Settings", call.Params.Name), nil
+		}
+		res, err := next(ctx, method, req)
+		if list, ok := res.(*mcp.ListToolsResult); ok && err == nil {
+			kept := list.Tools[:0:0]
+			for _, t := range list.Tools {
+				if !isDeleteTool(t.Name) {
+					kept = append(kept, t)
+				}
+			}
+			list.Tools = kept
+		}
+		return res, err
+	}
 }
 
 // centralMCPServerForRole returns the per-role MCP server, building and
@@ -2442,6 +2476,7 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 				"default_app":                  map[string]interface{}{"type": "string", "description": "Default app nonce or 'control'"},
 				"mcp_database_mode":            map[string]interface{}{"type": "string", "description": "Central MCP database writes: \"read-only\" (default) or \"full-access\"", "enum": []string{"read-only", "full-access"}},
 				"admin_require_verified_email": map[string]interface{}{"type": "boolean", "description": "Link admin-gate logins to users only by an email the provider marks verified (off by default; not used by the built-in SSH key gate)"},
+				"mcp_delete_tools":             map[string]interface{}{"type": "boolean", "description": "Whether the central MCP's delete_* tools are available (on by default). Off hides them and refuses calls to them."},
 			},
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -2467,7 +2502,14 @@ func (s *Server) registerSettingsTools(mcps *mcp.Server) {
 		if v, ok := args["admin_require_verified_email"].(bool); ok {
 			requireVerified = &v
 		}
-		if err := s.coreUpdateSettings(user, adminAuthService, defaultApp, mcpDBMode, requireVerified); err != nil {
+		var deleteTools *bool
+		if v, ok := args["mcp_delete_tools"].(bool); ok {
+			deleteTools = &v
+		}
+		if err := s.coreUpdateSettings(user, settingsUpdate{
+			AdminAuthService: adminAuthService, DefaultApp: defaultApp, McpDatabaseMode: mcpDBMode,
+			RequireVerifiedEmail: requireVerified, McpDeleteTools: deleteTools,
+		}); err != nil {
 			return mcpToolError("%v", err), nil
 		}
 		return mcpToolResult(map[string]string{"status": "updated"})

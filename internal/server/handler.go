@@ -3827,17 +3827,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(view)
 	case http.MethodPut:
-		var body struct {
-			AdminAuthService     *string `json:"admin_auth_service"`
-			DefaultApp           *string `json:"default_app"`
-			McpDatabaseMode      *string `json:"mcp_database_mode"`
-			RequireVerifiedEmail *bool   `json:"admin_require_verified_email"`
-		}
+		var body settingsUpdate
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := s.coreUpdateSettings(userFromContext(r.Context()), body.AdminAuthService, body.DefaultApp, body.McpDatabaseMode, body.RequireVerifiedEmail); err != nil {
+		if err := s.coreUpdateSettings(userFromContext(r.Context()), body); err != nil {
 			writeErr(w, err)
 			return
 		}
