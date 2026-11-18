@@ -106,15 +106,43 @@ const Avatar = ({ name, email, size = 32 }) => {
     dangerouslySetInnerHTML={{__html: window.windowAvatar(seed, {size, color: 'currentColor'})}}/>;
 };
 
-// A hosted app's favicon, if it serves one at /favicon.ico; otherwise the
-// app's first initial on a coloured tile. Tried per-card so a missing
-// icon never breaks the grid.
-const Favicon = ({ route, name }) => {
+// Where a hosted app's icon is, found the way a browser finds it: a
+// <link rel="icon"> in the app's page (often a data: URL in a single-file
+// app), else /favicon.ico. The page is parsed, never run. Looked up once
+// per route per page load; an app on another origin can't be read, so it
+// gets /favicon.ico.
+const appIcons = new Map();
+function findAppIcon(route) {
+  if (!appIcons.has(route)) {
+    const fallback = route + '/favicon.ico';
+    appIcons.set(route, fetch(route + '/', { credentials: 'same-origin' })
+      .then(async r => {
+        if (!r.ok) return fallback;
+        const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+        const href = doc.querySelector('link[rel~="icon" i][href]')?.getAttribute('href');
+        return href ? new URL(href, r.url).href : fallback;
+      })
+      .catch(() => fallback));
+  }
+  return appIcons.get(route);
+}
+
+// A hosted app's favicon; a generic app glyph when it has none. Tried
+// per-card so a missing icon never breaks the grid.
+const Favicon = ({ route }) => {
+  const [src, setSrc] = useState(null);
   const [err, setErr] = useState(false);
-  if (err || !route) {
+  useEffect(() => {
+    if (!route) return;
+    let live = true;
+    setErr(false);
+    findAppIcon(route).then(u => { if (live) setSrc(u); });
+    return () => { live = false; };
+  }, [route]);
+  if (err || !route || !src) {
     return <Icon name="apps" size={14}/>;
   }
-  return <img className="hosted-fav" src={route + '/favicon.ico'} alt="" onError={()=>setErr(true)}/>;
+  return <img className="hosted-fav" src={src} alt="" onError={()=>setErr(true)}/>;
 };
 
 const Badge = ({ tone = "gray", dot = true, children }) => (
@@ -1237,7 +1265,7 @@ function HomePage({ session, navigate, apps, services, auth, users, adminAuthID,
           <div className="hosted-grid">
             {(allHosted ? hosted : hosted.slice(0, HOSTED_PREVIEW)).map(a => (
               <div key={a.nonce} className="hosted-card" onClick={() => window.open(hostRoute(a), '_blank', 'noopener')} title="Open app">
-                <Favicon route={hostRoute(a)} name={a.name}/>
+                <Favicon route={hostRoute(a)}/>
                 <a className="hosted-name" href={hostRoute(a)} target="_blank" rel="noopener noreferrer"
                    onClick={ev => ev.stopPropagation()}>{a.name}</a>
                 <span className={'env-dot ' + envTone(a.environment)} title={a.environment || 'No environment'}/>
@@ -1754,11 +1782,21 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
     </div>
   );
 
+  // A Member of the app picks which slot is live, too: they can deploy.
+  const environmentField = (
+    <div className="field"><label>Default environment</label>
+      <select className="input" name="environment" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
+        <option>Production</option><option>Staging</option><option>Development</option>
+      </select>
+      <span className="help">Which deployment slot the bare app URL serves.</span>
+    </div>
+  );
+
   return (
     <>
     <fieldset className="read-only-fields" disabled={!isAdmin}>
       {!isAdmin && (
-        <span className="help">Read-only — only admins can change an app{memberWiring ? ', but you can link your own services below' : ''}.</span>
+        <span className="help">Read-only — only admins can change an app{memberWiring ? ', but you can pick its default environment and link your own services below' : ''}.</span>
       )}
       <div className="field-row">
         <div className="field"><label>Name</label><input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
@@ -1768,12 +1806,7 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
         </div>
       </div>
       <div className="field-row">
-        <div className="field"><label>Default environment</label>
-          <select className="input" name="environment" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
-            <option>Production</option><option>Staging</option><option>Development</option>
-          </select>
-          <span className="help">Which deployment slot the bare app URL serves.</span>
-        </div>
+        {!memberWiring && environmentField}
         <div className="field"><label>Owner</label>
           <select className="input" name="owner_id" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
             <option value="">No owner</option>
@@ -1815,6 +1848,7 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
       />
       {!memberWiring && serviceAccess}
     </fieldset>
+    {memberWiring && environmentField}
     {memberWiring && serviceAccess}
     </>
   );
@@ -1911,8 +1945,11 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
     }
     if (memberWiring) {
       try {
+        if (form.environment !== (app.environment || 'Development')) {
+          await frbr(session, 'PUT','/api/apps/'+app.nonce+'/environment',{environment:form.environment});
+        }
         await frbr(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
-        toast('Services updated');
+        toast('App updated');
         onRefresh();
       } catch(e) { toast(e.message,true); }
       return;
@@ -2825,6 +2862,16 @@ function AuthForm({ form, setForm, record }) {
             </label>
             <span className="help">For a public provider like GitHub used as a gate: anyone can have an account there. With this on, only people whose provider email matches a user on this server get in, and they sign in as that user.</span>
           </div>
+          {d.require_user && (
+            <div className="field">
+              <label>Also allow these emails</label>
+              <textarea className="input mono" name="allowed_emails" rows={4} {...NO_FILL}
+                        value={(d.allowed_emails||[]).join('\n')}
+                        onChange={e=>upd('allowed_emails', e.target.value.split('\n'))}
+                        placeholder={'friend@example.com\ncontractor@example.org'}/>
+              <span className="help">One per line. These people get in without a user here — they sign in as outside identities, not as users, so they can't reach the control panel. Removing an email cuts off their existing sessions too.</span>
+            </div>
+          )}
         </>
       )}
 
@@ -3540,6 +3587,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
   const [creatingGate, setCreatingGate] = useState(false);
   const [defaultApp, setDefaultApp] = useState('');
   const [dbMode, setDbMode] = useState('read-only');
+  const [deleteTools, setDeleteTools] = useState(true);
   const [loading, setLoading] = useState(true);
   const toast = useToast();
 
@@ -3553,6 +3601,7 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
         setSavedRequireVerified(!!d.admin_require_verified_email);
         setDefaultApp(d.default_app || '');
         setDbMode(d.mcp_database_mode || 'read-only');
+        setDeleteTools(d.mcp_delete_tools !== false);
       })
       .catch(e => toast(e.message, true))
       .finally(() => setLoading(false));
@@ -3586,6 +3635,14 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
       await frbr(session, 'PUT', '/api/settings', { default_app: defaultApp });
       toast('Landing page saved');
     } catch(e) { toast(e.message, true); }
+  };
+
+  const saveDeleteTools = async (on) => {
+    setDeleteTools(on);
+    try {
+      await frbr(session, 'PUT', '/api/settings', { mcp_delete_tools: on });
+      toast(on ? 'MCP delete tools on' : 'MCP delete tools off');
+    } catch(e) { setDeleteTools(!on); toast(e.message, true); }
   };
 
   const saveDBMode = async () => {
@@ -3693,6 +3750,20 @@ function SettingsView({ session, services, apps, auth, onRefresh }) {
             <div style={{display:'flex',gap:8,marginTop:16}}>
               <button className="btn btn-primary" onClick={saveDBMode}>Save</button>
             </div>
+          </div>
+        )}
+        </SettingSection>
+
+        <SettingSection
+          title="MCP delete tools"
+          desc={<>Whether the central MCP server offers its delete tools — <code>delete_app</code>, <code>delete_service</code>, <code>delete_user</code>, <code>delete_app_file</code> and the rest. Off, they disappear from the tool list and calls to them are refused. Like the database mode, this is accident prevention, not a privilege boundary: the control panel and HTTP API can still delete.</>}
+        >
+        {loading ? <span className="muted">Loading…</span> : (
+          <div className="field">
+            <label style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer',fontSize:13,color:'var(--ink-1)',fontWeight:400}}>
+              <input type="checkbox" name="mcp_delete_tools" checked={deleteTools} onChange={e => saveDeleteTools(e.target.checked)}/>
+              <span>Allow MCP delete tools</span>
+            </label>
           </div>
         )}
         </SettingSection>

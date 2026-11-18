@@ -56,7 +56,7 @@ func TestAdminGateCanRequireVerifiedEmail(t *testing.T) {
 	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
 	super := &db.User{ID: 99, Role: "Superuser"}
 	id := strconv.FormatInt(rec.ID, 10)
-	if err := srv.coreUpdateSettings(super, &id, nil, nil, nil); err != nil {
+	if err := srv.coreUpdateSettings(super, settingsUpdate{AdminAuthService: &id}); err != nil {
 		t.Fatal(err)
 	}
 	user, _ := srv.store.CreateUser("Known", "known@example.com", "Member", "Active")
@@ -70,7 +70,7 @@ func TestAdminGateCanRequireVerifiedEmail(t *testing.T) {
 	}
 
 	on := true
-	if err := srv.coreUpdateSettings(super, nil, nil, nil, &on); err != nil {
+	if err := srv.coreUpdateSettings(super, settingsUpdate{RequireVerifiedEmail: &on}); err != nil {
 		t.Fatal(err)
 	}
 	if srv.settingsView()["admin_require_verified_email"] != true {
@@ -134,7 +134,7 @@ func TestEmailLinkPinsFirstAccount(t *testing.T) {
 	rec := newAuthRecord(t, srv, "IdP", db.AuthOIDC, db.AuthDescriptor{Issuer: "https://idp.example", Provider: "idp"})
 	super := &db.User{ID: 99, Role: "Superuser"}
 	id := strconv.FormatInt(rec.ID, 10)
-	if err := srv.coreUpdateSettings(super, &id, nil, nil, nil); err != nil {
+	if err := srv.coreUpdateSettings(super, settingsUpdate{AdminAuthService: &id}); err != nil {
 		t.Fatal(err)
 	}
 	user, _ := srv.store.CreateUser("Known", "known@example.com", "Member", "Active")

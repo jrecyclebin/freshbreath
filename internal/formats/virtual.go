@@ -165,10 +165,15 @@ var tokenVars = map[string]bool{"token": true, "token_email": true, "token_sub":
 
 // ParseVirtualFile parses a virtual service description file into tools.
 // Tools are separated by --- delimiters and begin with [name] headers.
+// Comment lines directly under a header continue its description.
 func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 	var tools []VirtualTool
 	var cur *VirtualTool
 	var curLines []string
+	// describing is true while the lines right under a [name] header are
+	// # comments: those continue the header's description, so a long one
+	// can wrap. The first line that isn't a comment (a blank included) ends it.
+	describing := false
 
 	seenNames := map[string]bool{}
 	flush := func() error {
@@ -189,6 +194,7 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 		}
 		cur = nil
 		curLines = nil
+		describing = false
 		return nil
 	}
 
@@ -208,8 +214,17 @@ func ParseVirtualFile(data []byte) ([]VirtualTool, error) {
 			}
 			cur = &VirtualTool{Name: strings.TrimSuffix(name, "!"), Description: desc, AppOnly: appOnly}
 			curLines = nil
+			describing = true
 			continue
 		}
+
+		if describing && strings.HasPrefix(trimmed, "#") {
+			if more := strings.TrimSpace(strings.TrimPrefix(trimmed, "#")); more != "" {
+				cur.Description = strings.TrimSpace(cur.Description + " " + more)
+			}
+			continue
+		}
+		describing = false
 
 		if cur != nil {
 			curLines = append(curLines, line)
@@ -411,9 +426,13 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 
 		switch state {
 		case sPre:
-			if ok, vn, ex := tryParseAssignment(line); ok {
-				name := vn
+			if ok, _, _ := tryParseAssignment(line); ok {
+				// The RHS is jq, collected like any jq statement: brackets
+				// or indented lines carry it onto the following lines.
+				expr, k := collectJQ(lines, i)
+				_, name, ex := tryParseAssignment(expr)
 				step.Pre = append(step.Pre, VirtualStmt{Assign: &name, Expr: ex})
+				i = k
 			} else if line == "WATCH" || strings.HasPrefix(line, "WATCH ") {
 				// WATCH directive: marks the tool watched, so a successful
 				// call is reported to the service's watchers. An expression
@@ -430,35 +449,22 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				}
 				step.Pre = append(step.Pre, VirtualStmt{Watch: true, Expr: expr})
 				i = k
-			} else if ann, ok := parseAnnotation(line); ok {
+			} else if ann, k, ok := parseAnnotationLines(lines, i); ok {
 				tool.typeAnnotations = append(tool.typeAnnotations, ann)
+				i = k
 			} else if ok, form := tryParseForm(line); ok {
 				// FORM directive: a blocking form elicitation whose answers
 				// replace the scope. Field declarations use the same annotation
-				// syntax as tool parameters on indented continuation lines
-				// (SQL-style): ends at the first non-indented line; blanks and
-				// indented # comments are skipped.
-				j := i + 1
-				for j < len(lines) {
-					raw := lines[j]
-					t := strings.TrimSpace(raw)
-					if t == "" {
-						j++
-						continue
+				// syntax as tool parameters, one per indented line under it.
+				fieldLines, k := continuationLines(lines, i)
+				for _, t := range fieldLines {
+					field, err := parseFormField(t)
+					if err != nil {
+						return err
 					}
-					if raw[0] != ' ' && raw[0] != '\t' {
-						break
-					}
-					if !strings.HasPrefix(t, "#") {
-						field, err := parseFormField(t)
-						if err != nil {
-							return err
-						}
-						form.Fields = append(form.Fields, field)
-					}
-					j++
+					form.Fields = append(form.Fields, field)
 				}
-				i = j - 1
+				i = k
 				step.Elicit = &VirtualElicit{Form: form}
 				// Forms have no status line; anchor any shaping block to 0.
 				step.Responses[0] = &VirtualResponse{}
@@ -474,31 +480,12 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				lastHTTPStatus = 0
 				state = sResp
 			} else if isSQLVerbLine(line) {
-				// SQL step: the verb line plus every indented continuation,
-				// against the RAW line (the loop's trim already happened).
-				// Ends at the first non-indented line. Blank lines and
-				// indented # comments are skipped, not collected. Checked
-				// before tryParseRequest: "DELETE FROM" is SQL, not a
-				// DELETE to the URL "FROM …".
-				sqlLines := []string{line}
-				j := i + 1
-				for j < len(lines) {
-					raw := lines[j]
-					t := strings.TrimSpace(raw)
-					if t == "" {
-						j++
-						continue
-					}
-					if raw[0] != ' ' && raw[0] != '\t' {
-						break
-					}
-					if !strings.HasPrefix(t, "#") {
-						sqlLines = append(sqlLines, t)
-					}
-					j++
-				}
-				i = j - 1
-				compiled, names, err := compileSQL(strings.Join(sqlLines, "\n"))
+				// SQL step: the verb line plus every indented continuation.
+				// Checked before tryParseRequest: "DELETE FROM" is SQL, not
+				// a DELETE to the URL "FROM …".
+				more, k := continuationLines(lines, i)
+				i = k
+				compiled, names, err := compileSQL(strings.Join(append([]string{line}, more...), "\n"))
 				if err != nil {
 					return err
 				}
@@ -509,8 +496,15 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				lastHTTPStatus = 0
 				state = sResp
 			} else if ok, m, u := tryParseRequest(line); ok {
+				// Indented lines continue the URL. URLs hold no whitespace,
+				// so the pieces join with nothing between them:
+				//   GET https://api.example.com/search
+				//     ?q=$q
+				//     &limit=$limit
+				more, k := continuationLines(lines, i)
+				i = k
 				step.Method = m
-				step.URL = u
+				step.URL = u + strings.Join(more, "")
 				state = sHeaders
 			} else if strings.HasPrefix(line, "{") {
 				// A shaping block with no request of its own — the tool's
@@ -537,11 +531,14 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 				step.Responses[code] = &VirtualResponse{}
 				lastHTTPStatus = code
 				state = sResp
-			} else if k, v, ok := parseHeaderLine(line); ok {
+			} else if key, v, ok := parseHeaderLine(line); ok {
+				// Indented lines continue a header value, joined by spaces.
+				more, k := continuationLines(lines, i)
+				i = k
 				if step.Headers == nil {
 					step.Headers = make(map[string]string)
 				}
-				step.Headers[k] = v
+				step.Headers[key] = strings.Join(append([]string{v}, more...), " ")
 			} else {
 				// The request body is a jq expression. Its result is sent
 				// verbatim when it's a string (with a required Content-Type),
@@ -577,6 +574,36 @@ func parseVirtualToolBody(tool *VirtualTool, lines []string) error {
 }
 
 // ── Line Classifiers ─────────────────────────────────────────────────
+
+// isIndented reports whether a raw (untrimmed) line starts with whitespace.
+func isIndented(raw string) bool {
+	return raw != "" && (raw[0] == ' ' || raw[0] == '\t')
+}
+
+// continuationLines collects the indented lines that continue lines[start]
+// and returns them trimmed, along with the index of the last line consumed
+// (start itself when nothing continues it). It ends at the first
+// non-indented line. Blank lines and indented # comments are skipped, not
+// collected. This is the one rule for spanning lines: SQL, requests,
+// headers, assignments, annotations and FORM fields all continue this way.
+func continuationLines(lines []string, start int) ([]string, int) {
+	var out []string
+	last := start
+	for j := start + 1; j < len(lines); j++ {
+		t := strings.TrimSpace(lines[j])
+		if t == "" {
+			continue
+		}
+		if !isIndented(lines[j]) {
+			break
+		}
+		if !strings.HasPrefix(t, "#") {
+			out = append(out, t)
+		}
+		last = j
+	}
+	return out, last
+}
 
 var identRe = regexp.MustCompile(`^[a-zA-Z_]\w*$`)
 
@@ -777,6 +804,22 @@ func parseAnnotation(line string) (typeAnnotation, bool) {
 	return typeAnnotation{}, false
 }
 
+// parseAnnotationLines parses an annotation starting at lines[start],
+// joining any indented continuation lines with spaces first, so a long enum
+// can be laid out one value per line. Returns the index of the last line
+// consumed. A line that isn't an annotation (even joined) consumes nothing.
+func parseAnnotationLines(lines []string, start int) (typeAnnotation, int, bool) {
+	line := strings.TrimSpace(lines[start])
+	if !strings.HasPrefix(line, "$") || strings.Contains(line, " = ") {
+		return typeAnnotation{}, start, false
+	}
+	more, k := continuationLines(lines, start)
+	if ann, ok := parseAnnotation(strings.Join(append([]string{line}, more...), " ")); ok {
+		return ann, k, true
+	}
+	return typeAnnotation{}, start, false
+}
+
 // parseFormField parses one FORM field declaration. Fields reuse the tool
 // parameter annotation syntax minus object/array: elicitation schemas are
 // flat primitives (string, number, boolean, enum, formatted string), and
@@ -903,26 +946,34 @@ func jqAccumDepth(line string, depth int, inStr bool) (int, bool) {
 
 // collectJQ consumes a jq expression starting at lines[start] (included)
 // and returns the joined expression and the index of the last consumed
-// line. A single-line expression whose brackets balance ends on its
-// line; an unbalanced line continues until it closes, spanning newlines.
-// Blank lines and #-comment lines between (while depth > 0) are skipped:
-// jq has no comments inside expressions, so they're authoring notes the
-// way they were for JSON bodies, not content jq would parse.
+// line. An unbalanced line continues until its brackets close, spanning
+// newlines; once balanced, indented lines continue it too (the same rule
+// as SQL), so a pipeline can be broken up:
+//
+//	$ids = .rows
+//	  | map(.id)
+//
+// Blank lines and #-comment lines between are skipped: jq has no comments
+// inside expressions, so they're authoring notes the way they were for
+// JSON bodies, not content jq would parse.
 func collectJQ(lines []string, start int) (string, int) {
 	var out []string
 	depth, inStr := 0, false
+	last := start
 	for i := start; i < len(lines); i++ {
 		t := strings.TrimSpace(lines[i])
 		if i > start && (t == "" || strings.HasPrefix(t, "#")) {
 			continue
 		}
-		out = append(out, t)
-		depth, inStr = jqAccumDepth(t, depth, inStr)
-		if depth <= 0 && !inStr {
-			return strings.Join(out, "\n"), i
+		// Once the brackets balance, only an indented line continues it.
+		if i > start && depth <= 0 && !inStr && !isIndented(lines[i]) {
+			break
 		}
+		out = append(out, t)
+		last = i
+		depth, inStr = jqAccumDepth(t, depth, inStr)
 	}
-	return strings.Join(out, "\n"), len(lines) - 1
+	return strings.Join(out, "\n"), last
 }
 
 // ── Variable Resolution (URL and header templates) ───────────────────

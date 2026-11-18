@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -104,6 +106,11 @@ type AuthDescriptor struct {
 	// outside identity. For a public provider (GitHub, say) used as a gate.
 	RequireUser bool `json:"require_user,omitempty"`
 
+	// AllowedEmails widens RequireUser: these emails get in too, though
+	// they have no user here. They sign in as outside identities (ext:
+	// subjects), not as users. Stored lowercase; see AllowsEmail.
+	AllowedEmails []string `json:"allowed_emails,omitempty"`
+
 	// mcp: the RFC 8707 resource indicator sent with authorization and
 	// token requests.
 	Resource string `json:"resource,omitempty"`
@@ -128,6 +135,26 @@ type AuthRecord struct {
 	Builtin    bool           `json:"builtin"`
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
+// AllowsEmail reports whether email is on the record's allowlist, ignoring
+// case and surrounding space.
+func (d AuthDescriptor) AllowsEmail(email string) bool {
+	email = strings.ToLower(strings.TrimSpace(email))
+	return email != "" && slices.Contains(d.AllowedEmails, email)
+}
+
+// NormalizeAllowedEmails lowercases and trims the allowlist, dropping
+// blanks and duplicates, so AllowsEmail can compare exactly.
+func (d *AuthDescriptor) NormalizeAllowedEmails() {
+	var out []string
+	for _, e := range d.AllowedEmails {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e != "" && !slices.Contains(out, e) {
+			out = append(out, e)
+		}
+	}
+	d.AllowedEmails = out
 }
 
 // Secret reports the record's stored secret (client secret or key),

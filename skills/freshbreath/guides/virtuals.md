@@ -54,7 +54,10 @@ from Github will be returned as-is.
 
 Aside from the request and response layouts, tool scripts can also include:
 
-- Comments: Lines starting with `#` are comments and are ignored by the parser.
+- Comments: Lines starting with `#` are comments and are ignored by the parser
+  — except comments directly under the `[tool-name]` header, which continue
+  the tool's description (joined with spaces) until the first blank or
+  non-comment line. Use them to wrap a long description.
 - Type annotations: Lines starting with `$arg is type` indicate that the argument
   is expected to be of a certain type (string, object, number, boolean, array,
   encrypted, or path — a string that substitutes whole into a URL path)
@@ -69,6 +72,23 @@ Aside from the request and response layouts, tool scripts can also include:
 
 These additions affect the HTTP requests that they precede, and can be used to
 modify the request or response.
+
+**Spanning lines.** Any line can be continued onto the lines beneath it by
+indenting them. The continuation ends at the first non-indented line; blank
+lines and indented `#` comments in between are skipped.
+
+- A request URL joins its continuations with nothing in between (URLs hold
+  no spaces): `GET https://api.example.com/search` then `  ?q=$q` then
+  `  &limit=$limit`.
+- A header value joins its continuations with spaces.
+- Assignments, assertions, request bodies and shaping blocks are jq: they
+  span lines either by indenting or by leaving a bracket open.
+- A type annotation joins with spaces, so an enum can list one value per
+  line (`$state is "open"` then `  | "closed"` then `  | "all"`).
+- SQL steps work the same way (see SQL Steps below).
+
+So never indent a line you mean to stand on its own: an indented `GET` under
+an assignment becomes part of that assignment.
 
 ## Calling Convention
 

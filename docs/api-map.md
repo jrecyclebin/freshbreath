@@ -117,7 +117,8 @@ refused while referenced.
 
 **Other tools**: `list_roles`, `list_audit`, `get_guide`
 (guides: `publishing`, `services`, `ssh`, `tasks`, `virtuals`),
-`get_settings`/`update_settings` (superuser; incl. `mcp_database_mode`).
+`get_settings`/`update_settings` (superuser; incl. `mcp_database_mode` and
+`mcp_delete_tools` — off hides every `delete_*` tool and refuses calls to them).
 
 **Database tools** (`registerDatabaseTools`): `db_list_databases`, `db_schema`,
 `db_query` (target: `''` per-app / `global` / `app:<nonce>`; `db_execute` needs
@@ -177,6 +178,7 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/apps/{nonce}` | GET/PUT/DELETE | any | Detail / update (204; owner must be Admin+ or the current owner) / delete (204) |
 | `/api/apps/{nonce}/members` | GET/PUT | admin+ | App member list (Member/Read-only accounts; rewrites prune the rest) |
 | `/api/apps/{nonce}/services` | GET/PUT | GET: any with access to the app; PUT: admin+, member of the app | Approved services for the app / `PUT {services}` rewrites them. An Admin sets the whole list. A Member sets only their share: services they're a member of are linked or unlinked as listed, links to any other service stay, and listing a new one of those is 403 |
+| `/api/apps/{nonce}/environment` | PUT | admin+, Member of the app | `PUT {environment}` (`Development`, `Staging` or `Production`): the slot the bare app URL serves |
 | `/api/apps/{nonce}/web[/<path>]` | GET/PUT/POST/DELETE | any canAccessApp | Web files. GET = folder listing `{files}` (`?search=`) or file bytes; PUT = replace a file; POST = multipart upload replacing the folder (bare = whole slot; 100 MB cap); DELETE = a file, or bare = clear the slot |
 | `/api/apps/{nonce}/data[/<path>]` | GET/PUT/POST/DELETE | any canAccessApp | Private (unhosted) files, as `/web` but POST adds to the folder and there's no bare DELETE; GET served with `CSP: sandbox`, `nosniff` |
 | `/api/apps/{nonce}/download` | GET | any canAccessApp | The dev slot as a zip |
@@ -213,7 +215,7 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/me/ssh-key` | GET/POST/DELETE | any | Own SSH key |
 | `/api/me/sessions` | GET/DELETE | any | Refresh-token families; DELETE revokes all |
 | `/api/me/sessions/{id}` | DELETE | any | Revoke one session |
-| `/api/settings` | GET/PUT | superuser | `admin_auth_service`, `default_app`, `mcp_database_mode` |
+| `/api/settings` | GET/PUT | superuser | `admin_auth_service`, `default_app`, `mcp_database_mode`, `admin_require_verified_email`, `mcp_delete_tools` |
 | `/api/onboarding` | GET/POST | superuser (open in setup mode) | Needed? / `POST {name, email, passphrase}` = first superuser |
 | `/api/onboarding/skip` | POST | superuser | Skip onboarding |
 | `/api/tls` | POST | superuser | Local HTTPS setup |

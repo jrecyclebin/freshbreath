@@ -172,8 +172,10 @@ func (s *Server) verifyGateToken(rec *db.AuthRecord, raw string) (*freshbreathCl
 	if err != nil {
 		return nil, nil, err
 	}
-	// Tokens from before the record asked for an account don't slip by.
-	if user == nil && rec.Descriptor.RequireUser {
+	// Tokens from before the record asked for an account don't slip by,
+	// nor do allowlisted strangers once they're taken off the list. The
+	// email speaks for the caller only when this record proved it.
+	if user == nil && rec.Descriptor.RequireUser && !(claims.identityFrom(rec.ID) && rec.Descriptor.AllowsEmail(claims.UserEmail)) {
 		return nil, nil, fmt.Errorf("%s admits only Fresh Breath users", rec.Name)
 	}
 	if user != nil {

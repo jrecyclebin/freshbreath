@@ -179,10 +179,7 @@ func appHostServes(p string) bool {
 	case strings.HasPrefix(p, "/control/"):
 		return strings.HasPrefix(p, "/control/vendor/")
 	case strings.HasPrefix(p, "/api/"):
-		// Editor apps sync files and drive git over ssh from their own
-		// host; the rest of the admin API (/api/db included) stays off it.
-		return p == "/api/updates/check" || p == "/api/updates/apply" || strings.HasPrefix(p, "/api/elicitation/") ||
-			strings.HasPrefix(p, "/api/ssh/") || strings.HasPrefix(p, "/api/sync/")
+		return true
 	case strings.HasPrefix(p, "/oauth/"):
 		return p == "/oauth/token" || strings.HasPrefix(p, "/oauth/token/")
 	case strings.HasPrefix(p, "/.well-known/"):
@@ -2295,6 +2292,13 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/apps/{nonce}/environment — PUT {environment}: the
+	// slot the bare URL serves, which a Member of the app may change too.
+	if len(parts) == 4 && parts[3] == "environment" {
+		s.handleAppEnvironment(w, r, nonce)
+		return
+	}
+
 	// Sub-routes: /api/apps/{nonce}/{web|staging|prod|data}[/<path>] — the
 	// hosted dev slot, the deployed slots (read-only), and private files
 	// the web server never hosts
@@ -2411,6 +2415,29 @@ func (s *Server) handleAppMembers(w http.ResponseWriter, r *http.Request, nonce 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleAppEnvironment(w http.ResponseWriter, r *http.Request, nonce string) {
+	if !s.canAccessApp(r.Context(), nonce) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Environment string `json:"environment"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := s.coreSetAppEnvironment(userFromContext(r.Context()), nonce, req.Environment); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleAppServices(w http.ResponseWriter, r *http.Request, nonce string) {
@@ -3827,17 +3854,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(view)
 	case http.MethodPut:
-		var body struct {
-			AdminAuthService     *string `json:"admin_auth_service"`
-			DefaultApp           *string `json:"default_app"`
-			McpDatabaseMode      *string `json:"mcp_database_mode"`
-			RequireVerifiedEmail *bool   `json:"admin_require_verified_email"`
-		}
+		var body settingsUpdate
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "Invalid JSON", http.StatusBadRequest)
 			return
 		}
-		if err := s.coreUpdateSettings(userFromContext(r.Context()), body.AdminAuthService, body.DefaultApp, body.McpDatabaseMode, body.RequireVerifiedEmail); err != nil {
+		if err := s.coreUpdateSettings(userFromContext(r.Context()), body); err != nil {
 			writeErr(w, err)
 			return
 		}

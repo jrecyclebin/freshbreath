@@ -384,3 +384,38 @@ func TestAppServiceAnswersToTheHostGate(t *testing.T) {
 		t.Errorf("app service gate = %+v (%v), want the host's %q", rec, err, gate.Name)
 	}
 }
+
+// A Member of an app picks its default environment; a Read-only member
+// and a Member of some other app can't.
+func TestMemberSetsAppEnvironment(t *testing.T) {
+	srv := newTestServer(t)
+	mo, nonce, _, _, _ := serviceShare(t, srv)
+
+	if rr := requestAs(t, srv, mo, "PUT", "/api/apps/"+nonce+"/environment", `{"environment":"Staging"}`); rr.Code/100 != 2 {
+		t.Fatalf("member: %d %s", rr.Code, rr.Body.String())
+	}
+	if app, _ := srv.store.GetApp(nonce); app.Environment != "Staging" {
+		t.Errorf("environment = %q, want Staging", app.Environment)
+	}
+	if rr := requestAs(t, srv, mo, "PUT", "/api/apps/"+nonce+"/environment", `{"environment":"Live"}`); rr.Code != 400 {
+		t.Errorf("unknown environment: %d, want 400", rr.Code)
+	}
+
+	other, _ := srv.store.CreateApp("Other", "Development", "other", nil, nil)
+	if rr := requestAs(t, srv, mo, "PUT", "/api/apps/"+other+"/environment", `{"environment":"Production"}`); rr.Code != 403 {
+		t.Errorf("an app they aren't a member of: %d, want 403", rr.Code)
+	}
+	var ce *coreErr
+	if err := srv.coreSetAppEnvironment(mo, other, "Production"); !errors.As(err, &ce) || ce.status != 403 {
+		t.Errorf("core, an app they aren't a member of: %v, want 403", err)
+	}
+
+	ro := mustUser(t, srv, "Rita", "Read-only", "Active")
+	srv.store.SetAppMembers(nonce, []int64{mo.ID, ro.ID})
+	if rr := requestAs(t, srv, ro, "PUT", "/api/apps/"+nonce+"/environment", `{"environment":"Production"}`); rr.Code != 403 {
+		t.Errorf("Read-only: %d, want 403", rr.Code)
+	}
+	if app, _ := srv.store.GetApp(nonce); app.Environment != "Staging" {
+		t.Errorf("refused writes changed the environment to %q", app.Environment)
+	}
+}
