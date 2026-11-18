@@ -179,10 +179,7 @@ func appHostServes(p string) bool {
 	case strings.HasPrefix(p, "/control/"):
 		return strings.HasPrefix(p, "/control/vendor/")
 	case strings.HasPrefix(p, "/api/"):
-		// Editor apps sync files and drive git over ssh from their own
-		// host; the rest of the admin API (/api/db included) stays off it.
-		return p == "/api/updates/check" || p == "/api/updates/apply" || strings.HasPrefix(p, "/api/elicitation/") ||
-			strings.HasPrefix(p, "/api/ssh/") || strings.HasPrefix(p, "/api/sync/")
+		return true
 	case strings.HasPrefix(p, "/oauth/"):
 		return p == "/oauth/token" || strings.HasPrefix(p, "/oauth/token/")
 	case strings.HasPrefix(p, "/.well-known/"):
