@@ -71,7 +71,7 @@ function check() {
   <div class="sim service-sim">
     <div class="sim-head"><b>Try it: give an app a service</b></div>
     <div class="sim-body grid">
-      <BrowserFrame url="https://localhost:9009/control/services" title="Services · Fresh Breath" icon="🌬️" accent="#3f5bd8">
+      <BrowserFrame url="https://localhost:9009/control/services" title="Services · Fresh Breath" icon="🌬️" accent="#3b8796">
         <div class="wa-head"><b>🔌 Services</b><small>control panel</small></div>
         <div class="wa-body form">
           <label>Start from

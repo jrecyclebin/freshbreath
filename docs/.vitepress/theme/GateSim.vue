@@ -99,7 +99,7 @@ watch([admin, protectedBy, usersOnly], () => {
 <style scoped>
 .effective { margin: 14px 0 12px }
 .users-only { display: flex; gap: 10px; align-items: flex-start; margin-top: 12px; padding: 10px 12px; border: 1.5px dashed var(--line); border-radius: 10px; cursor: pointer }
-.users-only.on { border-style: solid; border-color: var(--amber); background: var(--amber-soft) }
+.users-only.on { border-style: solid; border-color: var(--violet); background: var(--violet-soft) }
 .users-only input { margin-top: 4px }
 .users-only b { display: block; font-size: 14.5px }
 .users-only small { display: block; color: var(--ink-soft); font-size: 13px }
@@ -108,8 +108,8 @@ watch([admin, protectedBy, usersOnly], () => {
 .visitor .face { font-size: 30px; display: block }
 .visitor b { display: block; font-family: var(--display); font-size: 18px }
 .visitor b span { font-family: var(--mono); font-size: 12px; padding: 1px 7px; border-radius: 4px; vertical-align: 3px; margin-left: 4px }
-.visitor.in { border-color: var(--mint) }
-.visitor.in b span { background: var(--mint); color: var(--surface) }
+.visitor.in { border-color: var(--green) }
+.visitor.in b span { background: var(--green); color: var(--surface) }
 .visitor.out { opacity: .8 }
 .visitor.out b span { background: var(--red-soft); color: var(--red) }
 .visitor small { display: block; color: var(--ink-soft); font-size: 13px; line-height: 1.4; margin-bottom: 6px }

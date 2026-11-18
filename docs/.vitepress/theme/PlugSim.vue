@@ -125,7 +125,7 @@ function flip() {
 
 <style scoped>
 .bframe { margin-top: 2px; transition: box-shadow .3s }
-.bframe.plugged { box-shadow: 0 0 0 2px var(--mint), 0 10px 28px -12px rgba(20, 24, 40, .35) }
+.bframe.plugged { box-shadow: 0 0 0 2px var(--green), 0 10px 28px -12px rgba(20, 24, 40, .35) }
 .grow { flex: 1 1 160px }
 .mini-cards { list-style: none; padding: 0 !important; margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 8px }
 .mini-cards li { background: #fff8e6; color: #3a3220; border-radius: 4px; padding: 8px 12px; font-size: 14px; margin: 0; box-shadow: 0 1px 3px rgba(0,0,0,.15); transform: rotate(-.6deg); animation: pop .3s }

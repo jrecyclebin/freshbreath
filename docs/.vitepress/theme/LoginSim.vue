@@ -131,12 +131,12 @@ const rows = computed(() => Object.entries(storeRows))
 .sim-body { position: relative }
 .apps { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px }
 .app { display: flex; flex-direction: column; gap: 8px; min-width: 0 }
-.bframe.in { box-shadow: 0 0 0 2px var(--mint), 0 10px 28px -12px rgba(20, 24, 40, .35) }
+.bframe.in { box-shadow: 0 0 0 2px var(--green), 0 10px 28px -12px rgba(20, 24, 40, .35) }
 .result { margin-top: 10px; font: 12.5px var(--mono); color: var(--wa-soft) }
 .storage { margin-top: 14px; padding: 12px; border-radius: 10px; background: var(--code-bg); color: var(--code-ink) }
-.storage .note { color: #8b93a3 }
+.storage .note { color: var(--code-dim) }
 .storage-head { font-size: 12px; color: var(--ph); margin-bottom: 6px }
-.srow { display: grid; grid-template-columns: 110px 1fr auto; gap: 10px; font-size: 13px; padding: 4px 0; border-top: 1px solid #2a2f3a; overflow-wrap: anywhere }
+.srow { display: grid; grid-template-columns: 110px 1fr auto; gap: 10px; font-size: 13px; padding: 4px 0; border-top: 1px solid var(--code-line); overflow-wrap: anywhere }
 .sealed { color: var(--ph) }
 .popup-wrap { position: absolute; inset: 0; background: rgba(10, 12, 18, .45); display: grid; place-items: center; padding: 16px; border-radius: 0 0 12px 12px }
 .popup { background: var(--surface); border-radius: 12px; padding: 18px 20px; box-shadow: 0 20px 50px rgba(0,0,0,.4); max-width: 340px }

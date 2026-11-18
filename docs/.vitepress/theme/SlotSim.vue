@@ -130,19 +130,19 @@ function check() {
 <style scoped>
 .slots { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px }
 .slot { border: 1.5px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg); display: flex; flex-direction: column; gap: 6px }
-.slot.dev { border-top: 4px solid var(--plum) }
-.slot.staging { border-top: 4px solid var(--amber) }
-.slot.prod { border-top: 4px solid var(--mint) }
-.slot.default { box-shadow: 0 0 0 2px var(--cobalt) }
+.slot.dev { border-top: 4px solid var(--gold) }
+.slot.staging { border-top: 4px solid var(--violet) }
+.slot.prod { border-top: 4px solid var(--green) }
+.slot.default { box-shadow: 0 0 0 2px var(--teal) }
 .slot-name { font-weight: 700; display: flex; justify-content: space-between; align-items: center }
-.badge { font-family: var(--mono); font-size: 11px; background: var(--cobalt); color: var(--surface); padding: 1px 7px; border-radius: 4px }
+.badge { font-family: var(--mono); font-size: 11px; background: var(--teal); color: var(--surface); padding: 1px 7px; border-radius: 4px }
 .slot-ver { font-family: var(--display); font-size: 40px; font-weight: 800; line-height: 1 }
 .slot.empty .slot-ver { color: var(--ink-soft) }
 .slot-url { font-size: 12px; color: var(--ink-soft) }
 .slot-actions { display: flex; flex-direction: column; gap: 6px; margin-top: auto }
 .slot-actions .btn { justify-content: center }
 .browser { margin: 16px 0 12px; padding: 12px; border: 1.5px solid var(--line); border-radius: 10px }
-.chip.on { background: var(--cobalt); border-color: var(--cobalt); color: var(--surface) }
+.chip.on { background: var(--teal); border-color: var(--teal); color: var(--surface) }
 .ver { font: 600 12px var(--mono); background: rgba(255,255,255,.22); padding: 2px 8px; border-radius: 99px }
 .new { font-size: 11px; font-weight: 700; color: #6d4bd8; background: #efeaff; padding: 1px 6px; border-radius: 4px; margin-left: 6px }
 .missing { padding: 26px 18px; text-align: center; font-family: Georgia, serif }

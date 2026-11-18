@@ -229,9 +229,9 @@ function resetScript() { script.value = START }
 .editor { width: 100%; font-size: 13px !important; line-height: 1.5; font-family: var(--mono) !important; resize: vertical; white-space: pre; tab-size: 2 }
 .errors { list-style: none; padding: 0 !important; margin: 8px 0 0; font-size: 14px; color: var(--red) }
 .errors li { margin-bottom: 4px }
-.ok-line { margin: 8px 0 0; font-size: 14px; color: var(--mint) }
+.ok-line { margin: 8px 0 0; font-size: 14px; color: var(--green) }
 .tools { display: flex; flex-wrap: wrap; gap: 6px }
-.chip.on { background: var(--cobalt); border-color: var(--cobalt); color: var(--surface) }
+.chip.on { background: var(--teal); border-color: var(--teal); color: var(--surface) }
 .desc { margin: 10px 0; font-size: 15px; color: var(--ink-soft) }
 .args { display: grid; gap: 8px; margin-bottom: 12px }
 .args input:disabled { opacity: .7 }
