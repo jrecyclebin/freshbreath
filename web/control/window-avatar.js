@@ -6,6 +6,10 @@
 //   import { windowAvatar } from './fresh-breath-avatar.js';
 //   el.innerHTML = windowAvatar('someone@example.com', { size: 30 });
 //
+// options.highlight puts a CRT-style offset copy behind the foreground
+// silhouette (palm, saguaro or sail): 'offset' for one color picked against
+// the sky, 'split' for a cyan/pink color split, or 'none' (the default).
+//
 // The same input always gives the same picture. No dependencies.
 
 const COLORS = {
@@ -19,6 +23,9 @@ const COLORS = {
   },
   sun: '#ff5f8a', duskSun: '#ffe07a', moon: '#fde8f0', cloud: '#ffffff',
   land: '#4d4890', sea: '#2fa3b6',
+  // Candidate colors for the offset highlight behind a foreground silhouette.
+  // Whichever stands furthest from the sky behind it is used.
+  highlight: ['#ff5f8a', '#4ff0e6', '#ffe07a'],
 };
 
 export function windowAvatar(email, options = {}) {
@@ -29,7 +36,7 @@ export function windowAvatar(email, options = {}) {
   const uid = 'fb' + seed.toString(36);
 
   const frame = makeFrame(rnd);
-  const scene = composeScene(rnd, frame.bounds);
+  const scene = composeScene(rnd, frame.bounds, options.highlight ?? 'none');
 
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="${size}" height="${size}" role="img">`
     + `<defs><clipPath id="${uid}c"><path d="${poly(frame.inner)}"/></clipPath></defs>`
@@ -181,7 +188,7 @@ function makeFrame(rnd) {
 
 const SKY = { sun: 18, moon: 14, cloud: 14, sunset: 12, birds: 10, rain: 8, stars: 7, twinmoons: 1.5 };
 
-function composeScene(rnd, b) {
+function composeScene(rnd, b, highlight) {
   let item = rnd.weighted(SKY);
   let ground = rnd.weighted({ sea: 20, shimmer: 13, hills: 18, peaks: 9, ranges: 11, mesa: 9, desert: 8, none: 12 });
   // About a third of windows get a foreground silhouette. It shares the
@@ -290,14 +297,35 @@ function composeScene(rnd, b) {
   // Against a night sky a dark silhouette vanishes, so it is lifted a little.
   const shade = time === 'night' ? mix(COLORS.frame, COLORS.moon, 0.4) : COLORS.frame;
   const fx = b.cx - side * b.w * (item === 'sunset' ? 0.26 : 0.2);
+  // Each silhouette is a function of its color, so the highlight can draw
+  // the same shape again, shifted, in another color.
+  let silhouette = null;
   if (front === 'palm') {
-    out += palm(fx, B, horizon - rnd.range(26, 32), -side * rnd.range(6, 9), shade);
+    const top = horizon - rnd.range(26, 32), lean = -side * rnd.range(6, 9);
+    silhouette = color => palm(fx, B, top, lean, color);
   } else if (front === 'saguaro') {
-    out += saguaro(fx, horizon + rnd.range(12, 15), rnd.range(24, 28), side, time === 'night' ? shade : mix(COLORS.land, COLORS.frame, 0.6));
+    const base = horizon + rnd.range(12, 15), h = rnd.range(24, 28);
+    silhouette = color => saguaro(fx, base, h, side, color ?? (time === 'night' ? shade : mix(COLORS.land, COLORS.frame, 0.6)));
   } else if (front === 'sail') {
     const x = fx + side * 4, h = rnd.range(15, 18), w = h * 0.68;
-    fill(`M${f(x - w / 2)} ${f(horizon - 3)}L${f(x + w * 0.1)} ${f(horizon - 3 - h)}L${f(x + w / 2)} ${f(horizon - 3)}Z`, COLORS.cloud);
-    fill(`M${f(x - w * 0.75)} ${f(horizon - 2)}H${f(x + w * 0.75)}L${f(x + w * 0.5)} ${f(horizon + 2.5)}H${f(x - w * 0.5)}Z`, COLORS.frame);
+    silhouette = color =>
+      `<path d="M${f(x - w / 2)} ${f(horizon - 3)}L${f(x + w * 0.1)} ${f(horizon - 3 - h)}L${f(x + w / 2)} ${f(horizon - 3)}Z" fill="${color ?? COLORS.cloud}"/>`
+      + `<path d="M${f(x - w * 0.75)} ${f(horizon - 2)}H${f(x + w * 0.75)}L${f(x + w * 0.5)} ${f(horizon + 2.5)}H${f(x - w * 0.5)}Z" fill="${color ?? COLORS.frame}"/>`;
+  }
+  if (silhouette) {
+    // The copy is nudged towards the sun or moon, like a rim of light, and
+    // drawn first so the silhouette sits on top of it.
+    // At night the yellow reads as gold paint rather than light, so only the
+    // pink and cyan are offered.
+    const shifted = (dx, dy, color) => `<g transform="translate(${f(dx)} ${f(dy)})">${silhouette(color)}</g>`;
+    const ranked = byDistanceFrom(sky, time === 'night' ? COLORS.highlight.slice(0, 2) : COLORS.highlight);
+    if (highlight === 'offset') {
+      out += shifted(side * 3, -1.2, ranked[0]);
+    } else if (highlight === 'split') {
+      // The two colors that stand out most against this sky, one either side.
+      out += shifted(-side * 2.4, 0, ranked[1]) + shifted(side * 2.4, 0, ranked[0]);
+    }
+    out += silhouette(front === 'palm' ? shade : undefined);
   }
   return out;
 }
@@ -309,6 +337,18 @@ function composeScene(rnd, b) {
 function mix(a, b, t) {
   const c = [1, 3, 5].map(i => Math.round(parseInt(a.substr(i, 2), 16) * (1 - t) + parseInt(b.substr(i, 2), 16) * t));
   return '#' + c.map(v => v.toString(16).padStart(2, '0')).join('');
+}
+
+// Candidate colors sorted by (perceptually weighted) distance from the
+// background, furthest first.
+function byDistanceFrom(background, candidates) {
+  const rgb = hex => [1, 3, 5].map(i => parseInt(hex.substr(i, 2), 16));
+  const [r0, g0, b0] = rgb(background);
+  const distance = hex => {
+    const [r, g, b] = rgb(hex);
+    return 2 * (r - r0) ** 2 + 4 * (g - g0) ** 2 + 3 * (b - b0) ** 2;
+  };
+  return [...candidates].sort((a, b) => distance(b) - distance(a));
 }
 
 function moon(fill, flip, x, y, r, color) {
