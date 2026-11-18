@@ -283,7 +283,7 @@ func TestParseBadButWorkable(t *testing.T) {
 	input := `---
 [fetch-and-update] --- Fetch then update
 $hostname = unknown($url)
-  GET https://api.example.com/data/$id
+GET https://api.example.com/data/$id
 Authorization: Bearer $token
 
 HTTP 200
@@ -2954,5 +2954,94 @@ func TestWatchRejectsTokenVars(t *testing.T) {
 	// A name that only starts with "token" is an ordinary variable.
 	if _, err := ParseVirtualFile([]byte("[add] Add.\n\nWATCH $token_count\n")); err != nil {
 		t.Errorf("$token_count: %v", err)
+	}
+}
+
+func TestParseIndentedContinuations(t *testing.T) {
+	input := `[search] Search things.
+$kind is "a"
+  | "b"
+  | "c"
+$ids = .rows
+  | map(.id)
+$body = {
+  q: $q
+}
+GET https://api.example.com/search
+  ?q=$q
+  # comments between continuations are skipped
+  &kind=$kind
+Authorization: Bearer
+  $token
+Accept: application/json
+
+HTTP 200
+.items
+  | map(.name)
+`
+	tools, err := ParseVirtualFile([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := tools[0]
+	if len(tool.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(tool.Steps))
+	}
+	step := tool.Steps[0]
+	if step.URL != "https://api.example.com/search?q=$q&kind=$kind" {
+		t.Errorf("URL = %q", step.URL)
+	}
+	if step.Headers["Authorization"] != "Bearer $token" {
+		t.Errorf("Authorization = %q", step.Headers["Authorization"])
+	}
+	if step.Headers["Accept"] != "application/json" {
+		t.Errorf("Accept = %q", step.Headers["Accept"])
+	}
+	if len(step.Pre) != 2 {
+		t.Fatalf("expected 2 pre statements, got %d: %+v", len(step.Pre), step.Pre)
+	}
+	if *step.Pre[0].Assign != "ids" || step.Pre[0].Expr != ".rows\n| map(.id)" {
+		t.Errorf("pre[0] = %s = %q", *step.Pre[0].Assign, step.Pre[0].Expr)
+	}
+	if *step.Pre[1].Assign != "body" || step.Pre[1].Expr != "{\nq: $q\n}" {
+		t.Errorf("pre[1] = %s = %q", *step.Pre[1].Assign, step.Pre[1].Expr)
+	}
+	if got := tool.Steps[1].Pre; len(got) != 1 || got[0].Expr != ".items\n| map(.name)" {
+		t.Errorf("trailing statement = %+v", got)
+	}
+	var kind *ToolParam
+	for i := range tool.Params {
+		if tool.Params[i].Name == "kind" {
+			kind = &tool.Params[i]
+		}
+	}
+	if kind == nil || strings.Join(kind.Values, ",") != "a,b,c" {
+		t.Errorf("kind param = %+v", kind)
+	}
+}
+
+func TestParseDescriptionContinuedByComments(t *testing.T) {
+	input := `[list-prs] List pull requests
+# for a repository, optionally
+#
+# filtered by state.
+
+# Not part of the description: a blank line ended it.
+GET https://api.github.com/repos/$owner/$repo/pulls
+---
+# A comment after a separator, outside any tool.
+[bare]
+# Described only by comments.
+GET https://example.com
+`
+	tools, err := ParseVirtualFile([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tools[0].Description; got != "List pull requests for a repository, optionally filtered by state." {
+		t.Errorf("description = %q", got)
+	}
+	if got := tools[1].Description; got != "Described only by comments." {
+		t.Errorf("description = %q", got)
 	}
 }
