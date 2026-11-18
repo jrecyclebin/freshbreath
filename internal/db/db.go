@@ -680,6 +680,12 @@ func (s *Store) UpdateApp(nonce string, name, env string, url string, ownerID *i
 	return err
 }
 
+// SetAppEnvironment sets which deployment slot an app's bare URL serves.
+func (s *Store) SetAppEnvironment(nonce, env string) error {
+	_, err := s.db.Exec("UPDATE apps SET environment = ?, updated_at = "+nowSQL+" WHERE nonce = ?", env, nonce)
+	return err
+}
+
 func (s *Store) DeleteApp(nonce string) error {
 	_, err := s.db.Exec("DELETE FROM app_members WHERE app_nonce = ?", nonce)
 	if err != nil {

@@ -2295,6 +2295,13 @@ func (s *Server) handleAppDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sub-route: /api/apps/{nonce}/environment — PUT {environment}: the
+	// slot the bare URL serves, which a Member of the app may change too.
+	if len(parts) == 4 && parts[3] == "environment" {
+		s.handleAppEnvironment(w, r, nonce)
+		return
+	}
+
 	// Sub-routes: /api/apps/{nonce}/{web|staging|prod|data}[/<path>] — the
 	// hosted dev slot, the deployed slots (read-only), and private files
 	// the web server never hosts
@@ -2411,6 +2418,29 @@ func (s *Server) handleAppMembers(w http.ResponseWriter, r *http.Request, nonce 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleAppEnvironment(w http.ResponseWriter, r *http.Request, nonce string) {
+	if !s.canAccessApp(r.Context(), nonce) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Environment string `json:"environment"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := s.coreSetAppEnvironment(userFromContext(r.Context()), nonce, req.Environment); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleAppServices(w http.ResponseWriter, r *http.Request, nonce string) {

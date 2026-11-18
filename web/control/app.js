@@ -1782,11 +1782,21 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
     </div>
   );
 
+  // A Member of the app picks which slot is live, too: they can deploy.
+  const environmentField = (
+    <div className="field"><label>Default environment</label>
+      <select className="input" name="environment" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
+        <option>Production</option><option>Staging</option><option>Development</option>
+      </select>
+      <span className="help">Which deployment slot the bare app URL serves.</span>
+    </div>
+  );
+
   return (
     <>
     <fieldset className="read-only-fields" disabled={!isAdmin}>
       {!isAdmin && (
-        <span className="help">Read-only — only admins can change an app{memberWiring ? ', but you can link your own services below' : ''}.</span>
+        <span className="help">Read-only — only admins can change an app{memberWiring ? ', but you can pick its default environment and link your own services below' : ''}.</span>
       )}
       <div className="field-row">
         <div className="field"><label>Name</label><input className="input" name="app_name" {...NO_FILL} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="My App"/></div>
@@ -1796,12 +1806,7 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
         </div>
       </div>
       <div className="field-row">
-        <div className="field"><label>Default environment</label>
-          <select className="input" name="environment" value={form.environment} onChange={e=>setForm(f=>({...f,environment:e.target.value}))}>
-            <option>Production</option><option>Staging</option><option>Development</option>
-          </select>
-          <span className="help">Which deployment slot the bare app URL serves.</span>
-        </div>
+        {!memberWiring && environmentField}
         <div className="field"><label>Owner</label>
           <select className="input" name="owner_id" value={form.owner_id} onChange={e=>setForm(f=>({...f,owner_id:e.target.value}))}>
             <option value="">No owner</option>
@@ -1843,6 +1848,7 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
       />
       {!memberWiring && serviceAccess}
     </fieldset>
+    {memberWiring && environmentField}
     {memberWiring && serviceAccess}
     </>
   );
@@ -1939,8 +1945,11 @@ function AppPage({ session, nonce, isNew, apps, services, users, auth, adminAuth
     }
     if (memberWiring) {
       try {
+        if (form.environment !== (app.environment || 'Development')) {
+          await frbr(session, 'PUT','/api/apps/'+app.nonce+'/environment',{environment:form.environment});
+        }
         await frbr(session, 'PUT','/api/apps/'+app.nonce+'/services',{services:form.services||[]});
-        toast('Services updated');
+        toast('App updated');
         onRefresh();
       } catch(e) { toast(e.message,true); }
       return;

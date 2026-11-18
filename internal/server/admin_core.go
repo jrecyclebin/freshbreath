@@ -638,6 +638,29 @@ func (s *Server) coreSetAppServices(actor *db.User, nonce string, services []int
 	return nil
 }
 
+// coreSetAppEnvironment picks the deployment slot an app's bare URL serves.
+// Unlike the rest of an app's settings, a Member of the app may change it:
+// they can already deploy, and choosing which deploy is live goes with that.
+func (s *Server) coreSetAppEnvironment(actor *db.User, nonce, env string) error {
+	if err := s.gate(actor, rolesMemberPlus); err != nil {
+		return err
+	}
+	if !roleIn(actor.Role, rolesAdminPlus) {
+		if ok, _ := s.store.IsAppMember(nonce, actor.ID); !ok {
+			return cerr(http.StatusForbidden, "not a member of this app")
+		}
+	}
+	if env != "Development" && env != "Staging" && env != "Production" {
+		return cerr(http.StatusBadRequest, `environment must be "Development", "Staging" or "Production"`)
+	}
+	if err := s.store.SetAppEnvironment(nonce, env); err != nil {
+		return cerr(http.StatusInternalServerError, "%v", err)
+	}
+	s.rebuildHostedRoutes()
+	s.auditApp(actor, "set app environment to "+env, nonce)
+	return nil
+}
+
 // memberServiceLinks is the link list a Member's request adds up to: the
 // links to services they aren't a member of, untouched, plus the requested
 // services they are a member of.

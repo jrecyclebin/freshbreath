@@ -178,6 +178,7 @@ Refresh tokens may arrive in the form body (CLI/MCP) or the HttpOnly
 | `/api/apps/{nonce}` | GET/PUT/DELETE | any | Detail / update (204; owner must be Admin+ or the current owner) / delete (204) |
 | `/api/apps/{nonce}/members` | GET/PUT | admin+ | App member list (Member/Read-only accounts; rewrites prune the rest) |
 | `/api/apps/{nonce}/services` | GET/PUT | GET: any with access to the app; PUT: admin+, member of the app | Approved services for the app / `PUT {services}` rewrites them. An Admin sets the whole list. A Member sets only their share: services they're a member of are linked or unlinked as listed, links to any other service stay, and listing a new one of those is 403 |
+| `/api/apps/{nonce}/environment` | PUT | admin+, Member of the app | `PUT {environment}` (`Development`, `Staging` or `Production`): the slot the bare app URL serves |
 | `/api/apps/{nonce}/web[/<path>]` | GET/PUT/POST/DELETE | any canAccessApp | Web files. GET = folder listing `{files}` (`?search=`) or file bytes; PUT = replace a file; POST = multipart upload replacing the folder (bare = whole slot; 100 MB cap); DELETE = a file, or bare = clear the slot |
 | `/api/apps/{nonce}/data[/<path>]` | GET/PUT/POST/DELETE | any canAccessApp | Private (unhosted) files, as `/web` but POST adds to the folder and there's no bare DELETE; GET served with `CSP: sandbox`, `nosniff` |
 | `/api/apps/{nonce}/download` | GET | any canAccessApp | The dev slot as a zip |
