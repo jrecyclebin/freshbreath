@@ -136,7 +136,7 @@ function check() {
 .slot.default { box-shadow: 0 0 0 2px var(--teal) }
 .slot-name { font-weight: 700; display: flex; justify-content: space-between; align-items: center }
 .badge { font-family: var(--mono); font-size: 11px; background: var(--teal); color: var(--surface); padding: 1px 7px; border-radius: 4px }
-.slot-ver { font-family: var(--display); font-size: 40px; font-weight: 800; line-height: 1 }
+.slot-ver { font-family: var(--display); font-size: 40px; font-weight: 400; line-height: 1 }
 .slot.empty .slot-ver { color: var(--ink-soft) }
 .slot-url { font-size: 12px; color: var(--ink-soft) }
 .slot-actions { display: flex; flex-direction: column; gap: 6px; margin-top: auto }

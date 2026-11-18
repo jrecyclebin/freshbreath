@@ -140,6 +140,6 @@ const rows = computed(() => Object.entries(storeRows))
 .sealed { color: var(--ph) }
 .popup-wrap { position: absolute; inset: 0; background: rgba(10, 12, 18, .45); display: grid; place-items: center; padding: 16px; border-radius: 0 0 12px 12px }
 .popup { background: var(--surface); border-radius: 12px; padding: 18px 20px; box-shadow: 0 20px 50px rgba(0,0,0,.4); max-width: 340px }
-.popup b { font-family: var(--display); font-size: 20px }
+.popup b { font-family: var(--display); font-weight: 400; font-size: 20px }
 @media (max-width: 520px) { .srow { grid-template-columns: 1fr } }
 </style>

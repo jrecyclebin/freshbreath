@@ -9,7 +9,7 @@
   --violet: #4D4890; --violet-soft: #E7E5F5; --green: #2A8A5C; --green-soft: #DDF2E6;
   --gold: #946100; --gold-soft: #FBEFD2; --red: #C2452D; --red-soft: #FBE5DF;
   --code-bg: #14202C; --code-ink: #DCE6EC; --code-dim: #7F93A3; --code-line: #26384A; --ph: #FFE07A;
-  --display: "Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
+  --display: "Titan One", "IBM Plex Sans", system-ui, sans-serif;
   --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", Consolas, "Courier New", monospace;
   color-scheme: light;
@@ -36,7 +36,12 @@ kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px s
 /* ---- Shell ---------------------------------------------------------------- */
 .shell { display: grid; grid-template-columns: 290px minmax(0, 1fr); min-height: 100vh }
 .side { background: var(--surface); border-right: 1px solid var(--line); position: sticky; top: 0; height: 100vh; overflow-y: auto; padding: 22px 18px 24px; display: flex; flex-direction: column; gap: 18px }
-.brand { font-family: var(--display); font-weight: 800; font-size: 26px; line-height: .95; letter-spacing: -.02em; color: var(--ink); text-decoration: none; display: block }
+.brand { display: block; text-decoration: none; line-height: 1 }
+/* The control panel's logo, drawn in ink on off-white: contrast clips the
+   paper to white and multiply drops it; in dark mode it is inverted and
+   screen drops the black. */
+.brand img { display: block; width: 204px; height: auto; filter: contrast(1.25); mix-blend-mode: multiply }
+html.dark .brand img { filter: invert(1) contrast(1.25) brightness(.85); mix-blend-mode: screen }
 .brand span { display: block; font-family: var(--mono); font-weight: 500; font-size: 12px; letter-spacing: 0; color: var(--teal); margin-bottom: 6px }
 .progress { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 13px; color: var(--ink-soft) }
 .bar { flex: 1; height: 8px; background: var(--surface-2); border-radius: 99px; overflow: hidden }
@@ -57,9 +62,9 @@ kbd { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border: 1px s
 main { padding: 40px clamp(16px, 5vw, 64px) 100px; max-width: 960px; width: 100%; min-width: 0 }
 
 /* ---- Type ----------------------------------------------------------------- */
-h1 { font-family: var(--display); font-weight: 800; font-size: clamp(32px, 5vw, 50px); line-height: 1.02; letter-spacing: -.03em; margin: 0 0 16px }
-.content h2 { font-family: var(--display); font-weight: 800; font-size: clamp(24px, 3.4vw, 32px); line-height: 1.1; letter-spacing: -.02em; margin: 44px 0 14px }
-.content h3, main > h3 { font-family: var(--display); font-weight: 700; font-size: 22px; line-height: 1.25; margin: 34px 0 10px }
+h1 { font-family: var(--display); font-weight: 400; font-size: clamp(32px, 5vw, 50px); line-height: 1.02; letter-spacing: -.03em; margin: 0 0 16px }
+.content h2 { font-family: var(--display); font-weight: 400; font-size: clamp(24px, 3.4vw, 32px); line-height: 1.1; letter-spacing: -.02em; margin: 44px 0 14px }
+.content h3, main > h3 { font-family: var(--display); font-weight: 400; font-size: 22px; line-height: 1.25; margin: 34px 0 10px }
 .content h4 { font-size: 18px; margin: 22px 0 6px }
 p { margin: 0 0 14px }
 .content > div > *, .content .beat > * { max-width: 70ch }
@@ -107,7 +112,7 @@ strong { font-weight: 700 }
 .read-foot { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; margin-top: 46px; padding-top: 22px; border-top: 1.5px solid var(--line); max-width: 70ch }
 
 .finish { position: relative; overflow: hidden; margin-top: 34px; padding: 26px 24px; border-radius: 14px; background: var(--green-soft); border: 2px solid var(--green); max-width: 70ch; animation: beatIn .4s ease }
-.finish b { display: block; font-family: var(--display); font-size: 30px; font-weight: 800; color: var(--green); letter-spacing: -.02em; margin-bottom: 6px }
+.finish b { display: block; font-family: var(--display); font-size: 30px; font-weight: 400; color: var(--green); letter-spacing: -.02em; margin-bottom: 6px }
 .finish-actions { display: flex; gap: 10px; flex-wrap: wrap }
 .confetti { position: absolute; inset: 0; pointer-events: none }
 .confetti i { position: absolute; top: -12px; width: 8px; height: 14px; border-radius: 2px; animation: fall 1.6s ease-in forwards; opacity: 0 }
@@ -144,7 +149,7 @@ strong { font-weight: 700 }
 .custom-block.danger .custom-block-title { color: var(--red) }
 /* ::: info is "Think of it like…" */
 .custom-block.info { border: 0; border-radius: 10px; background: var(--violet-soft); padding: 16px 20px }
-.custom-block.info .custom-block-title { color: var(--violet); font-size: 15px; font-family: var(--display); font-weight: 700 }
+.custom-block.info .custom-block-title { color: var(--violet); font-size: 15px; font-family: var(--display); font-weight: 400 }
 .custom-block.details { border: 1.5px dashed var(--line); border-radius: 10px; background: transparent; padding: 0 16px }
 .custom-block.details[open] { background: var(--surface); padding-bottom: 14px }
 .custom-block.details summary { cursor: pointer; font-weight: 700; padding: 12px 0; color: var(--ink-soft); list-style: none }
@@ -199,7 +204,7 @@ div[class*="language-"]:hover .lang { opacity: 0 }
 .content th { font-family: var(--mono); font-size: 13px; font-weight: 600; background: var(--surface-2) }
 
 /* ---- Home ---------------------------------------------------------------- */
-.hero-word { font-family: var(--display); font-weight: 800; font-size: clamp(56px, 11vw, 124px); line-height: .86; letter-spacing: -.045em; margin: 0 0 20px; width: fit-content; background: linear-gradient(100deg, var(--teal), var(--violet) 55%, var(--pink)); -webkit-background-clip: text; background-clip: text; color: transparent }
+.hero-word { font-family: var(--display); font-weight: 400; font-size: clamp(56px, 11vw, 124px); line-height: .86; letter-spacing: -.045em; margin: 0 0 20px; width: fit-content; background: linear-gradient(100deg, var(--teal), var(--violet) 55%, var(--pink)); -webkit-background-clip: text; background-clip: text; color: transparent }
 .hero-word span { display: block; font-family: var(--mono); font-size: 13px; letter-spacing: 0; font-weight: 500; color: var(--teal); margin-bottom: 18px; line-height: 1; -webkit-text-fill-color: var(--teal) }
 .hero-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 30px }
 .hero-actions kbd { background: transparent; color: inherit }
@@ -223,7 +228,7 @@ div[class*="language-"]:hover .lang { opacity: 0 }
 .fact p { margin: 0; font-size: 15px; color: var(--ink-soft) }
 .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 18px 0 22px; max-width: none !important }
 .flow .node { flex: 1 1 140px; background: var(--surface); border: 1.5px solid var(--line); border-radius: 10px; padding: 12px 14px }
-.flow .node b { display: block; font-family: var(--display); font-weight: 700 }
+.flow .node b { display: block; font-family: var(--display); font-weight: 400 }
 .flow .node small { color: var(--ink-soft); font-size: 14px; display: block; line-height: 1.4 }
 .flow .node.me { border-color: var(--pink); border-top-width: 4px }
 .flow .node.cl { border-color: var(--teal); border-top-width: 4px }
@@ -235,7 +240,7 @@ div[class*="language-"]:hover .lang { opacity: 0 }
 .modal-wrap { position: fixed; inset: 0; z-index: 60; background: rgba(16, 26, 36, .55); display: flex; justify-content: center; align-items: flex-start; padding: 10vh 16px 16px; animation: fade .15s }
 @keyframes fade { from { opacity: 0 } }
 .modal { width: min(620px, 100%); background: var(--surface); border-radius: 14px; border: 1.5px solid var(--line); padding: 20px; box-shadow: 0 30px 80px rgba(0,0,0,.35); max-height: 80vh; overflow-y: auto }
-.modal h3 { margin: 0 0 6px; font-family: var(--display); font-size: 24px }
+.modal h3 { margin: 0 0 6px; font-family: var(--display); font-weight: 400; font-size: 24px }
 .jump input { width: 100%; font-size: 18px; padding: 12px 14px; border: 1.5px solid var(--teal); border-radius: 8px; background: var(--bg); outline: none }
 .jump ul { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 2px }
 .jump li button { all: unset; box-sizing: border-box; display: flex; gap: 12px; align-items: center; width: 100%; padding: 9px 12px; border-radius: 8px; cursor: pointer }
@@ -386,7 +391,7 @@ main.arriving > article { animation: slideIn .45s ease-out }
 @media (max-width: 860px) {
   .shell { grid-template-columns: minmax(0, 1fr) }
   .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--line); padding: 10px 16px }
-  .topbar .brand { font-size: 19px }
+  .topbar .brand img { width: 120px }
   .topbar-actions { display: flex; gap: 6px }
   .side { position: fixed; inset: 0 auto 0 0; width: min(320px, 88vw); height: 100%; z-index: 30; transform: translateX(-105%); transition: transform .25s ease; box-shadow: 0 0 40px rgba(0,0,0,.35) }
   .side.open { transform: none }

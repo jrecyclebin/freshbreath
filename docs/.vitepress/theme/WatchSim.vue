@@ -152,7 +152,7 @@ SELECT name FROM items
 .grow { flex: 1 1 100px }
 .list-pick { padding: 3px 6px !important; font-size: 13px; background: rgba(255,255,255,.95) !important; color: #2a2a2a !important; border: 0 !important }
 .win-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; flex-wrap: wrap }
-.win-top b { font-family: var(--display) }
+.win-top b { font-family: var(--display); font-weight: 400 }
 .toggle { display: inline-flex; gap: 6px; align-items: center; font-family: var(--mono); font-size: 13px; cursor: pointer }
 .toggle.small { font-size: 12px; color: var(--ink-soft) }
 .side-panel { display: flex; flex-direction: column; gap: 8px; min-width: 0 }

@@ -106,7 +106,7 @@ watch([admin, protectedBy, usersOnly], () => {
 .visitors { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px }
 .visitor { border: 1.5px solid var(--line); border-radius: 10px; padding: 12px; background: var(--bg) }
 .visitor .face { font-size: 30px; display: block }
-.visitor b { display: block; font-family: var(--display); font-size: 18px }
+.visitor b { display: block; font-family: var(--display); font-weight: 400; font-size: 18px }
 .visitor b span { font-family: var(--mono); font-size: 12px; padding: 1px 7px; border-radius: 4px; vertical-align: 3px; margin-left: 4px }
 .visitor.in { border-color: var(--green) }
 .visitor.in b span { background: var(--green); color: var(--surface) }
