@@ -199,7 +199,7 @@ const nextLabel = computed(() => {
 
 <template>
   <div class="topbar">
-    <a class="brand" :href="withBase('/')">FRESH BREATH</a>
+    <a class="brand" :href="withBase('/')"><img :src="withBase('/frbr-sm.png')" alt="Fresh Breath" width="204" height="72"></a>
     <div class="topbar-actions">
       <button class="chip" @click="openJump">Jump</button>
       <button class="chip" :aria-expanded="menuOpen" @click="menuOpen = !menuOpen">Menu</button>
@@ -209,7 +209,7 @@ const nextLabel = computed(() => {
 
   <div class="shell">
     <aside class="side" :class="{ open: menuOpen }" aria-label="Episodes">
-      <a class="brand" :href="withBase('/')"><span>a guide to</span>FRESH BREATH</a>
+      <a class="brand" :href="withBase('/')"><span>a guide to</span><img :src="withBase('/frbr-sm.png')" alt="Fresh Breath" width="204" height="72"></a>
 
       <div class="progress">
         <div class="bar" aria-hidden="true"><i :style="{ width: (doneCount / course.length) * 100 + '%' }" /></div>

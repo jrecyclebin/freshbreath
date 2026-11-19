@@ -123,7 +123,7 @@ watch([caller, protectedBy, actsAs, danaSignedIn, works], () => {
 .trace { margin: 0 0 10px !important }
 .trace li { font-size: 15px }
 .trace li b { font-family: var(--mono); font-size: 12px; padding: 1px 7px; border-radius: 4px; background: var(--surface-2); margin-right: 6px }
-.trace li.ok b { background: var(--mint-soft); color: var(--mint) }
+.trace li.ok b { background: var(--green-soft); color: var(--green) }
 .trace li.bad b { background: var(--red-soft); color: var(--red) }
-.trace li.meh b { background: var(--plum-soft); color: var(--plum) }
+.trace li.meh b { background: var(--gold-soft); color: var(--gold) }
 </style>

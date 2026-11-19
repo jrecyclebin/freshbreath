@@ -1,20 +1,25 @@
 /* Fresh Breath Control Panel */
 
 :root {
+  /* Colors take their cue from the window avatars: navy frame for ink, the
+     teal of the window's reveal for the accent, and their sunset pink, gold
+     and violet for the tones. The paper stays sand; everything is muted
+     well below the avatars' own saturation so they stay the brightest
+     thing on the page. */
   /* The page sits a step below its cards and fields, so they read as raised. */
   --bg: oklch(0.968 0.006 90);
   --panel: oklch(0.995 0.002 90);
   --field: oklch(1 0 0);
-  --ink: oklch(0.22 0.01 270);
-  --ink-2: oklch(0.42 0.01 270);
-  --ink-3: oklch(0.62 0.008 270);
+  --ink: oklch(0.24 0.026 244);
+  --ink-2: oklch(0.43 0.018 244);
+  --ink-3: oklch(0.62 0.012 244);
   --line: oklch(0.86 0.008 88);
   --line-soft: oklch(0.94 0.005 90);
   --hover: oklch(0.955 0.006 90);
-  --accent: oklch(0.62 0.06 150);
-  --accent-tint: oklch(0.96 0.025 150);
-  --warn: oklch(0.7 0.12 60);
-  --danger: oklch(0.6 0.15 25);
+  --accent: oklch(0.58 0.07 213);
+  --accent-tint: oklch(0.96 0.02 213);
+  --warn: oklch(0.72 0.12 80);
+  --danger: oklch(0.6 0.15 12);
   /* Papercraft: cards are cut sheets with square corners; controls keep
      the faintest ease so they still read as things to press. */
   --radius: 2px;
@@ -24,55 +29,66 @@
      outline filled with a darker paper. */
   --under: oklch(0.925 0.012 85);
   --shadow-card: 4px 4px 0 -1px var(--under), 4px 4px 0 0 var(--line);
-  --shadow-lift: 6px 6px 0 -1px var(--under), 6px 6px 0 0 var(--line);
+  /* Lifted, the sheet underneath catches the light: the avatars' offset
+     highlight behind a palm or sail, at a whisper. */
+  --shadow-lift: 6px 6px 0 -1px var(--glow-tint), 6px 6px 0 0 var(--glow-line);
   /* Wind: the dusty blue-gray that sits beside the sand. */
   --wind: oklch(0.52 0.03 245);
   --wind-tint: oklch(0.935 0.009 245);
   --wind-line: oklch(0.82 0.016 245);
+  /* Glow: the avatars' hot-pink highlight, for an offset edge behind dark
+     things (the primary button) and the lifted sheet under a hovered card. */
+  --glow: oklch(0.72 0.14 7);
+  --glow-tint: oklch(0.95 0.025 7);
+  --glow-line: oklch(0.84 0.06 7);
   --focus-ring: 0 0 0 3px oklch(from var(--accent) l c h / .16);
   --font-ui: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  --tone-green:  oklch(0.62 0.12 150);
-  --tone-amber:  oklch(0.70 0.14 70);
-  --tone-red:    oklch(0.60 0.18 25);
-  --tone-blue:   oklch(0.60 0.14 240);
-  --tone-violet: oklch(0.62 0.14 300);
+  --tone-green:  oklch(0.62 0.12 155);
+  --tone-amber:  oklch(0.72 0.14 80);
+  --tone-red:    oklch(0.60 0.18 12);
+  --tone-blue:   oklch(0.60 0.12 230);
+  --tone-violet: oklch(0.56 0.13 284);
   --tone-bg-l: 0.96;
   --tone-fg-l: 0.44;
   --tone-border-l: 0.90;
-  --ink-deep: oklch(0.16 0.01 270);
-  --accent-border: oklch(0.82 0.04 150);
+  --ink-deep: oklch(0.18 0.03 244);
+  --accent-border: oklch(0.82 0.04 213);
 }
 
 [data-theme="dark"] {
-  --bg: oklch(0.16 0.008 270);
-  --panel: oklch(0.21 0.01 270);
-  --field: oklch(0.175 0.008 270);
-  --ink: oklch(0.93 0.005 270);
-  --ink-2: oklch(0.75 0.005 270);
-  --ink-3: oklch(0.56 0.004 270);
-  --line: oklch(0.30 0.008 270);
-  --line-soft: oklch(0.26 0.008 270);
-  --hover: oklch(0.24 0.008 270);
-  --accent: oklch(0.72 0.07 150);
-  --accent-tint: oklch(0.22 0.03 150);
-  --warn: oklch(0.78 0.10 60);
-  --danger: oklch(0.70 0.12 25);
+  /* Night: the avatars' navy night skies, kept nearly gray. */
+  --bg: oklch(0.16 0.01 250);
+  --panel: oklch(0.21 0.012 250);
+  --field: oklch(0.175 0.01 250);
+  --ink: oklch(0.93 0.006 244);
+  --ink-2: oklch(0.75 0.008 244);
+  --ink-3: oklch(0.56 0.008 244);
+  --line: oklch(0.30 0.012 250);
+  --line-soft: oklch(0.26 0.01 250);
+  --hover: oklch(0.24 0.012 250);
+  --accent: oklch(0.74 0.08 205);
+  --accent-tint: oklch(0.23 0.03 213);
+  --warn: oklch(0.80 0.10 80);
+  --danger: oklch(0.70 0.13 12);
   --shadow-soft: 0 1px 0 rgba(0,0,0,.30), 0 8px 28px -16px rgba(0,0,0,.50);
-  --under: oklch(0.125 0.008 270);
+  --under: oklch(0.125 0.01 250);
   --wind: oklch(0.76 0.04 240);
   --wind-tint: oklch(0.25 0.014 245);
   --wind-line: oklch(0.38 0.02 245);
-  --tone-green:  oklch(0.72 0.14 150);
-  --tone-amber:  oklch(0.78 0.15 70);
-  --tone-red:    oklch(0.72 0.16 25);
-  --tone-blue:   oklch(0.70 0.16 240);
-  --tone-violet: oklch(0.72 0.15 300);
+  --glow: oklch(0.70 0.14 7);
+  --glow-tint: oklch(0.20 0.025 7);
+  --glow-line: oklch(0.42 0.07 7);
+  --tone-green:  oklch(0.72 0.14 155);
+  --tone-amber:  oklch(0.80 0.14 80);
+  --tone-red:    oklch(0.72 0.16 12);
+  --tone-blue:   oklch(0.70 0.13 230);
+  --tone-violet: oklch(0.70 0.13 284);
   --tone-bg-l: 0.22;
   --tone-fg-l: 0.82;
   --tone-border-l: 0.34;
-  --ink-deep: oklch(0.98 0.002 270);
-  --accent-border: oklch(0.50 0.08 150);
+  --ink-deep: oklch(0.98 0.003 244);
+  --accent-border: oklch(0.50 0.07 213);
 }
 
 * { box-sizing: border-box; }
@@ -399,7 +415,8 @@ button { font-family: inherit; }
   background: var(--ink);
   color: var(--bg);
   border-color: var(--ink);
-  box-shadow: 2px 2px 0 0 var(--ink-3);
+  /* The avatars' offset highlight: a pink edge set behind the dark shape. */
+  box-shadow: 2px 2px 0 0 var(--glow);
 }
 .btn-primary:hover { background: var(--ink-deep); border-color: var(--ink-deep); }
 .btn-ghost { border-color: transparent; background: transparent; }

@@ -50,7 +50,7 @@ function restart() {
       <button class="chip" @click="restart">↺ Start over</button>
     </div>
     <div class="sim-body">
-      <BrowserFrame :url="url" title="Fresh Breath" icon="🌬️" accent="#3f5bd8">
+      <BrowserFrame :url="url" title="Fresh Breath" icon="🌬️" accent="#3b8796">
         <div class="ob">
           <div class="logo">🌬️ <b>Fresh Breath</b></div>
 

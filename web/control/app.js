@@ -1770,7 +1770,7 @@ function AppFormFields({ form, setForm, app, services, users, auth, adminAuthID,
         />
       )}
       {exposed.length > 0 && (
-        <div className="help" style={{color:'var(--amber, #b7791f)',marginTop:8,lineHeight:1.5}}>
+        <div className="help" style={{color:'oklch(from var(--tone-amber) var(--tone-fg-l) c h)',marginTop:8,lineHeight:1.5}}>
           <Icon name="bell" size={12}/>{' '}
           <b>Wider than {exposed.length === 1 ? 'it asks for' : 'they ask for'}.</b>{' '}
           This app's gate governs everything reached through it, so linking{' '}
@@ -4464,7 +4464,7 @@ function UpdateProgress({ events, onClose }) {
       default: text = e.event;
     }
     const tone = e.event === 'feed_error' || e.event === 'error' ? 'var(--tone-red)' :
-      e.event === 'done' || e.event === 'summary' ? 'var(--green)' : '';
+      e.event === 'done' || e.event === 'summary' ? 'var(--tone-green)' : '';
     return <div key={i} style={{color: tone || undefined}}>{text}</div>;
   };
   return (

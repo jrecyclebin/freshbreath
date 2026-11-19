@@ -131,11 +131,11 @@ function showAll() {
 .chat-grid { display: block }
 .with-file .chat-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start }
 .script-panel { position: sticky; top: 12px; border-radius: 10px; background: var(--code-bg); overflow: hidden }
-.script-name { font-size: 12px; color: var(--ph); padding: 8px 12px; border-bottom: 1px solid #2a2f3a }
+.script-name { font-size: 12px; color: var(--ph); padding: 8px 12px; border-bottom: 1px solid var(--code-line) }
 .script { position: relative; margin: 0; padding: 10px 0; font-size: 12.5px; line-height: 1.55; color: var(--code-ink); overflow: auto; max-height: 560px }
 .sl { display: block; padding: 0 12px; white-space: pre; transition: background 1.5s }
-.sl.fresh { background: color-mix(in srgb, var(--mint) 28%, transparent); box-shadow: inset 3px 0 0 var(--mint) }
-.script-empty { margin: 0; padding: 18px 12px; color: #8b93a3; font-size: 14px; font-style: italic }
+.sl.fresh { background: color-mix(in srgb, var(--green) 28%, transparent); box-shadow: inset 3px 0 0 var(--green) }
+.script-empty { margin: 0; padding: 18px 12px; color: var(--code-dim); font-size: 14px; font-style: italic }
 .chat :deep(.file-chip) { display: inline-block; margin-top: 6px; font-family: var(--mono); font-size: 12px; padding: 2px 8px; border-radius: 5px; background: var(--code-bg); color: var(--ph) }
 @media (max-width: 860px) { .with-file .chat-grid { grid-template-columns: minmax(0, 1fr) } .script-panel { position: static } }
 </style>
