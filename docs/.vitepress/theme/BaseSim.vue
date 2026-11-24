@@ -139,19 +139,19 @@ watch([trace, links], () => {
 <style scoped>
 .grid { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 14px; align-items: start }
 .tree { background: var(--code-bg); color: var(--code-ink); border-radius: 8px; padding: 10px 12px; font-size: 12.5px; line-height: 1.7; white-space: pre }
-.tree .dim span { color: #7d8696 }
+.tree .dim span { color: var(--code-dim) }
 .tree .on { color: var(--ph); font-weight: 600 }
 .tree .on::after { content: "  ◀" }
 .presets { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 10px }
 .presets .chip { font-family: var(--mono); font-size: 11.5px }
-.chip.on { background: var(--cobalt); border-color: var(--cobalt); color: var(--surface) }
+.chip.on { background: var(--teal); border-color: var(--teal); color: var(--surface) }
 .toggle { display: inline-flex; gap: 6px; align-items: center; font-family: var(--mono); font-size: 12.5px; cursor: pointer }
 .trace { margin: 0 0 12px !important; font-size: 14px }
 .trace li { padding: 0 0 6px 36px !important; min-height: 0 !important }
 .trace li::before { width: 24px !important; height: 24px !important; font-size: 11px !important }
 .trace li::after { left: 11px !important; top: 26px !important }
-.trace li.ok { color: var(--mint) }
-.trace li.meh { color: var(--plum) }
+.trace li.ok { color: var(--green) }
+.trace li.meh { color: var(--gold) }
 .trace li.bad { color: var(--red) }
 .trace li.dim { color: var(--ink-soft) }
 .src { padding: 10px 12px; font-size: 12px; line-height: 1.7; white-space: pre; overflow-x: auto; background: var(--wa-tint); border-bottom: 1px solid var(--wa-line) }
